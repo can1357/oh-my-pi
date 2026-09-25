@@ -135,6 +135,8 @@ class TabState {
 	url: string;
 	title: string;
 	active: boolean;
+	/** Discarded tabs cannot answer debugger calls. */
+	discarded: boolean;
 	windowId: number;
 	pinned: boolean;
 	/** Chrome tab group id from the last snapshot; -1 when ungrouped. */
@@ -177,6 +179,7 @@ class TabState {
 		this.url = snap.url;
 		this.title = snap.title;
 		this.active = snap.active;
+		this.discarded = snap.discarded;
 		this.windowId = snap.windowId;
 		this.pinned = snap.pinned;
 		this.groupId = snap.groupId;
@@ -186,6 +189,7 @@ class TabState {
 		this.url = snap.url;
 		this.title = snap.title;
 		this.active = snap.active;
+		this.discarded = snap.discarded;
 		this.windowId = snap.windowId;
 		this.pinned = snap.pinned;
 		this.groupId = snap.groupId;
@@ -286,7 +290,14 @@ export class RelayBridge {
 		const out: Array<Record<string, string>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
-			out.push({ id: pageTargetIdFromKey(tab.tabKey), type: "page", title: tab.title, url: tab.url });
+			out.push({
+				id: pageTargetIdFromKey(tab.tabKey),
+				type: "page",
+				title: tab.title,
+				url: tab.url,
+				active: String(tab.active),
+				discarded: String(tab.discarded),
+			});
 		}
 		return out;
 	}
@@ -760,16 +771,24 @@ export class RelayBridge {
 			}
 			case "Target.setAutoAttach": {
 				conn.autoAttach = true;
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
+				// Discarded tabs can stall debugger calls. Retract targets already
+				// announced by Target.setDiscoverTargets so Puppeteer can connect().
+				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab) && !tab.discarded);
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
 				for (const tab of tabs) {
-					if (!tab.attached) {
-						// Attach failed (DevTools open, another debugger, …): retract
-						// the target so puppeteer's init never waits on it.
+					if (!tab.attached || tab.discarded || !this.#eligible(tab)) {
+						// Failed or newly discarded tabs must not hold up connect().
 						this.#retractTab(tab);
+						this.#detachIfUnheld(tab.tabKey);
 						continue;
 					}
 					this.#emitTabAttached(conn, tab);
+				}
+				for (const tab of this.#tabs.values()) {
+					if (tab.announced && tab.discarded && this.#eligible(tab)) {
+						this.#retractTab(tab);
+						this.#detachIfUnheld(tab.tabKey);
+					}
 				}
 				this.#reply(conn, msg, {});
 				return;
@@ -987,6 +1006,7 @@ export class RelayBridge {
 		if (!inst) return;
 		const key = tabKeyOf(inst.code, snap.tabId);
 		let tab = this.#tabs.get(key);
+		const becameActive = snap.active && (!tab || !tab.active || tab.windowId !== snap.windowId);
 		if (!tab) {
 			tab = new TabState(instanceId, inst.code, snap.tabId, snap);
 			this.#tabs.set(key, tab);
@@ -1000,10 +1020,16 @@ export class RelayBridge {
 			}
 			tab.update(snap);
 		}
+		if (becameActive) {
+			for (const other of this.#tabs.values()) {
+				if (other !== tab && other.instanceId === instanceId && other.windowId === snap.windowId)
+					other.active = false;
+			}
+		}
 		if (opts.silent) return;
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
-		if (eligible && !tab.announced) {
+		if (eligible && !tab.announced && !tab.discarded) {
 			tab.announced = true;
 			for (const conn of this.#conns.values()) {
 				if (!conn.discover) continue;
@@ -1013,13 +1039,21 @@ export class RelayBridge {
 			for (const conn of this.#conns.values()) {
 				if (!conn.autoAttach) continue;
 				void this.#ensureAttached(tab).then(ok => {
-					if (ok) this.#emitTabAttached(conn, tab);
+					if (!ok) return;
+					if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
+						this.#retractTab(tab);
+						this.#detachIfUnheld(tab.tabKey);
+						return;
+					}
+					this.#emitTabAttached(conn, tab);
 				});
 			}
 			return;
 		}
-		if (!eligible && tab.announced) {
+		if ((!eligible || tab.discarded) && tab.announced) {
+			// Puppeteer waits for attachments to announced targets.
 			this.#retractTab(tab);
+			this.#detachIfUnheld(tab.tabKey);
 			return;
 		}
 		if (eligible && tab.announced) {

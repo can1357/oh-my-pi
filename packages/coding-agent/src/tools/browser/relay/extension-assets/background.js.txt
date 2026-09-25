@@ -34,6 +34,7 @@ function snapshot(tab) {
     url: tab.url ?? tab.pendingUrl ?? "",
     title: tab.title ?? "",
     active: tab.active,
+    discarded: tab.discarded === true,
     windowId: tab.windowId,
     pinned: tab.pinned,
     groupId: tab.groupId
@@ -241,6 +242,13 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
   const snap = snapshot(tab);
   if (snap)
     post({ t: "tabUpdated", tab: snap });
+});
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs.get(tabId).then((tab) => {
+    const snap = snapshot(tab);
+    if (snap)
+      post({ t: "tabUpdated", tab: snap });
+  }).catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   post({ t: "tabRemoved", tabId });

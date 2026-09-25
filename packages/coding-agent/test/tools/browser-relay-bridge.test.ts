@@ -70,6 +70,7 @@ function tab(overrides: Partial<TabSnapshot> & { tabId: number }): TabSnapshot {
 		url: "https://example.com/",
 		title: "Example",
 		active: false,
+		discarded: false,
 		windowId: 1,
 		pinned: false,
 		groupId: -1,
@@ -924,7 +925,6 @@ describe("RelayBridge attachment release", () => {
 		).toEqual([]);
 	});
 });
-
 describe("RelayBridge multiple extension instances", () => {
 	it("keeps each browser's tabs listed when two instances connect", () => {
 		const bridge = new RelayBridge({});
@@ -1068,5 +1068,164 @@ describe("RelayBridge last-hello fallback and offline instance pruning", () => {
 		const edge2 = new FakeExtSocket();
 		connectInstance(bridge, edge2, "edge", [tab({ tabId: 1, title: "Edge tab", url: "https://edge.example/" })]);
 		expect(bridge.listTargets().map(t => t.title)).toEqual(["Chrome tab", "Edge tab"]);
+	});
+});
+describe("RelayBridge auto-attach gating", () => {
+	function destroyedIds(cdp: FakeCdpSocket): string[] {
+		const ids: string[] = [];
+		for (const m of cdp.messages) {
+			if (m.method !== "Target.targetDestroyed") continue;
+			const params = m.params;
+			if (params && typeof params === "object" && "targetId" in params && typeof params.targetId === "string") {
+				ids.push(params.targetId);
+			}
+		}
+		return ids;
+	}
+
+	function attachedIds(cdp: FakeCdpSocket): string[] {
+		const ids: string[] = [];
+		for (const m of cdp.messages) {
+			if (m.method !== "Target.attachedToTarget") continue;
+			const params = m.params;
+			if (!(params && typeof params === "object" && "targetInfo" in params)) continue;
+			const info = params.targetInfo;
+			if (info && typeof info === "object" && "targetId" in info && typeof info.targetId === "string") {
+				ids.push(info.targetId);
+			}
+		}
+		return ids;
+	}
+
+	it("eagerly attaches live tabs and retracts discarded tabs", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, discarded: true }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: true },
+			}),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+
+		expect(ext.rpcs("attach").map(r => r.tabId)).toEqual([2]);
+		const attached = attachedIds(cdp);
+		expect(attached).toContain(`TAB${ANON}.2`);
+		expect(attached).not.toContain(`TAB${ANON}.1`);
+		// The discarded tab was announced by setDiscoverTargets. Retract it
+		// so Puppeteer's connect() can finish.
+		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.1`);
+	});
+
+	it("announces revived tabs and retracts discarded tabs", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, discarded: true }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+
+		// Chrome reloads the discarded tab when the user activates it.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: false }) }));
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
+
+		// A previously attached tab becomes discarded.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 2, discarded: true }) }));
+		await flush();
+		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.2`);
+		expect(ext.rpcs("detach").map(r => r.tabId)).toContain(2);
+		ack(bridge, ext, "detach");
+	});
+
+	it("does not reattach an initially discovered tab discarded during attach", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.1`);
+		expect(attachedIds(cdp)).not.toContain(`TAB${ANON}.1`);
+		expect(ext.rpcs("detach").map(r => r.tabId)).toEqual([1]);
+	});
+
+	it("does not reattach a newly announced tab discarded during attach", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		await flush();
+		bridge.extMessage(ext, JSON.stringify({ t: "tabCreated", tab: tab({ tabId: 1 }) }));
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.1`);
+		expect(attachedIds(cdp)).not.toContain(`TAB${ANON}.1`);
+		expect(ext.rpcs("detach").map(r => r.tabId)).toEqual([1]);
+	});
+});
+
+describe("RelayBridge active tab metadata", () => {
+	it("keeps only the newly activated tab active in its window", () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [
+			tab({ tabId: 1, title: "First", active: true }),
+			tab({ tabId: 2, title: "Second" }),
+			tab({ tabId: 3, title: "Other window", active: true, windowId: 2 }),
+		]);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 2, title: "Second", active: true }) }),
+		);
+		expect(bridge.listTargets().map(t => [t.title, t.active])).toEqual([
+			["First", "false"],
+			["Second", "true"],
+			["Other window", "true"],
+		]);
 	});
 });

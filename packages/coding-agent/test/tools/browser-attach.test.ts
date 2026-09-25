@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+/**
+ * Tests for relay-safe target adoption in `pickElectronTarget`
+ * (discarded-tab hangs, "Requesting main frame too early!" race):
+ * - relay /json metadata selects the tab before any CDP attach,
+ * - discarded matches fail with actionable guidance,
+ * - per-target attach deadlines never hang,
+ * - mainFrame readiness is polled past the frameTree race.
+ */
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
+	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
 	pickElectronTarget,
@@ -13,6 +23,7 @@ import {
 	resolveSpawnArgs,
 	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
+	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
@@ -41,6 +52,62 @@ function makeSession(): ToolSession {
 		}),
 	};
 }
+
+function makePage(urlCalls: Array<() => void>, finalUrl = "https://example.com/") {
+	let calls = 0;
+	const page = {
+		url: () => {
+			urlCalls[Math.min(calls, urlCalls.length - 1)]?.();
+			calls += 1;
+			if (calls < urlCalls.length) {
+				throw new Error("Requesting main frame too early!");
+			}
+			return finalUrl;
+		},
+		title: async () => "Example",
+	} as unknown as Page;
+	return { page, calls: () => calls };
+}
+
+function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
+	const pageSpy = vi.fn(async (): Promise<Page | null> => {
+		if (pageDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pageDelayMs));
+		return page;
+	});
+	const target = {
+		_targetId: id,
+		type: () => "page",
+		page: pageSpy,
+	} as unknown as Target & { _targetId: string };
+	return { target, pageSpy };
+}
+
+function makeBrowser(targets: Array<Target & { _targetId: string }>) {
+	return {
+		targets: () => targets,
+		pages: vi.fn(async () => targets.map(t => t.page())),
+	} as unknown as Browser;
+}
+
+const RELAY_ENTRIES = [
+	{ id: "PAGE10", type: "page", title: "Docs", url: "https://docs.example.com", active: "false", discarded: "false" },
+	{
+		id: "PAGE11",
+		type: "page",
+		title: "Whole Foods Market Shopping Cart",
+		url: "https://www.amazon.com/cart/localmarket?almBrandId=x",
+		active: "true",
+		discarded: "false",
+	},
+	{
+		id: "PAGE12",
+		type: "page",
+		title: "Old cart",
+		url: "https://www.amazon.com/cart",
+		active: "false",
+		discarded: "true",
+	},
+];
 
 interface FakePageOptions {
 	url: string;
@@ -489,6 +556,279 @@ describe("resolveSpawnArgs", () => {
 
 		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
 		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome"]);
+	});
+});
+describe("pickElectronTarget relay path", () => {
+	let relay: Bun.Server<undefined>;
+	let relayJson: string;
+	let available = true;
+	let relayEntries = RELAY_ENTRIES;
+	beforeEach(() => {
+		available = true;
+		relayEntries = RELAY_ENTRIES;
+		relay = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				if (new URL(req.url).pathname !== "/json") return new Response("Not found", { status: 404 });
+				return available ? Response.json(relayEntries) : new Response("unavailable", { status: 503 });
+			},
+		});
+		relayJson = `http://127.0.0.1:${relay.port}`;
+	});
+	afterEach(async () => {
+		await relay.stop(true);
+		vi.restoreAllMocks();
+	});
+
+	it("adopts the active tab from /json metadata without attaching any other target", async () => {
+		const pages = new Map<string, { page: Page; calls: () => number }>();
+		const targets: Array<Target & { _targetId: string }> = [];
+		for (const entry of RELAY_ENTRIES) {
+			const made = makePage([() => {}]);
+			pages.set(entry.id, made);
+			const { target, pageSpy } = makeTarget(entry.id, made.page);
+			Object.assign(target, { page: pageSpy });
+			targets.push(target as Target & { _targetId: string });
+		}
+		const browser = makeBrowser(targets);
+
+		const picked = await pickElectronTarget(browser, { relayJson });
+
+		expect(picked).toBe(pages.get("PAGE11")!.page);
+		const attachCalls = targets.map(
+			t => (t as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length,
+		);
+		expect(attachCalls).toEqual([0, 1, 0]);
+	});
+
+	it("matcher skips a discarded matching tab", async () => {
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE11", made.page);
+		const made12 = makePage([() => {}]);
+		const { target: target12 } = makeTarget("PAGE12", made12.page);
+		const browser = makeBrowser([target, target12]);
+
+		const picked = await pickElectronTarget(browser, {
+			relayJson,
+			matcher: "cart",
+		});
+
+		expect(picked).toBe(made.page);
+		expect((target12 as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length).toBe(0);
+	});
+
+	it("chooses the first of two live matching tabs", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Cart A",
+				url: "https://example.com/cart/a",
+				active: "false",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Cart B",
+				url: "https://example.com/cart/b",
+				active: "false",
+				discarded: "false",
+			},
+		];
+		const firstPage = makePage([() => {}], relayEntries[0]!.url).page;
+		const secondPage = makePage([() => {}], relayEntries[1]!.url).page;
+		const first = makeTarget("PAGE_A", firstPage);
+		const second = makeTarget("PAGE_B", secondPage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
+			relayJson,
+			matcher: "cart",
+		});
+		expect(picked).toBe(firstPage);
+		expect(second.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("skips an active service worker page unless explicitly targeted", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Service Worker",
+				url: "https://example.com/a",
+				active: "true",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Home",
+				url: "https://example.com/b",
+				active: "false",
+				discarded: "false",
+			},
+		];
+		const skippedPage = makePage([() => {}], relayEntries[0]!.url).page;
+		const homePage = makePage([() => {}], relayEntries[1]!.url).page;
+		const skipped = makeTarget("PAGE_A", skippedPage);
+		const home = makeTarget("PAGE_B", homePage);
+		const browser = makeBrowser([skipped.target, home.target]);
+		expect(await pickElectronTarget(browser, { relayJson, preferVisible: true })).toBe(homePage);
+		expect(skipped.pageSpy).not.toHaveBeenCalled();
+		expect(await pickElectronTarget(browser, { relayJson, matcher: "Service Worker" })).toBe(skippedPage);
+	});
+
+	it("prefers the visible tab among active tabs in different windows", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_A",
+				type: "page",
+				title: "Window A",
+				url: "https://example.com/a",
+				active: "true",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_B",
+				type: "page",
+				title: "Window B",
+				url: "https://example.com/b",
+				active: "true",
+				discarded: "false",
+			},
+		];
+		const firstPage = {
+			url: () => relayEntries[0]!.url,
+			title: async () => "Window A",
+			evaluate: async () => false,
+		} as unknown as Page;
+		const visiblePage = {
+			url: () => relayEntries[1]!.url,
+			title: async () => "Window B",
+			evaluate: async () => true,
+		} as unknown as Page;
+		const first = makeTarget("PAGE_A", firstPage);
+		const second = makeTarget("PAGE_B", visiblePage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
+			relayJson,
+			preferVisible: true,
+		});
+		expect(picked).toBe(visiblePage);
+	});
+
+	it("fails with guidance when the only match is a discarded tab", async () => {
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE12", made.page);
+		const browser = makeBrowser([target]);
+
+		const picking = pickElectronTarget(browser, {
+			relayJson,
+			matcher: "old cart",
+		});
+
+		await expect(picking).rejects.toThrow(/discarded .* Chrome/i);
+	});
+
+	it("falls back to target enumeration when /json is unavailable", async () => {
+		available = false;
+		const made = makePage([() => {}]);
+		const { target } = makeTarget("PAGE11", made.page);
+		const browser = makeBrowser([target]);
+
+		const picked = await pickElectronTarget(browser, { relayJson });
+
+		expect(picked).toBe(made.page);
+	});
+});
+
+it("uses relay metadata through a proxy without corrupting UTF-8 titles", async () => {
+	const entries = [
+		{ id: "PAGE_A", type: "page", title: "Other", url: "https://example.com/a", active: "false", discarded: "false" },
+		{ id: "PAGE_B", type: "page", title: "Café", url: "https://example.com/b", active: "true", discarded: "false" },
+	];
+	let relayHits = 0;
+	let proxyHits = 0;
+	const relay = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: () => {
+			relayHits++;
+			return Response.json(entries);
+		},
+	});
+	const proxy = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: () => {
+			proxyHits++;
+			return new Response("Bad Gateway", { status: 502 });
+		},
+	});
+	const saved = {
+		HTTP_PROXY: process.env.HTTP_PROXY,
+		http_proxy: process.env.http_proxy,
+		NO_PROXY: process.env.NO_PROXY,
+		no_proxy: process.env.no_proxy,
+	};
+	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
+	process.env.http_proxy = process.env.HTTP_PROXY;
+	process.env.NO_PROXY = "";
+	process.env.no_proxy = "";
+	try {
+		const firstPage = { url: () => entries[0]!.url, title: async () => "Other" } as unknown as Page;
+		const chosenPage = { url: () => entries[1]!.url, title: async () => "Café" } as unknown as Page;
+		const first = makeTarget(entries[0]!.id, firstPage);
+		const chosen = makeTarget(entries[1]!.id, chosenPage);
+		const picked = await pickElectronTarget(makeBrowser([first.target, chosen.target]), {
+			relayJson: `http://127.0.0.1:${relay.port}`,
+			matcher: "Café",
+		});
+		expect(picked).toBe(chosenPage);
+		expect(first.pageSpy).not.toHaveBeenCalled();
+		expect(relayHits).toBe(1);
+		expect(proxyHits).toBe(0);
+	} finally {
+		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
+			process.env[key] = saved[key] ?? "";
+			if (saved[key] === undefined) delete process.env[key];
+		}
+		await proxy.stop(true);
+		await relay.stop(true);
+	}
+});
+
+describe("attach hardening", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("attachPageWithTimeout resolves null when the target never becomes a page", async () => {
+		const { target } = makeTarget("PAGE1", null, 10_000);
+		expect(await attachPageWithTimeout(target, 30)).toBeNull();
+	});
+
+	it("waitForMainFrame tolerates the frameTree race until the frame serves", async () => {
+		const { page } = makePage([() => {}, () => {}]);
+		expect(await waitForMainFrame(page, 2_000)).toBe(true);
+	});
+
+	it("waitForMainFrame gives up on non-race errors and on the deadline", async () => {
+		const bad = {
+			url: () => {
+				throw new Error("boom");
+			},
+		} as unknown as Page;
+		expect(await waitForMainFrame(bad, 100)).toBe(false);
+
+		let n = 0;
+		const racy = {
+			url: () => {
+				n += 1;
+				throw new Error("Requesting main frame too early!");
+			},
+		} as unknown as Page;
+		expect(await waitForMainFrame(racy, 150)).toBe(false);
+		expect(n).toBeGreaterThan(1);
 	});
 });
 

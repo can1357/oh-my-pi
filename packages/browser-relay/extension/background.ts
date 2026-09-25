@@ -59,6 +59,7 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 		url: tab.url ?? tab.pendingUrl ?? "",
 		title: tab.title ?? "",
 		active: tab.active,
+		discarded: tab.discarded === true,
 		windowId: tab.windowId,
 		pinned: tab.pinned,
 		groupId: tab.groupId,
@@ -287,6 +288,15 @@ chrome.tabs.onCreated.addListener(tab => {
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 	const snap = snapshot(tab);
 	if (snap) post({ t: "tabUpdated", tab: snap });
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+	void chrome.tabs.get(tabId).then(tab => {
+		const snap = snapshot(tab);
+		if (snap) post({ t: "tabUpdated", tab: snap });
+	}).catch(() => {
+		// The tab may have closed before Chrome answered.
+	});
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {

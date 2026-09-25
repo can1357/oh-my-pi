@@ -18,6 +18,7 @@
 - Preserved MCP `structuredContent` in live tool result `details`, allowing eval callers to consume server data without parsing the model-facing JSON rendering; spilled results omit the duplicate structured payload from session persistence while retaining the artifact reference ([#13397](https://github.com/can1357/oh-my-pi/issues/13397), [#13398](https://github.com/can1357/oh-my-pi/pull/13398) by [@shawnkoh](https://github.com/shawnkoh)).
 - Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line naming the command and pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
+- Fixed browser relay opens stalling on discarded tabs; reinstall and reload the relay extension to use the fix ([#<PR>](https://github.com/can1357/oh-my-pi/pull/<PR>) by [@jasonharrison](https://github.com/jasonharrison))
 
 ## [18.3.2] - 2026-09-25
 
@@ -41,6 +42,10 @@
 - Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
 - Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
+
+### Added
+
+- Added `ctx.agent` to the extension context, reporting whether the session is the top-level agent or a subagent, plus its registry id, agent definition name, task depth and parent id, so handlers rebound to subagent sessions can tell which agent they serve ([#13314](https://github.com/can1357/oh-my-pi/pull/13314) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.3.1] - 2026-09-25
 

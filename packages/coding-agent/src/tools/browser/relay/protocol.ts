@@ -12,6 +12,8 @@ export interface TabSnapshot {
 	url: string;
 	title: string;
 	active: boolean;
+	/** Chrome discarded this tab; it reloads when activated. */
+	discarded: boolean;
 	windowId: number;
 	/** Pinned tabs are never grouped (Chrome would silently unpin them). */
 	pinned: boolean;
