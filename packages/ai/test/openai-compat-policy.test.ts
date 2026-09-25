@@ -200,6 +200,35 @@ describe("OpenAI compat policy", () => {
 		expect(params.reasoning_effort).toBeUndefined();
 	});
 
+	it("extends the OpenAI effort dialect to discovered Qwen 3.8 siblings", () => {
+		// Regression for #12376: only the exact qwen3.8-max/flash ids carried the
+		// wire contract, so a discovered sibling (e.g. qwen3.8-plus) silently
+		// dropped every effort selection on the Qwen dialect. The revision-scoped
+		// class rule now carries it; max-preview stays on the binary toggle.
+		const model = buildModel({
+			id: "qwen3.8-plus",
+			name: "Qwen3.8 Plus",
+			api: "openai-completions",
+			provider: "alibaba-token-plan",
+			baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+		} satisfies ModelSpec<"openai-completions">);
+		for (const effort of [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]) {
+			const params = chatParams();
+			params.model = model.id;
+			const policy = resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: effort });
+			applyChatCompletionsCompatPolicy(params, policy);
+			applyOpenAIExtraBody(params, policy.compat.extraBody);
+			expect(params.reasoning_effort).toBe(effort);
+			expect(params.enable_thinking).toBe(true);
+			expect(params.chat_template_kwargs).toBeUndefined();
+		}
+	});
+
 	function localQwenModel(
 		id: string,
 		provider: string,

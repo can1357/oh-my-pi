@@ -43,6 +43,7 @@ describe("QwenCloud Token Plan provider", () => {
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
 						{ id: "qwen3.8-max", owned_by: "qwencloud" },
 						{ id: "qwen3.8-flash", owned_by: "qwencloud" },
+						{ id: "qwen3.8-plus", owned_by: "qwencloud" },
 						{ id: "deepseek-v3.2", owned_by: "qwencloud" },
 						{ id: "glm-5.1", owned_by: "qwencloud" },
 						{ id: "glm-5", owned_by: "qwencloud" },
@@ -82,6 +83,7 @@ describe("QwenCloud Token Plan provider", () => {
 			"qwen3.7-plus",
 			"qwen3.8-flash",
 			"qwen3.8-max",
+			"qwen3.8-plus",
 		]);
 		const expectedLimits = [
 			["qwen3.6-plus", 1_000_000, 65_536],

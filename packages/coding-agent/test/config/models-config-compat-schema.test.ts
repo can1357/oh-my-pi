@@ -19,3 +19,28 @@ describe("OpenAICompatSchema stripImageInput", () => {
 		expect(String(parsed)).toContain("stripImageInput");
 	});
 });
+
+// Regression for #12376: `replayReasoningContent` and `qwenPreserveThinking` are
+// the compat knobs a remote Qwen deployment needs to replay its reasoning
+// history (DashScope sends `reasoning_content` back per turn). They must be
+// declared, type-validated `compat` keys so the override reaches the transport
+// instead of being rejected as an unknown config field.
+describe("OpenAICompatSchema Qwen reasoning replay", () => {
+	test("accepts the documented replay flags", () => {
+		const parsed = OpenAICompatSchema({ replayReasoningContent: true, qwenPreserveThinking: true });
+		expect(parsed instanceof type.errors).toBe(false);
+	});
+
+	test("rejects a non-boolean replay flag", () => {
+		const parsed = OpenAICompatSchema({ replayReasoningContent: "yes" });
+		expect(parsed instanceof type.errors).toBe(true);
+		expect(String(parsed)).toContain("replayReasoningContent");
+	});
+
+	test("validates the flags inside whenThinking overrides too", () => {
+		const parsed = OpenAICompatSchema({ whenThinking: { replayReasoningContent: false } });
+		expect(parsed instanceof type.errors).toBe(false);
+		const rejected = OpenAICompatSchema({ whenThinking: { qwenPreserveThinking: "maybe" } });
+		expect(rejected instanceof type.errors).toBe(true);
+	});
+});
