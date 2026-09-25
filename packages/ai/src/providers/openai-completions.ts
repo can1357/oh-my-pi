@@ -4,7 +4,13 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	extractHttpStatusFromError,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -56,7 +62,13 @@ import {
 	StreamMarkupHealing,
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
-import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
+import {
+	isForcedToolChoice,
+	isForcedToolChoiceRejection,
+	mapToOpenAICompletionsToolChoice,
+	noteForcedToolChoiceRejected,
+	supportsForcedToolChoice,
+} from "../utils/tool-choice";
 import type {
 	ChatCompletionAssistantMessageParam,
 	ChatCompletionChunk,
@@ -821,7 +833,7 @@ const streamOpenAICompletionsOnce = (
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride, baseUrl);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
@@ -924,6 +936,17 @@ const streamOpenAICompletionsOnce = (
 							reasoningEffortFallback,
 						);
 					}
+				} else if (
+					isForcedToolChoice(activeRequestParams?.tool_choice) &&
+					isForcedToolChoiceRejection(
+						extractHttpStatusFromError(error) ?? capturedErrorResponse?.status,
+						[error instanceof Error ? error.message : undefined, capturedErrorResponse?.bodyText]
+							.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+							.join("\n"),
+					)
+				) {
+					noteForcedToolChoiceRejected(model, baseUrl);
+					openaiStream = await createCompletionsStream();
 				} else if (
 					model.compat.retryWithoutStrictOnGrammarError &&
 					!disableStrictTools &&
@@ -1799,6 +1822,7 @@ function buildParams(
 	context: Context,
 	options: OpenAICompletionsOptions | undefined,
 	toolStrictModeOverride?: ToolStrictModeOverride,
+	baseUrl?: string,
 ): {
 	params: OpenAICompletionsParams;
 	toolStrictMode: AppliedToolStrictMode;
@@ -1914,7 +1938,10 @@ function buildParams(
 		// Preserve the hard tool-use contract while letting K3 choose among tools.
 		params.tool_choice = "required";
 	}
-	if (isForcedToolChoice(params.tool_choice) && !initialCompat.supportsForcedToolChoice) {
+	if (
+		isForcedToolChoice(params.tool_choice) &&
+		!supportsForcedToolChoice({ ...model, compat: initialCompat }, baseUrl)
+	) {
 		// Some thinking-required OpenAI-compatible models reject forced
 		// `tool_choice` while still accepting tools with the default auto
 		// selector. Keep the tool available and let the model choose it.
