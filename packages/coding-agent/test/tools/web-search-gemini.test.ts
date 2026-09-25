@@ -1,7 +1,9 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
@@ -278,6 +280,47 @@ describe("searchGemini tools serialization", () => {
 		expect(capturedRequest?.url).toBe("https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
 		expect(capturedRequest?.body).toMatchObject({
 			model: "gemini-3.5-flash",
+		});
+	});
+
+	it("uses the collapsed OAuth model's default wire id", async () => {
+		const fetchMock = mockGeminiFetch();
+		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		await searchGemini({
+			...makeParams("collapsed OAuth model", selectedModel),
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "gemini-3.8-flash-low",
+		});
+	});
+
+	it("routes an explicit thinking level to the matching OAuth wire id", async () => {
+		const fetchMock = mockGeminiFetch();
+		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		await searchGemini({
+			...makeParams("collapsed OAuth model", selectedModel),
+			thinkingLevel: ThinkingLevel.High,
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "gemini-3.8-flash-high",
+		});
+	});
+
+	it("clamps an unsupported thinking level onto the nearest routed wire id", async () => {
+		const fetchMock = mockGeminiFetch();
+		const selectedModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		await searchGemini({
+			...makeParams("collapsed OAuth model", selectedModel),
+			thinkingLevel: ThinkingLevel.XHigh,
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body).toMatchObject({
+			model: "gemini-3.8-flash-high",
 		});
 	});
 

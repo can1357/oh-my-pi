@@ -153,6 +153,37 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(result.systemPrompt).toBe(context.systemPrompt);
 	});
 
+	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
+		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: false });
+		const renderedFonts: string[] = [];
+		const transformer = new SnapcompactInlineTransformer(options, undefined, {
+			async framesFor(text, shape) {
+				renderedFonts.push(shape.font);
+				return Array.from({ length: snapcompact.frames(text, { shape }) }, () => ({
+					type: "image" as const,
+					data: "ZnJhbWU=",
+					mimeType: "image/png",
+				}));
+			},
+		});
+		const context = makeContext();
+
+		expect(await transformer.transform(context, makeModel())).toBe(context);
+		expect(renderedFonts).toEqual([]);
+
+		options.renderToolResults = true;
+		expect(imageCount(await transformer.transform(context, makeModel()))).toBeGreaterThan(0);
+		expect(renderedFonts).toEqual(["6x12"]);
+
+		// Same shape → served from the frame cache.
+		await transformer.transform(context, makeModel());
+		expect(renderedFonts).toEqual(["6x12"]);
+
+		options.shape = "8x13-bw";
+		expect(imageCount(await transformer.transform(context, makeModel()))).toBeGreaterThan(0);
+		expect(renderedFonts).toEqual(["6x12", "8x13"]);
+	});
+
 	it("reports per-tool-result savings to the sink for each imaged result only", async () => {
 		const received: Array<{ toolCallId: string; savedTokens: number }>[] = [];
 		let model = "";

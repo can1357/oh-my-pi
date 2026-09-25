@@ -13,6 +13,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { assistantMsg, userMsg } from "./utilities";
 
+import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 describe("issue #986 compaction auth fallback", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -270,9 +272,9 @@ describe("issue #986 compaction auth fallback", () => {
 
 	it("retries a transient native compaction failure on the same candidate", async () => {
 		const { currentModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
-		session.settings.set("retry.enabled", true);
-		session.settings.set("retry.baseDelayMs", 1);
-		session.settings.set("retry.maxRetries", 1);
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		cfgRetryMaxRetries.set(session.settings, 1);
 		const waitSpy = mockSchedulerWaitWithClock();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
