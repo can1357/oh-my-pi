@@ -29,6 +29,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
 	try {
@@ -368,7 +370,7 @@ describe("history:// protocol", () => {
 
 	it("read applies selectors to caller-bound full history", async () => {
 		const settings = Settings.isolated();
-		settings.set("compaction.experimentalContextManagement", true);
+		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = currentBranchFixture();
 		const manager = {
 			getBranch: () => branch,

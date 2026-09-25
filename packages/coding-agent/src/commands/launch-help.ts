@@ -98,6 +98,9 @@ export const launchHelp = {
 		"no-rules": Flags.boolean({ description: "Disable rules discovery and loading" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		"no-ui": Flags.boolean({
+			description: "With --mode rpc: run extensions headless (no extension_ui_request dialogs for the host)",
+		}),
 		"print-thoughts": Flags.boolean({ description: "Include thinking blocks in print mode text output" }),
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
 		"auto-approve": Flags.boolean({

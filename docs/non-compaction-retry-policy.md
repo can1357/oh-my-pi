@@ -8,7 +8,7 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 
 - [`../packages/coding-agent/src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`../packages/coding-agent/src/session/turn-recovery.ts`](../packages/coding-agent/src/session/turn-recovery.ts) — retry classification, backoff, credential rotation, and model fallback
-- [`../packages/coding-agent/src/config/settings-schema.ts`](../packages/coding-agent/src/config/settings-schema.ts)
+- [`../packages/coding-agent/src/session/settings.ts`](../packages/coding-agent/src/session/settings.ts) — `retry.*` setting definitions
 - [`../packages/coding-agent/src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
 - [`../packages/coding-agent/src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts)
@@ -175,7 +175,7 @@ This barrier does not await arbitrary asynchronous work started by public subscr
 
 ### Configuration knobs
 
-Defined in settings schema under retry group:
+Defined in `packages/coding-agent/src/session/settings.ts`:
 
 - `retry.enabled`
 - `retry.maxRetries`
