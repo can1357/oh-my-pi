@@ -1442,6 +1442,11 @@ export interface ExtensionAPI {
 	/**
 	 * Send a custom message to the session.
 	 *
+	 * With the default delivery (no `deliverAs`), an idle `display: true` message renders in the
+	 * transcript immediately, even with `triggerTurn: false`, without starting a turn. This does
+	 * not apply to `deliverAs: "nextTurn"` or `deliverAs: "aside"`, which keep the semantics
+	 * described below (`nextTurn` stays hidden until consumed; `aside` starts a turn when idle).
+	 *
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
