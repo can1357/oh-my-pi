@@ -672,7 +672,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	it("keeps the stable MCP tool-name collision winner during late registration", async () => {
 		const tempDir = makeTempDir();
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => { });
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const lateMcpCollisionExtension: ExtensionFactory = pi => {
 			pi.on("session_start", async () => {
 				await Promise.resolve();
@@ -2024,7 +2024,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	it("keeps the stable MCP tool-name collision winner during SDK startup and warns", async () => {
 		const tempDir = makeTempDir();
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => { });
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const createMcpTool = (serverName: string, label: string): CustomTool => ({
 			name: "mcp__foo_bar_lookup",
 			label,
