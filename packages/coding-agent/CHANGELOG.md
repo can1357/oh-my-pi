@@ -46,6 +46,9 @@
 - Improved IDA database resource management with project sharing, bounded concurrency, idle cleanup, autosave, and clearer database status in listings.
 - Improved runtime configuration behavior with type-safe layered settings, live updates, and safe sequential saves.
 - Improved authentication and credential management to support live broker and credential-store changes.
+- Shortened the default system prompt by removing redundant rules and empty sections, reducing token usage by about 150 tokens with default settings.
+- Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
+- Added initial MCP readiness snapshots for extensions, covering first-discovery attempts only (later retries do not change the snapshot); hung discovery may wait indefinitely. Waiters support per-caller abort signals and reject when the manager is disposed ([#13108](https://github.com/can1357/oh-my-pi/pull/13108) by [@tahsinrahman](https://github.com/tahsinrahman))
 
 ### Fixed
 
@@ -72,6 +75,24 @@
 - Fixed supervised service exits being missed or repeatedly replayed instead of being delivered to the session that started the service.
 - Fixed memory backend failures to identify the affected item and underlying storage error.
 - Fixed `write xd://<tool>` validation behavior so devices can return precise schema-mismatch responses.
+- Updated `omp update` and the startup update check to use the configured npm registry, including scoped registries and authentication tokens.
+- Fixed auto-QA grievance uploads so an invalid report no longer blocks the rest of the queue; rejected reports are now reported with the server error.
+- Fixed Windows `read` failures for existing files when a line selector such as `:1-40` is used.
+- Fixed memory storage error reporting so failed `retain`, `learn`, and backend saves identify the failed item and include the underlying storage error.
+- Fixed malformed user-level `mcp.json` files disabling all MCP sources; valid sources now continue loading with a warning.
+- Fixed retry fallback loops that could retry indefinitely when a fallback resolved to the same effective request.
+- Fixed the setup wizard incorrectly reporting Gemini web search as unconfigured when Antigravity OAuth is active.
+- Fixed headless print mode abandoning the advisor's final review when the review model fails and a configured fallback reviewer is available.
+- Fixed embedded shell startup when the inherited working directory has been deleted.
+- Fixed Codex usage displays showing a stale subscription plan after the account plan changed.
+- Fixed explicit model or provider selections from bypassing `disabledProviders`; disabled providers are now refused and skipped during fallback.
+- Fixed usage views incorrectly combining model-specific quota limits with shared quota windows; each limit is now shown separately.
+- Fixed `write xd://<tool>` handling of devices with lenient argument validation so tools can provide their own precise responses for schema mismatches.
+- Fixed Anthropic server-side fallback requests failing because of an invalid fallback model name.
+- Fixed requests to large-output models failing near the context limit; the output allowance now adjusts to fit the remaining context.
+- Fixed system prompts that referenced tools by bare names when those tools were available only through `xd://` devices, including Hindsight and Mnemopi memory tools.
+- Fixed dictation remaining active when recording was restarted while the previous clip was still transcribing.
+- `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.0] - 2026-09-24
 

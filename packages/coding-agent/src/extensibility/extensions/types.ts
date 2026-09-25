@@ -86,6 +86,7 @@ import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
 import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
+import type { McpConnectionStatusSnapshot } from "../../mcp/startup-events";
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
@@ -435,6 +436,13 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/**
+	 * Await only the first discovery's configured MCP `tools/list` attempts. The
+	 * snapshot is initial-only; later retries do not change it, and a hung
+	 * discovery may wait indefinitely. Abort cancels only this caller's wait;
+	 * manager disposal rejects all pending waiters.
+	 */
+	waitForInitialMCPConnections(options?: { signal?: AbortSignal }): Promise<McpConnectionStatusSnapshot>;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
