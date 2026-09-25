@@ -67,6 +67,26 @@ describe("EvalTool display() text surfacing", () => {
 		expect(text).not.toBe("(no text output)");
 	});
 
+	it("keeps fully-inline small displays out of details.jsonOutputs (issue #10778)", async () => {
+		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
+			baseResult({
+				displayOutputs: [{ type: "json", data: { stdout: "hi", exit_code: 0 } }],
+			}) as never,
+		);
+
+		const tool = new EvalTool(makeSession());
+		const result = await tool.execute("call-small-display", {
+			language: "js",
+			code: "display({ stdout: 'hi', exit_code: 0 });",
+		});
+
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(text).toContain("display[1]");
+		expect(text).toContain('"stdout": "hi"');
+		expect(result.details?.jsonOutputs).toBeUndefined();
+	});
+
 	it("interleaves stdout text and display() JSON values", async () => {
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(evalIndex.jsBackend, "execute").mockResolvedValue(
