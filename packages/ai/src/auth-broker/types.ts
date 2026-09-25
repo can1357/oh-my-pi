@@ -42,7 +42,7 @@ export interface SnapshotResponse extends Omit<AuthCredentialSnapshot, "credenti
 	credentials: SnapshotEntry[];
 }
 
-/** GET /v1/usage response body — matches the local `AuthStorage.fetchUsageReports` shape. */
+/** GET /v1/usage response body — matches the local `AuthStorage.usage.reports` shape. */
 export interface UsageResponse {
 	generatedAt: number;
 	reports: UsageReport[];

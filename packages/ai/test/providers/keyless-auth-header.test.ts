@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { NO_AUTH_SENTINEL, resolveOpenAIRequestSetup } from "../../src/providers/openai-shared";
+import { NO_AUTH_SENTINEL } from "../../src/auth-retry";
+import { resolveOpenAIRequestSetup } from "../../src/providers/openai-shared";
 
 describe("resolveOpenAIRequestSetup keyless auth", () => {
 	test("omits Authorization for the keyless (auth: none) sentinel, keeping custom headers", () => {

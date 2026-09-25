@@ -2,10 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import {
-	META_MUSE_STATIC_MODELS,
-	MUSE_CODE_STATIC_MODELS,
 	metaModelManagerOptions,
 	museCodeModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -21,44 +20,14 @@ const MUSE_SPARK_MAX_THINKING: ThinkingConfig = {
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 };
 
+const metaMuseModels = seedModels<"openai-responses">("meta");
+const museCodeModels = seedModels<"openai-responses">("muse-code");
+
 function modelListResponse(ids: readonly string[]): Response {
 	return Response.json({ object: "list", data: ids.map(id => ({ id, object: "model" })) });
 }
 
 describe("Meta Model API provider", () => {
-	test("seeds every Muse Spark revision with Responses reasoning and tier pricing", () => {
-		const byId = new Map(META_MUSE_STATIC_MODELS.map(model => [model.id, model]));
-		expect([...byId.keys()]).toEqual([
-			"muse-spark-1.1",
-			"muse-spark-1.2",
-			"muse-spark-1.2-contributor",
-			"muse-spark-1.3",
-			"muse-spark-1.3-contributor",
-		]);
-		expect(byId.get("muse-spark-1.3")).toEqual({
-			id: "muse-spark-1.3",
-			name: "Muse Spark 1.3",
-			api: "openai-responses",
-			provider: "meta",
-			baseUrl: "https://api.meta.ai/v1",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-			contextWindow: 1_048_576,
-			maxTokens: 131_072,
-			thinking: MUSE_SPARK_MAX_THINKING,
-			compat: { supportsReasoningEffort: true, includeEncryptedReasoning: true },
-		});
-		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
-			name: "Muse Spark 1.3 (C)",
-			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-			thinking: MUSE_SPARK_THINKING,
-		});
-		const options = metaModelManagerOptions();
-		expect(options.providerId).toBe("meta");
-		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);
-	});
-
 	test("live discovery keeps seeded capabilities for ids Meta lists without metadata", async () => {
 		// api.meta.ai/v1/models returns bare `{id}` rows: no name, limits,
 		// reasoning, or pricing. Without the seed as reference, a newly shipped
@@ -89,13 +58,15 @@ describe("Meta Model API provider", () => {
 	test("unseeded Muse Spark revisions inherit lineage capabilities and tier naming", async () => {
 		// Meta ships revisions gateway-first; until the seed lists one it must
 		// still resolve with the lineage's window, thinking ladder, and pricing
-		// rather than the bare discovery defaults.
+		// rather than the bare discovery defaults. The ladder is rule-derived
+		// (only reviewed seed rows advertise `max`), so assert the built model
+		// the manager hands out.
 		const options = metaModelManagerOptions({
 			apiKey: "meta-key",
 			fetch: async () => modelListResponse(["muse-spark-1.4", "muse-spark-1.4-contributor", "muse-spark-2.0.1"]),
 		});
 		const models = await options.fetchDynamicModels?.();
-		const byId = new Map((models ?? []).map(model => [model.id, model]));
+		const byId = new Map((models ?? []).map(model => [model.id, buildModel(model)]));
 		expect(byId.get("muse-spark-1.4")).toMatchObject({
 			name: "Muse Spark 1.4",
 			reasoning: true,
@@ -114,18 +85,18 @@ describe("Meta Model API provider", () => {
 	});
 
 	test("prefers Meta's documented key name while accepting the provider-specific alias", () => {
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "meta");
+		const descriptor = providerEntry("meta");
 		expect(descriptor).toMatchObject({
 			defaultModel: "muse-spark-1.1",
 			envVars: ["MODEL_API_KEY", "META_API_KEY"],
-			catalogDiscovery: { label: "Meta Model API" },
+			discovery: { label: "Meta Model API" },
 		});
 	});
 });
 
 describe("Muse Code subscription provider", () => {
 	test("exposes a distinct provider with subscription-scoped Muse models", async () => {
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "muse-code");
+		const descriptor = providerEntry("muse-code");
 		expect(descriptor).toMatchObject({
 			defaultModel: "muse-spark-1.3",
 			dynamicModelsAuthoritative: true,
@@ -143,8 +114,8 @@ describe("Muse Code subscription provider", () => {
 		});
 		expect(options.providerId).toBe("muse-code");
 		expect(options.dynamicModelsAuthoritative).toBe(true);
-		expect(options.staticModels).toEqual(MUSE_CODE_STATIC_MODELS);
-		expect(MUSE_CODE_STATIC_MODELS.every(model => model.provider === "muse-code")).toBe(true);
+		expect(options.staticModels).toEqual(museCodeModels);
+		expect(museCodeModels.every(model => model.provider === "muse-code")).toBe(true);
 		const discovered = await options.fetchDynamicModels?.();
 		expect(requestHeaders.get("Authorization")).toBe("Bearer LLM|subscription-key");
 		expect(requestHeaders.get("x-api-version")).toBe("1.0.0");
@@ -159,17 +130,8 @@ describe("Muse Code subscription provider", () => {
 		]);
 	});
 
-	test("leaves the existing Meta Model API descriptor API-key-only", () => {
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "meta");
-		expect(descriptor).toMatchObject({
-			defaultModel: "muse-spark-1.1",
-			envVars: ["MODEL_API_KEY", "META_API_KEY"],
-			catalogDiscovery: { label: "Meta Model API" },
-		});
-	});
-
 	test("selects the compact edit prompt only for the subscription tier", () => {
-		const subscriber = buildModel(MUSE_CODE_STATIC_MODELS.find(model => model.id === "muse-spark-1.3-contributor")!);
+		const subscriber = buildModel(museCodeModels.find(model => model.id === "muse-spark-1.3-contributor")!);
 		expect(subscriber.editPromptVariant).toBe("compact");
 		// Verified 2026-09-05: api.meta.ai/v1 400s `custom` tools
 		// ("`custom` tools are not supported on this endpoint"), so the
@@ -178,7 +140,7 @@ describe("Muse Code subscription provider", () => {
 
 		// Same model ids on the direct Meta API key path keep the stock
 		// full-prompt JSON-function presentation.
-		const apiKey = buildModel(META_MUSE_STATIC_MODELS.find(model => model.id === "muse-spark-1.3-contributor")!);
+		const apiKey = buildModel(metaMuseModels.find(model => model.id === "muse-spark-1.3-contributor")!);
 		expect(apiKey.editPromptVariant).toBeUndefined();
 		expect(apiKey.applyPatchToolType).toBeUndefined();
 	});

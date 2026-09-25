@@ -674,8 +674,9 @@ mod tests {
 	#[test]
 	fn pytest_caps_error_blocks_independently_of_failures() {
 		// 12 collection-error banners (ERRORS section) exceed the cap and yield
-		// their OWN `[…N errors elided…]` marker, while the 2 real failure tracebacks
-		// in the FAILURES section are untouched (their counter is separate).
+		// their OWN `[…N errors elided…]` marker, while the 2 real failure
+		// tracebacks in the FAILURES section are untouched (their counter is
+		// separate).
 		let mut input = String::from(
 			"============================= test session starts \
 			 =============================\ncollected 2 items / 12 \

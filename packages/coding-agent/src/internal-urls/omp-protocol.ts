@@ -7,8 +7,8 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
-import * as path from "node:path";
 import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
+import { ompDocFilename, ompDocRel } from "./omp-scope";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
 /**
@@ -21,16 +21,16 @@ export class OmpProtocolHandler implements ProtocolHandler {
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl): Promise<InternalResource> {
-		// Extract filename from host + path
-		const host = url.rawHost || url.hostname;
-		const pathname = url.rawPathname ?? url.pathname;
-		const filename = host ? (pathname && pathname !== "/" ? host + pathname : host) : "";
+		const filename = ompDocFilename(url);
+		// The docs root (`omp://`, `omp://docs`) names no doc. The grammar also
+		// rejects absolute paths and `..` traversal.
+		const docPath = ompDocRel(url);
 
-		if (!filename) {
+		if (!filename || !docPath) {
 			return this.#listDocs(url);
 		}
 
-		return this.#readDoc(filename, url);
+		return this.#readDoc(docPath, filename, url);
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
@@ -54,23 +54,7 @@ export class OmpProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #readDoc(filename: string, url: InternalUrl): Promise<InternalResource> {
-		// Validate: no traversal, no absolute paths
-		if (path.isAbsolute(filename)) {
-			throw new Error("Absolute paths are not allowed in omp:// URLs");
-		}
-
-		const normalized = path.posix.normalize(filename.replaceAll("\\", "/"));
-		if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
-			throw new Error("Path traversal (..) is not allowed in omp:// URLs");
-		}
-
-		const docPath =
-			normalized === "docs" ? "" : normalized.startsWith("docs/") ? normalized.slice("docs/".length) : normalized;
-		if (!docPath) {
-			return this.#listDocs(url);
-		}
-
+	async #readDoc(docPath: string, filename: string, url: InternalUrl): Promise<InternalResource> {
 		const content = await getEmbeddedDoc(docPath);
 		if (content === undefined) {
 			const lookup = docPath.replace(/\.md$/, "");

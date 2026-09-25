@@ -19,7 +19,18 @@ export function tryParseJson<T = unknown>(content: string): T | null {
  * only lossless JSON representation.
  */
 export function stringifyJson(value: unknown, space?: string | number): string | undefined {
-	return JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item), space);
+	// Fast path: a replacer forces the slow stringify on every call, but
+	// bigint payloads are vanishingly rare. Try plain stringify first and
+	// retry with the coercing replacer only on TypeError (the only error a
+	// bigint raises). A TypeError from elsewhere (circular value, throwing
+	// toJSON) recurs on the retry and surfaces from that second walk, so
+	// stateful serializers ahead of a bigint run twice on that path.
+	try {
+		return JSON.stringify(value, undefined, space);
+	} catch (error) {
+		if (!(error instanceof TypeError)) throw error;
+		return JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item), space);
+	}
 }
 
 function stableJsonClone(value: unknown): unknown {

@@ -130,4 +130,14 @@ describe("XMLParser option and content edges", () => {
 		).toEqual({ r: { a: [1], b: false, empty: "", "@_a": "01", "@_b": "true" } });
 		expect(new XMLParser().parse(`<r a="ignored"><x>1</x></r>`)).toEqual({ r: { x: 1 } });
 	});
+
+	test("recovers from malformed end tags and stray markup instead of looping forever", () => {
+		// Every case below made the reader spin on a position it could not advance: the loop is
+		// synchronous, so one malformed OPF/slide/sheet wedged the whole conversion with no error.
+		expect(parser.parse(`<p>text<br>more</p>`)).toEqual({ p: { br: "more", "#text": "text" } });
+		expect(parser.parse(`</x>`)).toEqual({});
+		expect(parser.parse(`<a><b></a>`)).toEqual({ a: { b: "" } });
+		expect(parser.parse(`<a>x</b>y</a>`)).toEqual({ a: "x" });
+		expect(parser.parse(`<a / >`)).toEqual({ a: "" });
+	});
 });
