@@ -44,8 +44,9 @@ function makeSession(
 	concurrency = 2,
 	freshAgents = false,
 	deliveries?: Array<{ id: string; text: string }>,
+	maxRunningJobs?: number,
 ): ToolSession {
-	const manager = new AsyncJobManager({ retentionMs: 0 });
+	const manager = new AsyncJobManager({ retentionMs: 0, maxRunningJobs });
 	if (deliveries) {
 		manager.registerDeliverySink("Main", (id, text) => {
 			deliveries.push({ id, text });
@@ -151,6 +152,115 @@ afterEach(async () => {
 });
 
 describe("WorkPool dispatch", () => {
+	it("leaves a rejected aggregate push retryable when capacity becomes available", async () => {
+		const session = makeSession([], 1, false, undefined, 1);
+		const manager = session.asyncJobManager!;
+		const gate = Promise.withResolvers<string>();
+		const blocker = manager.register("bash", "blocker", () => gate.promise);
+		const blockerJob = manager.getJob(blocker)!;
+		const workpool = pool(session, "admission");
+
+		expect(() => workpool.push(["rejected"])).toThrow("Background job limit reached");
+		expect(workpool.peek()).toEqual({ batches: [], pending: 0 });
+		expect(workpool.status().agents).toEqual([]);
+		expect(manager.getJob(workpool.name)).toBeUndefined();
+		gate.resolve("released");
+		await blockerJob.promise;
+
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id, "accepted after capacity returned");
+		});
+		expect(workpool.push(["accepted"])).toEqual(["admission#1"]);
+		const poolJob = manager.getJob(workpool.name)!;
+		await poolJob.promise;
+		expect(poolJob.resultText).toContain("accepted after capacity returned");
+		expect(workpool.status().items).toEqual({ queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0 });
+		expect(manager.getRunningJobs()).toEqual([]);
+	});
+
+	it("rejects every push against a disposed manager without retaining pending work", async () => {
+		const session = makeSession();
+		const manager = session.asyncJobManager!;
+		const workpool = pool(session, "disposed");
+		await manager.dispose();
+
+		expect(() => workpool.push(["first"])).toThrow("Async job manager is disposed");
+		expect(() => workpool.push(["second"])).toThrow("Async job manager is disposed");
+		expect(workpool.peek()).toEqual({ batches: [], pending: 0 });
+		expect(workpool.close()).toEqual({ dropped: [] });
+		expect(manager.getRunningJobs()).toEqual([]);
+	});
+
+	it("settles a rejected new worker and drains after the admitted turn finishes", async () => {
+		const session = makeSession([], 2, false, undefined, 1);
+		const first = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const workpool = pool(session, "capacity");
+		workpool.push(["admitted", "rejected"]);
+		const poolJob = session.asyncJobManager!.getJob(workpool.name)!;
+		await until(() => workpool.status().items.failed === 1 && workpool.agents.length === 1);
+		expect(workpool.peek().batches[1]).toMatchObject({ status: "failed", items: ["capacity#2"] });
+		expect(workpool.peek().batches[1]?.output).toContain("Background job limit reached");
+		expect(workpool.close()).toEqual({ dropped: [] });
+		first.resolve();
+		await poolJob.promise;
+		expect(workpool.status().items).toEqual({ queued: 0, running: 0, completed: 1, failed: 1, cancelled: 0 });
+		expect(workpool.status().agents.every(agent => agent.state !== "running" && !agent.current)).toBe(true);
+		expect(poolJob.resultText).toContain("Background job limit reached");
+		expect(session.asyncJobManager!.getRunningJobs()).toEqual([]);
+	});
+
+	it("settles every item in a rejected follow-up batch and reuses the idle worker", async () => {
+		const session = makeSession([], 2, false, undefined, 2);
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			await (id.endsWith("-1") ? first.promise : second.promise);
+			markIdle(id);
+			return execution(id);
+		});
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id, "reused after admission failure");
+		});
+		const workpool = pool(session, "batch-capacity");
+		workpool.push(["first", "second", "third", "fourth", "fifth"]);
+		const manager = session.asyncJobManager!;
+		const poolJob = manager.getJob(workpool.name)!;
+		await until(() => workpool.agents[0]?.queue.length === 2 && workpool.agents[1]?.queue.length === 1);
+		const firstJob = manager.getJob(workpool.batches[0]!.jobId)!;
+		first.resolve();
+		await firstJob.promise;
+		expect(workpool.peek().batches[2]).toMatchObject({
+			status: "failed",
+			items: ["batch-capacity#3", "batch-capacity#5"],
+		});
+		expect(workpool.peek().batches[2]?.output).toContain("Background job limit reached");
+		expect(workpool.status().agents[0]).toMatchObject({ state: "idle", queued: 0 });
+
+		workpool.push(["sixth"]);
+		await until(() => workpool.batches.length === 4);
+		const reusedJob = manager.getJob(workpool.batches[3]!.jobId)!;
+		await reusedJob.promise;
+		expect(workpool.peek().batches[3]).toMatchObject({
+			agent: workpool.batches[0]!.agentId,
+			status: "completed",
+			output: "reused after admission failure",
+		});
+		second.resolve();
+		await poolJob.promise;
+		expect(workpool.status().items).toEqual({ queued: 0, running: 0, completed: 4, failed: 2, cancelled: 0 });
+		expect(manager.getRunningJobs()).toEqual([]);
+	});
+
 	it("renders the flat workpool yield contract after shared context", () => {
 		const rendered = prompt.render(subagentSystemPrompt, {
 			agent: "Worker",
