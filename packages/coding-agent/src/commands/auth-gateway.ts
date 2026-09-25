@@ -30,6 +30,7 @@ export default class AuthGateway extends Command {
 			description:
 				"Disable inbound bearer-token auth (serve). Useful when bound to loopback — any caller is allowed.",
 		}),
+		routes: Flags.string({ description: "JSON/JSON5 RouteDefinition file for `serve`" }),
 		strict: Flags.boolean({
 			description:
 				"For `check`: additionally probe each credential against its provider's chat-completion endpoint. Slower; consumes a tiny amount of quota per credential.",
@@ -42,6 +43,7 @@ export default class AuthGateway extends Command {
 		"# Print the gateway bearer token (creates one on first run)\n  omp auth-gateway token",
 		"# Rotate the gateway bearer token\n  omp auth-gateway token --regenerate",
 		"# Run on loopback without any bearer (anyone on this host can call)\n  omp auth-gateway serve --no-auth",
+		"# Load virtual routes from a JSON/JSON5 file\n  omp auth-gateway serve --routes=routes.json5",
 		"# Show local gateway + broker config status\n  omp auth-gateway status",
 		"# Probe each broker credential to see which one is producing 401s\n  omp auth-gateway check",
 		"# Same, machine-readable for scripts\n  omp auth-gateway check --json",
@@ -61,6 +63,7 @@ export default class AuthGateway extends Command {
 				bind: flags.bind,
 				regenerate: flags.regenerate,
 				noAuth: flags["no-auth"],
+				routes: flags.routes,
 				strict: flags.strict,
 			},
 		};
