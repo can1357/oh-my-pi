@@ -610,6 +610,15 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	}
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
 	if (data.frequency_penalty !== undefined) options.frequencyPenalty = data.frequency_penalty;
+	if (data.seed !== undefined) options.seed = data.seed;
+	if (data.logit_bias !== undefined) options.logitBias = data.logit_bias;
+	if (data.response_format !== undefined) options.responseFormat = data.response_format;
+	else if (isObj(data.text) && data.text.format !== undefined) {
+		// Canonical Responses structured output lives in `text.format`;
+		// `response_format` is the Chat Completions spelling. Forward it so
+		// schema-constrained requests survive gateway translation.
+		options.responseFormat = data.text.format;
+	}
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
 	if (Array.isArray(data.include)) options.include = data.include.filter(isOpenAIResponseInclude);
 	const cacheKey = resolvePromptCacheKey(body, headers);
@@ -617,6 +626,12 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
+	// Responses structured outputs arrive as `text.format` (not Chat
+	// Completions `response_format`). Forward into options.responseFormat so
+	// applyParsedGatewayOptions / providers see the schema.
+	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
+		options.responseFormat = data.text.format;
+	}
 	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
 	// silently accepted by the schema. No typed slot — drop.
 
@@ -884,7 +899,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	return buildResponseEnvelope(
 		message,
 		requestedModelId,
-		makeRespId(),
+		message.responseId ?? makeRespId(),
 		responseStatusForStopReason(message),
 		items,
 		buildUsage(message),
@@ -941,7 +956,8 @@ export function encodeStream(
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
-	const responseId = makeRespId();
+	let responseId: string | undefined;
+	let preambleEmitted = false;
 	let sequenceNumber = 0;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
@@ -976,7 +992,7 @@ export function encodeStream(
 				openItemsByContentIndex.get(contentIndex) ?? null;
 
 			const responseSnapshot = (status: ResponseStatus, output: OutputItem[] | []) => ({
-				id: responseId,
+				id: responseId ?? makeRespId(),
 				object: "response",
 				created_at: createdAt,
 				status,
@@ -985,6 +1001,17 @@ export function encodeStream(
 				usage: null,
 				incomplete_details: incompleteDetailsForStatus(status),
 			});
+			const chooseResponseId = (candidate?: string): string => {
+				if (responseId === undefined) responseId = candidate ?? makeRespId();
+				return responseId;
+			};
+			const emitPreamble = (): void => {
+				if (preambleEmitted) return;
+				chooseResponseId();
+				preambleEmitted = true;
+				emit("response.created", { response: responseSnapshot("in_progress", []) });
+				emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
+			};
 
 			const openMessage = (signature: MessageSignature | undefined, sourceContentIndex: number): OpenMessage => {
 				const itemOutputIndex = allocateOutputIndex();
@@ -1215,14 +1242,26 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
+					const eventResponseId =
+						"partial" in ev
+							? ev.partial.responseId
+							: ev.type === "done"
+								? ev.message.responseId
+								: ev.type === "error"
+									? ev.error.responseId
+									: undefined;
+					if (ev.type === "start") {
+						createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
+						if (eventResponseId) {
+							chooseResponseId(eventResponseId);
+							emitPreamble();
+						}
+					} else {
+						chooseResponseId(eventResponseId);
+						emitPreamble();
+					}
 					switch (ev.type) {
 						case "start": {
-							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
-							// response.created — initial envelope.
-							emit("response.created", { response: responseSnapshot("in_progress", []) });
-							// response.in_progress — mirrors real OpenAI; some clients gate
-							// on it before reading items.
-							emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
 							break;
 						}
 						case "text_start": {
@@ -1417,6 +1456,7 @@ export function encodeStream(
 				}
 
 				if (failureMessage) {
+					emitPreamble();
 					closeAllOpenItems();
 					controller.enqueue(
 						encoder.encode(
@@ -1437,6 +1477,8 @@ export function encodeStream(
 
 				closeAllOpenItems();
 				const message = finalMessage ?? ((await events.result().catch(() => null)) as AssistantMessage | null);
+				if (message?.responseId) chooseResponseId(message.responseId);
+				emitPreamble();
 
 				// Build the canonical output from the final message so non-streaming
 				// readers see the exact same shape they'd get from encodeResponse().

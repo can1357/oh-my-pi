@@ -75,6 +75,7 @@ import type {
 } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyResponsesFormatParams,
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
@@ -410,6 +411,7 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	min_p?: number;
 	presence_penalty?: number;
 	repetition_penalty?: number;
+	seed?: number;
 	session_id?: string;
 	stream_options?: { include_obfuscation?: boolean };
 	provider?: OpenAICompat["openRouterRouting"];
@@ -541,10 +543,22 @@ const streamOpenAIResponsesOnce = (
 				params.store = true;
 			}
 			applyReasoningEffortFallbackForRequest(params);
-			let chained: OpenAIResponsesChainedParams =
-				chainState && !chainState.disabled
+			// A caller-supplied `previous_response_id` names the client's own stored
+			// response; internal chain deltas are computed against a DIFFERENT
+			// baseline (the provider session's last response), so pairing them with
+			// the client's id would send the delta to the wrong conversation.
+			// Branch before any delta construction — the client id wins.
+			const clientPreviousResponseId = options?.previousResponseId;
+			let chainedInternal = false;
+			let chained: OpenAIResponsesChainedParams = clientPreviousResponseId
+				? {
+						params: { ...params, previous_response_id: clientPreviousResponseId },
+						previousResponseId: clientPreviousResponseId,
+					}
+				: chainState && !chainState.disabled
 					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
 					: { params };
+			chainedInternal = chained.previousResponseId !== undefined && !clientPreviousResponseId;
 			sentPreviousResponseId = chained.previousResponseId;
 			const idleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
@@ -699,14 +713,28 @@ const streamOpenAIResponsesOnce = (
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
-							let fallbackChained: OpenAIResponsesChainedParams =
-								chainState && !chainState.disabled
+							// Preserve caller storage intent (e.g. via onPayload): a
+							// stored first attempt whose retry is not retained breaks
+							// subsequent previous_response_id continuations.
+							else if (activeParams.store === true) fallbackParams.store = true;
+							const fallbackClientPreviousResponseId = options?.previousResponseId;
+							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId
+								? {
+										params: {
+											...fallbackParams,
+											previous_response_id: fallbackClientPreviousResponseId,
+										},
+										previousResponseId: fallbackClientPreviousResponseId,
+									}
+								: chainState && !chainState.disabled
 									? buildOpenAIResponsesChainedParams(
 											fallbackParams,
 											fallbackBuilt.trailingScaffoldingItems,
 											chainState,
 										)
 									: { params: fallbackParams };
+							chainedInternal =
+								fallbackChained.previousResponseId !== undefined && !fallbackClientPreviousResponseId;
 							sentPreviousResponseId = fallbackChained.previousResponseId;
 							fallbackChained = {
 								...fallbackChained,
@@ -718,7 +746,11 @@ const streamOpenAIResponsesOnce = (
 							activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
 							continue;
 						}
-						if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {
+						// Recovery re-baselines the PROVIDER session's chain. A stale
+						// caller-owned id means the client's stored response is gone —
+						// retrying this turn standalone would silently drop the client's
+						// prior context, so only internally owned ids may recover here.
+						if (!chainState || !sentPreviousResponseId || !chainedInternal || requestSignal.aborted) {
 							throw error;
 						}
 						const zdrRejection =
@@ -1260,6 +1292,11 @@ export function buildParams(
 		store: false,
 		stream_options: model.compat.supportsObfuscationOptOut ? { include_obfuscation: false } : undefined,
 	};
+	if (options?.parallelToolCalls !== undefined) params.parallel_tool_calls = options.parallelToolCalls;
+	if (options?.user !== undefined) params.user = options.user;
+	// `seed` is a Chat Completions parameter — the Responses API has no such
+	// field and rejects it as an unknown parameter.
+	applyResponsesFormatParams(params, options?.responseFormat);
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	maybeAddOpenRouterAnthropicCacheControl(params, model, cacheRetention);
 	const outputToken = resolveOpenAIOutputTokenParam({

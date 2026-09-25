@@ -39,6 +39,7 @@ import * as commandsSettings from "../commands/settings";
 import * as streamSettings from "../stream/settings";
 import * as commitSettings from "../commit/settings";
 import * as cliGcSettings from "../cli/gc-settings";
+import * as authGatewaySettings from "../cli/auth-gateway-settings";
 
 const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	configModelSettings,
@@ -74,6 +75,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	streamSettings,
 	commitSettings,
 	cliGcSettings,
+	authGatewaySettings,
 ];
 
 /** Domains listed immediately before `before` (a setting of a DOMAINS entry) instead of in DOMAINS order. */

@@ -1,6 +1,8 @@
-# Changelog
-
 ## [Unreleased]
+
+### Fixed
+
+- Running auth gateways now add or remove provider models when broker credentials change, without requiring a restart.
 
 ## [18.3.1] - 2026-09-25
 
@@ -38,6 +40,44 @@
 
 ### Fixed
 
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
+- `omp auth-gateway serve --routes=<path>` loads virtual route definitions from a JSON/JSON5 file.
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
+
+- `omp auth-gateway serve --routes=<path>` loads virtual route definitions from a JSON/JSON5 file.
+
+- `omp update` and the startup update check now use your configured npm registry (`.npmrc`, `npm_config_registry`, or bunfig, including scoped registries and auth tokens) instead of always querying registry.npmjs.org ([#13115](https://github.com/can1357/oh-my-pi/pull/13115) by [@H4vC](https://github.com/H4vC))
+- Fixed auto-QA grievance pushes getting stuck forever behind one report the collector rejects: tool names are clamped to the collector's 128-byte limit, rejected reports are set aside with the server's error (shown in `omp grievances list` and `push`), and the rest of the queue keeps sending ([#13091](https://github.com/can1357/oh-my-pi/issues/13091), [#13119](https://github.com/can1357/oh-my-pi/pull/13119) by [@NaC-L](https://github.com/NaC-L))
+- Fixed advisor reviews making an extra model request after a turn whose only tool calls were `advise`. That request re-sent the whole review context just so the advisor could reply "done", with no new notes. The review now ends after the advise-only turn; a turn that also calls other tools continues as before ([#13132](https://github.com/can1357/oh-my-pi/pull/13132) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed the advisor replaying the whole main transcript after the main session's per-turn prune blanked tool results it had already seen. The advisor now keeps its context across the prune; rollback, branch, edited messages, compaction and session switch still re-prime it (part of [#7226](https://github.com/can1357/oh-my-pi/issues/7226), [#13131](https://github.com/can1357/oh-my-pi/pull/13131) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed `/login` crashing source-link and dev installs with `NameTooLong reading "file:file:…"` once an extension loader had loaded. The legacy-pi specifier shim no longer re-enters itself while resolving a canonical `@oh-my-pi/pi-*` subpath such as `@oh-my-pi/pi-ai/index.js`, so `require()` of those subpaths resolves to the host copy ([#12293](https://github.com/can1357/oh-my-pi/issues/12293), [#13127](https://github.com/can1357/oh-my-pi/pull/13127) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed advisors configured with `auto` thinking running at `medium` instead of following the main session's current effort. An `auto` advisor now runs at the effort the main session uses for the current turn (the classifier's pick under `auto`, the set level otherwise, `medium` when thinking is off), updated at each review without rebuilding the advisor; on a retry-fallback model it keeps the fallback's effort until its main model is restored ([#13130](https://github.com/can1357/oh-my-pi/pull/13130) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Fixed large edit diffs being sent whole in advisor reviews; they are now redacted and cut to the same 8 KiB / 80-line budget as other tool output ([#13129](https://github.com/can1357/oh-my-pi/pull/13129) by [@alnaggar-dev](https://github.com/alnaggar-dev)).
+- Updated `omp update` and the startup update check to use the configured npm registry, including scoped registries and authentication tokens.
+- Fixed auto-QA grievance uploads so an invalid report no longer blocks the rest of the queue; rejected reports are now reported with the server error.
+- Fixed Windows `read` failures for existing files when a line selector such as `:1-40` is used.
+- Fixed memory storage error reporting so failed `retain`, `learn`, and backend saves identify the failed item and include the underlying storage error.
+- Fixed malformed user-level `mcp.json` files disabling all MCP sources; valid sources now continue loading with a warning.
+- Fixed retry fallback loops that could retry indefinitely when a fallback resolved to the same effective request.
+- Fixed the setup wizard incorrectly reporting Gemini web search as unconfigured when Antigravity OAuth is active.
+- Fixed headless print mode abandoning the advisor's final review when the review model fails and a configured fallback reviewer is available.
+- Fixed embedded shell startup when the inherited working directory has been deleted.
+- Fixed Codex usage displays showing a stale subscription plan after the account plan changed.
+- Fixed explicit model or provider selections from bypassing `disabledProviders`; disabled providers are now refused and skipped during fallback.
+- Fixed usage views incorrectly combining model-specific quota limits with shared quota windows; each limit is now shown separately.
+- Fixed `write xd://<tool>` handling of devices with lenient argument validation so tools can provide their own precise responses for schema mismatches.
+- Fixed Anthropic server-side fallback requests failing because of an invalid fallback model name.
+- Fixed requests to large-output models failing near the context limit; the output allowance now adjusts to fit the remaining context.
+- Fixed system prompts that referenced tools by bare names when those tools were available only through `xd://` devices, including Hindsight and Mnemopi memory tools.
+- Fixed dictation remaining active when recording was restarted while the previous clip was still transcribing.
 - Fixed concurrent project access by enforcing file locking across processes.
 - Fixed Windows file reads with line selectors such as `:1-40`.
 - Fixed `omp update` and startup update checks to honor configured npm registries, including scoped registries and authentication tokens.
@@ -1084,6 +1124,13 @@
 
 ### Added
 
+- `omp auth-gateway serve --routes=<path>` loads virtual route definitions from a JSON/JSON5 file.
+- `omp auth-gateway serve` loads virtual routes from `auth.gateway.routesFile` in config.yml when `--routes` is omitted.
+
+- Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
 
@@ -1397,11 +1444,25 @@
 - Fixed idle compaction discarding context while the session was still waiting on a backgrounded async job ([#10223](https://github.com/can1357/oh-my-pi/pull/10223) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed LSP idle timeout clobbering in multi-workspace sessions and unmanaged timer spawning on pure config reads ([#10237](https://github.com/can1357/oh-my-pi/pull/10237) by [@harshaygadekar](https://github.com/harshaygadekar)).
 
+### Fixed
+
+- Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
+
+
+### Fixed
+
+
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
 
 - Added gallery previews for composer and status-line components, with CLI filters for browsing by surface, composer, or segment.
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
 
 ### Changed
 
@@ -1410,6 +1471,7 @@
 ### Fixed
 
 - Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
+
 - Fixed credential rotation for HTTP 402 payment-required responses so sibling credentials are tried before model fallback without misclassifying informative non-quota errors.
 - Transport errors after a complete, non-executed tool call can now retry through configured retry budgets and fallback chains when it is safe to do so, instead of ending the turn prematurely.
 - Improved handling of truncated or otherwise undecodable images so they produce an actionable error and no longer permanently block subsequent requests or resumed sessions.

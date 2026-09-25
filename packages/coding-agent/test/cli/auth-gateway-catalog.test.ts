@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type StoredAuthCredential } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -7,6 +7,7 @@ import {
 	createSerializedRebuilder,
 	gatewayRoutableModels,
 	indexModelsByRequestId,
+	refreshAuthGatewayModelIndex,
 } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
@@ -184,4 +185,24 @@ describe("createSerializedRebuilder", () => {
 		await first;
 		expect(calls).toEqual([false]); // no redundant follow-up
 	});
+});
+
+test("catalog refresh includes newly credentialed providers and removes revoked providers", async () => {
+	const model = getBundledModels("anthropic")[0]!;
+	let credentials: StoredAuthCredential[] = [];
+	let afterDiscovery: StoredAuthCredential[] = [];
+	const storage: Pick<AuthStorage, "listStoredCredentials" | "reload"> = {
+		listStoredCredentials: () => credentials,
+		reload: async () => {
+			credentials = afterDiscovery;
+		},
+	};
+	const registry: Pick<ModelRegistry, "refresh" | "getAll"> = { refresh: async () => {}, getAll: () => [model] };
+	expect((await refreshAuthGatewayModelIndex(registry, storage)).has(`${model.provider}/${model.id}`)).toBe(false);
+	afterDiscovery = [
+		{ id: 1, provider: model.provider, disabledCause: null, credential: { type: "api_key", key: "new-key" } },
+	];
+	expect((await refreshAuthGatewayModelIndex(registry, storage)).get(`${model.provider}/${model.id}`)).toEqual(model);
+	afterDiscovery = [];
+	expect((await refreshAuthGatewayModelIndex(registry, storage)).has(`${model.provider}/${model.id}`)).toBe(false);
 });
