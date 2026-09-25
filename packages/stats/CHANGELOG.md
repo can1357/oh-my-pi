@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an unexpected cache-miss metric per provider, split into main agent and subagents: prompt tokens the previous request in the same session already sent but the provider did not read from cache while it should still have been warm (same model, under 5 minutes idle, prompt not shrunk by compaction; models that never report cache reads are excluded). Shown in the overview dashboard, `omp stats --summary`, and `getDashboardStats().cacheMisses`, with miss rate, bad-turn rate, missed tokens, and API-equivalent avoidable cost.
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

@@ -17,6 +17,7 @@ import type {
 	BehaviorModelStats,
 	BehaviorOverallStats,
 	BehaviorTimeSeriesPoint,
+	CacheMissStats,
 	CostTimeSeriesPoint,
 	DailyActivityPoint,
 	FolderStats,
@@ -218,7 +219,7 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_messages_entry_timestamp ON messages(entry_id, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
 		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
-		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_file);
+		CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_file, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_model_provider ON messages(timestamp, model, provider);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_folder ON messages(timestamp, folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_stop_reason_timestamp ON messages(stop_reason, timestamp);
@@ -318,6 +319,9 @@ export async function initDb(): Promise<Database> {
 		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
 	);
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
+	// Superseded by the (session_file, timestamp) index, which also serves
+	// session_file-only lookups and orders per-session request walks.
+	db.run("DROP INDEX IF EXISTS idx_messages_session");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
 	// already produced the new schema, but we want a clean wipe + re-ingest.
@@ -1001,6 +1005,123 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 		totalCacheReadTokens: row.total_cache_read_tokens || 0,
 		totalCacheWriteTokens: row.total_cache_write_tokens || 0,
 		totalCost: row.total_cost || 0,
+	}));
+}
+
+/** Idle gap after which a provider prompt cache may have expired. */
+const CACHE_WARM_WINDOW_MS = 5 * 60 * 1000;
+/** Prompts below this size are not cacheable on most providers. */
+const CACHE_MIN_PROMPT_TOKENS = 1024;
+/** A prompt below this fraction of its predecessor was compacted/pruned. */
+const CACHE_PROMPT_SHRINK_RATIO = 0.97;
+/** A turn is "bad" when it misses more than this many tokens... */
+const CACHE_BAD_MISS_MIN_TOKENS = 2048;
+/** ...and more than this fraction of its expected cache hit. */
+const CACHE_BAD_MISS_RATIO = 0.1;
+
+/** Full prompt size of one request: uncached input + cache reads + cache writes. */
+function promptTokensSql(alias: string): string {
+	return `(${alias}.input_tokens + ${alias}.cache_read_tokens + ${alias}.cache_write_tokens)`;
+}
+
+interface CacheMissRow {
+	provider: string;
+	agent_type: string | null;
+	pairs: number;
+	bad_pairs: number;
+	expected_tokens: number;
+	missed_tokens: number;
+	avoidable_cost: number | null;
+}
+
+/**
+ * Get unexpected prompt-cache misses grouped by provider and agent type,
+ * sorted by missed tokens (descending).
+ *
+ * Walks each transcript's requests in start order and pairs every request with
+ * its predecessor. A pair counts only when the cache should still be warm: same
+ * provider and model, neither request errored, both prompts are cacheable
+ * (>= 1024 tokens), the prompt did not shrink below 97% of its predecessor
+ * (compaction/pruning), and the idle gap between the predecessor finishing and
+ * this request starting is under 5 minutes. Models that never reported a cache
+ * read (all-time) have no warm cache to miss and are excluded. The smaller of
+ * the two prompts is the expected cache hit; whatever this request did not
+ * read from cache is missed.
+ *
+ * With a cutoff, pairs are selected by the later request's timestamp; the
+ * predecessor may precede the cutoff. Avoidable cost prices missed tokens at
+ * each model's all-time effective input rate minus its cache-read rate.
+ */
+export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff !== null && cutoff > 0;
+	const prevPrompt = promptTokensSql("a");
+	const prompt = promptTokensSql("b");
+	// LAG(id) + rowid joins beat six column LAGs: the window runs over the
+	// covering (session_file, timestamp) index and never touches the table.
+	const stmt = db.prepare(`
+		WITH ordered AS (
+			SELECT id, LAG(id) OVER (PARTITION BY session_file ORDER BY timestamp, id) AS prev_id
+			FROM messages
+			${hasCutoff ? "WHERE session_file IN (SELECT session_file FROM messages WHERE timestamp >= ?)" : ""}
+		),
+		pairs AS (
+			SELECT
+				b.provider,
+				b.model,
+				b.agent_type,
+				MIN(${prevPrompt}, ${prompt}) AS expected,
+				MAX(0, MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens) AS missed
+			FROM ordered o
+			JOIN messages b ON b.id = o.id
+			JOIN messages a ON a.id = o.prev_id
+			WHERE a.provider = b.provider
+				AND a.model = b.model
+				AND a.stop_reason != 'error'
+				AND b.stop_reason != 'error'
+				AND ${prevPrompt} >= ${CACHE_MIN_PROMPT_TOKENS}
+				AND ${prompt} >= ${CACHE_MIN_PROMPT_TOKENS}
+				AND ${prompt} >= ${CACHE_PROMPT_SHRINK_RATIO} * ${prevPrompt}
+				AND b.timestamp - a.timestamp - COALESCE(a.duration, 0) < ${CACHE_WARM_WINDOW_MS}
+				${hasCutoff ? "AND b.timestamp >= ?" : ""}
+		),
+		cached_models AS (
+			SELECT
+				provider,
+				model,
+				CASE WHEN SUM(input_tokens) > 0 THEN SUM(cost_input) / SUM(input_tokens) ELSE 0 END AS input_price,
+				SUM(cost_cache_read) / SUM(cache_read_tokens) AS cache_read_price
+			FROM messages
+			GROUP BY provider, model
+			HAVING SUM(cache_read_tokens) > 0
+		)
+		SELECT
+			p.provider,
+			p.agent_type,
+			COUNT(*) AS pairs,
+			SUM(CASE WHEN p.missed > MAX(${CACHE_BAD_MISS_MIN_TOKENS}, ${CACHE_BAD_MISS_RATIO} * p.expected)
+				THEN 1 ELSE 0 END) AS bad_pairs,
+			SUM(p.expected) AS expected_tokens,
+			SUM(p.missed) AS missed_tokens,
+			SUM(p.missed * MAX(0, m.input_price - m.cache_read_price)) AS avoidable_cost
+		FROM pairs p
+		JOIN cached_models m ON m.provider = p.provider AND m.model = p.model
+		GROUP BY p.provider, p.agent_type
+		ORDER BY missed_tokens DESC, p.provider, p.agent_type
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff, cutoff) : stmt.all()) as CacheMissRow[];
+	return rows.map(row => ({
+		provider: row.provider,
+		agentType: (row.agent_type as AgentType | null) ?? "main",
+		pairs: row.pairs,
+		badPairs: row.bad_pairs,
+		expectedTokens: row.expected_tokens,
+		missedTokens: row.missed_tokens,
+		missRate: row.expected_tokens > 0 ? row.missed_tokens / row.expected_tokens : 0,
+		badPairRate: row.pairs > 0 ? row.bad_pairs / row.pairs : 0,
+		avoidableCost: row.avoidable_cost ?? 0,
 	}));
 }
 

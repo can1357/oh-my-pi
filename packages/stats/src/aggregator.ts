@@ -10,6 +10,7 @@ import {
 	getBehaviorByModel,
 	getBehaviorOverall,
 	getBehaviorTimeSeries,
+	getCacheMissStats,
 	getCostTimeSeries,
 	getFileOffset,
 	getMessageById,
@@ -458,6 +459,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		byModel: getStatsByModel(cutoff ?? undefined),
 		byFolder: getStatsByFolder(cutoff ?? undefined),
 		byAgentType: getStatsByAgentType(cutoff ?? undefined),
+		cacheMisses: getCacheMissStats(cutoff),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
 		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
@@ -467,13 +469,14 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 
 export async function getOverviewStats(
 	range?: string | null,
-): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
+): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "cacheMisses" | "timeSeries">> {
 	await initDb();
 	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
 
 	return {
 		overall: getOverallStats(cutoff ?? undefined),
 		byAgentType: getStatsByAgentType(cutoff ?? undefined),
+		cacheMisses: getCacheMissStats(cutoff),
 		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
 	};
 }

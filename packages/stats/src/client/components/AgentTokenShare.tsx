@@ -8,7 +8,7 @@ import type { AgentType, AgentTypeStats } from "../types";
  * (pink -> violet -> cyan) used by the dashboard charts so the bar reads on
  * both themes without per-theme overrides.
  */
-const AGENT_META: Record<AgentType, { label: string; color: string }> = {
+export const AGENT_META: Record<AgentType, { label: string; color: string }> = {
 	main: { label: "Main agent", color: "#ed4abf" },
 	subagent: { label: "Subagents", color: "#9b4dff" },
 	advisor: { label: "Advisor", color: "#5ad8e6" },

@@ -1,8 +1,10 @@
 import { format } from "@oh-my-pi/pi-utils/dates";
+import { Info } from "lucide-react";
 import { useMemo } from "react";
 import { Line } from "react-chartjs-2";
 import { getOverviewStats, getRecentRequests } from "../api";
 import { AgentTokenShare } from "../components/AgentTokenShare";
+import { CACHE_MISS_HELP, CacheMissTable } from "../components/CacheMissTable";
 import { CHART_THEMES } from "../components/chart-shared";
 import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
@@ -231,6 +233,20 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			>
 				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
 					{overview && <AgentTokenShare stats={overview.byAgentType} />}
+				</AsyncBoundary>
+			</Panel>
+
+			<Panel
+				title={
+					<span className="inline-flex items-center gap-1.5" title={CACHE_MISS_HELP}>
+						Unexpected Cache Misses
+						<Info size={14} className="stats-text-muted" aria-label={CACHE_MISS_HELP} />
+					</span>
+				}
+				subtitle="Cacheable prompt tokens not read from cache while the cache should have been warm (same session, under 5 min idle, prompt not shrunk)"
+			>
+				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
+					{overview && <CacheMissTable stats={overview.cacheMisses} />}
 				</AsyncBoundary>
 			</Panel>
 
