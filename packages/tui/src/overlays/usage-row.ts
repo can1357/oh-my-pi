@@ -62,11 +62,23 @@ function usageRowSpecs(
 		specs.push({ leading: theme.icon.time, value: `${(ttftMs / 1000).toFixed(1)}s` });
 	}
 	if (durationMs && durationMs > MIN_DURATION_MS && usage.output > 0) {
-		// TPS over the total request duration — the post-TTFT window undercounts
-		// generation time when reasoning tokens are hidden before the first
-		// visible byte, inflating the rate.
-		const tokPerSec = (usage.output / durationMs) * 1000;
-		specs.push({ leading: theme.icon.throughput, value: `${tokPerSec.toFixed(1)}/s` });
+		if (ttftMs && ttftMs > 0) {
+			// Prefill and decode are different phases: TTFT covers prompt
+			// ingestion (cache walk, queueing), the remainder is generation.
+			// Rate the decode window alone so a long prefill no longer reads
+			// as slow generation.
+			const decodeMs = durationMs - ttftMs;
+			if (decodeMs > MIN_DURATION_MS) {
+				const decodeTokPerSec = (usage.output / decodeMs) * 1000;
+				specs.push({ leading: theme.icon.throughput, value: `${decodeTokPerSec.toFixed(1)}/s (decode)` });
+			}
+		} else {
+			// TPS over the total request duration — the post-TTFT window undercounts
+			// generation time when reasoning tokens are hidden before the first
+			// visible byte, inflating the rate.
+			const tokPerSec = (usage.output / durationMs) * 1000;
+			specs.push({ leading: theme.icon.throughput, value: `${tokPerSec.toFixed(1)}/s` });
+		}
 	}
 	return specs;
 }
