@@ -159,10 +159,10 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 	});
 
 	// createTools() builds the built-in slate before extensions load, so a bridge that
-	// installs its RemoteTransport during load was invisible to the hub gate. For a
-	// leaf root (task.maxRecursionDepth=0, no spawn-based peers) that dropped `hub`
+	// installs its RemoteTransport during load was invisible to the wait gate. For a
+	// leaf root (task.maxRecursionDepth=0, no spawn-based peers) that dropped `wait`
 	// entirely. It must be re-added once the transport is claimed (#7401 review).
-	it("adds the hub tool for a leaf root once a bridge installs a transport", async () => {
+	it("adds the wait tool for a leaf root once a bridge installs a transport", async () => {
 		const { cwd, agentDir } = makeProject();
 		const agentRegistry = new AgentRegistry();
 		const bridge: ExtensionFactory = pi => {
@@ -190,10 +190,10 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 		});
 		try {
 			expect(IrcBus.forRegistry(agentRegistry).hasRemoteTransport()).toBe(true);
-			// The bridge is a leaf root (no `task`), yet `hub` is active because a transport
+			// The bridge is a leaf root (no `task`), yet `wait` is active because a transport
 			// was claimed during load — matching the prompt block that advertises the peers.
 			const activeTools = session.getActiveToolNames();
-			expect(activeTools).toContain("hub");
+			expect(activeTools).toContain("wait");
 			expect(activeTools).not.toContain("task");
 		} finally {
 			await session.dispose();
@@ -240,8 +240,8 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 			// Disconnected right now, but the claim persists — the durable "bridged" signal.
 			expect(bus.hasRemoteTransport()).toBe(false);
 			expect(bus.hasClaimedNamespace()).toBe(true);
-			// So hub stays available for the retained @cluster-reconnect/* peers despite the leaf root.
-			expect(session.getActiveToolNames()).toContain("hub");
+			// So wait stays available for the retained @cluster-reconnect/* peers despite the leaf root.
+			expect(session.getActiveToolNames()).toContain("wait");
 		} finally {
 			await session.dispose();
 		}

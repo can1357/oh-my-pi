@@ -726,8 +726,7 @@ describe("IRC", () => {
 
 describe("isIrcEnabled", () => {
 	it("returns true for a leaf top-level session once a remote transport is installed (murmur-q00p)", () => {
-		const settings = Settings.isolated();
-		settings.set("task.maxRecursionDepth", 0); // cannot spawn — no LOCAL peers
+		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 }); // cannot spawn — no LOCAL peers
 		const bus = IrcBus.global();
 		try {
 			expect(isIrcEnabled(settings, 0)).toBe(false);

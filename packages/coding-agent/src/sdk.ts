@@ -893,7 +893,7 @@ export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
 // IRC wire-shape types for the pi.irc extension surface (the murmur bridge). The IrcBus
 // class itself is intentionally NOT exported — extensions reach inbound delivery via pi.irc.
-export type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+export type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 export type { RemoteTransport } from "./irc/bus";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
 // Agent registry: pass a private instance per `createAgentSession` when

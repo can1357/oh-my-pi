@@ -315,7 +315,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * skipping advisor transcripts.
 	 */
 	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
-		const registry = AgentRegistry.global();
+		const registry = context?.agentRegistry ?? AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
@@ -365,7 +365,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 
 		if (!agentId) {
-			const visible = AgentRegistry.global()
+			const visible = (context?.agentRegistry ?? AgentRegistry.global())
 				.list()
 				.filter(ref => isLocalSession(ref.kind));
 			const content = await this.#renderIndex(visible);
