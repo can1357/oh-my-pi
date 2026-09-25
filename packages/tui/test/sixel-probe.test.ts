@@ -16,6 +16,10 @@ const originalWtSession = Bun.env.WT_SESSION;
 const originalWslDistro = Bun.env.WSL_DISTRO_NAME;
 const originalWslInterop = Bun.env.WSL_INTEROP;
 const originalForcedProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
+const originalHerdrEnv = Bun.env.HERDR_ENV;
+const originalHerdrPane = Bun.env.HERDR_PANE_ID;
+const originalHerdrTab = Bun.env.HERDR_TAB_ID;
+const originalHerdrWorkspace = Bun.env.HERDR_WORKSPACE_ID;
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 
@@ -36,6 +40,13 @@ function restoreEnv(name: string, value: string | undefined): void {
 }
 
 function startProbe(terminal: VirtualTerminal): TUI {
+	// Heredity safety: the Kitty-graphics probe is Herdr-gated, so a suite run
+	// inside a Herdr pane (inherited HERDR_ENV=1) must not switch this probe
+	// off — Sixel detection is tested here independent of Herdr's presence.
+	delete Bun.env.HERDR_ENV;
+	delete Bun.env.HERDR_PANE_ID;
+	delete Bun.env.HERDR_TAB_ID;
+	delete Bun.env.HERDR_WORKSPACE_ID;
 	setTerminalImageProtocol(null);
 	terminalInfo.imageProtocol = null;
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
@@ -53,6 +64,10 @@ describe("TUI SIXEL capability probe", () => {
 		restoreEnv("WSL_DISTRO_NAME", originalWslDistro);
 		restoreEnv("WSL_INTEROP", originalWslInterop);
 		restoreEnv("PI_FORCE_IMAGE_PROTOCOL", originalForcedProtocol);
+		restoreEnv("HERDR_ENV", originalHerdrEnv);
+		restoreEnv("HERDR_PANE_ID", originalHerdrPane);
+		restoreEnv("HERDR_TAB_ID", originalHerdrTab);
+		restoreEnv("HERDR_WORKSPACE_ID", originalHerdrWorkspace);
 		restoreIsTty(process.stdin, stdinIsTtyDescriptor);
 		restoreIsTty(process.stdout, stdoutIsTtyDescriptor);
 	});
