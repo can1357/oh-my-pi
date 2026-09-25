@@ -469,7 +469,9 @@ const gitSegment: StatusLineSegment = {
 		const showBranch = opts.showBranch !== false;
 		let content = "";
 		if (showBranch && branch) {
-			content = withIcon(theme.icon.branch, statusValue(ctx, branch));
+			const maxLength = opts.maxLength ?? Number.POSITIVE_INFINITY;
+			const label = branch.length > maxLength ? `${branch.slice(0, Math.max(0, maxLength - 1))}…` : branch;
+			content = withIcon(theme.icon.branch, statusValue(ctx, label));
 		}
 
 		// Add status indicators
