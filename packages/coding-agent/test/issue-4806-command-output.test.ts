@@ -67,7 +67,7 @@ describe("issue #4806 command output during streaming", () => {
 		const streamedReply = new Text("agent is streaming", 0, 0);
 		mode.chatContainer.addChild(streamedReply);
 
-		mode.handleToolsCommand();
+		mode.presentCommandOutput(new Text("Available Tools", 1, 0));
 
 		expect(mode.chatContainer.children).toEqual([streamedReply]);
 
@@ -79,12 +79,26 @@ describe("issue #4806 command output during streaming", () => {
 		expect(transcript.match(/Available Tools/g)).toHaveLength(1);
 	});
 
+	it("panel commands leave no transcript residue across a streaming turn", async () => {
+		const streamedReply = new Text("agent is streaming", 0, 0);
+		mode.chatContainer.addChild(streamedReply);
+
+		mode.handleToolsCommand();
+
+		expect(mode.chatContainer.children).toEqual([streamedReply]);
+
+		streaming = false;
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		expect(mode.chatContainer.children).toEqual([streamedReply]);
+	});
+
 	it("drops deferred slash-command output when the session changes before agent_end", async () => {
 		const streamedReply = new Text("old session is streaming", 0, 0);
 		mode.chatContainer.addChild(streamedReply);
 		const previousSessionId = session.sessionManager.getSessionId();
 
-		mode.handleToolsCommand();
+		mode.presentCommandOutput(new Text("Available Tools", 1, 0));
 		await session.newSession();
 
 		expect(session.sessionManager.getSessionId()).not.toBe(previousSessionId);

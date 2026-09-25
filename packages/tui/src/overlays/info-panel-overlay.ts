@@ -1,34 +1,39 @@
-import { type Component, Ellipsis, matchesKey, ScrollView, Text, truncateToWidth } from "../index";
-import { theme } from "../theme/theme";
+import { type Component, Ellipsis, Markdown, matchesKey, ScrollView, Text, truncateToWidth } from "../index";
+import { getMarkdownTheme, theme } from "../theme/theme";
 import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 
 const FOOTER_HINT = "↑/↓ scroll · Esc close";
 const PANEL_CHROME_ROWS = 4;
 
-/** Terminal surface needed to size the session info viewport. */
-export interface SessionInfoOverlayHost {
+/** Terminal surface needed to size the info panel viewport. */
+export interface InfoPanelOverlayHost {
 	readonly terminal: {
 		readonly rows: number;
 	};
 }
 
-/** Focused, dismissible `/session` information panel. */
-export class SessionInfoOverlay implements Component {
-	readonly #host: SessionInfoOverlayHost;
+/** Focused, dismissible transient information panel (shared by all info commands). */
+export class InfoPanelOverlay implements Component {
+	readonly #host: InfoPanelOverlayHost;
 	readonly #onClose: () => void;
 	readonly #panel: OverlayPanel;
-	readonly #info: Text;
+	readonly #info: Text | Markdown;
 	readonly #scrollView: ScrollView;
 	readonly #footer: PanelRows;
 	#lastInfoWidth: number | undefined;
 	#lastInfoLines: readonly string[] | undefined;
 	#lastHeight: number | undefined;
 
-	constructor(host: SessionInfoOverlayHost, info: string, onClose: () => void) {
+	constructor(
+		host: InfoPanelOverlayHost,
+		info: string,
+		onClose: () => void,
+		options: { title: string; markdown?: boolean },
+	) {
 		this.#host = host;
 		this.#onClose = onClose;
-		this.#info = new Text(info, 0, 0);
+		this.#info = options.markdown ? new Markdown(info, 0, 0, getMarkdownTheme()) : new Text(info, 0, 0);
 		this.#scrollView = new ScrollView([], {
 			height: 0,
 			scrollbar: "auto",
@@ -40,7 +45,7 @@ export class SessionInfoOverlay implements Component {
 		});
 		this.#footer = new PanelRows();
 		this.#footer.setHeight(1);
-		this.#panel = new OverlayPanel("Session Info");
+		this.#panel = new OverlayPanel(options.title);
 		this.#panel.addChild(this.#scrollView);
 		this.#panel.addChild(new PanelDivider());
 		this.#panel.addChild(this.#footer);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a title and Markdown option to the session info overlay, renamed it to `InfoPanelOverlay`, and registered unbound `app.context.show`/`app.hotkeys.show`/`app.tools.show`/`app.memory.view`/`app.memory.stats`/`app.jobs.show` keybinding actions. ([#13261](https://github.com/can1357/oh-my-pi/pull/13261) by [@kml93](https://github.com/kml93))
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

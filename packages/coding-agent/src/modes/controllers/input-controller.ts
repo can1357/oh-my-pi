@@ -8,6 +8,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
+import type { AppKeybinding } from "@oh-my-pi/pi-tui/app-keybindings";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
@@ -706,6 +707,19 @@ export class InputController {
 		]);
 		for (const key of hubKeys) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+		}
+		const infoPanelActions: Array<[AppKeybinding, () => void]> = [
+			["app.context.show", () => this.ctx.handleContextCommand()],
+			["app.hotkeys.show", () => this.ctx.handleHotkeysCommand()],
+			["app.tools.show", () => this.ctx.handleToolsCommand()],
+			["app.memory.view", () => void this.ctx.handleMemoryCommand("/memory view")],
+			["app.memory.stats", () => void this.ctx.handleMemoryCommand("/memory stats")],
+			["app.jobs.show", () => void this.ctx.handleJobsCommand()],
+		];
+		for (const [action, handler] of infoPanelActions) {
+			for (const key of this.ctx.keybindings.getKeys(action)) {
+				this.ctx.editor.setCustomKeyHandler(key, handler);
+			}
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the
