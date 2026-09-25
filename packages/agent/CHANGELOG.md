@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `createToolBatchAbortScope` extension point so hosts can cancel pending sibling tool calls after a batch-level failure.
+- Added the `createToolBatchAbortScope` extension point so hosts can cancel pending sibling tool calls after a batch-level failure ([#13306](https://github.com/can1357/oh-my-pi/pull/13306) by [@eggpeat](https://github.com/eggpeat)).
 
 ### Fixed
 

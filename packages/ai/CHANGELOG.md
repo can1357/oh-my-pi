@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added API-key login and validation for Merge Gateway.
+- Added API-key login and validation for Merge Gateway ([#13306](https://github.com/can1357/oh-my-pi/pull/13306) by [@eggpeat](https://github.com/eggpeat)).
 
 ## [18.3.1] - 2026-09-25
 
