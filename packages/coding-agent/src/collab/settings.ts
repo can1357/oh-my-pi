@@ -6,6 +6,18 @@ import { register } from "../config/registry";
 import { DEFAULT_RELAY_URL } from "./protocol";
 
 // Collab
+export const cfgCollabEnabled = register({
+	id: "collab.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Collab",
+		label: "Collaboration",
+		description: "Allow hosting and joining live collaboration sessions",
+	},
+});
+
 export const cfgCollabRelayUrl = register({
 	id: "collab.relayUrl",
 	type: "string",

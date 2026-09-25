@@ -38,6 +38,7 @@ import {
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
+import { cfgCollabEnabled } from "./settings";
 
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
@@ -169,6 +170,7 @@ export class CollabGuestLink {
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
 	#left = false;
+	#unsubscribeEnabledChange: (() => void) | undefined;
 	#replicaActivated = false;
 	/** One owner spans cancellation, queued snapshot work, and local restoration. */
 	#restoration: Promise<boolean> | undefined;
@@ -257,6 +259,8 @@ export class CollabGuestLink {
 	}
 
 	async join(link: string): Promise<void> {
+		if (!cfgCollabEnabled.get(this.#ctx.settings))
+			throw new Error("Collaboration is disabled by settings (collab.enabled)");
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		if (this.#ctx.collabGuest || this.#left) throw new Error("Already in a collab session (/leave first)");
@@ -265,6 +269,9 @@ export class CollabGuestLink {
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 		// Claim the process before any async setup or replica session transition.
 		this.#ctx.collabGuest = this;
+		this.#unsubscribeEnabledChange = cfgCollabEnabled.listen(this.#ctx.settings, enabled => {
+			if (!enabled) return this.leave("collaboration disabled by settings");
+		});
 		let key: CryptoKey;
 		try {
 			key = await importRoomKey(parsed.key);
@@ -793,6 +800,8 @@ export class CollabGuestLink {
 	#restoreLocalSession(): Promise<boolean> {
 		if (this.#restoration) return this.#restoration;
 		this.#left = true;
+		this.#unsubscribeEnabledChange?.();
+		this.#unsubscribeEnabledChange = undefined;
 		this.#joinReject?.(new Error("Collab join cancelled"));
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();

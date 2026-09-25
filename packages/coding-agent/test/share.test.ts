@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { Settings } from "../src/config/settings";
 import type { SessionData } from "../src/export/html";
 import {
 	buildShareSnapshot,
@@ -554,6 +555,17 @@ describe("normalizeShareServerUrl", () => {
 });
 
 describe("shareSession", () => {
+	test("refuses disabled sharing before constructing or uploading a snapshot", async () => {
+		const sm = {
+			getHeader: () => {
+				throw new Error("snapshot must not be built");
+			},
+		} as unknown as SessionManager;
+		await expect(shareSession(sm, { settings: Settings.isolated({ "share.enabled": false }) })).rejects.toThrow(
+			"Session sharing is disabled by settings",
+		);
+	});
+
 	test("default store seals the snapshot and uploads it to the share server", async () => {
 		const entries = [messageEntry("e1", null, "share me"), messageEntry("e2", "e1", "second")];
 		const sm = {
@@ -573,7 +585,7 @@ describe("shareSession", () => {
 		});
 		try {
 			const base = `http://localhost:${server.port}`;
-			const result = await shareSession(sm, { serverUrl: base });
+			const result = await shareSession(sm, { settings: Settings.isolated(), serverUrl: base });
 
 			// Default store ("blob") routes to the server, not a gist: server-issued id, no gistUrl.
 			expect(result.method).toBe("server");

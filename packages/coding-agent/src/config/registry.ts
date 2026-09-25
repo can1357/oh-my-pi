@@ -63,10 +63,10 @@ export interface UiArray extends UiBase {
 }
 
 /**
- * Environment variable that, when set, takes precedence over every settings layer. Default parsing
- * follows the setting's type: booleans follow `parseFlag` (empty is unset; `1`, `y`, `true`, `yes`,
- * `on`, all lower- or upper-case, are true; any other text is false), numbers any finite number,
- * enums a listed value, strings any non-blank text; other text counts as unset.
+ * Environment variable that, when set, takes precedence over user settings layers but not the
+ * machine-managed layer. Default parsing follows the setting's type: booleans follow `parseFlag`
+ * (empty is unset; `1`, `y`, `true`, `yes`, `on`, all lower- or upper-case, are true; any other text
+ * is false), numbers any finite number, enums a listed value, strings any non-blank text.
  */
 export type SettingEnv<T> =
 	| string
@@ -449,8 +449,9 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 }
 
 /**
- * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * Handle for one registered setting. Reads resolve, in precedence order: machine policy,
+ * the definition's environment variable, runtime override, `--config` overlay, project,
+ * global, then the default.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -535,6 +536,9 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	override get(scope: ScopeLike): T {
+		const settings = settingsOf(scope);
+		// Environment variables cannot override managed (machine policy) settings
+		if (settings.getProvenance(this) === "managed") return super.get(scope);
 		return this.#effectiveEnv(scope) ?? super.get(scope);
 	}
 
@@ -762,7 +766,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	/** Layer supplying the effective value. */
 	provenance(scope: ScopeLike): SettingProvenance {
-		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
+		const layeredProvenance = settingsOf(scope).getProvenance(this);
+		// If value comes from managed layer, it cannot be overridden by env
+		if (layeredProvenance === "managed") return "managed";
+		// Otherwise, env can override if set
+		return this.#effectiveEnv(scope) !== undefined ? "env" : layeredProvenance;
 	}
 }
 

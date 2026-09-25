@@ -69,6 +69,7 @@ const PROVENANCE_LABELS: Record<SettingProvenance, string> = {
 	overlay: "--config overlay",
 	project: "project config",
 	global: "global config",
+	managed: "machine config",
 	default: "default",
 };
 
@@ -285,10 +286,10 @@ function saveShadowingLayer(
 	return undefined;
 }
 
-/** Only an environment variable outranks a session override. */
-const ABOVE_SESSION: readonly SettingProvenance[] = ["env"];
+/** Layers that outrank a session override. */
+const ABOVE_SESSION: readonly SettingProvenance[] = ["managed", "env"];
 /** Every layer that outranks the global config.yml a `/save` writes. */
-const ABOVE_GLOBAL: readonly SettingProvenance[] = ["env", "runtime", "overlay", "project"];
+const ABOVE_GLOBAL: readonly SettingProvenance[] = ["managed", "env", "runtime", "overlay", "project"];
 
 function callerSession(context: ResolveContext | WriteContext | undefined): ToolSession {
 	const session = context?.session;
@@ -396,9 +397,12 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		};
 
 		if (!save && Bun.deepEquals(previous, value)) return finish("unchanged");
-		// Refuse before prompting: approving a session change a non-fallback env var overrides is a no-op.
-		// A fallback env var yields to the override the write adds, so it does not shadow.
-		if (!save && !leaf.envFallback && shadowingLayer(leaf, settings, value, ABOVE_SESSION)) {
+		// A managed policy (or a non-fallback environment value) cannot be changed for this session.
+		const sessionShadow = !save && shadowingLayer(leaf, settings, value, ABOVE_SESSION);
+		if (sessionShadow === "managed") {
+			throw new Error(`Setting \`${leaf.id}\` is controlled by machine config and cannot be overridden here.`);
+		}
+		if (sessionShadow === "env" && !leaf.envFallback) {
 			throw new Error(
 				prompt
 					.render(cfgEnvShadowedTemplate, {

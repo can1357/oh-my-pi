@@ -27,6 +27,8 @@ import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
+import type { Settings } from "../config/settings";
+import { cfgShareEnabled } from "../commands/settings";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { buildSessionData, type SessionData, type SubSession } from "./html";
@@ -483,15 +485,20 @@ function redactShareMessage(
 }
 
 /** Share the session; uploads to the share server unless `options.store` is `"gist"`. */
-export async function shareSession(sm: SessionManager, options?: ShareSessionOptions): Promise<ShareSessionResult> {
+export async function shareSession(
+	sm: SessionManager,
+	options: ShareSessionOptions & { settings: Settings },
+): Promise<ShareSessionResult> {
+	if (!cfgShareEnabled.get(options.settings))
+		throw new Error("Session sharing is disabled by settings (share.enabled)");
 	const data = buildShareSnapshot(sm, options);
 	const keyBytes = new Uint8Array(SHARE_KEY_BYTES);
 	crypto.getRandomValues(keyBytes);
 	const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
 	const keyText = Buffer.from(keyBytes).toString("base64url");
-	const base = normalizeShareServerUrl(options?.serverUrl);
+	const base = normalizeShareServerUrl(options.serverUrl);
 
-	if (options?.store === "gist") {
+	if (options.store === "gist") {
 		const forGist = await sealToFit(key, data, GIST_MAX_SEALED_BYTES);
 		const gist = await tryCreateGist(forGist.sealed);
 		if (gist) {

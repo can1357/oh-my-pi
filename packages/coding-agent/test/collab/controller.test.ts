@@ -39,7 +39,7 @@ import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
-import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
+import { cfgCollabAutoStart, cfgCollabEnabled } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,
@@ -755,6 +755,27 @@ describe("interactive collaboration startup", () => {
 });
 
 describe("CollabController", () => {
+	it("withdraws an active room and blocks hosting or joining when collaboration is disabled", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await settled(publishSpy, 1);
+		const host = controller.host;
+		if (!host) throw new Error("room was not hosted");
+
+		const stopped = Promise.withResolvers<void>();
+		state.tornDown.push(stopped.resolve);
+		cfgCollabEnabled.override(state.settings, false);
+		await stopped.promise;
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+		expect(controller.autoStartMode).toBe("off");
+		await expect(controller.start({ access: "control" })).rejects.toThrow("Collaboration is disabled by settings");
+		await expect(new CollabGuestLink(ctx).join(host.link)).rejects.toThrow("Collaboration is disabled by settings");
+		switchSession(state, "another-session");
+		await controller.idle();
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
 	it("recovers later rotations after a teardown UI error without hiding the failure", async () => {
 		const { ctx, state } = makeControllerContext({ autoStart: "control" });
 		controller = new CollabController(ctx);

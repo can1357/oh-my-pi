@@ -13,6 +13,7 @@ import {
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import Collab from "@oh-my-pi/pi-coding-agent/commands/collab";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CliConfig, CliUsageError } from "@oh-my-pi/pi-utils/cli";
 
 interface HostFixture {
@@ -125,6 +126,22 @@ afterEach(async () => {
 });
 
 describe("Collab CLI", () => {
+	it("refuses local host discovery and link retrieval when collaboration is disabled", async () => {
+		spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({ "collab.enabled": false }));
+		const list = spyOn(registry, "listCollabHosts");
+		const link = spyOn(registry, "resolveCollabHostLink");
+		const out = collector();
+		await expect(collabCli.runCollabListCommand({ json: true }, out.print)).rejects.toThrow(
+			"Collaboration is disabled by settings",
+		);
+		await expect(
+			collabCli.runCollabLinkCommand({ selector: "host-alpha", view: false, json: true }, out.print),
+		).rejects.toThrow("Collaboration is disabled by settings");
+		expect(out.calls).toEqual([]);
+		expect(list).not.toHaveBeenCalled();
+		expect(link).not.toHaveBeenCalled();
+	});
+
 	it("reports no active hosts against an empty registry", async () => {
 		const dir = await makeTmpDir();
 		const out = collector();

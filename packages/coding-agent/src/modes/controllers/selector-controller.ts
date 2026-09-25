@@ -784,16 +784,17 @@ export class SelectorController {
 							const concreteThinking = isAuto || thinkingLevel === undefined ? undefined : thinkingLevel;
 							const effectiveProvenance = this.ctx.settings.getModelRoleProvenance("default");
 							const shadowedGlobal =
-								configuredStorage === "project" &&
 								targetScope === "global" &&
-								(effectiveProvenance === "project" ||
-									effectiveProvenance === "overlay" ||
-									(effectiveProvenance === "runtime" &&
-										this.ctx.settings.isProjectModelRoleRuntimeOverrideActive("default")));
+								(effectiveProvenance === "managed" ||
+									(configuredStorage === "project" &&
+										(effectiveProvenance === "project" ||
+											effectiveProvenance === "overlay" ||
+											(effectiveProvenance === "runtime" &&
+												this.ctx.settings.isProjectModelRoleRuntimeOverrideActive("default")))));
 							const shadowedProject =
 								configuredStorage === "project" &&
 								targetScope === "project" &&
-								effectiveProvenance === "overlay";
+								(effectiveProvenance === "managed" || effectiveProvenance === "overlay");
 							if (shadowedGlobal) {
 								this.ctx.settings.setModelRole(
 									"default",

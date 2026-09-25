@@ -84,7 +84,7 @@ import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi
 
 import { cfgDisplayCollapseCompacted, cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
-import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+import { cfgShareEnabled, cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -262,6 +262,10 @@ export class CommandController {
 	}
 
 	async handleShareCommand(): Promise<void> {
+		if (!cfgShareEnabled.get(this.ctx.settings)) {
+			this.ctx.showError("Session sharing is disabled by settings (share.enabled)");
+			return;
+		}
 		let customShare: LoadedCustomShare | null;
 		try {
 			customShare = await loadCustomShare();
@@ -324,6 +328,7 @@ export class CommandController {
 		// server; the key rides in the link fragment and never leaves the client.
 		try {
 			const result = await shareSession(this.ctx.session.sessionManager, {
+				settings: this.ctx.settings,
 				serverUrl: cfgShareServerUrl.get(this.ctx.settings),
 				store: cfgShareStore.get(this.ctx.settings),
 				state: this.ctx.session.state,

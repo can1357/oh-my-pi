@@ -20,7 +20,8 @@ import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers
 import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
-import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
+import { cfgShareEnabled, cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
+import { cfgCollabEnabled } from "../collab/settings";
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
@@ -262,8 +263,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "share",
 		description: "Share session via an encrypted link (share server or secret gist)",
 		handle: async (_command, runtime) => {
+			if (!cfgShareEnabled.get(runtime.settings)) {
+				return usage("Session sharing is disabled by settings (share.enabled)", runtime);
+			}
 			try {
 				const result = await shareSession(runtime.sessionManager, {
+					settings: runtime.settings,
 					serverUrl: cfgShareServerUrl.get(runtime.settings),
 					store: cfgShareStore.get(runtime.settings),
 					state: runtime.session.state,
@@ -312,6 +317,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (verb === "stop") {
 				await ctx.collabController.stop("host stopped");
 				ctx.showStatus("Collab stopped");
+				return;
+			}
+			if (!cfgCollabEnabled.get(ctx.settings)) {
+				ctx.showError("Collaboration is disabled by settings (collab.enabled)");
 				return;
 			}
 			if (verb === "status") {

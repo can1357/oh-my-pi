@@ -2,7 +2,7 @@
  * Discover local Collab hosts and retrieve a link on explicit request.
  */
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import { runCollabLinkCommand, runCollabListCommand } from "../cli/collab-cli";
+import { CollabDisabledError, runCollabLinkCommand, runCollabListCommand } from "../cli/collab-cli";
 import { collabHelp as commandHelp } from "../cli/command-help";
 import { CollabLinkError } from "../collab/registry";
 
@@ -35,23 +35,23 @@ export default class Collab extends Command {
 
 	async run(): Promise<void> {
 		const { args, argv, flags } = await this.parse(Collab);
-		if ((args.action ?? "list") === "list") {
-			if (argv.length > 1 || flags.view) {
-				throw new CliUsageError("collab list accepts no selector or --view (usage: collab list [--json])");
-			}
-			await runCollabListCommand({ json: flags.json });
-			return;
-		}
-
-		if (argv.length !== 2 || !args.selector) {
-			throw new CliUsageError(
-				"collab link requires exactly one selector (usage: collab link <instanceId|pid> [--view] [--json])",
-			);
-		}
 		try {
+			if ((args.action ?? "list") === "list") {
+				if (argv.length > 1 || flags.view) {
+					throw new CliUsageError("collab list accepts no selector or --view (usage: collab list [--json])");
+				}
+				await runCollabListCommand({ json: flags.json });
+				return;
+			}
+
+			if (argv.length !== 2 || !args.selector) {
+				throw new CliUsageError(
+					"collab link requires exactly one selector (usage: collab link <instanceId|pid> [--view] [--json])",
+				);
+			}
 			await runCollabLinkCommand({ selector: args.selector, view: flags.view, json: flags.json });
 		} catch (error) {
-			if (!(error instanceof CollabLinkError)) throw error;
+			if (!(error instanceof CollabLinkError || error instanceof CollabDisabledError)) throw error;
 			process.stderr.write(`error: ${error.message}\n`);
 			process.exitCode = 1;
 		}

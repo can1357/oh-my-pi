@@ -17,7 +17,7 @@ import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/rende
 import { CollabHost, CollabHostStoppedError } from "./host";
 import type { CollabAccess } from "./registry";
 
-import { cfgCollabAutoStart, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
+import { cfgCollabAutoStart, cfgCollabEnabled, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
 
 export type CollabAutoStart = "off" | CollabAccess;
 
@@ -42,6 +42,7 @@ export class CollabController {
 	#stopEpoch = 0;
 	/** Installed when the first room starts; a process that never hosts never subscribes. */
 	#unsubscribeSessionChange: (() => void) | undefined;
+	#unsubscribeEnabledChange: (() => void) | undefined;
 	/** Guests may drive the session only once interactive startup has finished. */
 	#startupComplete = false;
 	#shutdown = false;
@@ -51,6 +52,9 @@ export class CollabController {
 		this.#ctx = ctx;
 		// 64 random bits: unique per process on one machine, short enough for `omp collab link <id>` and socket paths.
 		this.instanceId = randomBytes(8).toString("hex");
+		this.#unsubscribeEnabledChange = cfgCollabEnabled.listen(ctx.settings, enabled => {
+			if (!enabled) return this.stop("collaboration disabled by settings");
+		});
 	}
 
 	/** The live room for the current session; stale or ending rooms are absent. */
@@ -65,7 +69,7 @@ export class CollabController {
 	}
 
 	get autoStartMode(): CollabAutoStart {
-		return cfgCollabAutoStart.get(this.#ctx.settings);
+		return cfgCollabEnabled.get(this.#ctx.settings) ? cfgCollabAutoStart.get(this.#ctx.settings) : "off";
 	}
 
 	/**
@@ -124,6 +128,8 @@ export class CollabController {
 	 * control is requested.
 	 */
 	async start(options: CollabStartOptions): Promise<CollabHost> {
+		if (!cfgCollabEnabled.get(this.#ctx.settings))
+			throw new CollabHostStoppedError("Collaboration is disabled by settings (collab.enabled)");
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const existing = this.host;
@@ -176,6 +182,8 @@ export class CollabController {
 	async shutdown(reason: string): Promise<void> {
 		this.#shutdown = true;
 		this.#shutdownWake?.resolve();
+		this.#unsubscribeEnabledChange?.();
+		this.#unsubscribeEnabledChange = undefined;
 		this.#unsubscribeSessionChange?.();
 		this.#unsubscribeSessionChange = undefined;
 		// Stop before draining the chain: a room still connecting is aborted at
@@ -201,6 +209,8 @@ export class CollabController {
 	 * and state first. Connect only after the previous room is fully gone.
 	 */
 	async #launch(access: CollabAccess, stopEpoch: number, relay?: string): Promise<CollabHost> {
+		if (!cfgCollabEnabled.get(this.#ctx.settings))
+			throw new CollabHostStoppedError("Collaboration is disabled by settings (collab.enabled)");
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		// Identity cleanup callbacks can precede awaited hooks and message replacement.
@@ -213,6 +223,8 @@ export class CollabController {
 		// Shutdown or an explicit stop may have overtaken either wait.
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
+		if (!cfgCollabEnabled.get(this.#ctx.settings))
+			throw new CollabHostStoppedError("Collaboration is disabled by settings (collab.enabled)");
 		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = cfgCollabWebUrl.get(this.#ctx.settings) || "";
