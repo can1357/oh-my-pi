@@ -18,16 +18,6 @@ export function setHeaderIfAbsent(headers: Record<string, string>, name: string,
 	headers[name] = value;
 }
 
-function setHeader(headers: Record<string, string>, name: string, value: string): void {
-	const normalizedName = name.toLowerCase();
-	for (const existingName in headers) {
-		if (existingName.toLowerCase() !== normalizedName) continue;
-		if (existingName === name && headers[existingName] === value) return;
-		delete headers[existingName];
-	}
-	headers[name] = value;
-}
-
 /**
  * Project omp's identity and authoritative conversation id onto the headers
  * understood by the active inference protocol and host.
@@ -44,15 +34,15 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	if (!sessionId) return;
 
 	if (options.protocol === "anthropic") {
-		setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
+		setHeaderIfAbsent(headers, "X-Claude-Code-Session-Id", sessionId);
 	} else if (options.protocol === "openai" && options.provider === "openai") {
-		setHeader(headers, "session_id", sessionId);
-		setHeader(headers, "x-client-request-id", sessionId);
+		setHeaderIfAbsent(headers, "session_id", sessionId);
+		setHeaderIfAbsent(headers, "x-client-request-id", sessionId);
 	}
 
 	if (isOpenCode) {
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
-		setHeader(headers, "x-opencode-session", sessionId);
+		setHeaderIfAbsent(headers, "x-opencode-session", sessionId);
 	}
 }
 
