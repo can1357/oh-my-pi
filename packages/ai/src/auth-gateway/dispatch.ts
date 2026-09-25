@@ -16,6 +16,8 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
+import type { RouteDecisionTraceLog } from "./decision-trace";
+import type { RouteRegistry } from "./route-graph";
 import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
@@ -33,6 +35,10 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	listModels?: () => Iterable<Model<Api>>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
+	/** Wave A compiled-route shim. Constructed by {@link startAuthGateway} when omitted. */
+	routeRegistry?: RouteRegistry;
+	/** Bounded decision-trace ring buffer; constructed by {@link startAuthGateway} when omitted. */
+	decisionTraces?: RouteDecisionTraceLog;
 }
 
 /**
@@ -103,6 +109,8 @@ export async function resolveGatewayApiKey(
 		status: 401,
 		type: "authentication_error",
 		message: `No credential available for provider ${model.provider}`,
+		owner: "credential",
+		disposition: "credential_permanent",
 	};
 }
 
