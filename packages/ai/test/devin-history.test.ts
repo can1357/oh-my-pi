@@ -53,12 +53,13 @@ async function captureRequest(context: Context) {
 
 	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
+	const flag = requestPayload[0];
+	if (flag !== 0x01) throw new Error(`expected gzip Connect frame (flag 0x01), got 0x${flag.toString(16)}`);
 	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(
 		1,
 		false,
 	);
-	const compressed = requestPayload.subarray(5, 5 + length);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(compressed));
+	return fromBinary(GetChatMessageRequestSchema, gunzipSync(requestPayload.subarray(5, 5 + length)));
 }
 
 describe("streamDevin history handoff", () => {
