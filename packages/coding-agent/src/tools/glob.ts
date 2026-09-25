@@ -219,6 +219,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Limit must be a positive number");
 			}
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
+			// A request above the hard cap is silently reduced today; say so up
+			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
+			const clampNotice =
+				requestedLimit > MAX_LIMIT
+					? `Requested limit ${requestedLimit} clamped to the max of ${MAX_LIMIT}`
+					: undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -266,6 +272,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
+				if (clampNotice) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
@@ -281,9 +288,21 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};
 
+				// Cap the doubled suggestion at MAX_LIMIT; once the reached count
+				// is already the cap there is no larger usable limit, so suppress
+				// the advice rather than recommend a value that clamps back (#13263).
+				const reachedLimit = limitMeta.resultLimit;
+				const cappedSuggestion =
+					reachedLimit === undefined ? undefined : Math.min(reachedLimit.reached * 2, MAX_LIMIT);
+				const resultLimitInput =
+					reachedLimit === undefined
+						? undefined
+						: cappedSuggestion !== undefined && cappedSuggestion > reachedLimit.reached
+							? { reached: reachedLimit.reached, suggestion: cappedSuggestion }
+							: { reached: reachedLimit.reached, suggestion: null };
 				const resultBuilder = toolResult(details)
 					.text(truncation.content)
-					.limits({ resultLimit: limitMeta.resultLimit?.reached });
+					.limits({ resultLimit: resultLimitInput });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}

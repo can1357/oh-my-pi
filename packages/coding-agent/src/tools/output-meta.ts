@@ -35,7 +35,8 @@ import {
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
-	resultLimit?: number;
+	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263). */
+	resultLimit?: number | { reached: number; suggestion?: number | null };
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
@@ -313,7 +314,11 @@ export class OutputMetaBuilder {
 			this.matchLimit(limits.matchLimit);
 		}
 		if (limits.resultLimit !== undefined) {
-			this.resultLimit(limits.resultLimit);
+			if (typeof limits.resultLimit === "number") {
+				this.resultLimit(limits.resultLimit);
+			} else {
+				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion);
+			}
 		}
 		if (limits.headLimit !== undefined) {
 			this.headLimit(limits.headLimit);
@@ -324,10 +329,14 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add result limit notice. No-op if reached <= 0. */
-	resultLimit(reached: number, suggestion = reached * 2): this {
+	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. */
+	resultLimit(reached: number, suggestion?: number | null): this {
 		if (reached <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, resultLimit: { reached, suggestion } };
+		const resolved = suggestion === null ? undefined : (suggestion ?? reached * 2);
+		this.#meta.limits = {
+			...this.#meta.limits,
+			resultLimit: { reached, ...(resolved !== undefined ? { suggestion: resolved } : {}) },
+		};
 		return this;
 	}
 
