@@ -560,7 +560,10 @@ async function resolveBrokerConfig(
 	return { url, token };
 }
 
-export interface OpenAuthCredentialStoreOptions extends AuthSettingsSource {
+export interface OpenAuthCredentialStoreOptions extends Pick<
+	DiscoverAuthStorageOptions,
+	"agentDir" | "persistedSettings" | "fetch" | "revalidationSignal"
+> {
 	/** Broker to connect to; `null` opens the local SQLite store under `agentDir`. */
 	brokerConfig: AuthBrokerClientConfig | null;
 	cachePath?: string;

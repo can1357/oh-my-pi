@@ -57,7 +57,7 @@ interface OpenedAuthConfig {
 	agentDir: string;
 	brokerConfig: AuthBrokerClientConfig | null;
 	persistedSettings?: PersistedAuthSettings;
-	storeOptions?: Pick<AuthDiscoveryOptions, "accountPool" | "cachePath" | "sourceLabel">;
+	storeOptions?: Pick<AuthDiscoveryOptions, "accountPool" | "cachePath" | "fetch" | "sourceLabel">;
 }
 
 const AUTH_OPEN_CONFIG = Symbol("auth.openConfig");
@@ -359,6 +359,7 @@ export async function discoverAuthStorage(
 		storeOptions: options && {
 			accountPool: options.accountPool,
 			cachePath: options.cachePath,
+			fetch: options.fetch,
 			sourceLabel: options.sourceLabel,
 		},
 	};
