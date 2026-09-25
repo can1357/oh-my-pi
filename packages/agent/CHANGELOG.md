@@ -376,6 +376,9 @@
 ### Added
 
 - Added live steering support, allowing models to receive and act on user steering messages during an active stream.
+### Changed
+
+- Passive tool context developer messages now carry a presentation marker so host UIs can show their provenance without inspecting instruction text.
 
 ## [18.3.2] - 2026-09-25
 

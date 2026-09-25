@@ -1,3 +1,4 @@
+import { isPassiveToolContextMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -1325,11 +1326,17 @@ export class EventController {
 			}
 			this.ctx.ui.requestRender(true);
 		} else if (event.message.role === "developer") {
-			// A run-initiating synthetic developer prompt (auto-continue, or a
-			// queued follow-up drained inside the current run — plan approval, /goal)
-			// starts fresh work without a new agent_start: clear the preceding user
-			// prompt's anchor so its rows don't inherit the old turn's span.
-			if (event.message.synthetic) {
+			if (isPassiveToolContextMessage(event.message)) {
+				const target = [...this.#toolTimelineComponents.values()].at(-1);
+				if (target instanceof ToolExecutionComponent || target instanceof ReadToolGroupComponent) {
+					target.setAdditionalContext(textContent(event.message.content));
+					this.ctx.ui.requestRender();
+				}
+			} else if (event.message.synthetic) {
+				// A run-initiating synthetic developer prompt (auto-continue, or a
+				// queued follow-up drained inside the current run — plan approval, /goal)
+				// starts fresh work without a new agent_start: clear the preceding user
+				// prompt's anchor so its rows don't inherit the old turn's span.
 				// A deliberate operator action (`.`, `c` continue shortcut) is the
 				// turn's own prompt: anchor the delta to it instead of clearing.
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
