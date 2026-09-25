@@ -241,6 +241,8 @@ export interface InteractiveModeContext {
 	noteDisplayableThinkingContent(message: AgentMessage): boolean;
 	proseOnlyThinking: boolean;
 	expandThinkingBlocks: boolean;
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
