@@ -4,7 +4,7 @@
 
 ### Changed
 
-- After range replacements, the edit guidance now requires re-reading the touched span to verify neighboring definitions survived.
+- After accepted `PUT` edits, the model is instructed to re-read the touched span and verify neighboring definitions survived.
 
 ## [18.0.4] - 2026-08-24
 
