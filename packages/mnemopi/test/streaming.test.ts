@@ -93,6 +93,166 @@ describe("DeltaSync", () => {
 		}
 	});
 
+	it("preserves persisted watermarks across empty and older batches and advances on applied rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 100 }));
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 500 }), "episodic_memory");
+			sync.applyDelta("peer", []);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(100);
+
+			expect(sync.applyDelta("peer", [{ id: "old", content: "Older", rowid: 50 }]).skipped).toBe(1);
+			expect(db.query("SELECT content FROM working_memory WHERE id = ?").get("old")).toBeNull();
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+
+			expect(sync.applyDelta("peer", [{ id: "new", content: "Newer", rowid: 120 }]).inserted).toBe(1);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(120);
+			expect(sync.applyDelta("peer", [{ id: "new", content: "Updated", rowid: 130 }]).updated).toBe(1);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(130);
+			expect(sync.getCheckpoint("peer", "episodic_memory")?.lastRowid).toBe(500);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps newer contents when older and equal-rowid deltas are replayed after reload", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			new DeltaSync({ db }, root).applyDelta("peer", [{ id: "x", content: "Newer", rowid: 100 }]);
+			const sync = new DeltaSync({ db }, root);
+			const stats = sync.syncFrom("peer", [
+				{ id: "x", content: "Older", rowid: 50 },
+				{ id: "x", content: "Duplicate", rowid: 100 },
+			]).stats;
+			expect(db.query("SELECT content FROM working_memory WHERE id = ?").get("x")).toEqual({ content: "Newer" });
+			expect(stats).toMatchObject({ inserted: 0, updated: 0, skipped: 2 });
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("applies all fresh rows in an unsorted batch using the persisted peer and table cutoff", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 100 }));
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "other", lastRowid: 500 }));
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 500 }), "episodic_memory");
+			const stats = sync.applyDelta("peer", [
+				{ id: "higher", content: "Higher", rowid: 120 },
+				{ id: "lower", content: "Lower", rowid: 110 },
+			]);
+			expect(stats.inserted).toBe(2);
+			expect(db.query("SELECT id FROM working_memory ORDER BY id").all()).toEqual([
+				{ id: "higher" },
+				{ id: "lower" },
+			]);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(120);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the newest applied version of each ID within an unsorted batch", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			const stats = sync.applyDelta("peer", [
+				{ id: "descending", content: "Newest", rowid: 100 },
+				{ id: "descending", content: "Older", rowid: 50 },
+				{ id: "ascending", content: "Initial", rowid: 20 },
+				{ id: "ascending", content: "Updated", rowid: 80 },
+				{ id: "ascending", content: "Duplicate", rowid: 80 },
+			]);
+			expect(db.query("SELECT id, content FROM working_memory ORDER BY id").all()).toEqual([
+				{ id: "ascending", content: "Updated" },
+				{ id: "descending", content: "Newest" },
+			]);
+			expect(stats).toMatchObject({ inserted: 2, updated: 1, skipped: 2 });
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(100);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("allows a lower version of an ID when its higher version could not be applied", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			const stats = sync.applyDelta("peer", [
+				{ id: "x", rowid: 100 },
+				{ id: "x", content: "Inserted", rowid: 50 },
+				{ id: "x", rowid: 200 },
+				{ id: "x", content: "Updated", rowid: 150 },
+			]);
+			expect(db.query("SELECT content FROM working_memory WHERE id = ?").get("x")).toEqual({ content: "Updated" });
+			expect(stats).toMatchObject({ inserted: 1, updated: 1, skipped: 2 });
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(150);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not advance checkpoints for skipped rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.applyDelta("peer", [{ id: "existing", content: "Original", rowid: 100 }]);
+			const stats = sync.applyDelta("peer", [
+				{ id: "", content: "Invalid id", rowid: 200 },
+				{ id: "missing-content", rowid: 300 },
+				{ id: "existing", rowid: 400 },
+			]);
+			expect(stats.skipped).toBe(3);
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+			sync.applyDelta("peer", [
+				{ id: "accepted", content: "Accepted", rowid: 150 },
+				{ id: "still-missing-content", rowid: 500 },
+			]);
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(150);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores invalid rowids without rejecting otherwise applicable rows", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			sync.saveCheckpoint(new SyncCheckpoint({ peerId: "peer", lastRowid: 100 }));
+			const invalidRowids = [undefined, "200", NaN, Infinity, -Infinity, 200.5, Number.MAX_SAFE_INTEGER + 1, -1];
+			for (const [index, rowid] of invalidRowids.entries()) {
+				expect(sync.applyDelta("peer", [{ id: `invalid-${index}`, content: "Applied", rowid }]).inserted).toBe(1);
+				expect(sync.getCheckpoint("peer")?.lastRowid).toBe(100);
+			}
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("serializes checkpoints", () => {
 		const checkpoint = new SyncCheckpoint({
 			peer_id: "p1",

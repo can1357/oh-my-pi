@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Empty and older synchronization batches no longer move peer checkpoints backward. ([#12288](https://github.com/can1357/oh-my-pi/pull/12288) by [@iliaal](https://github.com/iliaal))
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
