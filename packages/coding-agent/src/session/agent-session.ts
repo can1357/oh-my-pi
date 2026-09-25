@@ -2862,15 +2862,32 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#queuedExtensionEvents: Promise<void> = Promise.resolve();
+	#queuedExtensionEvents: AgentSessionEvent[] = [];
+	#drainingExtensionEvents = false;
 
-	#queueExtensionEvent(event: AgentSessionEvent): Promise<void> {
-		const emit = async () => {
-			await this.#emitExtensionEvent(event);
-		};
-		const queued = this.#queuedExtensionEvents.then(emit, emit);
-		this.#queuedExtensionEvents = queued.catch(() => {});
-		return queued;
+	#queueExtensionEvent(event: AgentSessionEvent): void {
+		this.#queuedExtensionEvents.push(event);
+		if (this.#drainingExtensionEvents) return;
+		this.#drainingExtensionEvents = true;
+		queueMicrotask(() => void this.#drainExtensionEvents());
+	}
+
+	async #drainExtensionEvents(): Promise<void> {
+		try {
+			while (this.#queuedExtensionEvents.length > 0) {
+				const batch = this.#queuedExtensionEvents;
+				this.#queuedExtensionEvents = [];
+				for (const event of batch) {
+					try {
+						await this.#emitExtensionEvent(event);
+					} catch {
+						// A failed notification must not hold later updates in the queue.
+					}
+				}
+			}
+		} finally {
+			this.#drainingExtensionEvents = false;
+		}
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
@@ -2884,7 +2901,7 @@ export class AgentSession implements SettingsScope {
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			this.#queueExtensionEvent(event);
 			return;
 		}
 		// Deliver synchronously before awaiting extension notifications. This keeps

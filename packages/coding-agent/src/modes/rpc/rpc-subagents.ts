@@ -109,10 +109,13 @@ export class RpcSubagentRegistry {
 	#transcriptSessionFilesBySubagentId = new Map<string, string>();
 	#staleSubagentIds = new Set<string>();
 	#unsubscribers: Array<() => void> = [];
+	#eventUnsubscribe: (() => void) | undefined;
+	#observabilityBus: EventBus | undefined;
 	#output: RpcSubagentOutput;
 	#subscriptionLevel: RpcSubagentSubscriptionLevel = "off";
 
 	constructor(observabilityBus: EventBus, output: RpcSubagentOutput) {
+		this.#observabilityBus = observabilityBus;
 		this.#output = output;
 		this.#unsubscribers.push(
 			observabilityBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
@@ -121,15 +124,15 @@ export class RpcSubagentRegistry {
 			observabilityBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
 				this.handleProgress(data as SubagentProgressPayload);
 			}),
-			observabilityBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
-				this.handleEvent(data as SubagentEventPayload);
-			}),
 		);
 	}
 
 	dispose(): void {
+		this.#eventUnsubscribe?.();
+		this.#eventUnsubscribe = undefined;
 		for (const unsubscribe of this.#unsubscribers) unsubscribe();
 		this.#unsubscribers = [];
+		this.#observabilityBus = undefined;
 		this.#subagents.clear();
 		this.#transcriptSessionFilesBySubagentId.clear();
 		this.#staleSubagentIds.clear();
@@ -147,6 +150,15 @@ export class RpcSubagentRegistry {
 	}
 
 	setSubscriptionLevel(level: RpcSubagentSubscriptionLevel): void {
+		const observabilityBus = this.#observabilityBus;
+		if (level === "events" && !this.#eventUnsubscribe && observabilityBus) {
+			this.#eventUnsubscribe = observabilityBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+				this.handleEvent(data as SubagentEventPayload);
+			});
+		} else if (level !== "events" && this.#eventUnsubscribe) {
+			this.#eventUnsubscribe();
+			this.#eventUnsubscribe = undefined;
+		}
 		this.#subscriptionLevel = level;
 	}
 
