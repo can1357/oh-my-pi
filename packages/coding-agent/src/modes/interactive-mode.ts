@@ -158,6 +158,8 @@ import { type CfgApproval, type CfgChangeRequest, setCfgApprovalHost } from "../
 import {
 	createTodoHudStateData,
 	getTodoHudVisibility,
+	isCompletedTodo,
+	isHudSettledTodo,
 	nextActionableTask,
 	TODO_HUD_STATE_CUSTOM_TYPE,
 	USER_TODO_EDIT_CUSTOM_TYPE,
@@ -165,7 +167,6 @@ import {
 } from "../tools/todo";
 import {
 	formatPhaseDisplayName,
-	isClosedTodo,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
 	todoMatchesAnyDescription,
@@ -3486,7 +3487,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#todoHudHidden = persisted === "dismissed";
 		if (persisted || phases.length === 0) return;
 		const tasks = phases.flatMap(phase => phase.tasks);
-		if (tasks.length === 0 || tasks.some(task => !isClosedTodo(task))) return;
+		if (tasks.length === 0 || tasks.some(task => !isHudSettledTodo(task))) return;
 		const delaySeconds = cfgTasksTodoClearDelay.get(owner.settings);
 		if (!Number.isFinite(delaySeconds) || delaySeconds < 0) return;
 		const generation = this.#todoAutoClearGeneration;
@@ -3647,7 +3648,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
 			// Closed, not just completed: the collapsed task window hides abandoned
 			// tasks too, so counting only completions leaves the phase reading stuck.
-			const done = phase.tasks.filter(isClosedTodo).length;
+			const done = phase.tasks.filter(isCompletedTodo).length;
 			const progress = ` · ${done}/${phase.tasks.length}`;
 			if (!isActive) {
 				const header = theme.fg("muted", label) + theme.fg("dim", progress);
@@ -3697,7 +3698,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Clamp so partial progress lights at least one cell; a closed plan fills
 		// the entire path until the configured auto-clear removes the HUD.
 		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isCompletedTodo).length, 0);
 		const pathLen = contentLines.length + tailLen;
 		let filled = Math.round((closedTasks / totalTasks) * pathLen);
 		if (closedTasks > 0) filled = Math.max(filled, 1);
@@ -3726,13 +3727,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
 		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isCompletedTodo).length, 0);
 		const activeTask = nextActionableTask(phases);
 
 		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;
+		const droppedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(t => t.status === "abandoned").length, 0);
 		const taskStr = activeTask
 			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
-			: theme.fg("success", `${theme.checkbox.checked} done`);
+			: droppedTasks > 0
+				? theme.fg("warning", `${theme.checkbox.unchecked} ${droppedTasks} dropped`)
+				: theme.fg("success", `${theme.checkbox.checked} done`);
 		const rightLine = `${header} ${theme.fg("dim", "·")} ${taskStr}`;
 
 		const rightPad = " ";

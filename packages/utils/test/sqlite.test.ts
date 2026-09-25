@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isSqliteCorruptionError, openSqliteDatabase, openSqliteDatabaseSync } from "../src/sqlite";
+import { checkpointWal, isSqliteCorruptionError, openSqliteDatabase, openSqliteDatabaseSync } from "../src/sqlite";
 import { TempDir } from "../src/temp";
 
 async function corruptSchemaPages(dbPath: string): Promise<Buffer<ArrayBuffer>> {
@@ -203,4 +203,28 @@ test("opt-in recovery never rotates a non-corruption SQLite failure", async () =
 	if (!(failure instanceof Error)) throw new Error("Expected SQLite initialization to fail");
 	expect(failure.message).toContain(dbPath);
 	expect(await backupNames(dir.path())).toEqual([]);
+});
+
+function dbThrowing(code: string, message = code): Database {
+	return {
+		run() {
+			throw Object.assign(new Error(message), { code });
+		},
+	} as unknown as Database;
+}
+
+describe("checkpointWal", () => {
+	it("ignores already-closed database handles", () => {
+		expect(() => checkpointWal(dbThrowing("SQLITE_MISUSE", "Database has closed"))).not.toThrow();
+	});
+
+	it("ignores SQLITE_IOERR_VNODE unlink races during shutdown", () => {
+		expect(() => checkpointWal(dbThrowing("SQLITE_IOERR_VNODE"))).not.toThrow();
+	});
+
+	it("surfaces real SQLITE_IOERR write and fsync failures", () => {
+		expect(() => checkpointWal(dbThrowing("SQLITE_IOERR_WRITE"))).toThrow(/SQLITE_IOERR_WRITE/);
+		expect(() => checkpointWal(dbThrowing("SQLITE_IOERR_FSYNC"))).toThrow(/SQLITE_IOERR_FSYNC/);
+		expect(() => checkpointWal(dbThrowing("SQLITE_IOERR"))).toThrow(/SQLITE_IOERR/);
+	});
 });

@@ -1240,7 +1240,7 @@ export interface CursorMcpCall {
 
 export interface CursorTodoSnapshotItem {
 	content: string;
-	status: "pending" | "in_progress" | "completed" | "abandoned";
+	status: "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 }
 
 /**

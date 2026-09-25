@@ -11,6 +11,7 @@ MUST:
 - keep sections concise.
 - preserve relevant tool outputs/command results.
 - include mentioned repository state changes (branch, uncommitted changes).
+- preserve pending/in_progress items from additional-context and the conversation in Incomplete Todos; do not mark them done.
 
 Format (omit inapplicable sections):
 
@@ -36,6 +37,9 @@ Format (omit inapplicable sections):
 
 ## Next Steps
 1. [Update based on current state]
+
+## Incomplete Todos
+[pending/in_progress items only]
 
 ## Critical Context
 - [Preserve important context; add new if needed]

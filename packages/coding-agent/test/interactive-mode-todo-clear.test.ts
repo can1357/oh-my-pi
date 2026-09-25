@@ -89,7 +89,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 				name: "Implementation",
 				tasks: [
 					{ content: "done task", status: "completed" },
-					{ content: "abandoned task", status: "abandoned" },
+					{ content: "abandoned task", status: "abandoned", droppedBy: "user" },
 				],
 			},
 		];
@@ -130,9 +130,8 @@ describe("InteractiveMode todo HUD persistence", () => {
 		vi.advanceTimersByTime(60_000);
 
 		const rendered = renderTodos(mode);
-		// Progress counts every closed task, abandoned included: the walking
-		// viewport hides both, so the counter is the only signal they existed.
-		expect(rendered).toContain("2/3");
+		// Model-abandoned tasks remain incomplete and are not counted as progress.
+		expect(rendered).toContain("1/3");
 		expect(rendered).toContain("current task");
 	});
 
@@ -142,7 +141,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		mode.setTodos(unfinishedPlan());
 
 		const rendered = renderTodos(mode);
-		expect(rendered).toContain("2/3");
+		expect(rendered).toContain("1/3");
 		expect(rendered).toContain("current task");
 	});
 

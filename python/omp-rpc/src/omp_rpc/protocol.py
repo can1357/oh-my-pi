@@ -816,6 +816,8 @@ class TodoItem:
     details: str | None = None
     # What a `blocked` task is waiting on; None for all other statuses.
     blocker: str | None = None
+    # Explicit user cancel (`/todo drop`, checklist); wire key is `droppedBy`.
+    dropped_by: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1419,6 +1421,7 @@ def parse_todo_item(payload: JsonObject) -> TodoItem:
         notes=_optional_str(payload, "notes"),
         details=_optional_str(payload, "details"),
         blocker=_optional_str(payload, "blocker"),
+        dropped_by=_optional_str(payload, "droppedBy"),
     )
 
 
