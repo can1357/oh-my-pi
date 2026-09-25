@@ -202,11 +202,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		cacheWrite: "number",
 		"inputThresholdInclusive?": "boolean",
 	}).narrow((value, ctx) => {
-		if (
-			typeof value.inputThreshold !== "number" ||
-			!Number.isFinite(value.inputThreshold) ||
-			value.inputThreshold <= 0
-		) {
+		if (!Number.isFinite(value.inputThreshold) || value.inputThreshold <= 0) {
 			return ctx.mustBe("longContext.inputThreshold a positive finite number");
 		}
 		return true;

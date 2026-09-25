@@ -2381,7 +2381,7 @@ export class ModelRegistry {
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
 		const customWindows = new Map<string, number>();
 		const pinnedWindows = new Set<string>();
-		let hasTieredOverlays = false;
+		const tieredOverlayKeys = new Set<string>();
 		for (const overlays of [this.#customModelOverlays, this.#runtimeModelOverlays]) {
 			for (const overlay of overlays) {
 				const key = `${overlay.provider}\u0000${overlay.id}`;
@@ -2392,11 +2392,16 @@ export class ModelRegistry {
 					pinnedWindows.add(key);
 				}
 				if (overlay.cost?.longContext !== undefined) {
-					hasTieredOverlays = true;
+					tieredOverlayKeys.add(key);
 				}
 			}
 		}
-		if (overrides.size === 0 && customWindows.size === 0 && pinnedWindows.size === 0 && !hasTieredOverlays) {
+		if (
+			overrides.size === 0 &&
+			customWindows.size === 0 &&
+			pinnedWindows.size === 0 &&
+			tieredOverlayKeys.size === 0
+		) {
 			return models;
 		}
 		let liveKeys: Set<string> | null = null;
@@ -2421,6 +2426,7 @@ export class ModelRegistry {
 			return this.#applyConfiguredLongContextCap(
 				withWindow,
 				override?.contextWindow !== undefined || pinnedWindows.has(`${model.provider}\u0000${model.id}`),
+				override?.cost?.longContext !== undefined || tieredOverlayKeys.has(`${model.provider}\u0000${model.id}`),
 			);
 		});
 	}
@@ -2428,14 +2434,26 @@ export class ModelRegistry {
 	/**
 	 * Config-declared long-context tiers (`cost.longContext` in models.yml) reach
 	 * the model only after the custom-model and override merge, so the catalog
-	 * tier cap in `#applyHardcodedModelPolicies` cannot see them. Mirror it here:
-	 * with extended context off, cap the working window at the tier threshold so
-	 * compaction fires before a request crosses into premium pricing. Explicitly
-	 * pinned windows (an override or custom definition that sets `contextWindow`)
-	 * win over this cap, matching the catalog pass's documented precedence.
+	 * tier cap in `#applyHardcodedModelPolicies` cannot see them. Mirror it here,
+	 * scoped to rows whose tier actually came from configuration (the override or
+	 * overlay that supplied `cost.longContext`) — never the whole composed list,
+	 * and never `xai-oauth`, whose subscription-backed requests must not be
+	 * constrained by its estimated tier (same carve-out the catalog pass
+	 * documents). With extended context off, cap the working window at the tier
+	 * threshold so compaction fires before a request crosses into premium
+	 * pricing. Explicitly pinned windows (an override or custom definition that
+	 * sets `contextWindow`) win over this cap, matching the catalog pass's
+	 * documented precedence.
 	 */
-	#applyConfiguredLongContextCap(model: Model<Api>, windowPinned: boolean): Model<Api> {
-		if (windowPinned || isExtendedContextEnabledFromSettings(this.#settings)) return model;
+	#applyConfiguredLongContextCap(model: Model<Api>, windowPinned: boolean, tierFromConfig: boolean): Model<Api> {
+		if (
+			!tierFromConfig ||
+			windowPinned ||
+			model.provider === "xai-oauth" ||
+			isExtendedContextEnabledFromSettings(this.#settings)
+		) {
+			return model;
+		}
 		const threshold = model.cost.longContext?.inputThreshold;
 		if (threshold === undefined || model.contextWindow === null || model.contextWindow <= threshold) {
 			return model;

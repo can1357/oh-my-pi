@@ -2536,6 +2536,57 @@ describe("ModelRegistry", () => {
 			expect(registry.find("portkey-gateway", "gpt-6-sol")?.contextWindow).toBe(1_050_000);
 		});
 
+		test("an unrelated modelOverrides entry leaves bundled xai-oauth rows uncapped", async () => {
+			// Regression: the config-tier cap must only touch rows whose tier
+			// came from configuration, never bundled rows — and xai-oauth is
+			// carved out even for its own catalog tier (subscription-backed
+			// requests must not be constrained by estimated pricing).
+			writeRawModelsJson({
+				anthropic: { modelOverrides: { "claude-sonnet-4": { maxTokens: 4096 } } },
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			expect(registry.find("xai-oauth", "grok-4.6")?.contextWindow).toBe(500_000);
+			expect(registry.find("xai-oauth", "grok-4.3")?.contextWindow).toBe(1_000_000);
+			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(2_000_000);
+		});
+
+		test("an override-declared tier caps a bundled non-xai row at its threshold", async () => {
+			// A bundled row whose tier comes from models.yml (not catalog rules)
+			// still gets the extended-context-off cap.
+			writeRawModelsJson({
+				openrouter: {
+					modelOverrides: {
+						"anthropic/claude-opus-5": {
+							contextWindow: 400_000,
+							maxContextWindow: 600_000,
+							cost: {
+								input: 1.25,
+								output: 10,
+								cacheRead: 0.125,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 272_000,
+									input: 10,
+									output: 45,
+									cacheRead: 1.25,
+									cacheWrite: 0,
+								},
+							},
+						},
+					},
+				},
+			});
+			const testSettings = Settings.isolated();
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			// Explicit contextWindow pin in the same override wins over the cap.
+			expect(registry.find("openrouter", "anthropic/claude-opus-5")?.contextWindow).toBe(400_000);
+
+			testSettings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openrouter", "anthropic/claude-opus-5")?.contextWindow).toBe(600_000);
+		});
+
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
