@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown.
+
 ### Fixed
 
 - Fixed shell commands using `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` so they now access the command's descriptors correctly, including preventing heredoc commands from hanging the TUI.
