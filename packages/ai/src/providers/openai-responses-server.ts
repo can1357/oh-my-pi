@@ -894,7 +894,10 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 	return buildResponseEnvelope(
 		message,
 		requestedModelId,
-		makeRespId(),
+		// Expose the upstream response id so a client's next
+		// `previous_response_id` refers to a response the provider actually
+		// stored; mint a local id only when upstream did not supply one.
+		message.responseId ?? makeRespId(),
 		responseStatusForStopReason(message),
 		items,
 		buildUsage(message),
@@ -951,7 +954,12 @@ export function encodeStream(
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
-	const responseId = makeRespId();
+	// Resolved lazily: the upstream response id lands on `partial.responseId`
+	// once the provider's own `response.created` is processed, so defer minting
+	// a local id until the first frame must go out. A client that later chains
+	// via `previous_response_id` must name a response the provider stored.
+	let responseId: string | undefined;
+	let responseStarted = false;
 	let sequenceNumber = 0;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
@@ -985,8 +993,25 @@ export function encodeStream(
 			const openItemForContentIndex = (contentIndex: number): OpenItem | null =>
 				openItemsByContentIndex.get(contentIndex) ?? null;
 
+			// `response.created`/`response.in_progress` go out together the first
+			// time a frame is needed. When `partial` already carries the upstream
+			// response id (the provider's own `response.created` was processed
+			// before this event), the emitted envelope names that real id so a
+			// later `previous_response_id` resolves against the provider's store;
+			// otherwise a local id is minted once and kept for the whole stream.
+			const ensureResponseStarted = (partial?: AssistantMessage): void => {
+				if (responseStarted) return;
+				responseStarted = true;
+				responseId = partial?.responseId ?? makeRespId();
+				createdAt = Math.floor((partial?.timestamp || Date.now()) / 1000);
+				emit("response.created", { response: responseSnapshot("in_progress", []) });
+				// response.in_progress — mirrors real OpenAI; some clients gate
+				// on it before reading items.
+				emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
+			};
+
 			const responseSnapshot = (status: ResponseStatus, output: OutputItem[] | []) => ({
-				id: responseId,
+				id: (responseId ??= makeRespId()),
 				object: "response",
 				created_at: createdAt,
 				status,
@@ -1225,14 +1250,15 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
+					// `start` usually fires before the provider's own
+					// `response.created` was processed, so its partial has no
+					// upstream id yet — hold the envelope until the next event
+					// rather than minting an id the client cannot continue from.
+					const idCarrier =
+						ev.type === "done" ? ev.message : ev.type === "error" ? ev.error : ev.partial;
+					if (ev.type !== "start" || idCarrier.responseId) ensureResponseStarted(idCarrier);
 					switch (ev.type) {
 						case "start": {
-							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
-							// response.created — initial envelope.
-							emit("response.created", { response: responseSnapshot("in_progress", []) });
-							// response.in_progress — mirrors real OpenAI; some clients gate
-							// on it before reading items.
-							emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
 							break;
 						}
 						case "text_start": {
@@ -1428,6 +1454,7 @@ export function encodeStream(
 
 				if (failureMessage) {
 					closeAllOpenItems();
+					responseId ??= failureMessage.responseId;
 					controller.enqueue(
 						encoder.encode(
 							sseEvent("response.failed", {
@@ -1465,7 +1492,7 @@ export function encodeStream(
 							type: terminalEvent,
 							sequence_number: seq(),
 							response: {
-								id: responseId,
+								id: (responseId ??= message?.responseId ?? makeRespId()),
 								object: "response",
 								created_at: createdAt,
 								status,
@@ -1490,7 +1517,7 @@ export function encodeStream(
 								type: "response.failed",
 								sequence_number: seq(),
 								response: {
-									id: responseId,
+									id: (responseId ??= makeRespId()),
 									object: "response",
 									created_at: Math.floor(Date.now() / 1000),
 									status: "failed",

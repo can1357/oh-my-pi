@@ -14,6 +14,18 @@ const METADATA_EVENTS: Record<string, true> = {
 	"response.created": true,
 	"response.in_progress": true,
 	"response.queued": true,
+	"response.output_item.added": true,
+	"response.content_part.added": true,
+	start: true,
+	text_start: true,
+	thinking_start: true,
+	toolcall_start: true,
+	message_start: true,
+	// Anthropic SSE metadata: message_delta carries usage/stop_reason, and
+	// content_block_stop is the structural close of a content block — neither
+	// is generated output worth committing the stream over.
+	message_delta: true,
+	content_block_stop: true,
 	heartbeat: true,
 	ping: true,
 };
@@ -137,7 +149,7 @@ export class PreludeAbortedError extends Error {
 export function classifyCommitEvent(eventType: string): CommitClass {
 	if (!eventType) return "output";
 	if (METADATA_EVENTS[eventType]) return "metadata";
-	if (eventType === "response.completed") return "terminal-success";
+	if (eventType === "response.completed" || eventType === "message_stop") return "terminal-success";
 	if (eventType === "response.failed") return "terminal-retryable";
 	if (eventType === "response.incomplete") return "terminal-success";
 	if (eventType === "response.error") return "terminal-failure";
