@@ -1424,6 +1424,24 @@ export function isOsc99Supported(): boolean {
 	return osc99CapabilitiesConfirmed;
 }
 
+/**
+ * The terminal's own selection background (`#rrggbb`), reported by the OSC 17
+ * highlight-color probe. Undefined until a terminal answers; views that draw
+ * their own selection fall back to reverse video, which also follows the
+ * user's palette.
+ */
+let terminalSelectionBackground: string | undefined;
+
+/** Record the OSC 17 probe result (called by ProcessTerminal). */
+export function setTerminalSelectionBackground(color: string | undefined): void {
+	terminalSelectionBackground = color;
+}
+
+/** The terminal's reported selection background, if it answered the probe. */
+export function getTerminalSelectionBackground(): string | undefined {
+	return terminalSelectionBackground;
+}
+
 /** Collapse a structured notification to a single line for non-OSC-99 sinks. */
 function notificationToLine(n: TerminalNotification): string {
 	if (n.title && n.body) return `${n.title}: ${n.body}`;

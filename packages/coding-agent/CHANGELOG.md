@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transcript scroll mode. Press Ctrl+Up or Ctrl+Down at the prompt to jump between your earlier prompts, and drag across text to copy it. Press Esc, or any key the mode does not use, to return to the prompt with your draft intact ([#13285](https://github.com/can1357/oh-my-pi/pull/13285) by [@affaffaff](https://github.com/affaffaff)).
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))

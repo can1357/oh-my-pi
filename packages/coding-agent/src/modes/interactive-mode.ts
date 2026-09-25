@@ -7121,6 +7121,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	showHistorySearch(): void {
 		this.#selectorController.showHistorySearch();
 	}
+	openTranscriptScroll(delta: -1 | 1): void {
+		this.composer.openTranscriptScroll(delta, text => {
+			copyToClipboard(text).then(
+				() => this.showStatus("Copied selection to clipboard"),
+				(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+			);
+		});
+	}
 
 	showExtensionsDashboard(): void {
 		void this.#selectorController.showExtensionsDashboard();

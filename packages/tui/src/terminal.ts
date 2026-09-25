@@ -21,6 +21,7 @@ import {
 	setCellDimensions,
 	setOsc99Supported,
 	setTerminalGlyphProtocol,
+	setTerminalSelectionBackground,
 	TERMINAL,
 } from "./terminal-capabilities";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
@@ -663,9 +664,22 @@ type Da1SentinelOwner =
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
+	| { kind: "osc17" }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" };
 
 let nextOsc99ProbeId = 1;
+
+/** OSC 17 (highlight background) reply: `rgb:R/G/B` with 1-4 hex digits per channel, BEL or ST. */
+const osc17ResponsePattern =
+	/^\x1b\]17;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\/[0-9a-fA-F]{1,4})?(?:\x07|\x1b\\)$/;
+
+/** Scale one X11 color channel of 1-4 hex digits to a two-digit byte. */
+function x11ChannelToByte(hex: string): string {
+	const value = parseInt(hex, 16);
+	const max = 16 ** hex.length - 1;
+	const byte = Number.isNaN(value) || max <= 0 ? 0 : Math.round((value / max) * 255);
+	return byte.toString(16).padStart(2, "0");
+}
 
 function parseOsc99KeyValues(section: string): Map<string, string> {
 	const values = new Map<string, string>();
@@ -787,6 +801,7 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	#osc17ResponseBuffer = "";
 	/**
 	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
 	 * coverage reply sent after the bundle was written.
@@ -1037,6 +1052,11 @@ export class ProcessTerminal implements Terminal {
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
 
+		// Selection highlight color via OSC 17, same DA1 sentinel FIFO. Views
+		// that draw their own text selection (transcript scroll mode) paint with
+		// the terminal's selection color so it matches the user's theme.
+		this.#querySelectionBackground();
+
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
 		// triggers the bundled icon registration so the nerd symbol preset renders
 		// without a patched font installed.
@@ -1185,6 +1205,7 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
+				this.#osc17ResponseBuffer.length === 0 &&
 				this.#glyphProtocolReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
@@ -1344,6 +1365,11 @@ export class ProcessTerminal implements Terminal {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
 					}
+					case "osc17": {
+						// DA1 beat the reply: the terminal does not report its selection color.
+						this.#osc17ResponseBuffer = "";
+						break;
+					}
 					case "glyphProtocol": {
 						// The support-phase sentinel is answered after the `s` reply that
 						// already advanced the handshake; only a sentinel from the phase
@@ -1417,6 +1443,24 @@ export class ProcessTerminal implements Terminal {
 					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
+					return;
+				}
+			}
+
+			// OSC 17 replies are terminal->host reports, never keystrokes: swallow
+			// them for the whole session, and a late one still reports the color.
+			if (this.#osc17ResponseBuffer || sequence.startsWith("\x1b]17;")) {
+				if (this.#osc17ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#osc17ResponseBuffer = "";
+				} else {
+					this.#osc17ResponseBuffer += sequence;
+					const osc17Match = this.#osc17ResponseBuffer.match(osc17ResponsePattern);
+					if (!osc17Match) return;
+					const [, rHex, gHex, bHex] = osc17Match;
+					this.#osc17ResponseBuffer = "";
+					setTerminalSelectionBackground(
+						`#${x11ChannelToByte(rHex!)}${x11ChannelToByte(gHex!)}${x11ChannelToByte(bHex!)}`,
+					);
 					return;
 				}
 			}
@@ -1563,6 +1607,20 @@ export class ProcessTerminal implements Terminal {
 		// The probe never runs under a multiplexer (see #shouldQueryOsc99Support),
 		// so it is always sent directly to the terminal.
 		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
+	}
+
+	#shouldQuerySelectionBackground(): boolean {
+		// Same multiplexer rule as the OSC 99 probe: tmux/screen cannot route
+		// the reply back to the sending pane, so it would leak as literal text.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime() || $env.PI_TUI_OSC17_PROBE === "1";
+	}
+
+	#querySelectionBackground(): void {
+		this.#osc17ResponseBuffer = "";
+		if (this.#dead || !this.#shouldQuerySelectionBackground()) return;
+		this.#da1SentinelOwners.push({ kind: "osc17" });
+		this.#safeWrite("\x1b]17;?\x07\x1b[c");
 	}
 
 	#handleOsc99CapabilityResponse(metaRaw: string, payload: string): boolean {
@@ -1971,6 +2029,8 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#osc17ResponseBuffer = "";
+		setTerminalSelectionBackground(undefined);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";

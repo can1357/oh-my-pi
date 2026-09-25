@@ -3,6 +3,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
+	isKeyRelease,
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
@@ -257,6 +258,7 @@ export class InputController {
 	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
+	#transcriptScrollListenerInstalled = false;
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
@@ -332,6 +334,18 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#transcriptScrollListenerInstalled) {
+			this.#transcriptScrollListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				if (isKeyRelease(data)) return undefined;
+				const delta = matchesKey(data, "ctrl+up") ? -1 : matchesKey(data, "ctrl+down") ? 1 : 0;
+				if (delta === 0) return undefined;
+				// A dialog or overlay owns the chord; scroll mode handles its own hops.
+				if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				this.ctx.openTranscriptScroll(delta);
+				return { consume: true };
+			});
+		}
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
