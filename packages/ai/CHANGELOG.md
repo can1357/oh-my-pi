@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
+### Fixed
+
+- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected ([#13249](https://github.com/can1357/oh-my-pi/pull/13249) by [@jwaldrip](https://github.com/jwaldrip)).
 
 ## [18.3.1] - 2026-09-25
 
