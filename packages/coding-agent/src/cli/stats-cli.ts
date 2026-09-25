@@ -119,7 +119,7 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 async function printStatsSummary(): Promise<void> {
 	const { getDashboardStats } = await import("@oh-my-pi/omp-stats");
 	const stats = await getDashboardStats();
-	const { overall, byModel, byFolder } = stats;
+	const { overall, byModel, byFolder, cacheMisses } = stats;
 
 	console.log(chalk.bold("\n=== AI Usage Statistics ===\n"));
 
@@ -152,6 +152,16 @@ async function printStatsSummary(): Promise<void> {
 		console.log(chalk.bold("\nBy Folder:"));
 		for (const f of byFolder.slice(0, 10)) {
 			console.log(`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost)}`);
+		}
+	}
+
+	const misses = cacheMisses.filter(m => m.missedTokens > 0);
+	if (misses.length > 0) {
+		console.log(chalk.bold("\nUnexpected cache misses (warm cache, same session, prompt not shrunk):"));
+		for (const m of misses) {
+			console.log(
+				`  ${m.provider} ${m.agentType}: ${formatPercent(m.missRate)} of cacheable tokens missed (${formatNumber(m.missedTokens)} tokens, ${formatPercent(m.badPairRate)} of turns), ~${formatCost(m.avoidableCost)} API-equivalent`,
+			);
 		}
 	}
 

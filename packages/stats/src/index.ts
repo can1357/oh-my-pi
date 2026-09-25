@@ -21,6 +21,7 @@ export { formatStatsDashboardUrl, startServer } from "./server";
 export type { GainDashboardStats, GainSource, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
 export type {
 	AggregatedStats,
+	CacheMissStats,
 	DashboardStats,
 	FolderStats,
 	MessageStats,
@@ -51,7 +52,7 @@ function normalizePremiumRequests(n: number): number {
  */
 async function printStats(): Promise<void> {
 	const stats = await getDashboardStats();
-	const { overall, byModel, byFolder } = stats;
+	const { overall, byModel, byFolder, cacheMisses } = stats;
 
 	console.log("\n=== AI Usage Statistics ===\n");
 
@@ -85,6 +86,16 @@ async function printStats(): Promise<void> {
 		for (const f of byFolder.slice(0, 10)) {
 			console.log(
 				`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost, f.unpricedRequests)}`,
+			);
+		}
+	}
+
+	const misses = cacheMisses.filter(m => m.missedTokens > 0);
+	if (misses.length > 0) {
+		console.log("\nUnexpected cache misses (warm cache, same session, prompt not shrunk):");
+		for (const m of misses) {
+			console.log(
+				`  ${m.provider} ${m.agentType}: ${formatPercent(m.missRate)} of cacheable tokens missed (${formatNumber(m.missedTokens)} tokens, ${formatPercent(m.badPairRate)} of turns), ~${formatCost(m.avoidableCost)} API-equivalent`,
 			);
 		}
 	}

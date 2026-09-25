@@ -16,6 +16,7 @@ Local observability dashboard for AI usage statistics.
 | Tokens/s | `output_tokens / (duration / 1000)` |
 | Cache Rate | `cache_read / (input + cache_read) * 100` |
 | Cache Savings | `(uncached prompt cost - actual prompt cost) / uncached prompt cost * 100` |
+| Unexpected Cache Miss Rate | Per provider + agent type: for consecutive requests in one session with the same provider and model, neither errored, both prompts ≥ 1024 tokens, prompt not shrunk below 97%, and < 5 min idle, `sum(shortfall if shortfall > 256 else 0) / sum(min(prev_prompt, prompt))` with `shortfall = min(prev_prompt, prompt) - cache_read` (up to 256 tokens is cache-block rounding); models that never reported a cache read are excluded; a bad turn misses more than `max(2048, 10%)` tokens |
 | Error Rate | `count(stopReason=error) / total_calls * 100` |
 | API-equivalent estimate | Sum of token usage priced with the matching public API rate card |
 | Avg Latency | Mean of `duration` |
@@ -75,6 +76,7 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 The web dashboard provides:
 
 - Overall metrics cards (requests, API-equivalent estimate, cache rate, cache savings, error rate, duration, tokens/s)
+- Unexpected cache misses per provider and agent type (miss rate, bad turns, missed tokens, avoidable API-equivalent cost)
 - Time series chart showing requests and errors over time
 - Per-model breakdown table
 - Per-folder breakdown table
