@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- Gateway surface API eligibility now comes from compiled runtime KDL policy, preserving custom identifiers and explicit exclusions.
+- Fixed Claude Opus 5.5 requests that force tool use, preventing turn failures and allowing forced tool selections to fall back to automatic tool selection when required.
+- Yolo-Auto Qwen3.8 models now offer the `xhigh` reasoning level the provider advertises ([#13160](https://github.com/can1357/oh-my-pi/pull/13160) by [@H4vC](https://github.com/H4vC)).
 - Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
 - Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
 - Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).

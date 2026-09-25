@@ -2095,6 +2095,15 @@ function mapOptionsForApi<TApi extends Api>(
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		// Gateway-forwarded continuation/structured-output fields: parsed from
+		// the wire by format parsers and must survive the provider mapping.
+		previousResponseId: options?.previousResponseId,
+		store: options?.store,
+		parallelToolCalls: options?.parallelToolCalls,
+		seed: options?.seed,
+		logitBias: options?.logitBias,
+		user: options?.user,
+		responseFormat: options?.responseFormat,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
@@ -2256,6 +2265,12 @@ function mapOptionsForApi<TApi extends Api>(
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
+					previousResponseId: options?.previousResponseId,
+					parallelToolCalls: options?.parallelToolCalls,
+					seed: options?.seed,
+					logitBias: options?.logitBias,
+					user: options?.user,
+					responseFormat: options?.responseFormat,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2268,6 +2283,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 		}
 
@@ -2282,6 +2302,11 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-responses":
@@ -2298,6 +2323,12 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "azure-openai-responses":
@@ -2311,6 +2342,12 @@ function mapOptionsForApi<TApi extends Api>(
 				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
+				previousResponseId: options?.previousResponseId,
+				parallelToolCalls: options?.parallelToolCalls,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-codex-responses":

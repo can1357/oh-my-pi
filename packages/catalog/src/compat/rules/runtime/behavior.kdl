@@ -1,6 +1,21 @@
 // Provider and model behavior needed before or outside exact bundled-model lookup.
 
 behavior {
+	// Client-facing gateway protocol eligibility, including custom API identifiers.
+	gateway-surface name="openai-chat" {
+		allow substring="openai-completions"
+		allow substring="openai-chat"
+		allow substring="openai-compatible"
+		allow substring="grok" exclude-substring="responses"
+	}
+	gateway-surface name="openai-responses" { allow substring="responses"; }
+	gateway-surface name="anthropic-messages" { allow substring="anthropic"; }
+	gateway-surface name="gemini-v1beta" {
+		allow substring="google-generative-ai"
+		allow substring="google-vertex"
+	}
+	gateway-surface name="pi-native" { allow any=#true; }
+
 	// LiteLLM may discover ids absent from the bundled catalog. This conservative
 	// heuristic routes likely OpenAI text/reasoning ids to Responses while
 	// excluding other OpenAI product surfaces.
