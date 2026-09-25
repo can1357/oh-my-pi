@@ -169,6 +169,7 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 		case "move":
 			return "move";
 		case "bash":
+		case "powershell":
 		case "shell":
 		case "exec":
 		case "eval":
@@ -516,7 +517,7 @@ function buildToolStartContent(toolName: string, args: unknown): ToolCallContent
 function buildToolStartText(toolName: string, args: unknown): string | undefined {
 	if (isCommandToolName(toolName)) {
 		const command = extractStringProperty<CommandContainer>(args, "command");
-		return command ? limitText(`$ ${command}`) : undefined;
+		return command ? limitText(`${toolName === "powershell" ? "PS> " : "$ "}${command}`) : undefined;
 	}
 	if (toolName === "eval") {
 		return buildEvalStartText(args);
@@ -572,7 +573,7 @@ function mergeToolUpdateContent(startContent: ToolCallContent[], resultContent: 
 }
 
 function isCommandToolName(toolName: string): boolean {
-	return toolName === "bash" || toolName === "shell" || toolName === "exec";
+	return toolName === "bash" || toolName === "shell" || toolName === "exec" || toolName === "powershell";
 }
 
 function buildToolTitle(toolName: string, args: unknown, intent: string | undefined): string {
