@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Preserved provider-reported routed models as `upstreamModel` when they differ from the requested model.
+
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))

@@ -477,7 +477,8 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	// so any missing field must be normalised here before binding into SQLite.
 	const raw: Partial<UsageCost> | undefined = stats.usage.cost;
 	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
-	const catalogCost = getCatalogCost(stats.provider, stats.model);
+	const pricing = stats.pricingIdentity ?? stats;
+	const catalogCost = getCatalogCost(pricing.provider, pricing.model);
 
 	// Scheduled prices are frozen per request, including explicitly free usage.
 	// Preserve legacy zero-cost subscription correction for unscheduled models.
@@ -494,7 +495,7 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 
 	return {
 		cost:
-			calculateCatalogCost(stats.provider, stats.model, stats.usage, stats.timestamp) ??
+			calculateCatalogCost(pricing.provider, pricing.model, stats.usage, stats.timestamp) ??
 			storedCost ??
 			ZERO_USAGE_COST,
 		unpriced: false,
@@ -748,7 +749,8 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 	const insert = db.transaction(() => {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
-			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
+			const pricing = s.pricingIdentity ?? s;
+			const noCacheInputCost = calculateNoCacheInputCost(pricing.provider, pricing.model, s.usage, s.timestamp) ?? 0;
 			const result = stmt.run(
 				s.sessionFile,
 				s.entryId,

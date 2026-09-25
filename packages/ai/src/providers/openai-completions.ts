@@ -1261,6 +1261,12 @@ const streamOpenAICompletionsOnce = (
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
 				}
 
+				if (!output.upstreamModel && typeof chunk.model === "string" && chunk.model.length > 0) {
+					if (chunk.model !== model.id && chunk.model !== activeRequestParams?.model) {
+						output.upstreamModel = chunk.model;
+					}
+				}
+
 				if (chunk.usage) {
 					applyUsagePayload(chunk.usage);
 				}
