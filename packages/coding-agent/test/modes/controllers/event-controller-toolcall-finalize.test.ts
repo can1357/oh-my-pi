@@ -19,6 +19,8 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
+import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 beforeAll(async () => {
 	await initTheme();
 });
@@ -102,7 +104,7 @@ describe("EventController finalizes assistant block when tool-call args stream",
 
 	it("marks the streaming assistant finalized even when the per-turn usage row is enabled", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		const message = makeStreamingMessage([
 			{ type: "thinking", thinking: "planning" },
 			{ type: "toolCall", id: "tc-2", name: "write", arguments: { file_path: "/tmp/b.ts", content: "y" } },
@@ -113,7 +115,7 @@ describe("EventController finalizes assistant block when tool-call args stream",
 
 	it("emits the per-turn usage row with the turn's local timestamp at message_end", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 		// Fixed local wall-clock time; single-digit fields exercise zero-padding.
 		const timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 		const message: AssistantMessage = {

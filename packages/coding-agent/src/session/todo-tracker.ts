@@ -36,6 +36,9 @@ const PARENT_VERIFY_TOOLS: Record<string, true> = {
 	lsp: true,
 };
 
+import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
+import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
 const MUTATING_TOOLS: Record<string, true> = {
@@ -527,8 +530,8 @@ export class TodoTracker {
 	createEagerTodoPrelude(
 		promptText: string | undefined,
 	): { message: AgentMessage; toolChoice?: ToolChoice } | undefined {
-		const mode = this.#host.settings.get("todo.eager");
-		if (mode === "default" || !this.#host.settings.get("todo.enabled")) return undefined;
+		const mode = cfgTodoEager.get(this.#host.settings);
+		if (mode === "default" || !cfgTodoEnabled.get(this.#host.settings)) return undefined;
 		if (this.#host.planModeEnabled() || this.#phases.length > 0) return undefined;
 		// An actionable prewalk drives todo creation in a plan-first-then-todo order;
 		// the forced eager prelude's "call todo first this turn" contradicts it (#10510).
@@ -566,7 +569,7 @@ export class TodoTracker {
 
 	/** Builds the first-turn eager task-delegation prelude. */
 	createEagerTaskPrelude(promptText: string | undefined): AgentMessage | undefined {
-		if (this.#host.settings.get("task.eager") !== "always") return undefined;
+		if (cfgTaskEager.get(this.#host.settings) !== "always") return undefined;
 		if (this.#host.agentKind() === "sub" || this.#host.planModeEnabled()) return undefined;
 		if (promptText !== undefined) {
 			if (this.#host.agent.state.messages.some(message => message.role === "user")) return undefined;
@@ -662,7 +665,7 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		const remindersMax = this.#host.settings.get("todo.remindersMax");
+		const remindersMax = cfgTodoRemindersMax.get(this.#host.settings);
 		if (this.#reminderCount >= remindersMax && !unverifiedMerge) {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
@@ -672,7 +675,7 @@ export class TodoTracker {
 		// todo-driven reminder path below consults the todo settings.
 		if (
 			!unverifiedMerge &&
-			(!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled"))
+			(!cfgTodoReminders.get(this.#host.settings) || !cfgTodoEnabled.get(this.#host.settings))
 		) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
@@ -766,7 +769,7 @@ export class TodoTracker {
 	takeMidRunNudge(): AgentMessage | null {
 		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
 		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
-		if (!this.#host.settings.get("todo.enabled") || !this.#host.settings.get("todo.reminders")) return null;
+		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases
 			.flatMap(phase => phase.tasks)
@@ -801,7 +804,7 @@ export class TodoTracker {
 		};
 		return {
 			toolRefs: { task: wireName("task"), todo: wireName("todo") },
-			taskBatch: this.#host.settings.get("task.batch"),
+			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
 	}
 

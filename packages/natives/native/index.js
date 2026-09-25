@@ -45,7 +45,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
-export const __piNativesV18_3_0 = nativeBindings.__piNativesV18_3_0;
+export const __piNativesV18_3_1 = nativeBindings.__piNativesV18_3_1;
 export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
 export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
 export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");
@@ -205,5 +205,60 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const ShellFsFileType = {
+	File: "file",
+	Dir: "dir",
+	Symlink: "symlink",
+	Fifo: "fifo",
+	Socket: "socket",
+	Char: "char",
+	Block: "block",
+};
+export const ShellFsMissing = {
+	Existing: "existing",
+	Normal: "normal",
+	Missing: "missing",
+};
+export const ShellFsOp = {
+	Metadata: "metadata",
+	SymlinkMetadata: "symlinkMetadata",
+	ReadDir: "readDir",
+	Canonicalize: "canonicalize",
+	BackingPath: "backingPath",
+	ReadLink: "readLink",
+	Access: "access",
+	Open: "open",
+	Read: "read",
+	Write: "write",
+	Flush: "flush",
+	Close: "close",
+	FileMetadata: "fileMetadata",
+	IsLocked: "isLocked",
+	SetLen: "setLen",
+	FileSetTimes: "fileSetTimes",
+	FileSetPermissions: "fileSetPermissions",
+	Sync: "sync",
+	CreateDir: "createDir",
+	RemoveFile: "removeFile",
+	RemoveDir: "removeDir",
+	RemoveDirAll: "removeDirAll",
+	Rename: "rename",
+	HardLink: "hardLink",
+	Symlink: "symlink",
+	SetPermissions: "setPermissions",
+	SetTimes: "setTimes",
+	Chown: "chown",
+	StatFs: "statFs",
+	GetXattr: "getXattr",
+	SetXattr: "setXattr",
+	ListXattr: "listXattr",
+	RemoveXattr: "removeXattr",
+	Mknod: "mknod",
+};
+export const ShellFsResolve = {
+	Physical: "physical",
+	Logical: "logical",
+	None: "none",
 };
 // --- end generated native exports ---

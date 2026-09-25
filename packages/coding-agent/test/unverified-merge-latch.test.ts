@@ -3,6 +3,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MERGED_UNVERIFIED_MARKER, UnverifiedMergeLatch } from "@oh-my-pi/pi-coding-agent/session/settle-gates";
+import { cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { TodoTracker, type TodoTrackerHost } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
 
 function textOnlyStop(text = "Task complete."): AssistantMessage {
@@ -709,8 +710,8 @@ describe("unverified isolated merge latch", () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
 		const ctx = host(latch);
-		(ctx.host.settings as Settings).set("todo.enabled", false);
-		(ctx.host.settings as Settings).set("todo.reminders", false);
+		cfgTodoEnabled.set(ctx.host.settings, false);
+		cfgTodoReminders.set(ctx.host.settings, false);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.setPhases([]);
 
@@ -723,7 +724,7 @@ describe("unverified isolated merge latch", () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
 		const ctx = host(latch);
-		(ctx.host.settings as Settings).set("todo.remindersMax", 1);
+		cfgTodoRemindersMax.set(ctx.host.settings, 1);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.setPhases([]);
 

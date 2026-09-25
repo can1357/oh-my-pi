@@ -58,6 +58,19 @@ import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/too
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
+import { cfgAsyncEnabled } from "../tools/settings";
+import {
+	cfgTaskBatch,
+	cfgTaskDisabledAgents,
+	cfgTaskEnableEffort,
+	cfgTaskEnableLsp,
+	cfgTaskIsolationApply,
+	cfgTaskIsolationEnabled,
+	cfgTaskMaxConcurrency,
+	cfgTaskMaxRecursionDepth,
+	cfgTaskMaxRuntimeMs,
+} from "./settings";
+
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: assignment.trim(),
@@ -577,12 +590,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.enabled");
+		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
-			effortEnabled: this.session.settings.get("task.enableEffort"),
+			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			defaultAgent,
 		});
@@ -594,21 +607,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
-		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
+		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
+		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
 			sessionAgents: this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
-			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
+			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
-			effortEnabled: this.session.settings.get("task.enableEffort"),
+			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
-			asyncEnabled: this.session.settings.get("async.enabled"),
+			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
@@ -622,11 +635,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	#isBatchEnabled(): boolean {
-		return this.session.settings.get("task.batch");
+		return cfgTaskBatch.get(this.session.settings);
 	}
 
 	#getSpawnSemaphore(): Semaphore {
-		const max = this.session.settings.get("task.maxConcurrency");
+		const max = cfgTaskMaxConcurrency.get(this.session.settings);
 		if (this.#spawnSemaphore) {
 			this.#spawnSemaphore.resize(max);
 		} else {
@@ -657,9 +670,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
-			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
 	}
 
@@ -738,11 +751,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// `blocking: true` runs inline on this turn (the parent waits on its
 		// result); every other item becomes a background job when async
 		// execution is available.
-		const asyncEnabled = this.session.settings.get("async.enabled");
+		const asyncEnabled = cfgAsyncEnabled.get(this.session.settings);
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
 		const asyncItems = manager ? spawnItems.filter((_, index) => !itemBlocking[index]) : [];
 		const depthCapacity = canSpawnAtDepth(
-			this.session.settings.get("task.maxRecursionDepth") ?? 2,
+			cfgTaskMaxRecursionDepth.get(this.session.settings),
 			this.session.taskDepth ?? 0,
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
@@ -763,7 +776,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						ircEnabled,
 						willRunAsync: false,
 						scoutAvailable: isScoutSpawnable(
-							this.session.settings.get("task.disabledAgents") as string[] | undefined,
+							cfgTaskDisabledAgents.get(this.session.settings),
 							this.session.getSessionSpawns?.() ?? "*",
 						),
 					});
@@ -800,7 +813,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					ircEnabled,
 					willRunAsync: asyncItems.length > 0,
 					scoutAvailable: isScoutSpawnable(
-						this.session.settings.get("task.disabledAgents") as string[] | undefined,
+						cfgTaskDisabledAgents.get(this.session.settings),
 						this.session.getSessionSpawns?.() ?? "*",
 					),
 				});
@@ -1514,9 +1527,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
-				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
+				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };

@@ -400,7 +400,13 @@ FROM model_usage_legacy
 			// Model-performance batches are synchronous once invoked, so this
 			// persists them before finalizing their statements during process exit.
 			void this.#perfDrain.flush();
-			checkpointWal(this.#db);
+			// Best-effort: a database whose directory was removed (agent dir deleted underneath the
+			// process) cannot checkpoint, and that must not keep the remaining handles open.
+			try {
+				checkpointWal(this.#db);
+			} catch (error) {
+				logger.debug("AgentStorage: WAL checkpoint on close failed", { error: String(error) });
+			}
 			this.#listSettingsStmt.finalize();
 			this.#upsertModelUsageStmt.finalize();
 			this.#listModelUsageStmt.finalize();

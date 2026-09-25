@@ -23,6 +23,8 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SEARCH_PROVIDER_OPTIONS } from "@oh-my-pi/pi-tui/tools/web-search";
 
+import { cfgSetupVersion, cfgSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 type SetupApplicationSceneHost = Omit<SetupSceneHost, "ctx"> & { ctx: InteractiveModeContext };
 
 function bindSceneHost(host: SetupApplicationSceneHost): SetupSceneHost {
@@ -221,7 +223,7 @@ describe("setup wizard persistence", () => {
 	it("marks the current setup version complete", async () => {
 		const settings = Settings.isolated();
 		await markSetupWizardComplete(settings);
-		expect(settings.get("setupVersion")).toBe(CURRENT_SETUP_VERSION);
+		expect(cfgSetupVersion.get(settings)).toBe(CURRENT_SETUP_VERSION);
 	});
 
 	it("can run a targeted scene without setup-version or welcome-intro side effects", async () => {
@@ -261,7 +263,7 @@ describe("setup wizard persistence", () => {
 		component?.handleInput?.("\n");
 		await pending;
 
-		expect(settings.get("setupVersion")).toBe(0);
+		expect(cfgSetupVersion.get(settings)).toBe(0);
 		expect(playWelcomeIntro).not.toHaveBeenCalled();
 		expect(hideOverlay).toHaveBeenCalledTimes(1);
 		expect(setFocus).toHaveBeenCalled();
@@ -466,7 +468,7 @@ describe("setup wizard theme previews", () => {
 
 		controller.handleInput?.("2");
 		await Bun.sleep(20);
-		expect(settings.get("symbolPreset")).toBe("nerd");
+		expect(cfgSymbolPreset.get(settings)).toBe("nerd");
 		expect(theme.getSymbolPreset()).toBe("nerd");
 	});
 });
@@ -500,7 +502,7 @@ describe("setup wizard glyph scene", () => {
 
 		controller.handleInput?.("\n");
 		await Bun.sleep(20);
-		expect(settings.get("symbolPreset")).toBe("nerd");
+		expect(cfgSymbolPreset.get(settings)).toBe("nerd");
 		expect(finished).toBe(true);
 	});
 });
