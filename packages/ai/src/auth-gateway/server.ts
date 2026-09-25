@@ -627,6 +627,10 @@ async function handleFormatEndpoint(
 	health: ProviderHealthBook,
 	cacheStore: PromptCacheAffinityStore,
 	sessionStates: AuthGatewaySessionStateStore,
+	responseSessions?: {
+		get: (responseId: string) => string | undefined;
+		record: (responseId: string | undefined, sessionId: string) => void;
+	},
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -763,12 +767,32 @@ async function handleFormatEndpoint(
 		);
 	};
 
+	// `openai-codex-responses` cannot honour a caller-owned
+	// `previous_response_id`: its chaining lives in websocket session state and
+	// the SSE transport cannot carry the field at all. Silently dropping it
+	// would answer from only the new input — reject loudly instead.
+	if (model.api === "openai-codex-responses" && parsed.options.previousResponseId !== undefined) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			"previous_response_id is not supported for openai-codex-responses models",
+		);
+	}
+
 	// Sticky credential id: honour the client's `prompt_cache_key` when
-	// supplied (so external session ids align), otherwise derive from
+	// supplied (so external session ids align), then a remembered
+	// `previous_response_id` chain key (a continuation's context holds only the
+	// new input, so content derivation cannot reproduce the original session —
+	// without this lookup each hop can land on a different account whose store
+	// does not know the referenced response), otherwise derive from
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const chainKey =
+		parsed.options.previousResponseId !== undefined
+			? responseSessions?.get(parsed.options.previousResponseId)
+			: undefined;
+	const sessionId = clientKey ?? chainKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.promptCacheKey = sessionId;
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
@@ -1374,6 +1398,10 @@ async function handlePiNative(
 	health: ProviderHealthBook,
 	cacheStore: PromptCacheAffinityStore,
 	sessionStates: AuthGatewaySessionStateStore,
+	responseSessions?: {
+		get: (responseId: string) => string | undefined;
+		record: (responseId: string | undefined, sessionId: string) => void;
+	},
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -1429,7 +1457,14 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	// `previous_response_id` chains stick to the session that stored the
+	// referenced response — the continuation's context holds only the new
+	// input, so content derivation can't reproduce the original key.
+	const chainKey =
+		parsed.options.previousResponseId !== undefined
+			? responseSessions?.get(parsed.options.previousResponseId)
+			: undefined;
+	const sessionId = clientKey ?? chainKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId = sessionId;
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
@@ -2253,6 +2288,20 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 	// Owned by this server instance so two gateways in one process never share
 	// (or tear down) each other's provider state, and so `close()` can drain it.
 	const sessionStates = new AuthGatewaySessionStateStore();
+	// Upstream response ids live under the credential+session that created
+	// them; a later `previous_response_id` must re-resolve to the same session
+	// key or the stored chain can't be found (each OAuth account has its own
+	// provider-side store). Bounded FIFO — chains only need short memory.
+	const responseSessionIds = new Map<string, string>();
+	const recordResponseSession = (responseId: string | undefined, sessionId: string): void => {
+		if (!responseId) return;
+		responseSessionIds.delete(responseId);
+		if (responseSessionIds.size >= 4096) {
+			const oldest = responseSessionIds.keys().next().value;
+			if (oldest !== undefined) responseSessionIds.delete(oldest);
+		}
+		responseSessionIds.set(responseId, sessionId);
+	};
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -2319,50 +2368,25 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore, sessionStates), req);
-				}
-
-				// Native Gemini paths carry the model in the URL. Inject it (and
-				// the endpoint's streaming mode) so the module sees a complete body.
-				if (req.method === "POST") {
-					const geminiPath = GEMINI_MODEL_PATH.exec(pathname);
-					if (geminiPath) {
-						let pathModel: string;
-						try {
-							pathModel = decodeURIComponent(geminiPath[1]!);
-						} catch {
-							return withCors(json(400, { error: "invalid model path encoding" }), req);
-						}
-						const streaming = geminiPath[2] === "streamGenerateContent";
-						const module = {
-							...geminiV1beta,
-							parseRequest: (body: unknown, headers?: Headers) => {
-								if (!isRecord(body)) return geminiV1beta.parseRequest(body, headers);
-								let injected = body;
-								if (typeof injected.model !== "string") injected = { ...injected, model: pathModel };
-								if (typeof injected.stream !== "boolean") injected = { ...injected, stream: streaming };
-								return geminiV1beta.parseRequest(injected, headers);
-							},
-						};
-						return withCors(
-							await handleFormatEndpoint(
-								{ module, label: "gemini-v1beta", pathModel, pathStream: streaming },
-								boot,
-								req,
-								peer,
-								health,
-								cacheStore,
-								sessionStates,
-							),
-							req,
-						);
-					}
+					return withCors(
+						await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore, sessionStates, {
+							get: responseId => responseSessionIds.get(responseId),
+							record: recordResponseSession,
+						}),
+						req,
+					);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
 				// foreign-wire routes, just without the wire-format translation.
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(boot, req, peer, health, cacheStore, sessionStates), req);
+					return withCors(
+						await handlePiNative(boot, req, peer, health, cacheStore, sessionStates, {
+							get: responseId => responseSessionIds.get(responseId),
+							record: recordResponseSession,
+						}),
+						req,
+					);
 				}
 
 				// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
