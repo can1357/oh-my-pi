@@ -54,6 +54,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
+import type { PromptCacheDiagnosticContextInput } from "./utils/prompt-cache-debug";
 
 export type { StopDetails } from "./providers/anthropic-wire";
 export type { AssistantMessageEventStream } from "./utils/event-stream";
@@ -507,6 +508,11 @@ export interface StreamOptions {
 	 * `x-grok-conv-id`; when omitted, they fall back to `sessionId`.
 	 */
 	promptCacheKey?: string;
+	/**
+	 * Caller-supplied context-generation facts for the opt-in prompt-cache
+	 * diagnostic. This metadata is provider-neutral and never serialized.
+	 */
+	promptCacheDiagnosticContext?: PromptCacheDiagnosticContextInput;
 	/**
 	 * OpenAI GPT-5.6+ prompt-cache policy. Ignored by providers that do not
 	 * support explicit OpenAI cache breakpoints; explicit mode fails locally on
