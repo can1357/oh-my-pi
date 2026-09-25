@@ -4,16 +4,26 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-tui/status-line/presets";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { StatusLineTestComponents } from "./helpers/status-line";
+
+import {
+	cfgGitEnabled,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 let settingsState: SettingsTestState | undefined;
 let projectDir = "";
+const statusLines = new StatusLineTestComponents();
 
 beforeEach(async () => {
 	settingsState = beginSettingsTest();
@@ -24,6 +34,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	statusLines.dispose();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 	if (projectDir) {
@@ -71,7 +82,7 @@ function makeSession(sessionName = "Cache Session") {
 }
 
 function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
-	const component = new StatusLineComponent(makeSession());
+	const component = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
 	component.updateSettings(statusLineSettings);
 	return component;
 }
@@ -99,6 +110,48 @@ describe("StatusLineComponent effective settings cache", () => {
 				expect(second).toEqual(first);
 			}
 		}
+	});
+
+	it("skips the entire segment pipeline until a visible input invalidates it", () => {
+		const session = makeSession();
+		let snapshotCalls = 0;
+		const getSnapshot = session.getAsyncJobSnapshot.bind(session);
+		session.getAsyncJobSnapshot = () => {
+			snapshotCalls++;
+			return getSnapshot();
+		};
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "mode"],
+			rightSegments: ["session_name"],
+			sessionAccent: false,
+		});
+
+		const first = component.getTopBorder(120);
+		const second = component.getTopBorder(120);
+		expect(second).toEqual(first);
+		expect(snapshotCalls).toBe(1);
+
+		component.invalidate();
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(2);
+
+		component.setPlanModeStatus({ enabled: true, paused: false });
+		const withPlan = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withPlan).toContain("Plan");
+		expect(snapshotCalls).toBe(3);
+
+		const mutableModel = session.state.model as { name: string };
+		mutableModel.name = "Renamed Model";
+		const withModel = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withModel).toContain("Renamed Model");
+		expect(snapshotCalls).toBe(4);
+
+		const mutableMessages = session.messages as unknown[];
+		mutableMessages.push({ role: "user", content: "new tail" });
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(5);
 	});
 
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {
@@ -161,14 +214,32 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
 	});
 
+	it("renders custom preset defaults when segment arrays are unconfigured", () => {
+		cfgStatusLinePreset.override(Settings.instance, "custom");
+		const component = makeComponent({
+			preset: cfgStatusLinePreset.get(Settings.instance),
+			leftSegments: cfgStatusLineLeftSegments.get(Settings.instance),
+			rightSegments: cfgStatusLineRightSegments.get(Settings.instance),
+			sessionAccent: false,
+		});
+
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.leftSegments).toEqual(STATUS_LINE_PRESETS.custom.leftSegments);
+		expect(effective.rightSegments).toEqual(STATUS_LINE_PRESETS.custom.rightSegments);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("Test Model");
+		expect(content).toContain("Cache Session");
+	});
+
 	it("surfaces active subagents even when custom segments omit subagents", () => {
 		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 
 		component.setRunningSubagents(["sub-1", "sub-2"]);
 
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
-		expect(content).toContain("2 agents");
-		expect(content).not.toContain("running");
+		expect(content).toContain(`${theme.icon.agents} 2`);
+		expect(content).not.toContain("agents");
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
@@ -247,7 +318,7 @@ describe("StatusLineComponent effective settings cache", () => {
 		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
 		try {
-			Settings.instance.override("git.enabled", false);
+			cfgGitEnabled.override(Settings.instance, false);
 			const component = makeComponent({
 				preset: "custom",
 				leftSegments: ["git", "pr"],

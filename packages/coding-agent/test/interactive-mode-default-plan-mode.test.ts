@@ -4,7 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -14,6 +14,8 @@ import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/interactive-mode";
 import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
+
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -67,9 +69,9 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		Settings.instance.set("startup.quiet", true);
+		cfgStartupQuiet.set(Settings.instance, true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -169,7 +171,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	});
 
 	it("keeps the welcome banner synchronized across startup and later model switches", async () => {
-		Settings.instance.set("startup.quiet", false);
+		cfgStartupQuiet.set(Settings.instance, false);
 		const settings = Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false });
 		settings.setModelRole("plan", "anthropic/claude-haiku-4-5:high");
 		const created = createHarness(settings);

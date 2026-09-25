@@ -21,7 +21,7 @@ describe("advisor memory context", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -131,6 +131,7 @@ describe("advisor memory context", () => {
 			const memoryRoot = getMemoryRoot(tempDir.path(), tempDir.path());
 			await fs.mkdir(memoryRoot, { recursive: true });
 			await Bun.write(`${memoryRoot}/memory_summary.md`, "Advisor project summary marker.\n");
+
 			session = await createAdvisedSession(backend, SessionManager.inMemory(tempDir.path()));
 			expect(session.sessionFile).toBeUndefined();
 			const advisor = session.getAdvisorAgent();
@@ -140,17 +141,18 @@ describe("advisor memory context", () => {
 			const glob = advisor.state.tools.find(tool => tool.name === "glob");
 			if (!read || !grep || !glob) throw new Error("Expected default advisor URL tools");
 
-			const readResult = await read.execute("advisor-root-read", { path: "memory://root" });
-			expect(JSON.stringify(readResult.content)).toContain("Advisor project summary marker.");
-			const grepResult = await grep.execute("advisor-root-grep", {
-				path: "memory://root",
-				pattern: "Advisor project summary marker",
-			});
-			expect(JSON.stringify(grepResult.content)).toContain("Advisor project summary marker.");
-			for (const path of ["memory://root", "memory://root/*.md"]) {
-				const globResult = await glob.execute("advisor-root-glob", { path });
-				expect(JSON.stringify(globResult.content)).toContain("memory_summary.md");
-			}
+			const unavailableRoot = `active backend: ${backend}`;
+			await expect(read.execute("advisor-root-read", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(
+				grep.execute("advisor-root-grep", {
+					path: "memory://root",
+					pattern: "Advisor project summary marker",
+				}),
+			).rejects.toThrow(unavailableRoot);
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
+				unavailableRoot,
+			);
 
 			if (backend === "mnemopi") {
 				for (let attempt = 0; !session.getMnemopiSessionState() && attempt < 100; attempt++) {

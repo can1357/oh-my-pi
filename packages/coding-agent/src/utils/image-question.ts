@@ -1,4 +1,5 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
@@ -9,10 +10,13 @@ import {
 	resolveModelFromString,
 } from "../config/model-resolver";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
-import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
+
+import { cfgImagesBlockImages } from "../modes/settings";
+import { cfgImagesQuestionTimeoutMs } from "../tools/settings";
 
 /** Vision-capable model selected for an explicit image question. */
 export interface ResolvedImageQuestionModel {
@@ -51,7 +55,7 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	let selectedPattern: string | undefined;
 	for (const pattern of ["@vision", "@default", activeModelPattern]) {
 		const resolved = resolvePattern(pattern);
-		if (resolved?.input.includes("image")) {
+		if (resolved && sendsImageInputOnWire(resolved)) {
 			model = resolved;
 			selectedPattern = pattern;
 			break;
@@ -60,9 +64,9 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 
 	const activeProvider = resolvePattern(activeModelPattern)?.provider;
 	model ??= availableModels.find(
-		candidate => candidate.provider === activeProvider && candidate.input.includes("image"),
+		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
 	);
-	model ??= availableModels.find(candidate => candidate.input.includes("image"));
+	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
 	if (!model) {
 		const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
 		if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");
@@ -83,7 +87,7 @@ export async function askImageQuestion(
 	signal: AbortSignal | undefined,
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
-	if (session.settings.get("images.blockImages")) {
+	if (cfgImagesBlockImages.get(session.settings)) {
 		throw new ToolError(
 			"Image submission is disabled by settings (images.blockImages=true). Disable it to ask about images.",
 		);
@@ -107,7 +111,7 @@ export async function askImageQuestion(
 	}
 
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
-	const timeoutMs = session.settings.get("images.questionTimeoutMs");
+	const timeoutMs = cfgImagesQuestionTimeoutMs.get(session.settings);
 	const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
 	const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
 	const effectiveSignal = timeoutSignal ? (signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal) : signal;

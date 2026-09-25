@@ -14,7 +14,9 @@ import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { $env, getTinyWorkerRuntimeDir, logger, prompt } from "@oh-my-pi/pi-utils";
 import packageJson from "../../package.json" with { type: "json" };
-import { settings } from "../config/settings";
+import type { Setting } from "../config/registry";
+import { isSettingsInitialized, settings } from "../config/settings";
+
 import { stageRunnerScript } from "../eval/runner-cache";
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
@@ -29,13 +31,7 @@ import { connectJsonlSocket, LineParser, writeJsonLine } from "./jsonl-socket";
 import { formatTitleUserMessage } from "./message-preproc";
 import { ensureTinyMlxRuntime, getTinyMlxModelDir, MLX_LM_VERSION } from "./mlx-runtime";
 import MLX_SERVER_SCRIPT from "./mlx-server.py" with { type: "text" };
-import {
-	getTinyLocalModelSpec,
-	isTinyLocalModelKey,
-	isTinyMemoryLocalModelKey,
-	isTinyTitleLocalModelKey,
-	type TinyLocalModelKey,
-} from "./models";
+import { getTinyLocalModelSpec, isTinyLocalModelKey, type TinyLocalModelKey } from "./models";
 import { normalizeGeneratedTitle } from "./text";
 import {
 	TINY_WORKER_ARG,
@@ -51,13 +47,14 @@ import {
 	tinyWorkerEndpoint,
 	tinyWorkerLogPath,
 } from "./title-protocol";
+import { cfgProvidersTinyModelDevice, cfgProvidersTinyModelDtype } from "../session/settings";
 
 const TITLE_PREFILL = "<title>";
 const TITLE_CLOSE = "</title>";
 const TITLE_MAX_NEW_TOKENS = 20;
-const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
+const COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt, { includeExamples: false });
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const MLX_IDLE_SECONDS = 15 * 60;
 
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -72,7 +69,7 @@ type WorkerHandle = RefCountedWorkerHandle<TinyWorkerRequest, TinyWorkerResponse
 
 type PendingRequest =
 	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
-	| { kind: "completion"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
+	| { kind: "chat"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
 	| { kind: "load"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
@@ -96,9 +93,12 @@ export interface TinyTitleGenerateOptions {
 	systemPrompt?: string;
 }
 
-export interface TinyModelCompletionOptions {
+export interface TinyModelChatOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
+}
+
+export interface TinyModelCompletionOptions extends TinyModelChatOptions {
 	systemPrompt?: string;
 }
 
@@ -112,44 +112,43 @@ function normalizeTinyTitleGenerateOptions(
 
 // ── Device / dtype resolution ────────────────────────────────────────
 
-function readTinyModelSetting(path: "providers.tinyModelDevice" | "providers.tinyModelDtype"): string | undefined {
-	try {
-		const value = settings.get(path);
-		return typeof value === "string" ? value : undefined;
-	} catch {
-		// Settings may be uninitialized (e.g. `omp --smoke-test`); fall back to env/default.
-		return undefined;
-	}
+/** Setting value (its env var included); only the env var when settings are uninitialized (e.g. `omp --smoke-test`). */
+function readTinyModelSetting(setting: Setting<string>): string | undefined {
+	return isSettingsInitialized() ? setting.get(settings) : setting.envValue();
 }
 
 /**
- * Resolve the `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars a worker should run
- * with. A present env var wins; otherwise the mapped persisted setting is
- * used. Only resolved keys are returned — never the default sentinel — so the
+ * Map the resolved `providers.tinyModelDevice` / `providers.tinyModelDtype`
+ * values onto the `PI_TINY_DEVICE` / `PI_TINY_DTYPE` vars a worker should run
+ * with. Only resolved keys are returned — never the default sentinel — so the
  * worker's built-in defaults apply for anything absent. Pure for testability;
  * see {@link tinyModelEnv} for the settings glue.
  * @internal
  */
 export function tinyWorkerEnvOverlay(
-	env: Record<string, string | undefined>,
 	deviceSetting: string | undefined,
 	dtypeSetting: string | undefined,
 ): Record<string, string> {
 	const overlay: Record<string, string> = {};
-	const device = env.PI_TINY_DEVICE || tinyModelDeviceSettingToEnv(deviceSetting);
+	const device = tinyModelDeviceSettingToEnv(deviceSetting);
 	if (device) overlay.PI_TINY_DEVICE = device;
-	const dtype = env.PI_TINY_DTYPE || tinyModelDtypeSettingToEnv(dtypeSetting);
+	const dtype = tinyModelDtypeSettingToEnv(dtypeSetting);
 	if (dtype) overlay.PI_TINY_DTYPE = dtype;
 	return overlay;
 }
 
-/** Resolved device/dtype vars for this process (env over `providers.tinyModelDevice` / `providers.tinyModelDtype`). */
+/** Resolved device/dtype vars for this process. */
 function tinyModelEnv(): Record<string, string> {
 	return tinyWorkerEnvOverlay(
-		$env,
-		readTinyModelSetting("providers.tinyModelDevice"),
-		readTinyModelSetting("providers.tinyModelDtype"),
+		readTinyModelSetting(cfgProvidersTinyModelDevice),
+		readTinyModelSetting(cfgProvidersTinyModelDtype),
 	);
+}
+
+/** Identity of the resolved device/dtype; a worker started under a different key is stale. */
+export function tinyModelEnvKey(): string {
+	const env = tinyModelEnv();
+	return `${env.PI_TINY_DEVICE ?? ""}|${env.PI_TINY_DTYPE ?? ""}`;
 }
 
 /**
@@ -530,12 +529,20 @@ interface ModelWorker {
 	handle: WorkerHandle;
 	unsubscribe: () => void;
 	refed: boolean;
+	/** {@link tinyModelEnvKey} when the connection was made. */
+	envKey: string;
 }
 
+/**
+ * Per-model worker connections. Device/dtype settings are read at use time: a
+ * connection made under a different device/dtype is replaced on its next idle
+ * use, and the launch-tag probe then swaps the machine-wide worker.
+ */
 export class TinyTitleClient {
 	#workers = new Map<TinyLocalModelKey, ModelWorker>();
 	#pending = new Map<string, PendingRequest>();
-	#failedModels = new Set<TinyLocalModelKey>();
+	/** Models whose load/generation failed, keyed to the device/dtype they failed under. */
+	#failedModels = new Map<TinyLocalModelKey, string>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
 	#nextRequestId = 0;
 	#connect: (modelKey: TinyLocalModelKey) => Promise<WorkerHandle>;
@@ -574,7 +581,7 @@ export class TinyTitleClient {
 	 * online / non-local keys and for models already marked failed.
 	 */
 	prewarm(modelKey: string): void {
-		if (!isTinyTitleLocalModelKey(modelKey) || this.#failedModels.has(modelKey)) return;
+		if (!isTinyLocalModelKey(modelKey) || this.#hasFailed(modelKey)) return;
 		try {
 			this.#ensureWorker(modelKey).handle.send({ type: "ping", id: String(++this.#nextRequestId) });
 		} catch (error) {
@@ -593,8 +600,8 @@ export class TinyTitleClient {
 		optionsOrSignal?: AbortSignal | TinyTitleGenerateOptions,
 	): Promise<string | null> {
 		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
-		if (!isTinyTitleLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
 		const { promise, resolve } = Promise.withResolvers<string | null>();
 		const request: TinyWorkerRequest = {
 			type: "chat",
@@ -609,24 +616,30 @@ export class TinyTitleClient {
 		);
 	}
 
+	async chat(
+		modelKey: string,
+		messages: readonly TinyChatMessage[],
+		options: TinyModelChatOptions = {},
+	): Promise<string | null> {
+		if (!isTinyLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
+		const requested = options.maxTokens ?? COMPLETION_DEFAULT_MAX_NEW_TOKENS;
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const request: TinyWorkerRequest = {
+			type: "chat",
+			id: String(++this.#nextRequestId),
+			messages,
+			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
+		};
+		return this.#run(request, { kind: "chat", modelKey, resolve }, promise, options.signal, () => resolve(null));
+	}
+
 	async complete(
 		modelKey: string,
 		promptText: string,
 		options: TinyModelCompletionOptions = {},
 	): Promise<string | null> {
-		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
-		const requested = options.maxTokens ?? MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS;
-		const { promise, resolve } = Promise.withResolvers<string | null>();
-		const request: TinyWorkerRequest = {
-			type: "chat",
-			id: String(++this.#nextRequestId),
-			messages: buildCompletionMessages(promptText, options.systemPrompt),
-			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
-		};
-		return this.#run(request, { kind: "completion", modelKey, resolve }, promise, options.signal, () =>
-			resolve(null),
-		);
+		return this.chat(modelKey, buildCompletionMessages(promptText, options.systemPrompt), options);
 	}
 
 	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<TinyTitleDownloadResult> {
@@ -699,14 +712,23 @@ export class TinyTitleClient {
 	}
 
 	#ensureWorker(modelKey: TinyLocalModelKey): ModelWorker {
+		const envKey = tinyModelEnvKey();
 		const existing = this.#workers.get(modelKey);
-		if (existing) return existing;
+		if (existing) {
+			// Device/dtype changed since connecting: reconnect once idle so in-flight
+			// requests finish on the old worker.
+			if (existing.envKey === envKey || this.#hasPending(modelKey)) return existing;
+			this.#workers.delete(modelKey);
+			existing.unsubscribe();
+			void existing.handle.terminate();
+		}
 		const handle = new LazyWorkerHandle(() => this.#connect(modelKey));
 		const unsubscribeMessage = handle.onMessage(message => this.#handleMessage(modelKey, message));
 		const unsubscribeError = handle.onError(error => this.#handleWorkerError(modelKey, error));
 		const worker: ModelWorker = {
 			handle,
 			refed: false,
+			envKey,
 			unsubscribe: () => {
 				unsubscribeMessage();
 				unsubscribeError();
@@ -724,13 +746,7 @@ export class TinyTitleClient {
 	#syncWorkerRef(modelKey: TinyLocalModelKey): void {
 		const worker = this.#workers.get(modelKey);
 		if (!worker) return;
-		let inFlight = false;
-		for (const pending of this.#pending.values()) {
-			if (pending.modelKey === modelKey) {
-				inFlight = true;
-				break;
-			}
-		}
+		const inFlight = this.#hasPending(modelKey);
 		if (inFlight === worker.refed) return;
 		worker.refed = inFlight;
 		if (inFlight) worker.handle.ref();
@@ -758,10 +774,21 @@ export class TinyTitleClient {
 		}
 		if (message.type === "text") {
 			if (pending.kind === "title") pending.resolve(extractTinyTitle(message.text, pending.source));
-			else if (pending.kind === "completion") pending.resolve(message.text.trim() || null);
+			else if (pending.kind === "chat") pending.resolve(message.text.trim() || null);
 			return;
 		}
 		if (pending.kind === "load") pending.resolve({ ok: true });
+	}
+
+	#hasPending(modelKey: TinyLocalModelKey): boolean {
+		for (const pending of this.#pending.values()) {
+			if (pending.modelKey === modelKey) return true;
+		}
+		return false;
+	}
+
+	#hasFailed(modelKey: TinyLocalModelKey): boolean {
+		return this.#failedModels.get(modelKey) === tinyModelEnvKey();
 	}
 
 	#fail(pending: PendingRequest, error: string | undefined): void {
@@ -771,7 +798,7 @@ export class TinyTitleClient {
 	}
 
 	#markFailedModel(pending: PendingRequest): void {
-		if (pending.kind !== "load") this.#failedModels.add(pending.modelKey);
+		if (pending.kind !== "load") this.#failedModels.set(pending.modelKey, tinyModelEnvKey());
 	}
 
 	#emitProgress(event: TinyTitleProgressEvent): void {
@@ -810,7 +837,7 @@ export class TinyTitleClient {
 
 export const tinyTitleClient = new TinyTitleClient();
 
-/** Alias for the shared tiny-model worker client (titles + memory completions). */
+/** Alias for the shared tiny-model worker client (titles + generic chat completions). */
 export const tinyModelClient = tinyTitleClient;
 
 /** Drop this process's worker connections; the workers themselves keep serving others until idle. */

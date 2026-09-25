@@ -7,7 +7,7 @@ import * as zlib from "node:zlib";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -20,7 +20,10 @@ import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
-import { HubTool } from "../src/tools/hub";
+
+import { DEFAULT_BASH_INTERCEPTOR_RULES, cfgBashInterceptorPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -725,7 +728,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = path.join(testDir, "large.txt");
 			const lines = Array.from({ length: 3500 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
-			const defaultLimit = session.settings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(session.settings);
 
 			const result = await readTool.execute("test-call-3", { path: testFile });
 			const output = getTextOutput(result);
@@ -734,6 +737,21 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(`Line ${defaultLimit}`);
 			expect(output).not.toContain(`Line ${defaultLimit + 1}`);
 			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1} to continue]`);
+		});
+
+		it("applies a read.defaultLimit change made after the tool was built", async () => {
+			const testFile = path.join(testDir, "live-limit.txt");
+			fs.writeFileSync(testFile, Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`).join("\n"));
+
+			cfgReadDefaultLimit.set(session.settings, 10);
+			const first = getTextOutput(await readTool.execute("live-limit-10", { path: testFile }));
+			expect(first).toContain("Line 10");
+			expect(first).not.toContain("Line 11");
+
+			cfgReadDefaultLimit.set(session.settings, 25);
+			const second = getTextOutput(await readTool.execute("live-limit-25", { path: testFile }));
+			expect(second).toContain("Line 25");
+			expect(second).not.toContain("Line 26");
 		});
 
 		it("should truncate when byte limit exceeded", async () => {
@@ -925,6 +943,38 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(`${total} x`);
 		});
 
+		it("does not claim a partial scan count is the total for bounded reads", async () => {
+			const testFile = path.join(testDir, "bounded-large.txt");
+			const lines = Array.from({ length: 10_000 }, (_, i) => `${i + 1} ${"x".repeat(500)}`);
+			fs.writeFileSync(testFile, lines.join("\n"));
+			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
+
+			const result = await readTool.execute("test-bounded-large", { path: `${testFile}:1-3` });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("not scanned to EOF");
+			expect(output).toContain("Use :7 to continue");
+			expect(output).not.toMatch(/\[Showing lines 1-6 of \d+/);
+			expect(result.details?.meta?.truncation).toBeUndefined();
+			expect(result.details?.truncation).toBeUndefined();
+		});
+
+		it("does not claim a suppressed hashline preview was shown", async () => {
+			Bun.env.PI_EDIT_VARIANT = "hashline";
+			const testFile = path.join(testDir, "hashline-preview-large.txt");
+			const firstLine = "x".repeat(70_000);
+			const tail = Array.from({ length: 9_000 }, () => "y".repeat(500)).join("\n");
+			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
+			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
+
+			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("Hashline output requires full lines");
+			expect(output).toContain("[File not scanned to EOF]");
+			expect(output).not.toContain("Showing line 1");
+		});
+
 		it("tail selector is verbatim under :raw and clamps to the whole file when N exceeds it", async () => {
 			const testFile = path.join(testDir, "tail-raw.txt");
 			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
@@ -942,7 +992,7 @@ describe("Coding Agent Tools", () => {
 			const testFile = path.join(testDir, "large-file.txt");
 			const lines = Array.from({ length: 3500 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
-			const defaultLimit = session.settings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(session.settings);
 
 			const result = await readTool.execute("test-call-9", { path: testFile });
 
@@ -984,7 +1034,7 @@ describe("Coding Agent Tools", () => {
 				"tools.artifactTailLines": 10,
 				"tools.artifactHeadBytes": 1,
 			});
-			const defaultLimit = spillSettings.get("read.defaultLimit");
+			const defaultLimit = cfgReadDefaultLimit.get(spillSettings);
 			const spillManager = SessionManager.create(testDir, path.join(testDir, "spill-sessions"));
 			await spillManager.ensureOnDisk();
 			const spillSession = createTestToolSession(testDir, spillSettings, {
@@ -1028,6 +1078,84 @@ describe("Coding Agent Tools", () => {
 					context,
 				);
 				expect(getTextOutput(artifactResult)).toContain(line);
+				expect(saveArtifact).not.toHaveBeenCalled();
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
+			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
+			const skillDir = path.join(testDir, "skills", "demo");
+			fs.mkdirSync(skillDir, { recursive: true });
+			fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: d\n---\nBody\n");
+			fs.writeFileSync(path.join(skillDir, "ref.md"), payload);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 1,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 1,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "url-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const artifactsDir = spillManager.getArtifactsDir();
+			if (!artifactsDir) throw new Error("expected an on-disk artifacts dir");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "Worker.md"), JSON.stringify({ report: payload }));
+			fs.writeFileSync(path.join(artifactsDir, "Lines.md"), payload);
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "local", "big.md"), payload);
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => artifactsDir,
+						localProtocolOptions: {
+							getArtifactsDir: () => artifactsDir,
+							getSessionId: () => spillManager.getSessionId(),
+						},
+						skills: [
+							{
+								name: "demo",
+								description: "d",
+								filePath: path.join(skillDir, "SKILL.md"),
+								baseDir: skillDir,
+								source: "test",
+							},
+						],
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			try {
+				for (const url of [
+					"skill://demo/ref.md",
+					"agent://Worker/report",
+					"local://big.md:1-3000",
+					"agent://Lines:1-3000",
+				]) {
+					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
+					const output = getTextOutput(result);
+					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
+				}
+
+				const artifactId = await spillManager.saveArtifact(payload, "read");
+				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
+				const artifactPage = await spillReadTool.execute(
+					"spill-artifact-page",
+					{ path: `artifact://${artifactId}:1-3000` },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
 				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
@@ -1886,9 +2014,9 @@ describe("Coding Agent Tools", () => {
 
 			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
 
-			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to session/local/handoffs/new-output.json`,
-			);
+			// The result names the URL the model wrote, not the session's backing path.
+			expect(getTextOutput(result)).toContain(localPath);
+			expect(getTextOutput(result)).not.toContain(path.join("session", "local"));
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
 		});
@@ -2088,6 +2216,27 @@ function b() {
 			expect(getTextOutput(result)).toMatch(/Found 2 high-confidence matches/);
 		});
 
+		it("applies edit.fuzzyMatch and edit.fuzzyThreshold changes made after the tool was built", async () => {
+			const testFile = path.join(testDir, "edit-live-fuzzy.txt");
+			fs.writeFileSync(testFile, "function greet() {\n  const message = 'hello world';\n  return message;\n}\n");
+			const args = {
+				path: testFile,
+				old_string: "  const mesage = 'helo wrld';\n  return mesage;",
+				new_string: "  return 'bye';",
+			};
+
+			cfgEditFuzzyMatch.set(session.settings, false);
+			expect((await editTool.execute("live-fuzzy-off", args)).isError).toBe(true);
+
+			cfgEditFuzzyMatch.set(session.settings, true);
+			cfgEditFuzzyThreshold.set(session.settings, 0.99);
+			expect((await editTool.execute("live-fuzzy-strict", args)).isError).toBe(true);
+
+			cfgEditFuzzyThreshold.set(session.settings, 0.6);
+			expect((await editTool.execute("live-fuzzy-loose", args)).isError).not.toBe(true);
+			expect(await Bun.file(testFile).text()).toBe("function greet() {\n  return 'bye';\n}\n");
+		});
+
 		it("should fail with replace_all: true if no matches found", async () => {
 			const testFile = path.join(testDir, "edit-all-nomatch.txt");
 			fs.writeFileSync(testFile, "hello world");
@@ -2183,10 +2332,8 @@ function b() {
 				"bashInterceptor.patterns": [],
 			});
 
-			expect(defaultSettings.get("bashInterceptor.patterns")).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(defaultSettings.getBashInterceptorRules()).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
-			expect(explicitEmptySettings.get("bashInterceptor.patterns")).toEqual([]);
-			expect(explicitEmptySettings.getBashInterceptorRules()).toEqual([]);
+			expect(cfgBashInterceptorPatterns.get(defaultSettings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
+			expect(cfgBashInterceptorPatterns.get(explicitEmptySettings)).toEqual([]);
 		});
 
 		it("should block built-in interceptor commands when enabled with default patterns", async () => {
@@ -2259,33 +2406,6 @@ function b() {
 					createTestToolContext(["grep"]),
 				),
 			).rejects.toThrow(/Use the `grep` tool for customcmd\./);
-		});
-
-		it("should expose env values without shell re-parsing", async () => {
-			const mermaid = [
-				"flowchart TD",
-				'N0["attack"]',
-				'N1["[target] cluster"]',
-				'N2["diff-review"]',
-				'N3["extract"]',
-				'N4["report"]',
-				'N5["setup"]',
-				"N3 --> N0",
-				"N0 --> N1",
-				"N2 --> N1",
-				"N3 --> N2",
-				"N5 --> N3",
-				"N1 --> N4",
-			].join("\n");
-			const result = await bashTool.execute("test-call-8-env", {
-				command: "printf '%s' \"$MERMAID\"",
-				env: { MERMAID: mermaid },
-			});
-			const output = getTextOutput(result);
-			expect(output).toContain('N0["attack"]');
-			expect(output).toContain("N1 --> N4");
-			expect(fs.existsSync(path.join(testDir, "N0"))).toBe(false);
-			expect(fs.existsSync(path.join(testDir, "N4"))).toBe(false);
 		});
 
 		it("should resolve local:// destination paths for mv commands", async () => {
@@ -2382,7 +2502,11 @@ function b() {
 			expect(getTextOutput(result)).toContain("short");
 			expect(result.details?.timeoutSeconds).toBe(300);
 			expect(result.details?.async).toBeUndefined();
+			await asyncJobManager.waitForAll();
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+			// A command that finished in the foreground never becomes a background job row.
+			expect(asyncJobManager.getAllJobs()).toEqual([]);
+			expect(asyncJobManager.getJob("bg_1")).toBeUndefined();
 			expect(deliveries).toEqual([]);
 			await asyncJobManager.dispose();
 		});
@@ -2634,73 +2758,6 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
-		});
-	});
-
-	describe("HubTool", () => {
-		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-
-			const jobId = manager.register("bash", "test job", async () => "success");
-
-			// Job is running, call poll
-			const resultPromise = jobTool.execute("test-call-poll-1", { op: "wait", ids: [jobId] });
-
-			// Ensure poll finished
-			const result = await resultPromise;
-			expect(getTextOutput(result)).toContain("Completed");
-
-			// Wait for deliveries to be processed
-			await manager.drainDeliveries({ timeoutMs: 100 });
-
-			// If it correctly acknowledged, the delivery is suppressed.
-			expect(manager.hasPendingDeliveries()).toBe(false);
-		});
-
-		it("flags still-waiting polls and all-running snapshots as contextually useless", async () => {
-			const manager = new AsyncJobManager({
-				onJobComplete: async () => {},
-			});
-			const session = createTestToolSession(testDir, Settings.isolated({ "bash.autoBackground.enabled": true }), {
-				asyncJobManager: manager,
-			});
-			const jobTool = new HubTool(session);
-			const gate = Promise.withResolvers<string>();
-			const jobId = manager.register("bash", "long job", () => gate.promise);
-
-			// Poll cut short while the job is still running: a pure "still
-			// waiting" snapshot carries no information once consumed.
-			const controller = new AbortController();
-			const pollPromise = jobTool.execute("test-call-useless-poll", { op: "wait", ids: [jobId] }, controller.signal);
-			controller.abort();
-			const polled = await pollPromise;
-			expect(polled.useless).toBe(true);
-
-			// A list snapshot showing only running jobs is equally uneventful.
-			const listed = await jobTool.execute("test-call-useless-list", { op: "jobs" });
-			expect(listed.useless).toBe(true);
-
-			// Once the job settles, the result is informative — flag absent.
-			gate.resolve("done");
-			const settled = await jobTool.execute("test-call-useless-settled", { op: "wait", ids: [jobId] });
-			expect(getTextOutput(settled)).toContain("Completed");
-			expect(settled.useless).toBeUndefined();
-
-			// Nothing left to wait for: noise once consumed.
-			const idle = await jobTool.execute("test-call-useless-idle", { op: "wait" });
-			expect(getTextOutput(idle)).toContain("No running background jobs");
-			expect(idle.useless).toBe(true);
-
-			// A poll naming unknown ids found nothing — equally uneventful.
-			const missing = await jobTool.execute("test-call-useless-missing", { op: "wait", ids: ["no-such-job"] });
-			expect(getTextOutput(missing)).toContain("No matching jobs found");
-			expect(missing.useless).toBe(true);
 		});
 	});
 

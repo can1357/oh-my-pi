@@ -2,13 +2,15 @@
 
 use std::{
 	borrow::Cow,
+	collections::HashMap,
 	fmt,
-	path::{Path, PathBuf},
-	sync::LazyLock,
+	path::{Component, Path, PathBuf, Prefix},
+	sync::{Arc, LazyLock},
 	time::{Duration, Instant},
 };
 
-use dashmap::DashMap;
+use parking_lot::Mutex;
+use pi_vfs::BlockingFs;
 use rayon::{ThreadPool, prelude::*};
 
 use crate::{CollectedEntries, CollectedEntry, FileType, WalkError, WalkOptions};
@@ -22,7 +24,96 @@ struct CacheKey {
 #[derive(Clone)]
 struct CacheEntry {
 	created_at: Instant,
-	entries:    Vec<CollectedEntry>,
+	entries:    Arc<Vec<CollectedEntry>>,
+	bytes:      usize,
+}
+
+struct ScanCache {
+	entries:     HashMap<CacheKey, CacheEntry>,
+	bytes:       usize,
+	generation:  u64,
+	ttl:         Duration,
+	max_entries: usize,
+	max_bytes:   usize,
+}
+
+impl ScanCache {
+	fn new(ttl: Duration, max_entries: usize, max_bytes: usize) -> Self {
+		Self { entries: HashMap::new(), bytes: 0, generation: 0, ttl, max_entries, max_bytes }
+	}
+
+	fn remove(&mut self, key: &CacheKey) {
+		if let Some(entry) = self.entries.remove(key) {
+			self.bytes -= entry.bytes;
+		}
+	}
+
+	fn expire(&mut self, now: Instant) {
+		self.entries.retain(|_, entry| {
+			if now.saturating_duration_since(entry.created_at) < self.ttl {
+				true
+			} else {
+				self.bytes -= entry.bytes;
+				false
+			}
+		});
+	}
+
+	fn get(&mut self, key: &CacheKey, now: Instant) -> Option<CacheEntry> {
+		self.expire(now);
+		self.entries.get(key).cloned()
+	}
+
+	fn insert(&mut self, key: CacheKey, entry: CacheEntry, generation: u64, now: Instant) {
+		self.expire(now);
+		if generation != self.generation
+			|| self.max_entries == 0
+			|| entry.bytes > self.max_bytes
+			|| self.max_bytes == 0
+			|| now.saturating_duration_since(entry.created_at) >= self.ttl
+			|| self
+				.entries
+				.get(&key)
+				.is_some_and(|cached| cached.created_at > entry.created_at)
+		{
+			return;
+		}
+		self.remove(&key);
+		while self.entries.len() >= self.max_entries || self.bytes > self.max_bytes - entry.bytes {
+			let oldest = self
+				.entries
+				.iter()
+				.min_by_key(|(_, value)| value.created_at)
+				.map(|(key, _)| key.clone());
+			if let Some(oldest) = oldest {
+				self.remove(&oldest);
+			} else {
+				break;
+			}
+		}
+		self.bytes += entry.bytes;
+		self.entries.insert(key, entry);
+	}
+
+	fn invalidate(&mut self, target: Option<&Path>) {
+		self.generation = self.generation.wrapping_add(1);
+		self.entries.retain(|key, entry| {
+			if target.is_none_or(|target| target.starts_with(&key.root)) {
+				self.bytes -= entry.bytes;
+				false
+			} else {
+				true
+			}
+		});
+	}
+}
+
+fn entry_bytes(entries: &[CollectedEntry], capacity: usize) -> usize {
+	entries
+		.iter()
+		.fold(capacity.saturating_mul(size_of::<CollectedEntry>()), |bytes, entry| {
+			bytes.saturating_add(entry.path.capacity())
+		})
 }
 
 static CACHE_TTL_MS: LazyLock<u64> =
@@ -31,6 +122,8 @@ static EMPTY_RECHECK_MS: LazyLock<u64> =
 	LazyLock::new(|| env_uint("FS_SCAN_EMPTY_RECHECK_MS", 200, 0, u64::MAX));
 static MAX_CACHE_ENTRIES: LazyLock<usize> =
 	LazyLock::new(|| env_uint("FS_SCAN_CACHE_MAX_ENTRIES", 16, 0, usize::MAX));
+static MAX_CACHE_BYTES: LazyLock<usize> =
+	LazyLock::new(|| env_uint("FS_SCAN_CACHE_MAX_BYTES", 64 * 1024 * 1024, 0, usize::MAX));
 const DEFAULT_WALK_WORKERS: usize = 4;
 
 static WALK_WORKERS: LazyLock<usize> = LazyLock::new(|| {
@@ -47,7 +140,19 @@ static WALK_POOL: LazyLock<Option<ThreadPool>> = LazyLock::new(|| {
 		.build()
 		.ok()
 });
-static SCAN_CACHE: LazyLock<DashMap<CacheKey, CacheEntry>> = LazyLock::new(DashMap::new);
+static SCAN_CACHE: LazyLock<Mutex<ScanCache>> = LazyLock::new(|| {
+	Mutex::new(ScanCache::new(
+		Duration::from_millis(*CACHE_TTL_MS),
+		*MAX_CACHE_ENTRIES,
+		*MAX_CACHE_BYTES,
+	))
+});
+
+#[cfg(test)]
+pub(crate) fn cache_test_guard() -> parking_lot::MutexGuard<'static, ()> {
+	static LOCK: Mutex<()> = Mutex::new(());
+	LOCK.lock()
+}
 
 fn env_uint<T>(name: &str, default: T, min: T, max: T) -> T
 where
@@ -154,35 +259,35 @@ where
 	with_walk_pool(|| items.par_iter().try_for_each_init(init, operation))
 }
 
-fn evict_oldest() {
-	if SCAN_CACHE.len() > *MAX_CACHE_ENTRIES
-		&& let Some(oldest_key) = SCAN_CACHE
-			.iter()
-			.min_by_key(|entry| entry.value().created_at)
-			.map(|entry| entry.key().clone())
-	{
-		SCAN_CACHE.remove(&oldest_key);
-	}
-}
-
 fn cache_key(root: &Path, mut options: WalkOptions) -> CacheKey {
 	options.cache = false;
 	CacheKey { root: root.to_path_buf(), options }
 }
 
+/// Normalize a filesystem path to a forward-slash string on Windows.
+///
+/// Verbatim (`\\?\`) and device (`\\.\`) paths are returned unchanged: Windows
+/// only honors those prefixes with backslash separators.
+pub fn normalize_path(path: &Path) -> Cow<'_, str> {
+	let text = path.to_string_lossy();
+	if cfg!(windows) && text.contains('\\') && !has_literal_prefix(path) {
+		Cow::Owned(text.replace('\\', "/"))
+	} else {
+		text
+	}
+}
+
+fn has_literal_prefix(path: &Path) -> bool {
+	matches!(
+		path.components().next(),
+		Some(Component::Prefix(prefix))
+			if prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+	)
+}
+
 /// Normalize a filesystem path to a forward-slash relative string.
 pub fn normalize_relative_path<'a>(root: &Path, path: &'a Path) -> Cow<'a, str> {
-	let relative = path.strip_prefix(root).unwrap_or(path);
-	if cfg!(windows) {
-		let relative = relative.to_string_lossy();
-		if relative.contains('\\') {
-			Cow::Owned(relative.replace('\\', "/"))
-		} else {
-			relative
-		}
-	} else {
-		relative.to_string_lossy()
-	}
+	normalize_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Return whether a path contains the exact component name.
@@ -263,7 +368,46 @@ pub fn resolve_search_path(path: &str) -> Result<PathBuf, WalkError<String>> {
 	Ok(std::fs::canonicalize(&root).unwrap_or(root))
 }
 
+#[cfg(not(test))]
+const fn scan_seam() {}
+
+#[cfg(test)]
+thread_local! {
+	static SCAN_SEAM: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+/// Pause point reached once a walk has produced its entries but before any
+/// caller can observe them, so a test can hold its own scan in flight. Thread
+/// local so an installed seam never reaches a scan some other test is running.
+#[cfg(test)]
+fn scan_seam() {
+	let seam = SCAN_SEAM.with_borrow(Clone::clone);
+	if let Some(seam) = seam {
+		seam();
+	}
+}
+
+#[cfg(test)]
+struct ScanSeamGuard;
+
+#[cfg(test)]
+impl ScanSeamGuard {
+	fn install(seam: impl Fn() + 'static) -> Self {
+		SCAN_SEAM.with_borrow_mut(|slot| *slot = Some(std::rc::Rc::new(seam)));
+		Self
+	}
+}
+
+#[cfg(test)]
+impl Drop for ScanSeamGuard {
+	fn drop(&mut self) {
+		SCAN_SEAM.with_borrow_mut(|slot| *slot = None);
+	}
+}
+
 fn collect_entries_uncached<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	mut options: WalkOptions,
 	heartbeat: &H,
@@ -273,10 +417,14 @@ where
 	E: fmt::Display,
 {
 	options.cache = false;
-	crate::collect_entries_native(root, options, || heartbeat().map_err(|err| err.to_string()))
+	let scan =
+		crate::scan_entries(fs, root, options, || heartbeat().map_err(|err| err.to_string()))?;
+	scan_seam();
+	Ok(scan)
 }
 
 fn get_or_scan<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: &H,
@@ -285,32 +433,58 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
-	let ttl = *CACHE_TTL_MS;
-	if ttl == 0 {
-		return collect_entries_uncached(root, options, heartbeat);
+	if *CACHE_TTL_MS == 0 || *MAX_CACHE_ENTRIES == 0 || *MAX_CACHE_BYTES == 0 {
+		return collect_entries_uncached(fs, root, options, heartbeat);
 	}
 
+	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
 	let key = cache_key(root, options);
 	let now = Instant::now();
-	if let Some(entry) = SCAN_CACHE.get(&key) {
-		let age = now.duration_since(entry.created_at);
-		if age < Duration::from_millis(ttl) {
-			return Ok(CollectedEntries {
-				entries:      entry.entries.clone(),
-				cache_age_ms: age.as_millis() as u64,
-			});
-		}
-		drop(entry);
-		SCAN_CACHE.remove(&key);
+	let (cached, generation) = {
+		let mut cache = SCAN_CACHE.lock();
+		(cache.get(&key, now), cache.generation)
+	};
+	if let Some(entry) = cached {
+		let entries = entry.entries.as_ref().clone();
+		heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
+		return Ok(CollectedEntries {
+			entries,
+			cache_age_ms: now.saturating_duration_since(entry.created_at).as_millis() as u64,
+		});
 	}
 
-	let scan = collect_entries_uncached(root, options, heartbeat)?;
-	SCAN_CACHE.insert(key, CacheEntry { created_at: now, entries: scan.entries.clone() });
-	evict_oldest();
-	Ok(CollectedEntries { entries: scan.entries, cache_age_ms: 0 })
+	let scan = collect_entries_uncached(fs, root, options, heartbeat)?;
+	let bytes = entry_bytes(&scan.entries, scan.entries.capacity());
+	if bytes > *MAX_CACHE_BYTES {
+		return Ok(scan);
+	}
+	let entries = Arc::new(scan.entries);
+	SCAN_CACHE.lock().insert(
+		key,
+		CacheEntry { created_at: now, entries: Arc::clone(&entries), bytes },
+		generation,
+		Instant::now(),
+	);
+	let entries = Arc::unwrap_or_clone(entries);
+	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
+	Ok(CollectedEntries { entries, cache_age_ms: 0 })
 }
 
-pub fn collect_entries<H, E>(
+/// Return whether a scan of `root` through `fs` may use the shared cache.
+///
+/// Cached results are keyed by host path and options alone, yet a scan also
+/// reads ancestor repository markers, ancestor and global ignore files, and
+/// symlink targets outside `root`. Only a filesystem without a provider sees
+/// all of those exactly as the host does, so any provider disables sharing
+/// even when it serves `root` natively.
+pub(crate) fn shares_scan_cache(fs: &BlockingFs, root: &Path) -> bool {
+	fs.is_native() && fs.is_native_local(root)
+}
+
+/// Collect entries from `fs`, consulting the shared scan cache only when
+/// `options.cache` is set and [`shares_scan_cache`] allows it.
+pub fn collect_entries_in<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: H,
@@ -319,23 +493,16 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
-	if options.cache {
-		get_or_scan(root, options, &heartbeat)
+	if options.cache && shares_scan_cache(fs, root) {
+		get_or_scan(fs, root, options, &heartbeat)
 	} else {
-		collect_entries_uncached(root, options, &heartbeat)
+		collect_entries_uncached(fs, root, options, &heartbeat)
 	}
 }
 
 /// Invalidate cache entries whose root contains `target`.
 pub fn invalidate_path(target: &Path) {
-	let keys_to_remove: Vec<CacheKey> = SCAN_CACHE
-		.iter()
-		.filter(|entry| target.starts_with(&entry.key().root))
-		.map(|entry| entry.key().clone())
-		.collect();
-	for key in keys_to_remove {
-		SCAN_CACHE.remove(&key);
-	}
+	SCAN_CACHE.lock().invalidate(Some(target));
 }
 
 /// Resolve a possibly relative path and invalidate matching cache roots.
@@ -362,7 +529,7 @@ pub fn invalidate_path_string(path: &str) {
 
 /// Clear the entire scan cache.
 pub fn invalidate_all() {
-	SCAN_CACHE.clear();
+	SCAN_CACHE.lock().invalidate(None);
 }
 
 #[cfg(test)]
@@ -391,7 +558,12 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			let path = std::env::temp_dir().join(format!("pi-fs-cache-test-{timestamp}-{counter}"));
+			// nextest runs each test in its own process, so the counter restarts at 0
+			// and macOS clocks tick in microseconds: without the pid, two tests
+			// starting together share a directory and one's Drop deletes the other's.
+			let pid = std::process::id();
+			let path =
+				std::env::temp_dir().join(format!("pi-fs-cache-test-{pid}-{timestamp}-{counter}"));
 			fs::create_dir_all(&path).expect("create temp test directory");
 			Self(path)
 		}
@@ -411,9 +583,9 @@ mod tests {
 	fn make_fifo(path: &Path) {
 		let fifo_path =
 			CString::new(path.as_os_str().as_bytes()).expect("fifo path has no NUL bytes");
-		// SAFETY: `fifo_path` is a valid CString (NUL-terminated, no interior NULs),
-		// so `as_ptr()` yields a valid C string pointer. `0o600` is a valid mode.
-		// The CString is alive for the duration of the call.
+		// SAFETY: `fifo_path` is a valid CString (NUL-terminated, no interior
+		// NULs), so `as_ptr()` yields a valid C string pointer. `0o600` is a
+		// valid mode. The CString is alive for the duration of the call.
 		let rc = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
 		assert_eq!(rc, 0, "create fifo: {}", std::io::Error::last_os_error());
 	}
@@ -432,6 +604,224 @@ mod tests {
 		assert_eq!(super::normalize_worker_count_with_available(0, 0), 1);
 		assert_eq!(super::normalize_worker_count_with_available(1, 8), 1);
 		assert_eq!(super::normalize_worker_count_with_available(4, 8), 4);
+	}
+
+	fn cached_entry(
+		path: &str,
+		spare_bytes: usize,
+		created_at: std::time::Instant,
+	) -> super::CacheEntry {
+		let mut value = String::with_capacity(path.len() + spare_bytes);
+		value.push_str(path);
+		let entries = vec![CollectedEntry {
+			path:      value,
+			file_type: FileType::File,
+			mtime:     None,
+			size:      None,
+		}];
+		let bytes = super::entry_bytes(&entries, entries.capacity());
+		super::CacheEntry { created_at, entries: std::sync::Arc::new(entries), bytes }
+	}
+
+	fn key(name: &str) -> super::CacheKey {
+		super::cache_key(Path::new(name), crate::WalkOptions::default())
+	}
+
+	fn sorted_paths(entries: &[CollectedEntry]) -> Vec<&str> {
+		let mut paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+		paths.sort_unstable();
+		paths
+	}
+
+	#[test]
+	fn cache_evicts_oldest_by_allocated_bytes_and_rejects_oversized_scans() {
+		let now = std::time::Instant::now();
+		let a = cached_entry("a", 512, now);
+		let b = cached_entry("b", 512, now + Duration::from_millis(1));
+		let c = cached_entry("c", 512, now + Duration::from_millis(2));
+		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, a.bytes + b.bytes);
+		cache.insert(key("a"), a, 0, now);
+		cache.insert(key("b"), b, 0, now);
+		cache.insert(key("c"), c, 0, now);
+		assert!(cache.get(&key("a"), now).is_none());
+		assert_eq!(cache.get(&key("b"), now).unwrap().entries[0].path, "b");
+		assert_eq!(cache.get(&key("c"), now).unwrap().entries[0].path, "c");
+		let oversized = cached_entry("too-large", cache.max_bytes, now);
+		cache.insert(key("oversized"), oversized, 0, now);
+		assert!(cache.get(&key("oversized"), now).is_none());
+		assert_eq!(cache.entries.len(), 2);
+		assert!(cache.bytes <= cache.max_bytes);
+	}
+
+	#[test]
+	fn cache_replacements_release_budget_and_old_scans_do_not_replace_newer_results() {
+		let now = std::time::Instant::now();
+		let large = cached_entry("old", 512, now);
+		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, large.bytes);
+		cache.insert(key("root"), large, 0, now);
+		cache.insert(key("root"), cached_entry("new", 0, now + Duration::from_millis(1)), 0, now);
+		cache.insert(key("other"), cached_entry("other", 0, now), 0, now);
+		cache.insert(key("root"), cached_entry("stale", 0, now), 0, now);
+		assert_eq!(cache.get(&key("root"), now).unwrap().entries[0].path, "new");
+		assert_eq!(cache.get(&key("other"), now).unwrap().entries[0].path, "other");
+		assert_eq!(
+			cache.bytes,
+			cache
+				.entries
+				.values()
+				.map(|entry| entry.bytes)
+				.sum::<usize>()
+		);
+	}
+
+	#[test]
+	fn cache_miss_releases_all_expired_payloads_and_rejects_already_expired_scans() {
+		let now = std::time::Instant::now();
+		let ttl = Duration::from_millis(10);
+		let mut cache = super::ScanCache::new(ttl, 16, 4096);
+		let expired = cached_entry("expired", 0, now);
+		let weak = std::sync::Arc::downgrade(&expired.entries);
+		cache.insert(key("expired"), expired, 0, now);
+		cache.insert(
+			key("fresh"),
+			cached_entry("fresh", 0, now + Duration::from_millis(1)),
+			0,
+			now + Duration::from_millis(1),
+		);
+		assert!(cache.get(&key("missing"), now + ttl).is_none());
+		assert!(weak.upgrade().is_none());
+		cache.insert(key("slow"), cached_entry("slow", 0, now), 0, now + ttl);
+		assert!(cache.get(&key("slow"), now + ttl).is_none());
+		assert_eq!(cache.get(&key("fresh"), now + ttl).unwrap().entries[0].path, "fresh");
+	}
+
+	#[test]
+	fn cache_rejects_inserts_carrying_a_pre_invalidation_generation() {
+		let now = std::time::Instant::now();
+		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, 4096);
+		let generation = cache.generation;
+		cache.invalidate(Some(Path::new("root/changed")));
+		cache.insert(key("root"), cached_entry("stale", 0, now), generation, now);
+		assert!(cache.get(&key("root"), now).is_none());
+		let generation = cache.generation;
+		cache.insert(key("root"), cached_entry("fresh", 0, now), generation, now);
+		assert_eq!(cache.get(&key("root"), now).unwrap().entries[0].path, "fresh");
+	}
+
+	#[test]
+	fn collect_entries_discards_a_scan_invalidated_while_in_flight() {
+		let _cache_test_guard = super::cache_test_guard();
+		let root = TempDirGuard::new();
+		fs::write(root.path().join("before.txt"), "ok").unwrap();
+		let options = crate::WalkOptions {
+			cache: true,
+			..scan_options(true, false, crate::WalkDetail::Minimal)
+		};
+
+		let paused = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let scanner = {
+			let root = root.path().to_path_buf();
+			let paused = std::sync::Arc::clone(&paused);
+			let resume = std::sync::Arc::clone(&resume);
+			std::thread::spawn(move || {
+				let _seam = super::ScanSeamGuard::install(move || {
+					paused.wait();
+					resume.wait();
+				});
+				crate::collect_entries(&root, options, ok_heartbeat)
+			})
+		};
+
+		paused.wait();
+		fs::write(root.path().join("after.txt"), "ok").unwrap();
+		super::invalidate_path(&root.path().join("after.txt"));
+		resume.wait();
+
+		let inflight = scanner.join().unwrap().unwrap();
+		assert_eq!(inflight.cache_age_ms, 0);
+		assert_eq!(sorted_paths(&inflight.entries), ["before.txt"]);
+
+		let refreshed = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert_eq!(
+			sorted_paths(&refreshed.entries),
+			["after.txt", "before.txt"],
+			"the invalidated in-flight scan must not repopulate the cache"
+		);
+
+		std::thread::sleep(Duration::from_millis(2));
+		let repopulated = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert!(repopulated.cache_age_ms > 0, "scans after invalidation must cache again");
+		super::invalidate_path(root.path());
+	}
+
+	#[test]
+	fn concurrent_inserts_enforce_count_and_byte_limits_without_mutating_snapshots() {
+		let now = std::time::Instant::now();
+		let cache = std::sync::Arc::new(parking_lot::Mutex::new(super::ScanCache::new(
+			Duration::from_secs(60),
+			3,
+			2048,
+		)));
+		let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+		let workers: Vec<_> = (0..16)
+			.map(|index| {
+				let cache = std::sync::Arc::clone(&cache);
+				let barrier = std::sync::Arc::clone(&barrier);
+				std::thread::spawn(move || {
+					let name = index.to_string();
+					let entry = cached_entry(&name, 512, now + Duration::from_millis(index));
+					let snapshot = std::sync::Arc::clone(&entry.entries);
+					barrier.wait();
+					let mut cache = cache.lock();
+					cache.insert(key(&name), entry, 0, now);
+					assert!(cache.bytes <= 2048);
+					assert!(cache.entries.len() <= 3);
+					drop(cache);
+					assert_eq!(snapshot[0].path, name);
+				})
+			})
+			.collect();
+		for worker in workers {
+			worker.join().unwrap();
+		}
+		let mut cache = cache.lock();
+		cache.invalidate(None);
+		assert_eq!(cache.bytes, 0);
+		assert!(cache.entries.is_empty());
+	}
+
+	#[test]
+	fn cache_hits_preserve_owned_results_and_respect_cancellation() {
+		let _cache_test_guard = super::cache_test_guard();
+		let root = TempDirGuard::new();
+		fs::write(root.path().join("real.txt"), "ok").unwrap();
+		let options = crate::WalkOptions {
+			cache: true,
+			..scan_options(true, false, crate::WalkDetail::Minimal)
+		};
+		let mut first = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		first.entries[0].path = "changed-by-caller".to_owned();
+		std::thread::sleep(Duration::from_millis(2));
+		let second = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert!(second.cache_age_ms > 0, "second collection must use the cached snapshot");
+		assert_eq!(second.entries[0].path, "real.txt");
+		let cancelled = crate::collect_entries(root.path(), options, || Err("cancelled"));
+		assert!(
+			matches!(cancelled, Err(crate::WalkError::Interrupted(error)) if error == "cancelled")
+		);
+		let heartbeat_calls = AtomicU64::new(0);
+		let cancelled_after_copy = crate::collect_entries(root.path(), options, || {
+			if heartbeat_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+				Ok(())
+			} else {
+				Err("cancelled after copy")
+			}
+		});
+		assert!(
+			matches!(cancelled_after_copy, Err(crate::WalkError::Interrupted(error)) if error == "cancelled after copy")
+		);
+		super::invalidate_path(root.path());
 	}
 
 	fn scan_options(
@@ -493,7 +883,7 @@ mod tests {
 		fs::write(root.path().join("node_modules/pkg/index.js"), "nm").unwrap();
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -519,7 +909,7 @@ mod tests {
 		let mut options = scan_options(true, false, crate::WalkDetail::Minimal);
 		options.follow_links = crate::FollowLinks::Always;
 
-		let entries = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let entries = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		let paths: Vec<&str> = entries
 			.entries
 			.iter()
@@ -539,7 +929,7 @@ mod tests {
 		fs::write(root.path().join("ignored.txt"), "ignored").unwrap();
 		fs::write(root.path().join("kept.txt"), "keep").unwrap();
 
-		let collected = super::collect_entries(
+		let collected = crate::collect_entries(
 			root.path(),
 			scan_options(true, true, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -562,7 +952,7 @@ mod tests {
 		fs::write(root.path().join(".hidden-file"), "secret").unwrap();
 		fs::write(root.path().join("visible.txt"), "visible").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(false, false, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -595,7 +985,7 @@ mod tests {
 		fs::write(root.path().join(".hidden-file"), "secret").unwrap();
 		fs::write(root.path().join(".ignored-hidden"), "ignored").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(true, true, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -618,7 +1008,7 @@ mod tests {
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
 		std::thread::sleep(Duration::from_millis(1));
-		let result = super::collect_entries(
+		let result = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Minimal),
 			|| Err("Timeout".to_string()),
@@ -638,7 +1028,7 @@ mod tests {
 		let root = TempDirGuard::new();
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
-		let minimal = super::collect_entries(
+		let minimal = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Minimal),
 			ok_heartbeat,
@@ -652,7 +1042,7 @@ mod tests {
 		assert_eq!(minimal_file.mtime, None);
 		assert_eq!(minimal_file.size, None);
 
-		let full = super::collect_entries(
+		let full = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Full),
 			ok_heartbeat,

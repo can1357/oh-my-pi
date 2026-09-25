@@ -9,12 +9,14 @@ import {
 	type McpConnectionStatusEvent,
 } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 /**
  * Behavioral wiring guard for MCP startup status (mirrors
@@ -101,7 +103,7 @@ describe("InteractiveMode MCP connection status", () => {
 	});
 
 	it("does not render the mcp:connection-status status when startup.quiet is enabled", () => {
-		session.settings.set("startup.quiet", true);
+		cfgStartupQuiet.set(session.settings, true);
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {

@@ -168,5 +168,85 @@ describe("zod-like parsing", () => {
 		const flags = z.record(z.enum(["A", "B"] as const), z.boolean());
 		expect(flags.parse({ A: true, B: false })).toEqual({ A: true, B: false });
 		expect(flags.safeParse({ C: true }).success).toBe(false);
+		const values = z.record(z.number());
+		expect(values.parse({ first: 1, second: 2 })).toEqual({ first: 1, second: 2 });
+		expect(values.safeParse({ first: "one" }).success).toBe(false);
+	});
+});
+
+describe("zod-like trim and superRefine", () => {
+	it("trims strings and applies constraints post-trim", () => {
+		expect(z.string().trim().parse("  hello  ")).toBe("hello");
+		expect(z.string().min(3).trim().safeParse("  ab  ").success).toBe(false);
+		expect(z.string().min(2).trim().parse("  ab  ")).toBe("ab");
+		expect(z.string().trim().min(3).parse("  abc  ")).toBe("abc");
+		expect(z.string().trim().min(3).safeParse("  ab  ").success).toBe(false);
+		expect(z.string().trim().regex(/^omp$/).parse("  omp  ")).toBe("omp");
+		expect(z.string().trim().regex(/^omp$/).safeParse("  nope  ").success).toBe(false);
+		expect(z.string().trim().url().parse("  https://omp.sh  ")).toBe("https://omp.sh");
+		expect(z.string().trim().url().safeParse("  not-a-url  ").success).toBe(false);
+		expect(z.object({ name: z.string().default(" omp ").trim() }).parse({})).toEqual({ name: "omp" });
+	});
+
+	it("supports superRefine with addIssue", () => {
+		const schema = z.string().superRefine((val, ctx) => {
+			if (val.length < 3) ctx.addIssue({ code: "custom", path: [], message: "too short" });
+		});
+		expect(schema.parse("abc")).toBe("abc");
+		expect(schema.safeParse("ab").success).toBe(false);
+		const obj = z
+			.object({
+				name: z.string(),
+				age: z.number(),
+			})
+			.superRefine((val, ctx) => {
+				if (val.age < 0) ctx.addIssue({ code: "custom", path: ["age"], message: "age must be nonnegative" });
+			});
+		expect(obj.parse({ name: "a", age: 1 })).toEqual({ name: "a", age: 1 });
+		const bad = obj.safeParse({ name: "a", age: -1 });
+		expect(bad.success).toBe(false);
+		if (!bad.success) expect(bad.error.issues[0].path).toEqual(["age"]);
+
+		const nested = z
+			.object({
+				child: z.string().superRefine((_, ctx) => ctx.addIssue({ message: "rejected" })),
+			})
+			.safeParse({ child: "value" });
+		expect(nested.success).toBe(false);
+		if (!nested.success) expect(nested.error.issues[0].path).toEqual(["child"]);
+	});
+
+	it("chains trim through stepped schemas", () => {
+		const stepped = z.string().trim().regex(/^x$/);
+		expect(stepped.parse("  x  ")).toBe("x");
+		expect(stepped.safeParse("  y  ").success).toBe(false);
+		const trimmed = z.string().trim();
+		const constrained = trimmed.min(2).max(5);
+		expect(constrained.parse("  abc  ")).toBe("abc");
+		expect(constrained.safeParse("  a  ").success).toBe(false);
+		expect(constrained.safeParse("  abcdef  ").success).toBe(false);
+
+		const transformed = z
+			.string()
+			.trim()
+			.transform(value => value.slice(0, 1));
+		expect(transformed.min(2).safeParse("long").success).toBe(false);
+		expect(transformed.max(0).safeParse("long").success).toBe(false);
+		expect(
+			z
+				.string()
+				.trim()
+				.transform(() => 42)
+				.regex(/^42$/)
+				.safeParse("value").success,
+		).toBe(false);
+		expect(
+			z
+				.string()
+				.trim()
+				.transform(() => "not a url")
+				.url()
+				.safeParse("https://omp.sh").success,
+		).toBe(false);
 	});
 });

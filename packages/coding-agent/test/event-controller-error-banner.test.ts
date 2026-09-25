@@ -11,13 +11,16 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { ErrorBannerComponent } from "@oh-my-pi/pi-coding-agent/modes/components/error-banner";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
+import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 	return {
@@ -47,7 +50,7 @@ beforeAll(async () => {
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	settings.set("display.smoothStreaming", false);
+	cfgDisplaySmoothStreaming.set(settings, false);
 });
 
 afterEach(() => {
@@ -116,6 +119,26 @@ function createFixture(streamingMessage?: AssistantMessage) {
 }
 
 describe("EventController error banner", () => {
+	it("bounds and sanitizes multiline provider errors in fallback warnings", async () => {
+		const { controller, ctx } = createFixture();
+		const showWarning = vi.spyOn(ctx, "showWarning");
+		const reason = `Request failed: \u001b[31m503 unavailable\u001b[0m\n${"<html>error</html>\n".repeat(1000)}`;
+		await controller.handleEvent({
+			type: "retry_fallback_applied",
+			from: "source/model",
+			to: "target/model",
+			role: "default",
+			reason,
+		});
+		const warning = showWarning.mock.calls[0][0];
+		expect(warning).toContain("source/model -> target/model");
+		const lines = warning.split("\n");
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("503 unavailable");
+		expect(lines[1]).not.toContain("\u001b");
+		expect(Bun.stringWidth(lines[1])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE * PREVIEW_LIMITS.COLLAPSED_LINES);
+	});
+
 	it("pins the provider error above the editor when an assistant turn ends on stopReason error", async () => {
 		const errorMessage = "Output blocked by content filtering policy";
 		const message = makeAssistantMessage({ stopReason: "error", errorMessage });

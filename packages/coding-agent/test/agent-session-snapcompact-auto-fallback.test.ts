@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -87,7 +88,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		// metadata changes (claude-sonnet-4-5's 200k window is narrower than the
 		// vision-role qwen's, so a fixed count would overflow one of them).
 		const contextWindow = activeModel.contextWindow ?? 0;
-		const thresholdTokens = compactionModule.resolveThresholdTokens(contextWindow, settings.getGroup("compaction"));
+		const thresholdTokens = compactionModule.resolveThresholdTokens(contextWindow, cfgCompaction.get(settings));
 		const promptTokens = contextWindow > 0 ? Math.floor((thresholdTokens + contextWindow) / 2) : 246_000;
 		const assistantMsg = {
 			role: "assistant" as const,
@@ -120,8 +121,8 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("aimlapi", "test-key");
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("aimlapi", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

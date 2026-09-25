@@ -55,3 +55,10 @@ poetry.lock -text
 # Changelogs are append-mostly; auto-merge by unioning both sides.
 packages/*/CHANGELOG.md merge=union
 
+# Generated, minified catalog artifacts: regenerate instead of diffing/merging.
+packages/catalog/src/models.json binary
+packages/catalog/src/compat/rules.json binary
+
+# Generated tree-sitter parser: regenerate from grammar.js (see its README.md).
+crates/vendor/tree-sitter-go/src/parser.c linguist-generated
+

@@ -5,14 +5,15 @@ import {
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { CompactionSettings } from "../config/settings-schema";
+import type { CompactionSettings } from "./context-settings";
 
 /** Choices presented by the ordered compaction-method setting. */
 export const COMPACTION_METHOD_CHOICES = [
 	{
 		value: "remote",
-		label: "OpenAI server compaction",
-		description: "Use provider-native OpenAI-compatible server compaction when the active route supports it",
+		label: "Server compaction",
+		description:
+			"Use provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when the active route supports it",
 	},
 	{
 		value: "snapcompact",

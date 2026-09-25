@@ -25,6 +25,7 @@ import {
 	removeMCPServer,
 	setServerDisabled,
 	updateMCPServer,
+	validateServerName,
 } from "../../mcp/config-writer";
 import {
 	lookupMcpOAuthCredentialForServer,
@@ -56,19 +57,21 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath } from "../../tools/render-utils";
-import { urlHyperlinkAlways } from "../../tui";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
 import { openPath } from "../../utils/open";
-import { ChatBlock } from "../components/chat-block";
-import { DynamicBorder } from "../components/dynamic-border";
-import { MCPAddWizard } from "../components/mcp-add-wizard";
-import { TranscriptBlock } from "../components/transcript-container";
-import { parseCommandArgs } from "../shared";
-import { theme } from "../theme/theme";
+import { ChatBlock } from "@oh-my-pi/pi-tui/chrome/chat-block";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { MCPAddWizard } from "@oh-my-pi/pi-tui/overlays/mcp-add-wizard";
+import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { parseCommandArgs } from "../../utils/command-args";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
+
+import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
@@ -397,8 +400,9 @@ export class MCPCommandController {
 	 * Handle /mcp command and route to subcommands
 	 */
 	async handle(text: string): Promise<void> {
-		const parts = text.trim().split(/\s+/);
+		const parts = parseCommandArgs(text.trim());
 		const subcommand = parts[1]?.toLowerCase();
+		const serverName = parts.slice(2).join(" ") || undefined;
 
 		if (!subcommand || subcommand === "help") {
 			this.#showHelp();
@@ -417,19 +421,19 @@ export class MCPCommandController {
 				await this.#handleRemove(text);
 				break;
 			case "test":
-				await this.#handleTest(parts[2]);
+				await this.#handleTest(serverName);
 				break;
 			case "reauth":
-				await this.#handleReauth(parts[2]);
+				await this.#handleReauth(serverName);
 				break;
 			case "unauth":
-				await this.#handleUnauth(parts[2]);
+				await this.#handleUnauth(serverName);
 				break;
 			case "enable":
-				await this.#handleSetEnabled(parts[2], true);
+				await this.#handleSetEnabled(serverName, true);
 				break;
 			case "disable":
-				await this.#handleSetEnabled(parts[2], false);
+				await this.#handleSetEnabled(serverName, false);
 				break;
 			case "resources":
 				await this.#handleResources();
@@ -450,7 +454,7 @@ export class MCPCommandController {
 				await this.#handleSmitheryLogout();
 				break;
 			case "reconnect":
-				await this.#handleReconnect(parts[2]);
+				await this.#handleReconnect(serverName);
 				break;
 			case "reload":
 				await this.#handleReload();
@@ -791,6 +795,7 @@ export class MCPCommandController {
 
 		// Create wizard with OAuth handler and connection test
 		const wizard = new MCPAddWizard(
+			{ validateServerName, analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes },
 			async (name: string, config: MCPServerConfig, scope: "user" | "project") => {
 				done();
 				await this.#handleWizardComplete(name, config, scope);
@@ -1020,7 +1025,7 @@ export class MCPCommandController {
 				authorizationUrl: flow.authorizationUrl,
 			};
 
-			await authStorage.set(credentialId, oauthCredential);
+			await authStorage.credentials.set(credentialId, oauthCredential);
 
 			return {
 				credentialId,
@@ -2098,12 +2103,16 @@ export class MCPCommandController {
 		try {
 			this.#showMessage(["", theme.fg("muted", "Reloading MCP servers and runtime tools..."), ""].join("\n"));
 			await this.reloadServers();
-			const connectedCount = this.ctx.mcpManager?.getConnectedServers().length ?? 0;
+			const manager = this.ctx.mcpManager;
+			const connectedCount = manager?.getConnectedServers().length ?? 0;
+			const connectingCount =
+				manager?.getAllServerNames().filter(name => manager.getConnectionStatus(name) === "connecting").length ?? 0;
 			this.#showMessage(
 				[
 					"",
 					theme.fg("success", `${theme.icon.loop} MCP reload complete`),
 					`  Connected servers: ${connectedCount}`,
+					`  Connecting servers: ${connectingCount}`,
 					"",
 				].join("\n"),
 			);
@@ -2215,7 +2224,7 @@ export class MCPCommandController {
 
 		// Rediscover and connect, mirroring startup's discovery filters.
 		const result = await this.ctx.mcpManager.discoverAndConnect({
-			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			filterExa: true,
 			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,

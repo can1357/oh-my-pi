@@ -78,8 +78,8 @@ below.
 uutils coreutils (https://github.com/uutils/coreutils), MIT
 --------------------------------------------------------------------------------
 Covers: base32, base64, basename, cat, cksum (shared checksum machinery),
-b2sum, md5sum, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, comm, cut,
-date, dirname, head, hostname, ln, ls, mkdir, mktemp, mv, nproc, paste,
+b2sum, md5sum, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, comm, cp,
+cut, date, dirname, head, hostname, ln, ls, mkdir, mktemp, mv, nproc, paste,
 printenv, readlink, realpath, rm, seq, sort, stat, tac, tail, tee, touch, tr,
 truncate, uname, uniq, wc, whoami, yes.
 
@@ -293,7 +293,7 @@ MIT License
 Copyright (c) 2026 Sander Land
   (measured tokenizer vocabulary data, reconstruction model, and reference
   implementation: https://github.com/sanderland/ctok)
-Copyright (c) 2026 Can Bölük and the Oh My Pi contributors
+Copyright (c) 2026 Can Bölük and the omp contributors
 Copyright (c) 2026 Stencil Labs, Inc.
   (Rust implementation and the compact binary vocabulary encoding in
   crates/pi-natives/src/utok/claude)
@@ -334,43 +334,6 @@ License: Creative Commons Attribution 4.0 International (CC BY 4.0)
 This license allows the work and adaptations of it to be shared and used
 commercially, as long as it is attributed to Poppy Works. The font is bundled
 here (crates/pi-natives/src/fonts/Silver.ttf) as a CJK/Unicode bitmap fallback.
-
--------------------------------------------------------------------------------
-packages/utils/src/vendor/mermaid-ascii/NOTICE
-
-This directory contains an in-house Mermaid-diagram-to-ASCII renderer adapted
-from beautiful-mermaid (https://github.com/lukilabs/beautiful-mermaid), used
-under the MIT License.
-
-  Copyright (c) 2026 Craft Docs
-
-Only the ASCII rendering pipeline is ported (flowchart/state, sequence, class,
-ER, and xychart diagrams); the SVG renderer and its `elkjs` graph-layout
-dependency, the browser entry point, and the SVG theme/style modules were
-dropped. Terminal display width is reimplemented on `Bun.stringWidth`, and
-inline label formatting (HTML tags, markdown emphasis) is reduced to plain text
-for ASCII output. Layout and edge-routing logic is preserved faithfully so
-ASCII output matches the upstream package.
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 -------------------------------------------------------------------------------
 packages/coding-agent/src/markit/NOTICE
@@ -10843,7 +10806,7 @@ RUST RUNTIME DEPENDENCY LICENSES
 
 Generated from Cargo.lock by cargo-about 0.8.2 in locked, offline, workspace, all-feature, all-target mode, then restricted using cargo metadata to normal and build edges reachable from the workspace (development-only edges are excluded). cargo-deny independently evaluates the complete all-target graph.
 
-Native Opus (audiopus/audiopus_sys) and PCRE2 (pcre2/pcre2-sys) are covered by the exact crate license payloads below. inferno 0.12.8 is package-scoped as CDDL-1.0: its CDDL-covered source remains available in the locked crates.io source archive at https://crates.io/crates/inferno/0.12.8 and https://github.com/jonhoo/inferno. The full locked license text follows below.
+Native Opus (opus/opusic-sys) and PCRE2 (pcre2/pcre2-sys) are covered by the exact crate license payloads below. inferno 0.12.8 is package-scoped as CDDL-1.0: its CDDL-covered source remains available in the locked crates.io source archive at https://crates.io/crates/inferno/0.12.8 and https://github.com/jonhoo/inferno. The full locked license text follows below.
 
 -------------------------------------------------------------------------------
 License: Apache License 2.0 (Apache-2.0)
@@ -12512,6 +12475,58 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -------------------------------------------------------------------------------
 License: BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
 Used by:
+- opusic-sys 0.7.5 (https://github.com/DoumanAsh/opusic-sys)
+
+Full license text:
+
+Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
+                    Jean-Marc Valin, Timothy B. Terriberry,
+                    CSIRO, Gregory Maxwell, Mark Borgerding,
+                    Erik de Castro Lopo, Mozilla, Amazon
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of Internet Society, IETF or IETF Trust, nor the
+names of specific contributors, may be used to endorse or promote
+products derived from this software without specific prior written
+permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Opus is subject to the royalty-free patent licenses which are
+specified at:
+
+Xiph.Org Foundation:
+https://datatracker.ietf.org/ipr/1524/
+
+Microsoft Corporation:
+https://datatracker.ietf.org/ipr/1914/
+
+Broadcom Corporation:
+https://datatracker.ietf.org/ipr/1526/
+
+-------------------------------------------------------------------------------
+License: BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
+Used by:
 - curve25519-dalek 4.1.3 (https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek)
 
 Full license text:
@@ -13289,29 +13304,6 @@ Any litigation relating to this License shall be subject to the
 jurisdiction of the Federal Courts of the Northern District of
 California and the state courts of the State of California, with
 venue lying in Santa Clara County, California.
-
--------------------------------------------------------------------------------
-License: ISC License (ISC)
-Used by:
-- audiopus_sys 0.2.2 (https://github.com/lakelezz/audiopus_sys.git)
-
-Full license text:
-
-ISC License
-
-Copyright (c) 2019, Lakelezz
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 -------------------------------------------------------------------------------
 License: ISC License (ISC)
@@ -18734,7 +18726,7 @@ DEALINGS IN THE SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- opus 0.3.1 (https://github.com/SpaceManiac/opus-rs)
+- opus 0.4.0 (https://github.com/SpaceManiac/opus-rs)
 
 Full license text:
 

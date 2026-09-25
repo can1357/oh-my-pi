@@ -10,10 +10,17 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+
+import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -22,6 +29,7 @@ interface FakeAcpBuiltinSession {
 	sessionFile: string | undefined;
 	sessionId: string;
 	sessionName: string;
+	titleGenerationSignal: AbortSignal;
 	_todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	_switchedTo: string | undefined;
 	_movedFromEmptySessionFile: string | undefined;
@@ -48,10 +56,12 @@ interface FakeAcpBuiltinSession {
 	effectiveExtensionRoots: unknown;
 	setTitleSystemPrompt(prompt: string | undefined): void;
 	setSlashCommands(commands: unknown[]): void;
-	refreshSkills(): Promise<void>;
+	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
+	getHindsightSessionState(): undefined;
+	applyMemoryBackend(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
@@ -77,6 +87,7 @@ function createRuntime() {
 		sessionFile: undefined,
 		sessionId: "fake-session-id",
 		sessionName: "Fake Session",
+		titleGenerationSignal: new AbortController().signal,
 		_todoPhases: [],
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
@@ -84,7 +95,7 @@ function createRuntime() {
 		effectiveExtensionRoots: undefined,
 		setTitleSystemPrompt: (_prompt: string | undefined) => {},
 		setSlashCommands: (_commands: unknown[]) => {},
-		refreshSkills: async () => {},
+		refreshSkillsAndCommands: async () => {},
 		toggleFastMode() {
 			this.fastMode = !this.fastMode;
 			return this.fastMode;
@@ -139,6 +150,9 @@ function createRuntime() {
 			this._todoPhases = phases;
 		},
 		async refreshBaseSystemPrompt() {},
+		// Headless `/move` and `/wt` rebind memory for the destination project.
+		getHindsightSessionState: () => undefined,
+		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
@@ -257,11 +271,11 @@ describe("ACP builtin slash commands", () => {
 		const { output, runtime } = createRuntime();
 
 		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(true);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(true);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
-		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(cfgExtendedContext.get(runtime.settings)).toBe(false);
 		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
 		expect(output).toEqual([
 			"Extended context disabled.",
@@ -378,10 +392,11 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {
-		const { output, runtime } = createRuntime();
+		const { runtime } = createRuntime();
 		let redeemedTarget: ResetCreditTarget | undefined;
 		runtime.session.listResetCredits = async () => [
 			{
+				provider: "openai-codex",
 				credentialId: 42,
 				accountId: "account-1",
 				email: "user@example.com",
@@ -395,11 +410,74 @@ describe("ACP builtin slash commands", () => {
 			return { ok: true, code: "reset", email: target.email };
 		};
 
-		const result = await executeAcpBuiltinSlashCommand("/usage reset active", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage reset openai-codex/active", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(redeemedTarget).toEqual({ credentialId: 42, accountId: "account-1", email: "user@example.com" });
-		expect(output).toEqual(["Reset applied for user@example.com — your rate-limit window has been refreshed."]);
+		expect(redeemedTarget).toEqual({
+			provider: "openai-codex",
+			credentialId: 42,
+			accountId: "account-1",
+			email: "user@example.com",
+		});
+	});
+
+	it("pins Claude's provider, credential, organization, and selected grant for same-email accounts", async () => {
+		const { runtime } = createRuntime();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		runtime.session.listResetCredits = async () => [
+			{
+				provider: "openai-codex",
+				credentialId: 7,
+				email: "shared@example.com",
+				availableCount: 1,
+				credits: [],
+				active: true,
+			},
+			{
+				provider: "anthropic",
+				credentialId: 9,
+				accountId: "claude-account",
+				email: "shared@example.com",
+				orgId: "org-claude",
+				availableCount: 2,
+				redeemableCount: 1,
+				nextCreditId: "grant-next",
+				credits: [
+					{
+						id: "grant-next",
+						title: "Claude reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: true,
+						clears: ["anthropic:5h", "anthropic:7d"],
+						blocking: [],
+						usedFractions: {},
+					},
+				],
+				active: true,
+			},
+		];
+		runtime.session.redeemResetCredit = async target => {
+			redeemedTarget = target;
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				cleared: ["anthropic:5h", "anthropic:7d"],
+			};
+		};
+
+		await executeAcpBuiltinSlashCommand("/usage reset anthropic/9", runtime);
+
+		expect(redeemedTarget).toEqual({
+			provider: "anthropic",
+			credentialId: 9,
+			accountId: "claude-account",
+			email: "shared@example.com",
+			orgId: "org-claude",
+			creditId: "grant-next",
+		});
 	});
 
 	it("does not dispatch the legacy /reset-usage command", async () => {
@@ -605,7 +683,7 @@ describe("ACP builtin slash commands", () => {
 			"/copy",
 			"/btw hi",
 			"/new",
-			"/drop",
+			"/delete",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -959,7 +1037,7 @@ describe("wave 3 commands", () => {
 
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
-		runtime.settings.override("worktree.cleanSource", true);
+		cfgWorktreeCleanSource.override(runtime.settings, true);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
@@ -1083,7 +1161,7 @@ describe("wave 3 commands", () => {
 
 	it("/memory stats: still names the backend when a real backend simply has no stats hook", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("memory.backend" as never, "local" as never);
+		cfgMemoryBackend.set(runtime.settings, "local");
 		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toBe("Memory stats is not available for the local backend.");
@@ -1102,25 +1180,25 @@ describe("wave 3 commands", () => {
 	// /browser
 	it("/browser visible: sets headless=false; second call is idempotent", async () => {
 		const { runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		const r1 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r1).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 		const r2 = await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		expect(r2).toEqual({ consumed: true });
-		expect(runtime.settings.get("browser.headless" as never)).toBe(false);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
 	});
 
 	it("/browser no-arg after /browser visible toggles to headless", async () => {
 		const { output, runtime } = createRuntime();
-		runtime.settings.set("browser.enabled" as never, true as never);
-		runtime.settings.set("browser.headless" as never, true as never);
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
 		await executeAcpBuiltinSlashCommand("/browser visible", runtime);
 		const r = await executeAcpBuiltinSlashCommand("/browser", runtime);
 		expect(r).toEqual({ consumed: true });
 		expect(output[output.length - 1]).toContain("headless");
-		expect(runtime.settings.get("browser.headless" as never)).toBe(true);
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(true);
 	});
 
 	// /compact
@@ -1139,17 +1217,6 @@ describe("wave 3 commands", () => {
 
 describe("wave 4 commands", () => {
 	// /mcp
-	it("/mcp (no args): outputs help text containing list, enable, disable, remove, reload", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("list");
-		expect(output[0]).toContain("enable");
-		expect(output[0]).toContain("disable");
-		expect(output[0]).toContain("remove");
-		expect(output[0]).toContain("reload");
-	});
-
 	it("/mcp help: outputs help text containing list, enable, disable, remove, reload", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
@@ -1250,6 +1317,21 @@ describe("wave 4 commands", () => {
 	});
 
 	// /plugins
+	it("/plugin list: the singular alias dispatches the plugins builtin", async () => {
+		const npmSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([
+			{ name: "@czottmann/pi-automode", version: "1.16.0" } as never,
+		]);
+		const installedSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		try {
+			const { output, runtime } = createRuntime();
+			const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
+		} finally {
+			npmSpy.mockRestore();
+			installedSpy.mockRestore();
+		}
+	});
 
 	// /todo start with in_progress status in fuzzy list
 	it("/todo start: resolves ambiguous matches by preferring active tasks", async () => {

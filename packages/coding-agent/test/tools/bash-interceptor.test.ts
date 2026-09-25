@@ -1,28 +1,22 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import {
-	type BashInterceptorRule,
-	DEFAULT_BASH_INTERCEPTOR_RULES,
-} from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { BashInterceptorRule } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
+import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
-		settings: {
-			get(key: string) {
-				if (key === "bashInterceptor.enabled") return true;
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return rules;
-			},
-		},
+		settings: Settings.isolated({
+			"bashInterceptor.enabled": true,
+			"bashInterceptor.patterns": rules,
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+		}),
 	} as unknown as ToolSession;
 
 	return new BashTool(session);
@@ -243,15 +237,15 @@ describe("default grep rule and pipeline stdin", () => {
 	});
 });
 
-describe("default hub start rules", () => {
-	const tools = ["hub"];
+describe("default bash service rules", () => {
+	const tools = ["bash"];
 
 	it.each(["bun run dev", "vite --host 0.0.0.0", "lldb ./app", "bun test --watch", "nohup server", "server &"])(
-		"routes %s to hub start",
+		"routes %s to named bash service mode",
 		command => {
 			const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
 			expect(result.block).toBe(true);
-			expect(result.suggestedTool).toBe("hub");
+			expect(result.suggestedTool).toBe("bash");
 		},
 	);
 

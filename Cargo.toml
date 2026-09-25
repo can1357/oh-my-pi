@@ -12,14 +12,17 @@ members = [
    "crates/pi-natives",
    "crates/pi-shell",
    "crates/pi-vcs",
+   "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/cfg_aliases",
+   "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.1.14"
+version = "18.3.1"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -28,6 +31,13 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
+# portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
+# future-incompatible trailing semicolons.
+cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
+# vendored copy carries the upstream grammar fix (see its README.md).
+tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -217,6 +227,7 @@ pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
+pi-vfs = { path = "crates/pi-vfs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 
@@ -225,17 +236,17 @@ pi-builtins = { path = "crates/pi-builtins" }
 # ──────────────────────────────────────────────────────────────────────────────
 async-trait = "0.1"
 futures = "0.3"
-dashmap = "6.1"
+dashmap = "6.2"
 parking_lot = "0.12.5"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
-flume = "0.11"
+flume = "0.12"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Serialization & Data Formats
 # ──────────────────────────────────────────────────────────────────────────────
-base64 = "0.22"
+base64 = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 toml = "1.1"
@@ -257,15 +268,15 @@ clap = { version = "4", features = ["derive"] }
 # ──────────────────────────────────────────────────────────────────────────────
 pdf-inspector = "1"
 regex = "1"
-similar = "3.1.0"
+similar = "3.2.0"
 fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
-phf = { version = "0.13", features = ["macros"] }
+phf = { version = "0.14", features = ["macros"] }
 heapless = "0.9"
-smallvec = { version = "1.15.1", features = [
+smallvec = { version = "1.16.1", features = [
    "serde",
    "write",
    "union",
@@ -280,8 +291,7 @@ xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
 # ──────────────────────────────────────────────────────────────────────────────
-audiopus_sys = { version = "0.2.2", features = ["static"] }
-opus = "0.3.1"
+opus = "0.4.0"
 webrtc = "0.17.2"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -291,6 +301,7 @@ libc = "0.2"
 os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
+   "Win32_Globalization",
    "Win32_Media_Audio",
    "Win32_Media_Multimedia",
    "Win32_Security",
@@ -302,6 +313,13 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_Ioctl",
    "Win32_System_Threading",
 ] }
+# Transitive-only pin (wired through crates/pi-natives build-deps so the
+# constraint participates in resolution): cc 1.2.x passes
+# FILE_ATTRIBUTE_TEMPORARY to OpenOptionsExt::custom_flags as u32, but
+# find-msvc-tools 0.1.13 retyped that constant to i32, breaking every Windows
+# build. tree-sitter-sequel caps cc at ~1.2.1 so the fixed cc 1.4.x line is
+# out of reach; hold 0.1.12 until upstream ships a compatible release.
+find-msvc-tools = "=0.1.12"
 winreg = "0.56"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -316,8 +334,9 @@ napi-derive = "3"
 # ──────────────────────────────────────────────────────────────────────────────
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 clipboard-win = "5.4"
-icy_sixel = "0.5"
+icy_sixel = "0.7"
 portable-pty = "0.9"
+shlex = "2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Search & File Walking
@@ -343,9 +362,9 @@ resvg = "0.48"
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
 zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
-# Not used directly: pins tinyvec to 1.12.0 because 1.13.0 was published broken
+# Not used directly: pins tinyvec to fixed 1.13.3 because 1.13.0 was published broken
 # (cannot find macro `vec` in alloc-only context).
-tinyvec = "=1.12.0"
+tinyvec = "=1.13.3"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
 syntect = { version = "5.3", default-features = false, features = [
@@ -358,20 +377,20 @@ syntect = { version = "5.3", default-features = false, features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
-html-to-markdown-rs = { version = "3.9.2", default-features = false }
+html-to-markdown-rs = { version = "3.12.4", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
-xutf = "1.4"
-zstd = "0.13"
+xutf = "1.5"
+zstd = "0.14"
 fancy-regex = "0.16"
-tiktoken-rs = "0.11"
+tiktoken-rs = "0.12"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.3"
+brush-parser = "0.4"
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -408,14 +427,14 @@ tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-clojure = "0.1"
-tree-sitter-cmake = "0.7.1"
+tree-sitter-cmake = "0.7.5"
 tree-sitter-cpp = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-dart = "0.2"
 tree-sitter-diff = "0.1"
 tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
 tree-sitter-elixir = "0.3"
-tree-sitter-elisp = "1.6.1"
+tree-sitter-elisp = "1.7.2"
 tree-sitter-erlang = "0.16.0"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-go = "0.25"
@@ -441,7 +460,7 @@ tree-sitter-php = "0.24"
 tree-sitter-powershell = "0.26.4"
 tree-sitter-proto = "0.4.0"
 tree-sitter-python = "0.25"
-tree-sitter-r = "1.2.0"
+tree-sitter-r = "1.3.0"
 tree-sitter-regex = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"

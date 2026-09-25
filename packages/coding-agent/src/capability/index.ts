@@ -23,6 +23,9 @@ import type {
 	SourceMeta,
 } from "./types";
 
+import { cfgDisabledExtensions } from "../extensibility/settings";
+import { cfgDisabledProviders, cfgEnabledProviders } from "../config/model-settings";
+
 // =============================================================================
 // Registry State
 // =============================================================================
@@ -36,11 +39,13 @@ const providerCapabilities = new Map<string, Set<string>>();
 /** Provider display metadata (shared across capabilities) */
 const providerMeta = new Map<string, { displayName: string; description: string }>();
 
-/** Disabled providers (by ID) */
-const disabledProviders = new Set<string>();
+/** Provider switches in effect while no settings instance is bound ({@link initializeWithSettings}). */
+let unboundDisabledProviders = new Set<string>();
+let unboundEnabledProviders = new Set<string>();
 
-/** Enabled providers (by ID) */
-const enabledProviders = new Set<string>();
+/** `disabledProviders` / `enabledProviders` as sets, memoized per settings instance. */
+const cfgDisabledProviderSet = cfgDisabledProviders.map(ids => new Set(ids));
+const cfgEnabledProviderSet = cfgEnabledProviders.map(ids => new Set(ids));
 
 /** Foreign tools whose user-level (~/...) configs are opt-in */
 const FOREIGN_USER_PROVIDERS: Record<string, true> = {
@@ -54,8 +59,25 @@ const FOREIGN_USER_PROVIDERS: Record<string, true> = {
 	github: true,
 };
 
-/** Settings manager for persistence (if set) */
-let settings: Settings | null = null;
+/** Outstanding {@link initializeWithSettings} holds, oldest first; the newest one is bound. */
+const settingsHolds: { settings: Settings }[] = [];
+
+/** Settings instance provider switches are read from and persisted to (the newest hold), if any. */
+function boundSettings(): Settings | undefined {
+	return settingsHolds.at(-1)?.settings;
+}
+
+/** Disabled provider IDs in effect: the bound settings' live value, else the unbound set. */
+function disabledProviders(): ReadonlySet<string> {
+	const settings = boundSettings();
+	return settings ? cfgDisabledProviderSet.get(settings) : unboundDisabledProviders;
+}
+
+/** Explicitly enabled provider IDs in effect: the bound settings' live value, else the unbound set. */
+function enabledProviders(): ReadonlySet<string> {
+	const settings = boundSettings();
+	return settings ? cfgEnabledProviderSet.get(settings) : unboundEnabledProviders;
+}
 
 // =============================================================================
 // Registration API
@@ -121,11 +143,13 @@ async function loadImpl<T>(
 ): Promise<CapabilityResult<T>> {
 	const allItems: Array<T & { _source: SourceMeta; _shadowed?: boolean }> = [];
 	const suppressedItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
+	const disabledItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
 	const allWarnings: string[] = [];
 	const contributingProviders: string[] = [];
-	const disabledExtensionIds = options.includeDisabled
-		? new Set<string>()
-		: new Set<string>(options.disabledExtensions ?? settings?.get("disabledExtensions") ?? []);
+	const settings = boundSettings();
+	const disabledExtensionIds = new Set<string>(
+		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
+	);
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -166,12 +190,17 @@ async function loadImpl<T>(
 			}
 
 			const extensionId = capability.toExtensionId?.(itemWithSource);
-			if (extensionId && disabledExtensionIds.has(extensionId)) {
+			const isDisabled = extensionId !== undefined && disabledExtensionIds.has(extensionId);
+			if (isDisabled && !options.includeDisabled) {
 				continue;
 			}
 
 			if (options.filter && !options.filter(itemWithSource)) {
 				continue;
+			}
+
+			if (isDisabled) {
+				disabledItems.add(itemWithSource);
 			}
 
 			if (options.suppress?.(itemWithSource)) {
@@ -203,6 +232,23 @@ async function loadImpl<T>(
 	for (const item of allItems) {
 		const key = capability.key(item);
 
+		if (disabledItems.has(item)) {
+			// Disabled rows never claim their key or equivalence class, so they
+			// can't shadow an enabled survivor (issue #11870). But when an
+			// earlier enabled item already owns the key or an equivalent
+			// identity, the disabled row is a lower-priority loser: mark it
+			// shadowed so the dashboard treats it as a shadowed no-op instead of
+			// an independently toggleable row.
+			const keySeen = key !== undefined && seen.has(key);
+			const aliasSeen =
+				!keySeen &&
+				equivalent !== undefined &&
+				deduped.some(existing => !disabledItems.has(existing) && equivalent(existing, item));
+			if (keySeen || aliasSeen) item._shadowed = true;
+			if (!suppressedItems.has(item)) deduped.push(item);
+			continue;
+		}
+
 		if (suppressedItems.has(item)) {
 			// Claim key ownership (same-name precedence, including disabled
 			// state) without surviving or equivalence-shadowing survivors.
@@ -217,7 +263,10 @@ async function loadImpl<T>(
 
 		const keySeen = seen.has(key);
 		seen.add(key);
-		const aliasSeen = !keySeen && equivalent !== undefined && deduped.some(existing => equivalent(existing, item));
+		const aliasSeen =
+			!keySeen &&
+			equivalent !== undefined &&
+			deduped.some(existing => !disabledItems.has(existing) && equivalent(existing, item));
 		if (keySeen || aliasSeen) {
 			item._shadowed = true;
 		} else {
@@ -251,7 +300,8 @@ async function loadImpl<T>(
  * Filter providers based on options and disabled state.
  */
 function filterProviders<T>(capability: Capability<T>, options: LoadOptions<T>): Provider<T>[] {
-	let providers = (capability.providers as Provider<T>[]).filter(p => !disabledProviders.has(p.id));
+	const disabled = disabledProviders();
+	let providers = (capability.providers as Provider<T>[]).filter(p => !disabled.has(p.id));
 
 	if (options.providers) {
 		const allowed = new Set(options.providers);
@@ -307,79 +357,55 @@ export function isForeignUserProvider(providerId: string): boolean {
  */
 export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean {
 	const id = source.replace(/^\./, "");
-	if (disabledProviders.has(id)) return false;
+	if (disabledProviders().has(id)) return false;
 	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
 	if (ctx?.explicitProviders?.has(id) || ctx?.includeOptOutUserSources) return true;
-	if (enabledProviders.has(id) || enabledProviders.has("*") || enabledProviders.has("all")) return true;
-	if (id === "claude-plugins" && enabledProviders.has("claude")) return true;
+	const enabled = enabledProviders();
+	if (enabled.has(id) || enabled.has("*") || enabled.has("all")) return true;
+	if (id === "claude-plugins" && enabled.has("claude")) return true;
 	if (id === "claude" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
 	return false;
 }
 
 /** Opt a foreign provider's `~/` config in. */
 export function enableUserSource(providerId: string): void {
-	enabledProviders.add(providerId);
-	persistEnabledProviders();
+	setEnabledProviders([...enabledProviders(), providerId]);
 }
 
 /** Opt a foreign provider's `~/` config out (project config keeps loading). */
 export function disableUserSource(providerId: string): void {
-	enabledProviders.delete(providerId);
-	persistEnabledProviders();
+	setEnabledProviders([...enabledProviders()].filter(id => id !== providerId));
 }
 
 /**
- * Initialize capability system with settings manager for persistence.
- * Call this once on startup to enable persistent provider state.
+ * Bind the capability system to `activeSettings`: provider switches are read live
+ * from its `enabledProviders`/`disabledProviders` (settings UI, `set()` from any
+ * caller, on-disk reloads — the next discovery pass sees them) and persisted to it.
+ * Holds stack: the newest outstanding hold is bound, and releasing it (the returned
+ * function) hands the binding back to the previous hold. The release is idempotent
+ * and never ends another holder's hold.
  */
-export function initializeWithSettings(activeSettings: Settings): void {
-	settings = activeSettings;
-	// Load disabled providers from settings
-	const disabled = settings.get("disabledProviders");
-	disabledProviders.clear();
-	for (const id of disabled) {
-		disabledProviders.add(id);
-	}
-	// Load enabled providers from settings
-	const enabled = settings.get("enabledProviders");
-	enabledProviders.clear();
-	for (const id of enabled) {
-		enabledProviders.add(id);
-	}
-}
-
-/**
- * Persist current disabled providers to settings.
- */
-function persistDisabledProviders(): void {
-	if (settings) {
-		settings.set("disabledProviders", Array.from(disabledProviders));
-	}
-}
-
-/**
- * Persist current enabled providers to settings.
- */
-function persistEnabledProviders(): void {
-	if (settings) {
-		settings.set("enabledProviders", Array.from(enabledProviders));
-	}
+export function initializeWithSettings(activeSettings: Settings): () => void {
+	const hold = { settings: activeSettings };
+	settingsHolds.push(hold);
+	return () => {
+		const index = settingsHolds.indexOf(hold);
+		if (index !== -1) settingsHolds.splice(index, 1);
+	};
 }
 
 /**
  * Disable a provider globally (across all capabilities).
  */
 export function disableProvider(providerId: string): void {
-	disabledProviders.add(providerId);
-	persistDisabledProviders();
+	setDisabledProviders([...disabledProviders(), providerId]);
 }
 
 /**
  * Enable a previously disabled provider.
  */
 export function enableProvider(providerId: string): void {
-	disabledProviders.delete(providerId);
-	persistDisabledProviders();
+	setDisabledProviders([...disabledProviders()].filter(id => id !== providerId));
 }
 
 /**
@@ -388,43 +414,39 @@ export function enableProvider(providerId: string): void {
  * {@link isUserSourceEnabled}.
  */
 export function isProviderEnabled(providerId: string): boolean {
-	return !disabledProviders.has(providerId);
+	return !disabledProviders().has(providerId);
 }
 
 /**
  * Get list of all disabled provider IDs.
  */
 export function getDisabledProviders(): string[] {
-	return Array.from(disabledProviders);
+	return Array.from(disabledProviders());
 }
 
 /**
- * Set disabled providers from a list (replaces current set).
+ * Set disabled providers from a list (replaces current set), persisting to the bound settings.
  */
 export function setDisabledProviders(providerIds: string[]): void {
-	disabledProviders.clear();
-	for (const id of providerIds) {
-		disabledProviders.add(id);
-	}
-	persistDisabledProviders();
+	const settings = boundSettings();
+	if (settings) cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
+	else unboundDisabledProviders = new Set(providerIds);
 }
 
 /**
  * Get list of all explicitly enabled provider IDs.
  */
 export function getEnabledProviders(): string[] {
-	return Array.from(enabledProviders);
+	return Array.from(enabledProviders());
 }
 
 /**
- * Set enabled providers from a list (replaces current set).
+ * Set enabled providers from a list (replaces current set), persisting to the bound settings.
  */
 export function setEnabledProviders(providerIds: string[]): void {
-	enabledProviders.clear();
-	for (const id of providerIds) {
-		enabledProviders.add(id);
-	}
-	persistEnabledProviders();
+	const settings = boundSettings();
+	if (settings) cfgEnabledProviders.set(settings, [...new Set(providerIds)]);
+	else unboundEnabledProviders = new Set(providerIds);
 }
 
 // =============================================================================
@@ -452,6 +474,7 @@ export function getCapabilityInfo(capabilityId: string): CapabilityInfo | undefi
 	const capability = capabilities.get(capabilityId);
 	if (!capability) return undefined;
 
+	const disabled = disabledProviders();
 	return {
 		id: capability.id,
 		displayName: capability.displayName,
@@ -461,7 +484,7 @@ export function getCapabilityInfo(capabilityId: string): CapabilityInfo | undefi
 			displayName: p.displayName,
 			description: p.description,
 			priority: p.priority,
-			enabled: !disabledProviders.has(p.id),
+			enabled: !disabled.has(p.id),
 		})),
 	};
 }
@@ -498,7 +521,7 @@ export function getProviderInfo(providerId: string): ProviderInfo | undefined {
 		description: meta.description,
 		priority,
 		capabilities: Array.from(caps),
-		enabled: !disabledProviders.has(providerId),
+		enabled: !disabledProviders().has(providerId),
 	};
 }
 
@@ -536,9 +559,9 @@ export function reset(): void {
  * Reset capability registry settings and provider state. Test-only.
  */
 export function resetCapabilityForTests(): void {
-	settings = null;
-	disabledProviders.clear();
-	enabledProviders.clear();
+	settingsHolds.length = 0;
+	unboundDisabledProviders = new Set();
+	unboundEnabledProviders = new Set();
 	clearFsCache();
 }
 

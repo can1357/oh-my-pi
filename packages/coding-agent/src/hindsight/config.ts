@@ -1,17 +1,39 @@
 /**
  * Resolved Hindsight runtime configuration.
  *
- * Source of truth precedence (last wins):
- *   1. Built-in defaults
- *   2. Settings (`hindsight.*` schema entries via `Settings.get(...)`)
- *   3. `HINDSIGHT_*` environment variables
- *
- * Env wins because operators frequently override per-shell (CI, prod) without
- * touching the persisted settings file.
+ * Every field reads a `hindsight.*` setting handle. Handles declare their `HINDSIGHT_*`
+ * environment variable, which wins over the settings layers because operators frequently
+ * override per-shell (CI, prod) without touching the persisted settings file.
  */
-
-import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import {
+	cfgHindsightApiToken,
+	cfgHindsightApiUrl,
+	cfgHindsightAutoRecall,
+	cfgHindsightAutoRetain,
+	cfgHindsightBankId,
+	cfgHindsightBankIdPrefix,
+	cfgHindsightBankMission,
+	cfgHindsightDebug,
+	cfgHindsightMentalModelAutoSeed,
+	cfgHindsightMentalModelMaxRenderChars,
+	cfgHindsightMentalModelsEnabled,
+	cfgHindsightRecallBudget,
+	cfgHindsightRecallContextTurns,
+	cfgHindsightRecallMaxQueryChars,
+	cfgHindsightRecallMaxTokens,
+	cfgHindsightRecallTimeoutMs,
+	cfgHindsightRecallTypes,
+	cfgHindsightReflectTimeoutMs,
+	cfgHindsightRequestTimeoutMs,
+	cfgHindsightRetainContext,
+	cfgHindsightRetainEveryNTurns,
+	cfgHindsightRetainMission,
+	cfgHindsightRetainMode,
+	cfgHindsightRetainOverlapTurns,
+	cfgHindsightRetainTimeoutMs,
+	cfgHindsightScoping,
+} from "./settings";
 
 export type HindsightScoping = "global" | "per-project" | "per-project-tagged";
 
@@ -53,133 +75,53 @@ export interface HindsightConfig {
 
 	mentalModelsEnabled: boolean;
 	mentalModelAutoSeed: boolean;
-	mentalModelRefreshIntervalMs: number;
 	mentalModelMaxRenderChars: number;
 }
-
-const VALID_RETAIN_MODES: HindsightConfig["retainMode"][] = ["full-session", "last-turn"];
-const VALID_BUDGETS: HindsightConfig["recallBudget"][] = ["low", "mid", "high"];
-const VALID_SCOPINGS: HindsightScoping[] = ["global", "per-project", "per-project-tagged"];
 
 const DEFAULT_PREAMBLE =
 	"Relevant memories from past conversations (prioritize recent when conflicting). " +
 	"Only use memories that are directly useful to continue this conversation; ignore the rest:";
 
-/** Coerce an env var value into a boolean using the OpenCode plugin's semantics. */
-function envBool(value: string | undefined): boolean | undefined {
-	if (value === undefined) return undefined;
-	return ["true", "1", "yes"].includes(value.toLowerCase());
-}
-
-/** Coerce an env var value into an int, returning undefined for non-numeric input. */
-function envInt(value: string | undefined): number | undefined {
-	if (value === undefined) return undefined;
-	const n = Number.parseInt(value, 10);
-	return Number.isFinite(n) ? n : undefined;
-}
-
-function envString(value: string | undefined): string | undefined {
-	if (value === undefined) return undefined;
-	const trimmed = value.trim();
-	return trimmed.length === 0 ? undefined : trimmed;
-}
-
-function pickBudget(value: unknown): HindsightConfig["recallBudget"] | undefined {
-	return typeof value === "string" && (VALID_BUDGETS as string[]).includes(value)
-		? (value as HindsightConfig["recallBudget"])
-		: undefined;
-}
-
-function pickRetainMode(value: unknown): HindsightConfig["retainMode"] | undefined {
-	return typeof value === "string" && (VALID_RETAIN_MODES as string[]).includes(value)
-		? (value as HindsightConfig["retainMode"])
-		: undefined;
-}
-
-function pickScoping(value: unknown): HindsightScoping | undefined {
-	return typeof value === "string" && (VALID_SCOPINGS as string[]).includes(value)
-		? (value as HindsightScoping)
-		: undefined;
-}
-
 /**
- * Load the resolved Hindsight config.
- *
- * Pure (no I/O) aside from reading from `process.env` and the supplied
- * Settings instance. Tests can pass `Settings.isolated({...})` and stub
- * `process.env` per case.
+ * Load the resolved Hindsight config. `HINDSIGHT_*` environment variables override settings
+ * through the setting definitions (`hindsight/settings.ts`); invalid values fall back to defaults.
  */
-export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv = process.env): HindsightConfig {
-	const apiUrlEnv = envString(env.HINDSIGHT_API_URL);
-	const apiTokenEnv = envString(env.HINDSIGHT_API_TOKEN);
-	const bankIdEnv = envString(env.HINDSIGHT_BANK_ID);
-	const bankMissionEnv = envString(env.HINDSIGHT_BANK_MISSION);
-	const retainModeEnv = pickRetainMode(env.HINDSIGHT_RETAIN_MODE);
-	const recallBudgetEnv = pickBudget(env.HINDSIGHT_RECALL_BUDGET);
-	const autoRecallEnv = envBool(env.HINDSIGHT_AUTO_RECALL);
-	const autoRetainEnv = envBool(env.HINDSIGHT_AUTO_RETAIN);
-	const scopingEnv = pickScoping(env.HINDSIGHT_SCOPING);
-	const debugEnv = envBool(env.HINDSIGHT_DEBUG);
-	const recallMaxTokensEnv = envInt(env.HINDSIGHT_RECALL_MAX_TOKENS);
-	const recallContextTurnsEnv = envInt(env.HINDSIGHT_RECALL_CONTEXT_TURNS);
-	const recallMaxQueryCharsEnv = envInt(env.HINDSIGHT_RECALL_MAX_QUERY_CHARS);
-	const retainEveryNTurnsEnv = envInt(env.HINDSIGHT_RETAIN_EVERY_N_TURNS);
-	const requestTimeoutMsEnv = envInt(env.HINDSIGHT_REQUEST_TIMEOUT_MS);
-	const reflectTimeoutMsEnv = envInt(env.HINDSIGHT_REFLECT_TIMEOUT_MS);
-	const recallTimeoutMsEnv = envInt(env.HINDSIGHT_RECALL_TIMEOUT_MS);
-	const retainTimeoutMsEnv = envInt(env.HINDSIGHT_RETAIN_TIMEOUT_MS);
-
-	// Read from settings (each falls back to its schema default).
-	const settingsRetainMode = pickRetainMode(settings.get("hindsight.retainMode"));
-	if (settings.get("hindsight.retainMode") && !settingsRetainMode) {
-		logger.warn("Hindsight: invalid retainMode setting, falling back to full-session", {
-			value: settings.get("hindsight.retainMode"),
-		});
-	}
-	const settingsRecallBudget = pickBudget(settings.get("hindsight.recallBudget"));
-	const settingsScoping = pickScoping(settings.get("hindsight.scoping"));
-	if (settings.get("hindsight.scoping") && !settingsScoping) {
-		logger.warn("Hindsight: invalid scoping setting, falling back to per-project-tagged", {
-			value: settings.get("hindsight.scoping"),
-		});
-	}
-
+export function loadHindsightConfig(settings: Settings): HindsightConfig {
 	const config: HindsightConfig = {
-		hindsightApiUrl: apiUrlEnv ?? settings.get("hindsight.apiUrl") ?? null,
-		hindsightApiToken: apiTokenEnv ?? settings.get("hindsight.apiToken") ?? null,
+		hindsightApiUrl: cfgHindsightApiUrl.get(settings),
+		hindsightApiToken: cfgHindsightApiToken.get(settings) ?? null,
 
-		bankId: bankIdEnv ?? settings.get("hindsight.bankId") ?? null,
-		bankIdPrefix: settings.get("hindsight.bankIdPrefix") ?? "",
-		scoping: scopingEnv ?? settingsScoping ?? "per-project-tagged",
-		bankMission: bankMissionEnv ?? settings.get("hindsight.bankMission") ?? "",
-		retainMission: settings.get("hindsight.retainMission") ?? null,
+		bankId: cfgHindsightBankId.get(settings) ?? null,
+		bankIdPrefix: cfgHindsightBankIdPrefix.get(settings) ?? "",
+		scoping: cfgHindsightScoping.get(settings),
+		bankMission: cfgHindsightBankMission.get(settings) ?? "",
+		retainMission: cfgHindsightRetainMission.get(settings) ?? null,
 
-		autoRecall: autoRecallEnv ?? settings.get("hindsight.autoRecall"),
-		autoRetain: autoRetainEnv ?? settings.get("hindsight.autoRetain"),
+		autoRecall: cfgHindsightAutoRecall.get(settings),
+		autoRetain: cfgHindsightAutoRetain.get(settings),
 
-		retainMode: retainModeEnv ?? settingsRetainMode ?? "full-session",
-		retainEveryNTurns: retainEveryNTurnsEnv ?? settings.get("hindsight.retainEveryNTurns"),
-		retainOverlapTurns: settings.get("hindsight.retainOverlapTurns"),
-		retainContext: settings.get("hindsight.retainContext") ?? "omp",
+		retainMode: cfgHindsightRetainMode.get(settings),
+		retainEveryNTurns: cfgHindsightRetainEveryNTurns.get(settings),
+		retainOverlapTurns: cfgHindsightRetainOverlapTurns.get(settings),
+		retainContext: cfgHindsightRetainContext.get(settings),
 
-		recallBudget: recallBudgetEnv ?? settingsRecallBudget ?? "mid",
-		recallMaxTokens: recallMaxTokensEnv ?? settings.get("hindsight.recallMaxTokens"),
-		recallTypes: settings.get("hindsight.recallTypes") as string[],
-		recallContextTurns: recallContextTurnsEnv ?? settings.get("hindsight.recallContextTurns"),
-		recallMaxQueryChars: recallMaxQueryCharsEnv ?? settings.get("hindsight.recallMaxQueryChars"),
+		recallBudget: cfgHindsightRecallBudget.get(settings),
+		recallMaxTokens: cfgHindsightRecallMaxTokens.get(settings),
+		recallTypes: [...cfgHindsightRecallTypes.get(settings)],
+		recallContextTurns: cfgHindsightRecallContextTurns.get(settings),
+		recallMaxQueryChars: cfgHindsightRecallMaxQueryChars.get(settings),
 		recallPromptPreamble: DEFAULT_PREAMBLE,
 
-		debug: debugEnv ?? settings.get("hindsight.debug"),
+		debug: cfgHindsightDebug.get(settings),
 
-		requestTimeoutMs: requestTimeoutMsEnv ?? settings.get("hindsight.requestTimeoutMs"),
-		reflectTimeoutMs: reflectTimeoutMsEnv ?? settings.get("hindsight.reflectTimeoutMs"),
-		recallTimeoutMs: recallTimeoutMsEnv ?? settings.get("hindsight.recallTimeoutMs"),
-		retainTimeoutMs: retainTimeoutMsEnv ?? settings.get("hindsight.retainTimeoutMs"),
+		requestTimeoutMs: cfgHindsightRequestTimeoutMs.get(settings),
+		reflectTimeoutMs: cfgHindsightReflectTimeoutMs.get(settings),
+		recallTimeoutMs: cfgHindsightRecallTimeoutMs.get(settings),
+		retainTimeoutMs: cfgHindsightRetainTimeoutMs.get(settings),
 
-		mentalModelsEnabled: settings.get("hindsight.mentalModelsEnabled"),
-		mentalModelAutoSeed: settings.get("hindsight.mentalModelAutoSeed"),
-		mentalModelRefreshIntervalMs: settings.get("hindsight.mentalModelRefreshIntervalMs"),
-		mentalModelMaxRenderChars: settings.get("hindsight.mentalModelMaxRenderChars"),
+		mentalModelsEnabled: cfgHindsightMentalModelsEnabled.get(settings),
+		mentalModelAutoSeed: cfgHindsightMentalModelAutoSeed.get(settings),
+		mentalModelMaxRenderChars: cfgHindsightMentalModelMaxRenderChars.get(settings),
 	};
 
 	return config;

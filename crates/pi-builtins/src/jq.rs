@@ -8,7 +8,7 @@ use std::{
 	cell::RefCell,
 	ffi::OsString,
 	io::{self, BufRead, Write},
-	path::PathBuf,
+	path::{Path, PathBuf},
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -19,6 +19,7 @@ use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use jaq_core::{Ctx, RcIter, load};
 use jaq_json::Val;
+use pi_vfs::{BlockingFs, File, TempOptions};
 
 use crate::host::{Host, Utility, util};
 
@@ -269,12 +270,13 @@ mod filter {
 	};
 	use std::{
 		io::{self, Write},
-		path::PathBuf,
+		path::{Path, PathBuf},
 	};
 
 	use jaq_core::{
 		Ctx, Error as CoreError, Exn, Native, RcIter, RunPtr, UpdatePtr, ValT, compile, load,
 	};
+	use pi_vfs::BlockingFs;
 
 	use super::{Cli, Error, Val, read};
 
@@ -401,6 +403,7 @@ mod filter {
 	}
 
 	pub fn parse_compile(
+		fs: &BlockingFs,
 		path: &PathBuf,
 		code: &str,
 		vars: &[String],
@@ -415,7 +418,12 @@ mod filter {
 		let vars: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 		let arena = Arena::default();
 		let defs = jaq_std::defs().chain(jaq_json::defs());
-		let loader = Loader::new(defs).with_std_read(paths);
+		let read = |import: load::Import<&str, PathBuf>| -> Result<File<String, PathBuf>, String> {
+			let path = find_import(fs, &import, paths, "jq")?;
+			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
+			Ok(File { code, path })
+		};
+		let loader = Loader::new(defs).with_read(read);
 		let path = path.into();
 		let modules = loader
 			.load(&arena, File { path, code })
@@ -423,8 +431,8 @@ mod filter {
 
 		let mut vals = Vec::new();
 		import(&modules, |p| {
-			let path = p.find(paths, "json")?;
-			vals.push(read::json_array(path).map_err(|e| e.to_string())?);
+			let path = find_import(fs, &p, paths, "json")?;
+			vals.push(read::json_array(fs, &path).map_err(|e| e.to_string())?);
 			Ok(())
 		})
 		.map_err(load_errors)?;
@@ -436,6 +444,100 @@ mod filter {
 			.with_global_vars(vars.iter().map(|v| &**v));
 		let filter = compiler.compile(modules).map_err(compile_errors)?;
 		Ok((vals, filter))
+	}
+
+	/// `jaq_core::load::Import::find`, resolving candidates through the
+	/// injected filesystem instead of the host process's.
+	///
+	/// Search paths from the directive's `search` metadata are relative to the
+	/// importing module; command-line (`-L`) paths are not. `~` and `$ORIGIN`
+	/// prefixes expand as upstream does.
+	fn find_import(
+		fs: &BlockingFs,
+		import: &load::Import<&str, PathBuf>,
+		paths: &[PathBuf],
+		ext: &str,
+	) -> Result<PathBuf, String> {
+		let parent = pi_vfs::parent_path(import.parent).unwrap_or(Path::new("."));
+
+		let mut rel = Path::new(*import.path).to_path_buf();
+		if !rel.is_relative() {
+			return Err("non-relative path".into());
+		}
+		rel.set_extension(ext);
+
+		#[cfg(target_os = "windows")]
+		let home = "USERPROFILE";
+		#[cfg(not(target_os = "windows"))]
+		let home = "HOME";
+
+		let home = || std::env::var_os(home).map(PathBuf::from);
+		let origin = || std::env::current_exe().ok()?.parent().map(PathBuf::from);
+		let expand = |path: &Path| {
+			let home = expand_prefix(path, "~", home);
+			let origin = expand_prefix(path, "$ORIGIN", origin);
+			home.or(origin).unwrap_or_else(|| path.to_path_buf())
+		};
+
+		let meta = import_search_paths(import.meta)
+			.into_iter()
+			.map(|path| pi_vfs::join_path(parent, &expand(path.as_path())));
+		meta.chain(paths.iter().map(|path| expand(path.as_path())))
+			.map(|path| pi_vfs::join_path(&path, &rel))
+			.filter_map(|path| fs.canonicalize(&path).ok())
+			.find(|path| fs.is_file(path))
+			.ok_or_else(|| "file not found".into())
+	}
+
+	fn expand_prefix(
+		path: &Path,
+		prefix: &str,
+		replacement: impl FnOnce() -> Option<PathBuf>,
+	) -> Option<PathBuf> {
+		let rest = path.strip_prefix(prefix).ok()?;
+		let mut expanded = replacement()?;
+		expanded.push(rest);
+		Some(expanded)
+	}
+
+	/// The `search` entries of an import directive's metadata object.
+	fn import_search_paths(meta: &Option<load::parse::Term<&str>>) -> Vec<PathBuf> {
+		use load::parse::Term;
+
+		let Some(Term::Obj(entries)) = meta else {
+			return Vec::new();
+		};
+		let search = entries.iter().find_map(|(key, value)| {
+			if *term_str(key)? == "search" { value.as_ref() } else { None }
+		});
+		let mut found = Vec::new();
+		match search {
+			Some(Term::Arr(Some(items))) => {
+				let mut stack = vec![&**items];
+				while let Some(term) = stack.pop() {
+					if let Term::BinOp(left, load::parse::BinaryOp::Comma, right) = term {
+						stack.push(&**right);
+						stack.push(&**left);
+					} else if let Some(path) = term_str(term) {
+						found.push(PathBuf::from(*path));
+					}
+				}
+			},
+			Some(term) => found.extend(term_str(term).map(|path| PathBuf::from(*path))),
+			None => {},
+		}
+		found
+	}
+
+	/// A plain string literal without interpolation or format.
+	fn term_str<'t, 's>(term: &'t load::parse::Term<&'s str>) -> Option<&'t &'s str> {
+		match term {
+			load::parse::Term::Str(None, parts) => match &parts[..] {
+				[load::lex::StrPart::Str(text)] => Some(text),
+				_ => None,
+			},
+			_ => None,
+		}
 	}
 
 	/// Run a filter with given input values and run `f` for every value output.
@@ -607,7 +709,7 @@ mod filter {
 		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
 	}
 
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String>;
+	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
 
 	impl Report {
 		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
@@ -620,13 +722,19 @@ mod filter {
 				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
 				Label::new(range)
 					.with_text(text.join(""))
-					.with_style(move |s| color.apply(s).to_string())
+					.with_style(Some(color))
 			});
-			Block::new(idx, labels).unwrap().map_code(|c| {
-				let c = c.replace('\t', "    ");
-				let w = xutf::width_str(&c);
-				CodeWidth::new(c, core::cmp::max(w, 1))
-			})
+			Block::new(idx, labels)
+				.unwrap()
+				.map_code(|c| {
+					let c = c.replace('\t', "    ");
+					let w = xutf::width_str(&c);
+					CodeWidth::new(c, core::cmp::max(w, 1))
+				})
+				.with_paint(|f, color, value| match color {
+					Some(color) => write!(f, "{}", color.apply(value)),
+					None => write!(f, "{value}"),
+				})
 		}
 	}
 
@@ -634,21 +742,32 @@ mod filter {
 
 mod read {
 	use std::{
-		io::{self, BufRead},
+		io::{self, BufRead, Read},
 		path::Path,
 	};
 
+	use pi_vfs::BlockingFs;
+
 	use super::{Cli, Val};
 
-	/// Try to load file by memory mapping and fall back to regular loading if it
-	/// fails.
-	pub fn load_file(path: impl AsRef<Path>) -> io::Result<Box<dyn core::ops::Deref<Target = [u8]>>> {
-		let path = path.as_ref();
-		let file = std::fs::File::open(path)?;
-		match unsafe { memmap2::Mmap::map(&file) } {
-			Ok(mmap) => Ok(Box::new(mmap)),
-			Err(_) => Ok(Box::new(std::fs::read(path)?)),
+	/// Load a file through the injected filesystem. Native files are memory
+	/// mapped when possible; everything else is read through the handle.
+	pub fn load_file(
+		fs: &BlockingFs,
+		path: &Path,
+	) -> io::Result<Box<dyn core::ops::Deref<Target = [u8]>>> {
+		let mut file = fs.open(path)?;
+		if let Some(native) = file.native()
+			// SAFETY: the mapping is read-only and dropped before any in-place
+			// replacement of the file; concurrent external truncation is the
+			// same hazard upstream jaq accepts.
+			&& let Ok(mmap) = unsafe { memmap2::Mmap::map(native) }
+		{
+			return Ok(Box::new(mmap));
 		}
+		let mut bytes = Vec::new();
+		file.read_to_end(&mut bytes)?;
+		Ok(Box::new(bytes))
 	}
 
 	pub fn invalid_data(e: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
@@ -672,8 +791,8 @@ mod read {
 		})
 	}
 
-	pub fn json_array(path: impl AsRef<Path>) -> io::Result<Val> {
-		json_slice(&load_file(path.as_ref())?).collect()
+	pub fn json_array(fs: &BlockingFs, path: &Path) -> io::Result<Val> {
+		json_slice(&load_file(fs, path)?).collect()
 	}
 
 	pub fn buffered<'a, R>(cli: &Cli, read: R) -> Box<dyn Iterator<Item = io::Result<Val>> + 'a>
@@ -1037,16 +1156,19 @@ mod color {
 }
 
 fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, Error> {
+	let fs = host.fs().clone();
 	if let Some(test_files) = &cli.run_tests {
 		return Ok(match test_files.last() {
 			Some(file) => {
 				run_tests(
-					io::BufReader::new(std::fs::File::open(file)?),
+					&fs,
+					io::BufReader::new(fs.open(file)?),
 					&mut host.stdout,
 					&mut host.stderr,
 				)
 			},
 			None => run_tests(
+				&fs,
 				io::BufReader::new(&mut host.stdin),
 				&mut host.stdout,
 				&mut host.stderr,
@@ -1060,12 +1182,11 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 		None => (Vec::new(), Filter::default()),
 		Some(filter) => {
 			let (path, code) = match filter {
-				cli::Filter::FromFile(path) => {
-					(path.into(), std::fs::read_to_string(path)?)
-				},
+				cli::Filter::FromFile(path) => (path.into(), fs.read_to_string(path)?),
 				cli::Filter::Inline(filter) => ("<inline>".into(), filter.clone()),
 			};
-			filter::parse_compile(&path, &code, &vars, &cli.library_path).map_err(Error::Report)?
+			filter::parse_compile(&fs, &path, &code, &vars, &cli.library_path)
+				.map_err(Error::Report)?
 		},
 	};
 	ctx.extend(vals);
@@ -1082,27 +1203,39 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 			// operations (open, metadata, in-place temp+rename) use the
 			// resolved path so nothing touches the host process cwd.
 			let path = file.as_path();
-			let file =
-				read::load_file(path).map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
+			let file = read::load_file(&fs, path)
+				.map_err(|e| Error::Io(Some(path.display().to_string()), e))?;
 			let inputs = read::slice(cli, &file);
 			if cli.in_place {
 				// create a temporary file where output is written to,
 				// in the resolved target's directory so the final rename
 				// stays on the same filesystem
-				let location = path.parent().unwrap();
-				let mut tmp = tempfile::Builder::new()
-					.prefix("jaq")
-					.tempfile_in(location)?;
+				let location = pi_vfs::parent_path(path).unwrap_or(Path::new("."));
+				let (tmp_path, tmp) = fs.create_temp(location, &TempOptions::new().prefix("jaq"))?;
+				let mut out = io::BufWriter::new(tmp);
 
-				last = filter::run(cli, &filter, ctx.clone(), inputs, |output| {
-					output::print(tmp.as_file_mut(), cli, &output)
-				})?;
+				let ran = filter::run(cli, &filter, ctx.clone(), inputs, |output| {
+					output::print(&mut out, cli, &output)
+				});
 
 				// replace the input file with the temporary file
 				std::mem::drop(file);
-				let perms = std::fs::metadata(path)?.permissions();
-				tmp.persist(path).map_err(Error::Persist)?;
-				std::fs::set_permissions(path, perms)?;
+				let replaced = match ran {
+					Ok(ran) => replace_with_temp(&fs, out, &tmp_path, path)
+						.map(|()| ran)
+						.map_err(Error::from),
+					Err(error) => {
+						// Release the handle before the file is removed.
+						let _ = out.into_parts().0.close();
+						Err(error)
+					},
+				};
+				if replaced.is_err() {
+					// The operation filesystem may be cancelled; cleanup must
+					// still run.
+					let _ = fs.for_cleanup().remove_file(&tmp_path);
+				}
+				last = replaced?;
 			} else {
 				last = output::with_stdout(stdout, |out| {
 					filter::run(cli, &filter, ctx.clone(), inputs, |v| output::print(out, cli, &v))
@@ -1119,6 +1252,28 @@ fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, 
 	}
 }
 
+/// Publishes an in-place result: closes the temporary file (surfacing any
+/// deferred write error), gives it the target's permissions, and renames it
+/// over the target.
+fn replace_with_temp(
+	fs: &BlockingFs,
+	out: io::BufWriter<File>,
+	tmp_path: &Path,
+	path: &Path,
+) -> io::Result<()> {
+	out.into_inner()
+		.map_err(|error| {
+			let (error, out) = error.into_parts();
+			// Release the handle before the caller removes the file.
+			let _ = out.into_parts().0.close();
+			error
+		})?
+		.close()?;
+	let perms = fs.metadata(path)?.permissions();
+	fs.set_permissions(tmp_path, perms)?;
+	fs.rename(tmp_path, path)
+}
+
 fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
 	let arg = cli.arg.iter().map(|(k, s)| {
 		let s = s.to_owned();
@@ -1130,13 +1285,15 @@ fn binds(cli: &Cli, host: &Host) -> Result<Vec<(String, Val)>, Error> {
 		let err = |e| Error::Parse(format!("{e} (for value passed to `--argjson {k}`)"));
 		Ok((k.to_owned(), lexer.exactly_one(Val::parse).map_err(err)?))
 	});
+	let fs = host.fs();
 	let rawfile = cli.rawfile.iter().map(|(k, path)| {
-		let s = std::fs::read_to_string(path)
+		let s = fs.read_to_string(Path::new(path))
 			.map_err(|e| Error::Io(Some(format!("{path:?}")), e));
 		Ok((k.to_owned(), Val::Str(s?.into())))
 	});
 	let slurpfile = cli.slurpfile.iter().map(|(k, path)| {
-		let a = read::json_array(path).map_err(|e| Error::Io(Some(format!("{path:?}")), e));
+		let a = read::json_array(fs, Path::new(path))
+			.map_err(|e| Error::Io(Some(format!("{path:?}")), e));
 		Ok((k.to_owned(), a?))
 	});
 
@@ -1170,7 +1327,6 @@ enum Error {
 	Report(Vec<FileReports>),
 	Parse(String),
 	Jaq(jaq_core::Error<Val>),
-	Persist(tempfile::PersistError),
 	FalseOrNull,
 	NoOutput,
 }
@@ -1186,9 +1342,6 @@ impl Display for Error {
 				}
 				writeln!(f, "{e}")
 			},
-			Self::Persist(e) => {
-				writeln!(f, "Error: {e}")
-			},
 			Self::Report(reports) => reports.iter().try_for_each(|fr| write!(f, "{fr}")),
 			Self::Parse(e) => writeln!(f, "Error: failed to parse: {e}"),
 			Self::Jaq(e) => writeln!(f, "Error: {e}"),
@@ -1201,7 +1354,7 @@ impl Error {
 	fn report(&self) -> i32 {
 		match self {
 			Self::FalseOrNull => 1,
-			Self::Io(..) | Self::Persist(_) => 2,
+			Self::Io(..) => 2,
 			Self::Report(_) => 3,
 			Self::NoOutput => 4,
 			Self::Parse(_) | Self::Jaq(_) => 5,
@@ -1215,9 +1368,9 @@ impl From<io::Error> for Error {
 	}
 }
 
-fn run_test(test: load::test::Test<String>) -> Result<(Val, Val), Error> {
-	let (ctx, filter) =
-		filter::parse_compile(&PathBuf::new(), &test.filter, &[], &[]).map_err(Error::Report)?;
+fn run_test(fs: &BlockingFs, test: load::test::Test<String>) -> Result<(Val, Val), Error> {
+	let (ctx, filter) = filter::parse_compile(fs, &PathBuf::new(), &test.filter, &[], &[])
+		.map_err(Error::Report)?;
 
 	let inputs = RcIter::new(Box::new(core::iter::empty()));
 	let ctx = Ctx::new(ctx, &inputs);
@@ -1235,6 +1388,7 @@ fn run_test(test: load::test::Test<String>) -> Result<(Val, Val), Error> {
 }
 
 fn run_tests(
+	fs: &BlockingFs,
 	read: impl BufRead,
 	stdout: &mut dyn Write,
 	stderr: &mut dyn Write,
@@ -1248,7 +1402,7 @@ fn run_tests(
 			break;
 		}
 		let _ = writeln!(stdout, "Testing {}", test.filter);
-		match run_test(test) {
+		match run_test(fs, test) {
 			Err(e) => {
 				let _ = writeln!(stderr, "{e:?}");
 			},

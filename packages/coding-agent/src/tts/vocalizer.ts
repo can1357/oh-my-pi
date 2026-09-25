@@ -34,16 +34,21 @@
  * Errors are swallowed (debug-logged) so a synthesis or playback failure never
  * throws into the turn. A process-level singleton ({@link vocalizer}) is shared
  * by the event controller (streaming deltas) and the ask tool (spoken
- * questions); the event controller wires the per-session enhancer via
- * {@link Vocalizer.setEnhancer}.
+ * questions); the event controller wires the per-session model source and
+ * enhancer via {@link Vocalizer.setModelSource} and {@link Vocalizer.setEnhancer}.
  */
+import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
-import { DEFAULT_TTS_VOICE } from "./models";
+import { resolveRoleChain } from "../config/model-resolver";
+import { roleCandidatePool } from "../config/model-roles";
+import { type Settings, settings } from "../config/settings";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS } from "./models";
 import { SpeakableStream } from "./speakable";
 import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
+
+import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechVoice } from "./settings";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
@@ -51,6 +56,20 @@ const IDLE_FLUSH_MS = 1000;
 const COALESCE_MIN_CHARS = 400;
 /** Bounded rewrite concurrency across utterances. */
 const MAX_REWRITES_IN_FLIGHT = 2;
+
+export interface VocalizerModelSource {
+	settings: Settings;
+	registry: ModelBrowserRegistry;
+}
+
+/** Resolve the first speech-role candidate that the local streaming worker can run. */
+export function resolveLocalSpeechModelId(source: VocalizerModelSource): string {
+	const pool = roleCandidatePool("speech", source.settings, source.registry);
+	const local = resolveRoleChain("speech", source.settings, pool).find(
+		candidate => candidate.model.api === "local-inference",
+	);
+	return local?.model.id ?? TTS_LOCAL_MODELS[0].key;
+}
 
 export interface VocalizerPlayer {
 	start(sampleRate: number): void;
@@ -90,6 +109,8 @@ export class Vocalizer {
 	#enhanced: EnhancedUtterance | null = null;
 	/** Per-session rewrite service; wired by the event controller, null elsewhere. */
 	#enhancer: SpeechEnhancer | null = null;
+	/** Live per-session settings and registry used to resolve the speech role. */
+	#modelSource: VocalizerModelSource | null = null;
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -116,6 +137,11 @@ export class Vocalizer {
 		this.#enhancer = enhancer;
 	}
 
+	/** Wire (or drop) the live per-session model source used by local speech synthesis. */
+	setModelSource(source: VocalizerModelSource | null): void {
+		this.#modelSource = source;
+	}
+
 	/**
 	 * Suppress new vocalization until the returned idempotent release function runs.
 	 * Existing synthesis and playback stop immediately; nested scopes release independently.
@@ -140,9 +166,10 @@ export class Vocalizer {
 	 * pipeline (enhanced vs mechanical) is latched per utterance.
 	 */
 	pushDelta(text: string): void {
-		if (this.#suspensions > 0 || !settings.get("speech.enabled")) return;
+		const speechSettings = this.#modelSource?.settings ?? settings;
+		if (this.#suspensions > 0 || !cfgSpeechEnabled.get(speechSettings)) return;
 		if (!text) return;
-		if (this.#enhanced || (!this.#speakable && this.#enhancer && settings.get("speech.enhanced"))) {
+		if (this.#enhanced || (!this.#speakable && this.#enhancer && cfgSpeechEnhanced.get(speechSettings))) {
 			this.#pushEnhanced(text);
 			return;
 		}
@@ -351,8 +378,9 @@ export class Vocalizer {
 	 * prior utterance's, so sequential utterances never overlap.
 	 */
 	#openSession(abort: AbortController): TtsStreamHandle {
-		const modelKey = settings.get("tts.localModel");
-		const voice = settings.get("speech.voice") || DEFAULT_TTS_VOICE;
+		const source = this.#modelSource;
+		const modelKey = source ? resolveLocalSpeechModelId(source) : TTS_LOCAL_MODELS[0].key;
+		const voice = cfgSpeechVoice.get(source?.settings ?? settings) || DEFAULT_TTS_VOICE;
 		const handle = ttsClient.synthesizeStream(modelKey, { voice, signal: abort.signal });
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);

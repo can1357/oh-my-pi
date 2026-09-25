@@ -25,7 +25,7 @@ async function captureRefreshResource(
 	});
 	try {
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		await storage.reload();
+		await storage.credentials.reload();
 		const credential: MCPStoredOAuthCredential = {
 			type: "oauth",
 			access: "access-0",
@@ -33,7 +33,7 @@ async function captureRefreshResource(
 			expires: Date.now() - 60_000,
 			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 		};
-		await storage.set(provider, credential);
+		await storage.credentials.set(provider, credential);
 		const result = await refreshStoredManagedMcpOAuthCredential(storage, provider, {
 			forceRefresh: true,
 			recoverServerUrlFromCredentialId,
@@ -81,7 +81,7 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 	try {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		const authStorage = new AuthStorage(store);
-		await authStorage.reload();
+		await authStorage.credentials.reload();
 		const credential: MCPStoredOAuthCredential = {
 			type: "oauth",
 			access: "access-0",
@@ -89,7 +89,7 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 			expires: Date.now() - 60_000,
 			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 		};
-		await authStorage.set(provider, credential);
+		await authStorage.credentials.set(provider, credential);
 		authStorage.close();
 
 		const proc = Bun.spawn([process.execPath, cliEntry, "token", provider, "--force-refresh"], {
@@ -116,8 +116,8 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 
 		const persistedStore = await SqliteAuthCredentialStore.open(dbPath);
 		const persistedStorage = new AuthStorage(persistedStore);
-		await persistedStorage.reload();
-		const persisted = persistedStorage.get(provider);
+		await persistedStorage.credentials.reload();
+		const persisted = persistedStorage.credentials.get(provider);
 		expect(persisted?.type).toBe("oauth");
 		if (persisted?.type === "oauth") {
 			expect(persisted.access).toBe("access-1");
@@ -141,8 +141,8 @@ test("token refuses a managed MCP id scoped to another profile", async () => {
 	const dbPath = tempDir.join("agent.db");
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const authStorage = new AuthStorage(store);
-	await authStorage.reload();
-	await authStorage.set(foreignProvider, {
+	await authStorage.credentials.reload();
+	await authStorage.credentials.set(foreignProvider, {
 		type: "oauth",
 		access: "work-access",
 		refresh: "work-refresh",

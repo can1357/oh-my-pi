@@ -19,11 +19,13 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
-import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelString } from "../config/model-resolver";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { Action } from "./actions";
 import { applyActions, initialArray, makeActions } from "./actions";
-import type { CatPlacement, IfBenchFailure } from "./protocol";
+import type { IfBenchFailure, IfBenchObserver } from "@oh-my-pi/pi-tui/apps/if-bench-board";
+import type { CatPlacement } from "./protocol";
 import { assessResponse, buildSystemPrompt, buildTurnPrompt } from "./protocol";
 
 /** Outcome of one turn: what was asked, what came back, and how it scored. */
@@ -71,14 +73,6 @@ export interface IfBenchSummary {
 	failures: number;
 }
 
-/** Live-progress sink; every hook is optional so JSON mode can pass nothing. */
-export interface IfBenchObserver {
-	modelStarted?(label: string): void;
-	turnStarted?(label: string, turn: number, actions: number): void;
-	turnFinished?(label: string, record: IfBenchTurnRecord): void;
-	modelFinished?(report: IfBenchModelReport): void;
-}
-
 export interface IfBenchRunOptions {
 	targets: readonly BenchTarget[];
 	runtime: BenchRuntime;
@@ -91,7 +85,7 @@ export interface IfBenchRunOptions {
 	stream: StreamSimpleFn;
 	now: () => number;
 	randomSessionId: () => string;
-	observer?: IfBenchObserver;
+	observer?: IfBenchObserver<IfBenchTurnRecord, IfBenchModelReport>;
 	/** Sleep between refusal-retry attempts; tests inject a no-op. Defaults to `Bun.sleep`. */
 	sleep?: (ms: number) => Promise<void>;
 }

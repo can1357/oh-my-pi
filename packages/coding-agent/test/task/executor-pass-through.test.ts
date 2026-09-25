@@ -5,22 +5,27 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
-import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -28,6 +33,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		for (const listener of listeners) listener(event);
 	};
 	const session = {
+		...createSessionDefaults(),
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -35,7 +41,6 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async (_toolNames: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -46,14 +51,6 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		prompt: async (_text: string, _options?: PromptOptions) => {
 			onPrompt({ emit });
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 	};
 	return session as unknown as AgentSession;
 }
@@ -100,12 +97,16 @@ const baseOptions = {
 	enableLsp: false,
 };
 
-function createModelRegistry(model: Model): ModelRegistry {
+function createModelRegistry(
+	models: Model | Model[],
+	getApiKey: (model: Model) => Promise<string | undefined> = async () => "test-key",
+): ModelRegistry {
+	const available = Array.isArray(models) ? models : [models];
 	return {
 		authStorage: {},
 		refresh: async () => {},
-		getAvailable: () => [model],
-		getApiKey: async () => "test-key",
+		getAvailable: () => available,
+		getApiKey,
 	} as unknown as ModelRegistry;
 }
 
@@ -201,8 +202,48 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
+	});
+
+	it("never grants subagents wait, and requires write for peers", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const readOnlyResult = await runSubprocess({
+			...baseOptions,
+			id: "read-only-child",
+			agent: { ...baseAgent, tools: ["read", "grep", "glob"] },
+		});
+		const writableResult = await runSubprocess({
+			...baseOptions,
+			id: "writable-child",
+			agent: { ...baseAgent, tools: ["read", "write"] },
+		});
+		const spawningResult = await runSubprocess({
+			...baseOptions,
+			id: "spawning-child",
+			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
+		});
+
+		expect(readOnlyResult.exitCode).toBe(0);
+		expect(writableResult.exitCode).toBe(0);
+		expect(spawningResult.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task"]);
+
+		const promptText = (index: number): string => {
+			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
+			const resolved = typeof prompt === "function" ? prompt(["default"]) : prompt;
+			return Array.isArray(resolved) ? resolved.join("\n") : (resolved ?? "");
+		};
+		const readOnlyPrompt = promptText(0);
+		const writablePrompt = promptText(1);
+		const spawningPrompt = promptText(2);
+		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
+		expect(writablePrompt.includes("# Peers")).toBe(true);
+		expect(spawningPrompt.includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -225,7 +266,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
-	it("removes all MCP and discovered capability sources for a restricted child", async () => {
+	it("removes MCP and fresh discovery sources for a restricted child", async () => {
 		const session = yieldEmittingSession();
 		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
 		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
@@ -267,7 +308,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
-		expect(forwarded?.preloadedPreparedExtensions).toEqual([]);
 		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
 		expect(getTools).not.toHaveBeenCalled();
 		expect(forwarded?.outputSchemaMode).toBe("strict");
@@ -485,5 +525,207 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
+	});
+});
+
+describe("runSubprocess per-agent compaction threshold overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies the override to the named child only, not to agents that child spawns", async () => {
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()))
+			.mockResolvedValueOnce(createSessionResult(yieldEmittingSession()));
+		const rootSettings = Settings.isolated({ "compaction.thresholdTokens": 40_000 });
+
+		const child = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-child",
+			settings: rootSettings,
+			compactionThresholdOverride: { thresholdPercent: 80, thresholdTokens: -1 },
+		});
+		expect(child.exitCode).toBe(0);
+		const childSettings = createSession.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected child settings");
+		const childCompaction = cfgCompaction.get(childSettings);
+		expect(resolveThresholdTokens(200_000, childCompaction)).toBe(160_000);
+		expect(shouldCompact(50_000, 200_000, childCompaction)).toBe(false);
+		expect(shouldCompact(160_001, 200_000, childCompaction)).toBe(true);
+
+		// A grandchild without its own entry is spawned from the child's settings.
+		const grandchild = await runSubprocess({
+			...baseOptions,
+			id: "compaction-override-grandchild",
+			settings: childSettings,
+		});
+		expect(grandchild.exitCode).toBe(0);
+		const grandchildSettings = createSession.mock.calls[1]?.[0]?.settings;
+		if (!grandchildSettings) throw new Error("Expected grandchild settings");
+		const grandchildCompaction = cfgCompaction.get(grandchildSettings);
+		expect(resolveThresholdTokens(200_000, grandchildCompaction)).toBe(40_000);
+		expect(shouldCompact(50_000, 200_000, grandchildCompaction)).toBe(true);
+	});
+});
+
+describe("runSubprocess per-agent service-tier overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// The child session evaluates the resolver against its final model; the
+	// tests evaluate it the same way, with the model dispatch handed over.
+	function childTiers(
+		sessionOptions: CreateAgentSessionOptions | undefined,
+		model: Model | undefined = sessionOptions?.model,
+	): ServiceTierByFamily {
+		const resolve = sessionOptions?.resolveServiceTierByFamily;
+		if (!resolve) throw new Error("Expected createAgentSession to receive a service-tier resolver");
+		return resolve(model);
+	}
+
+	it("applies the dispatch-resolved override to the effective model selected by task policy", async () => {
+		const effectiveModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const definitionModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!effectiveModel || !definitionModel) throw new Error("Expected bundled service-tier models to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${definitionModel.provider}/${definitionModel.id}`] },
+			modelOverride: [`${effectiveModel.provider}/${effectiveModel.id}`],
+			serviceTierOverride: "scale",
+			id: "subagent-agent-service-tier-effective-model",
+			settings: Settings.isolated({ "tier.subagent": "priority" }),
+			modelRegistry: createModelRegistry(effectiveModel),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({ openai: "scale" });
+	});
+
+	it("keeps tier.subagent when dispatch resolved no override for the agent", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-agent-service-tier-absent",
+			settings: Settings.isolated({ "tier.subagent": "flex" }),
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const sessionOptions = spy.mock.calls[0]?.[0];
+		expect(sessionOptions?.resolveServiceTierByFamily).toBeUndefined();
+		expect([
+			sessionOptions?.settings ? cfgTierOpenai.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierAnthropic.get(sessionOptions?.settings) : undefined,
+			sessionOptions?.settings ? cfgTierGoogle.get(sessionOptions?.settings) : undefined,
+		]).toEqual(["flex", "none", "flex"]);
+	});
+
+	it("drops inherited live tiers a family can't realize instead of failing the spawn", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		// A resumed parent session file can carry a live tier its family never realizes.
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-inherited-unrealizable-tier",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTier: { openai: "flex", anthropic: "flex" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		if (!childSettings) throw new Error("Expected createAgentSession to receive settings");
+		expect([
+			cfgTierOpenai.get(childSettings),
+			cfgTierAnthropic.get(childSettings),
+			cfgTierGoogle.get(childSettings),
+		]).toEqual(["flex", "none", "none"]);
+	});
+
+	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "reviewer", model: [`${model.provider}/${model.id}`] },
+			serviceTierOverride: "scale",
+			id: "subagent-agent-service-tier-family-validation",
+			settings: Settings.isolated({ "tier.subagent": "priority" }),
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({});
+	});
+
+	it("resolves the override against the auth-fallback model rather than the requested one", async () => {
+		const requested = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const parentModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!requested || !parentModel) throw new Error("Expected bundled service-tier models to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// The requested Anthropic model has no working credentials; the parent's OpenAI model does.
+		const modelRegistry = createModelRegistry([requested, parentModel], async model =>
+			model.provider === parentModel.provider ? "test-key" : undefined,
+		);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${requested.provider}/${requested.id}`] },
+			parentActiveModelPattern: `${parentModel.provider}/${parentModel.id}`,
+			serviceTierOverride: "scale",
+			id: "subagent-agent-service-tier-auth-fallback",
+			settings: Settings.isolated({ "tier.subagent": "priority" }),
+			modelRegistry,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.model?.provider).toBe(parentModel.provider);
+		// `scale` is an OpenAI-only tier: it lands on the fallback family and never on Anthropic.
+		expect(childTiers(spy.mock.calls[0]?.[0])).toEqual({ openai: "scale" });
+	});
+
+	it("scopes a concrete override to the model the session resolves instead of broadcasting it", async () => {
+		const openAIModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!openAIModel || !anthropicModel) throw new Error("Expected bundled service-tier models to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: ["extension/deferred-model"] },
+			modelOverride: ["extension/deferred-model"],
+			serviceTierOverride: "priority",
+			id: "subagent-agent-service-tier-deferred-model",
+			settings: Settings.isolated({ "tier.subagent": "none" }),
+			modelRegistry: createModelRegistry([]),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const sessionOptions = spy.mock.calls[0]?.[0];
+		expect(sessionOptions?.model).toBeUndefined();
+		expect(sessionOptions?.modelPattern).toEqual(["extension/deferred-model"]);
+		// Whichever family the session settles on gets the tier — and only that family.
+		expect(childTiers(sessionOptions, anthropicModel)).toEqual({ anthropic: "priority" });
+		expect(childTiers(sessionOptions, openAIModel)).toEqual({ openai: "priority" });
+		expect(childTiers(sessionOptions, undefined)).toEqual({});
 	});
 });

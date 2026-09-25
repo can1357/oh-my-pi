@@ -5,6 +5,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getCommitCacheDbPath } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
+import { cfgCommit } from "../settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import { resolvePrimaryModel, resolveSmolModel } from "../model-selection";
 import type { ConventionalCommit } from "../types";
@@ -63,7 +64,7 @@ function renderStat(entries: VcsNumstatEntry[]): string {
 export async function generateGitCommit(options: GenerateGitCommitOptions): Promise<GeneratedGitCommit> {
 	const repo = vcs.requireGit(options.cwd);
 	const settings = await Settings.init({ cwd: options.cwd });
-	const config = conventionalGenerationConfig(settings.getGroup("commit"));
+	const config = conventionalGenerationConfig(cfgCommit.get(settings));
 	let stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
 	let stagedAll = false;
 	if (stagedFiles.length === 0 && options.stageIfEmpty !== false) {
@@ -102,7 +103,7 @@ async function createOmpInference(
 	config: ConventionalGenerationConfig,
 ): Promise<OmpCommitInference> {
 	options.signal?.throwIfAborted();
-	const authStorage = await discoverAuthStorage();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		const registry = new ModelRegistry(authStorage);
 		await registry.refresh();

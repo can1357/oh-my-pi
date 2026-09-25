@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import {
 	applyDirenvPreflight,
 	buildMinimizerOptions,
@@ -11,12 +12,14 @@ import {
 	isPersistentShellCdCommand,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+
+import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -41,7 +44,7 @@ function shellQuote(value: string): string {
 
 function configureBashUserShell(homeDir: string): boolean {
 	if (process.platform === "win32" || !fs.existsSync("/bin/bash")) return false;
-	Settings.instance.set("shellPath", "/bin/bash");
+	cfgShellPath.set(Settings.instance, "/bin/bash");
 	vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 		shell: "/bin/bash",
 		args: ["-c"],
@@ -208,7 +211,7 @@ describe("executeBash", () => {
 		// load instantly, silently dropping the repo's direnv env. The load keeps
 		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
 		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
-		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
 
 		await executeBash("true", { cwd: tempDir, timeout: 0 });
@@ -222,7 +225,7 @@ describe("executeBash", () => {
 		// A positive caller timeout below the budget DOES clamp the direnv window,
 		// proving the fix only relaxes the `timeout: 0` case and did not disable
 		// clamping wholesale. Setting and options.timeout are both milliseconds.
-		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
 		const callerTimeout = 5;
 		expect(callerTimeout).toBeLessThan(budget);
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
@@ -294,7 +297,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		Settings.instance.set("shellPath", fakeShell);
+		cfgShellPath.set(Settings.instance, fakeShell);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
@@ -346,7 +349,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		Settings.instance.set("shellPath", fakeShell);
+		cfgShellPath.set(Settings.instance, fakeShell);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
 			args: ["-l", "-c"],
@@ -482,7 +485,7 @@ exit 64
 
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-shellpath-"));
 		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_shell_alias='printf zsh-alias-ok\\\\n'\n");
-		Settings.instance.set("shellPath", zshPath);
+		cfgShellPath.set(Settings.instance, zshPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -538,7 +541,7 @@ exit 64
 			path.join(configDir, "conf.d", "pi-login.fish"),
 			"if status is-login; echo fish-login-side-effect; end\n",
 		);
-		Settings.instance.set("shellPath", fishPath);
+		cfgShellPath.set(Settings.instance, fishPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fishPath,
@@ -582,7 +585,7 @@ exit 64
 
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
 		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
-		Settings.instance.set("shellPath", zshPath);
+		cfgShellPath.set(Settings.instance, zshPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -955,26 +958,53 @@ exit 64
 		if (process.platform === "win32") return;
 
 		const sessionKey = "parallel-overlap";
-		const order: string[] = [];
-		const slow = executeBash('sleep 0.15 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
-			result => {
-				order.push("slow");
-				return result;
-			},
-		);
-		const fast = executeBash('echo "B-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(result => {
-			order.push("fast");
-			return result;
+		const started = path.join(tempDir, "overlap-owner.started");
+		const release = path.join(tempDir, "overlap-owner.release");
+		const controller = new AbortController();
+		const deadline = Date.now() + 4000;
+		let ownerSettled = false;
+		const owner = executeBash(
+			`touch ${shellQuote(started)}; while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; echo "A-done"`,
+			{ cwd: tempDir, timeout: 0, sessionKey, signal: controller.signal },
+		).finally(() => {
+			ownerSettled = true;
 		});
+		const calls = [owner];
+		let overlapPassed = false;
+		try {
+			await pollUntil(() => fs.existsSync(started), deadline);
+			expect(fs.existsSync(started)).toBe(true);
 
-		const [slowResult, fastResult] = await Promise.all([slow, fast]);
-		expect(slowResult.exitCode).toBe(0);
-		expect(slowResult.output).toContain("A-done");
-		expect(fastResult.exitCode).toBe(0);
-		expect(fastResult.output).toContain("B-done");
-		// If the second call had queued behind the persistent session it could
-		// not finish before the 150ms sleep of the first.
-		expect(order).toEqual(["fast", "slow"]);
+			let overlappingSettled = false;
+			const overlapping = executeBash('echo "B-done"', {
+				cwd: tempDir,
+				timeout: 0,
+				sessionKey,
+				signal: controller.signal,
+			}).finally(() => {
+				overlappingSettled = true;
+			});
+			calls.push(overlapping);
+			// A serialized call cannot finish until the owner is explicitly released.
+			await pollUntil(() => overlappingSettled, Date.now() + 4000);
+			expect(overlappingSettled).toBe(true);
+			const overlappingResult = await overlapping;
+			expect(overlappingResult.exitCode).toBe(0);
+			expect(overlappingResult.output).toContain("B-done");
+			expect(ownerSettled).toBe(false);
+			overlapPassed = true;
+		} finally {
+			try {
+				await Bun.write(release, "");
+				if (overlapPassed) await pollUntil(() => ownerSettled, Date.now() + 4000);
+			} finally {
+				controller.abort();
+				await Promise.allSettled(calls);
+			}
+		}
+		const ownerResult = await owner;
+		expect(ownerResult.exitCode).toBe(0);
+		expect(ownerResult.output).toContain("A-done");
 	});
 
 	it("keeps the owner session usable when an overlapping call times out", async () => {

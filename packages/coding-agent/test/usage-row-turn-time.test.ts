@@ -1,5 +1,5 @@
 /**
- * Coverage for the per-turn prompt→yield time (Δ + clock) in transcript usage
+ * Coverage for the per-turn prompt→yield time (bare Δ marker) in transcript usage
  * rows, gated by `display.showTurnTime` — the delta sits right after the turn's
  * timestamp and counts hooks, tool calls, and the final generation.
  */
@@ -15,10 +15,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
-import { formatUsageRow } from "@oh-my-pi/pi-coding-agent/modes/components/usage-row";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { formatUsageRow } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -31,13 +31,15 @@ import { Container, type TUI } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
+import { cfgDisplayShowTokenUsage, cfgDisplayShowTurnTime } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 // 60s of elapsed: 30s between the prompt and the final response's creation,
 // plus a 30s provider request — formatDuration renders this as "1m".
 const PROMPT_AT = new Date(2026, 0, 2, 3, 4, 5).getTime();
 const RESPONSE_CREATED_AT = PROMPT_AT + 30_000;
 const REQUEST_DURATION_MS = 30_000;
 const USAGE_LABEL = "4.2K";
-const TURN_ELAPSED_LABEL = "Δ1m";
+const TURN_ELAPSED_LABEL = "Δ 1m";
 
 type AssistantFixture = Extract<AgentMessage, { role: "assistant" }>;
 
@@ -89,10 +91,12 @@ describe("formatUsageRow turn elapsed", () => {
 		await initTheme();
 	});
 
-	it("renders the clock-and-delta prompt→yield time right after the timestamp", () => {
-		const row = formatUsageRow(assistantMessage().usage as Usage, REQUEST_DURATION_MS, undefined, PROMPT_AT, 60_000);
+	it("renders the bare-delta prompt→yield time right after the timestamp", () => {
+		const row = formatUsageRow(assistantMessage().usage as Usage, REQUEST_DURATION_MS, 6_700, PROMPT_AT, 60_000);
 		expect(row.indexOf("2026-01-02 03:04:05")).toBeLessThan(row.indexOf(TURN_ELAPSED_LABEL));
 		expect(row).toContain(TURN_ELAPSED_LABEL);
+		expect(row).not.toContain(`${theme.icon.time}Δ`);
+		expect(row).toContain(`${theme.icon.time} 6.7s`);
 	});
 
 	it("omits the delta when no elapsed is supplied", () => {
@@ -109,7 +113,7 @@ describe("formatUsageRow turn elapsed", () => {
 			undefined,
 			347.28381699998863,
 		);
-		expect(row).toContain("Δ347ms");
+		expect(row).toContain("Δ 347ms");
 		expect(row).not.toContain("347.28381699998863");
 	});
 });
@@ -117,7 +121,7 @@ describe("formatUsageRow turn elapsed", () => {
 describe("ChatTranscriptBuilder turn elapsed", () => {
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 	});
 	afterEach(() => {
 		resetSettingsForTest();
@@ -132,7 +136,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 	}
 
 	it("shows the prompt→yield delta when display.showTurnTime is on", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		transcript.rebuild(toEntries([userMessage(), assistantMessage()]));
 		const rendered = renderedText(transcript.container);
@@ -141,35 +145,35 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 	});
 
 	it("hides the delta when display.showTurnTime is off", () => {
-		settings.set("display.showTurnTime", false);
+		cfgDisplayShowTurnTime.set(settings, false);
 		const transcript = builder();
 		transcript.rebuild(toEntries([userMessage(), assistantMessage()]));
 		expect(renderedText(transcript.container)).not.toContain(TURN_ELAPSED_LABEL);
 	});
 
 	it("shows no delta when the turn start is unknown (no user message)", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		transcript.rebuild(toEntries([assistantMessage()]));
 		expect(renderedText(transcript.container)).not.toContain(TURN_ELAPSED_LABEL);
 	});
 	it("measures the span from the local completion time when the provider omits duration", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		// gitlab-duo-style: `timestamp` stamped at request start, no provider
 		// `duration` — the session's `completedAt` stamp still yields the full span.
 		transcript.rebuild(toEntries([userMessage(), assistantMessage({ duration: undefined })]));
-		expect(renderedText(transcript.container)).toContain("Δ1m");
+		expect(renderedText(transcript.container)).toContain("Δ 1m");
 	});
 
 	it("shows no delta for a legacy message without the local completion stamp", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		transcript.rebuild(toEntries([userMessage(), assistantMessage({ completedAt: undefined })]));
 		expect(renderedText(transcript.container)).not.toContain("Δ");
 	});
 	it("clears the prompt anchor at a developer-initiated synthetic run during replay", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		const developer = {
 			role: "developer",
@@ -180,11 +184,11 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 		transcript.rebuild(toEntries([userMessage(), assistantMessage(), developer, assistantMessage()]));
 		// Only the user turn's row carries the delta; the auto-continuation run
 		// (developer message, no user prompt) must not inherit the user anchor.
-		const occurrences = renderedText(transcript.container).match(/Δ1m/g)?.length ?? 0;
+		const occurrences = renderedText(transcript.container).match(/Δ 1m/g)?.length ?? 0;
 		expect(occurrences).toBe(1);
 	});
 	it("keeps the prompt anchor across a persisted same-turn continuation reminder", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		// The todo/plan continuation reminders are persisted developer messages
 		// WITHOUT the synthetic marker (auto-continue carries it): the continued
@@ -195,11 +199,11 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			timestamp: RESPONSE_CREATED_AT + 5_000,
 		} as unknown as AgentMessage;
 		transcript.rebuild(toEntries([userMessage(), assistantMessage(), reminder, assistantMessage()]));
-		const occurrences = renderedText(transcript.container).match(/Δ1m/g)?.length ?? 0;
+		const occurrences = renderedText(transcript.container).match(/Δ 1m/g)?.length ?? 0;
 		expect(occurrences).toBe(2);
 	});
 	it("anchors a user-initiated continue shortcut to its own submission time", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		// `.`/`c` continue: a synthetic developer prompt the OPERATOR issued — the
 		// message's timestamp is the prompt time, not a continuation to clear.
@@ -212,11 +216,11 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			timestamp: PROMPT_AT,
 		} as unknown as AgentMessage;
 		transcript.rebuild(toEntries([continuePrompt, assistantMessage()]));
-		expect(renderedText(transcript.container)).toContain("Δ1m");
+		expect(renderedText(transcript.container)).toContain("Δ 1m");
 	});
 
 	it("seeds the prompt→yield delta from a user-invoked skill custom message", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		const skill = {
 			role: "custom",
@@ -230,7 +234,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 		expect(renderedText(transcript.container)).toContain(TURN_ELAPSED_LABEL);
 	});
 	it("seeds the prompt→yield delta from a writable-collab peer prompt", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		const collabPrompt = {
 			role: "custom",
@@ -244,7 +248,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 		expect(renderedText(transcript.container)).toContain(TURN_ELAPSED_LABEL);
 	});
 	it("ignores an agent-attributed user message as a turn start", () => {
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
 		// The advisor's tool-loop guard injects a mid-run `user` corrective with
 		// `attribution: "agent"`; it must not reset the anchor to the redirect.
@@ -258,7 +262,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 		transcript.rebuild(toEntries([userMessage(), assistantMessage(), redirect, assistantMessage()]));
 		// The real user prompt anchors both turns; the redirect adds no reset, so
 		// the second assistant row still measures from the initiating prompt.
-		const occurrences = renderedText(transcript.container).match(/Δ1m/g)?.length ?? 0;
+		const occurrences = renderedText(transcript.container).match(/Δ 1m/g)?.length ?? 0;
 		expect(occurrences).toBe(2);
 	});
 });
@@ -276,12 +280,7 @@ describe("UiHelpers.renderSessionContext turn elapsed", () => {
 			ui: { requestRender: vi.fn() },
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			settings: {
-				get: (key: string) =>
-					key === "display.showTokenUsage" ? true : key === "display.showTurnTime" ? turnTimeOn : false,
-			},
-			getUserMessageText: (message: { content?: unknown }) =>
-				typeof message.content === "string" ? message.content : "",
+			settings: Settings.isolated({ "display.showTokenUsage": true, "display.showTurnTime": turnTimeOn }),
 			addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 			session: {
 				retryAttempt: 0,
@@ -318,8 +317,8 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
-		settings.set("display.showTurnTime", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
+		cfgDisplayShowTurnTime.set(settings, true);
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -335,7 +334,6 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 					return streamState.isStreaming;
 				},
 			},
-			getUserMessageText: message => (typeof message.content === "string" ? message.content : ""),
 		});
 		ctx.chatContainer.setToolActivityVisible(true);
 		const helpers = new UiHelpers(ctx);
@@ -398,7 +396,7 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 		await driveAssistantTurn(controller, assistantMessage());
 
 		// Turn 1 keeps its row's delta; the synthetic run must not add another.
-		const occurrences = renderedText(chatContainer).match(/Δ1m/g)?.length ?? 0;
+		const occurrences = renderedText(chatContainer).match(/Δ 1m/g)?.length ?? 0;
 		expect(occurrences).toBe(1);
 	});
 	it("seeds the delta from a user-invoked skill prompt in the live path", async () => {
@@ -445,7 +443,7 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 		>);
 		await driveAssistantTurn(controller, assistantMessage());
 
-		const occurrences = renderedText(chatContainer).match(/Δ1m/g)?.length ?? 0;
+		const occurrences = renderedText(chatContainer).match(/Δ 1m/g)?.length ?? 0;
 		expect(occurrences).toBe(1); // the synthetic run's row adds no delta
 	});
 });
@@ -458,7 +456,7 @@ describe("AgentSession synthetic follow-up marking", () => {
 		sharedDir = path.join(os.tmpdir(), `pi-turn-time-shared-${Snowflake.next()}`);
 		fs.mkdirSync(sharedDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(sharedDir, "models.yml"));
 	});
 	afterAll(() => {

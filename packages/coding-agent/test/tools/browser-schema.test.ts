@@ -4,6 +4,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 
+import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+
 function makeSession(settings = Settings.isolated({ "browser.enabled": true })): ToolSession {
 	return {
 		cwd: "/tmp/test",
@@ -17,11 +19,11 @@ function makeSession(settings = Settings.isolated({ "browser.enabled": true })):
 describe("browser prelude", () => {
 	it("tracks the live browser capability setting", () => {
 		const settings = Settings.isolated();
-		settings.set("browser.enabled", false);
+		cfgBrowserEnabled.set(settings, false);
 		const prelude = createBrowserPrelude(makeSession(settings));
 
 		expect(prelude.enabled?.()).toBe(false);
-		settings.set("browser.enabled", true);
+		cfgBrowserEnabled.set(settings, true);
 		expect(prelude.enabled?.()).toBe(true);
 	});
 
@@ -45,6 +47,18 @@ describe("browser prelude", () => {
 		await expect(prelude.invoke({ action: "call", name: "x", chain: [] }, context)).rejects.toThrow(
 			"Action 'call' requires a non-empty 'chain'.",
 		);
+		for (const invalid of [
+			{ init_scripts: ["valid", 1] },
+			{ downloads: false },
+			{ user_agent: 1 },
+			{ ignore_https_errors: "yes" },
+			{ allow_file_access: 1 },
+			{ headed: "yes" },
+		]) {
+			await expect(prelude.invoke({ action: "open", ...invalid }, context)).rejects.toThrow(
+				/browser received invalid arguments/,
+			);
+		}
 	});
 
 	it("closes through the real host for an absent named tab", async () => {

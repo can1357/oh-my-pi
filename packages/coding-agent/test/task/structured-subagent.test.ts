@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
+import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -19,8 +21,12 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+
+import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
@@ -33,26 +39,38 @@ const AGENT: AgentDefinition = {
 
 function session(
 	options: {
+		cwd?: string;
+		settings?: Settings;
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationEnabled?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		agentServiceTierOverrides?: Record<string, string>;
+		agentCompactionThresholdOverrides?: Record<string, AgentCompactionThresholdOverride>;
 	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
-		settings: Settings.isolated({
-			"task.maxRecursionDepth": options.maxDepth ?? 2,
-			"task.isolation.enabled": options.isolationEnabled ?? false,
-			"isolation.backend": "rcopy",
-			"task.enableLsp": true,
-			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
-		}),
+		settings:
+			options.settings ??
+			Settings.isolated({
+				"task.maxRecursionDepth": options.maxDepth ?? 2,
+				"task.isolation.enabled": options.isolationEnabled ?? false,
+				"isolation.backend": "rcopy",
+				"task.enableLsp": true,
+				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+				...(options.agentServiceTierOverrides
+					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
+					: {}),
+				...(options.agentCompactionThresholdOverrides
+					? { "task.agentCompactionThresholdOverrides": options.agentCompactionThresholdOverrides }
+					: {}),
+			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
@@ -96,6 +114,30 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
+		mockDiscovery();
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: taggedSession, agent: "m1", invocationKind }),
+			);
+			expect(policy.agent.name).toBe("m1");
+			expect(policy.modelOverride).toEqual(["a/x"]);
+		}
+		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
+			'Unknown agent "m9". Available: worker, m1',
+		);
+	});
+
+	it("keeps discovered agents authoritative on pseudonym collisions", async () => {
+		mockDiscovery({ ...AGENT, name: "m1", model: ["b/y"] });
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
+		expect(policy.modelOverride).toEqual(["b/y"]);
+	});
+
 	it("uses caller, agent, then session schemas in precedence order", async () => {
 		mockDiscovery();
 		const callerSchema = { type: "object", properties: { caller: { type: "string" } } };
@@ -182,11 +224,15 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("reloads model roles before resolving an agent added during the session", async () => {
+	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			"task:\n  enableEffort: true\nretry:\n  modelFallback: true\n",
+		);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const liveSession = {
 			...session(),
@@ -195,16 +241,74 @@ describe("structured subagent primitive", () => {
 		} as ToolSession;
 
 		try {
-			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				"task:\n  agentModelOverrides:\n    hot-worker: xai-oauth/grok-4.6:medium\n  enableEffort: false\nretry:\n  modelFallback: false\n",
+			);
 			await Bun.write(
 				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
-				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: openai/gpt-4o\n---\n\nInspect the assignment.\n",
 			);
 
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
-			expect(policy.modelRole).toBe("hot_worker");
-			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
+			expect(cfgTaskEnableEffort.get(liveSettings)).toBe(false);
+			expect(cfgRetryModelFallback.get(liveSettings)).toBe(false);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves only the exact case-sensitive service-tier override into the policy", async () => {
+		mockDiscovery({ ...AGENT, name: "scout" });
+
+		const exact = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { scout: "priority" } }), agent: "scout" }),
+		);
+		expect(exact.serviceTierOverride).toBe("priority");
+
+		const differentCase = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { Scout: "priority" } }), agent: "scout" }),
+		);
+		expect(differentCase.serviceTierOverride).toBeUndefined();
+	});
+
+	it("resolves only the exact case-sensitive compaction threshold override into the policy", async () => {
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const resolve = (overrides: Record<string, AgentCompactionThresholdOverride>) =>
+			resolveEffectiveSubagentPolicy(
+				request({ session: session({ agentCompactionThresholdOverrides: overrides }), agent: "scout" }),
+			);
+
+		expect((await resolve({ scout: "80%", task: 90000 })).compactionThresholdOverride).toEqual({
+			thresholdPercent: 80,
+			thresholdTokens: -1,
+		});
+		expect((await resolve({ Scout: "80%" })).compactionThresholdOverride).toBeUndefined();
+		expect((await resolve({ task: 90000 })).compactionThresholdOverride).toBeUndefined();
+	});
+
+	it("reloads persisted per-agent service-tier overrides before each launch", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-tier-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = session({ cwd: projectDir, settings: liveSettings });
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const configPath = path.join(agentDir, "config.yml");
+
+		try {
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: priority\n");
+			const first = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(first.serviceTierOverride).toBe("priority");
+
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: none\n");
+			const second = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
@@ -267,7 +371,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		roleSession.settings.override("task.agentModelOverrides", { worker: "@override" });
+		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
 
 		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
 		expect(requestPolicy.modelRole).toBe("request");
@@ -281,7 +385,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		concreteOverrideSession.settings.override("task.agentModelOverrides", { worker: "openai/gpt-4o" });
+		cfgTaskAgentModelOverrides.override(concreteOverrideSession.settings, { worker: "openai/gpt-4o" });
 		const concreteOverridePolicy = await resolveEffectiveSubagentPolicy(
 			request({ session: concreteOverrideSession }),
 		);
@@ -307,7 +411,7 @@ describe("structured subagent primitive", () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
@@ -318,12 +422,60 @@ describe("structured subagent primitive", () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "@empty" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "@empty" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
 		expect(policy.modelRole).toBe("definition");
 		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("lets before_subagent_spawn replace model patterns at dispatch without dropping role identity", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "anthropic/claude-opus-4-5" } });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		childSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return { model: "openai/gpt-4o", note: "pool test" };
+		};
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		// Frontend preflight is side-effect free: stateful routers must not advance.
+		await resolveEffectiveSubagentPolicy(request({ session: childSession }));
+		expect(events).toEqual([]);
+
+		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
+		expect(dispatched[0]).toMatchObject({
+			modelOverride: ["openai/gpt-4o"],
+			modelRole: "definition",
+			modelRoute: "pool test",
+		});
+		expect(events).toEqual([
+			{
+				type: "before_subagent_spawn",
+				agent: "worker",
+				invocationKind: "task",
+				modelRole: "definition",
+				patterns: ["anthropic/claude-opus-4-5"],
+			},
+		]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
+		mockDiscovery();
+		const blockedSession = session();
+		blockedSession.emitBeforeSubagentSpawn = async () => ({ block: true, reason: "pool exhausted" });
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		const error = await runStructuredSubagent(request({ session: blockedSession })).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
+		expect(run).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
 	it("does not assign a role when a child uses an explicit model selector", async () => {
@@ -460,6 +612,22 @@ describe("structured subagent primitive", () => {
 		expect(hint).toContain("Captured branch preserved as omp/task/Worker.");
 		expect(await fs.readFile(nestedPath, "utf8")).toBe("diff --git a/file b/file\n");
 		await fs.rm(artifactsDir, { recursive: true, force: true });
+	});
+
+	it("names the failure when nested patches cannot be written as a fallback", async () => {
+		// `Bun.write` creates missing parents, so a genuine failure needs a path
+		// that cannot become a directory: a regular file in its place.
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-subagent-unwritable-"));
+		const artifactsDir = path.join(parent, "artifacts");
+		await fs.writeFile(artifactsDir, "");
+		const completed = result();
+		completed.nestedPatches = [{ relativePath: "sub/nested", patch: "diff --git a/file b/file\n" }];
+
+		const hint = await buildStructuredSubagentRecoveryHint(completed, artifactsDir);
+
+		expect(hint).toMatch(/Nested patches could not be written: .*(ENOTDIR|EEXIST)/);
+		expect(hint).not.toContain("Captured nested patch preserved");
+		await fs.rm(parent, { recursive: true, force: true });
 	});
 
 	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
@@ -634,12 +802,40 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("reports a run that failed before yielding as unavailable, not schema-invalid", async () => {
+		// Production 2026-09-21: a scout whose model stream died mid-prose
+		// ("Anthropic stream envelope error: stream ended before message_stop")
+		// was delivered as `Structured output: schema invalid: <provider error>`
+		// with its half-streamed text as the offending payload. No payload was
+		// ever validated, so the status is "unavailable", the error is the
+		// provider's, and the partial prose is not presented as data.
+		mockDiscovery();
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue({
+			...result(),
+			exitCode: 1,
+			output: "I'll systematically investigate the codebase",
+			stderr: error,
+			error,
+		});
+
+		const settled = await runStructuredSubagent(request());
+
+		expect(settled.result.structuredOutput).toEqual({
+			source: "agent",
+			mode: "permissive",
+			status: "unavailable",
+			error,
+		});
+		expect(settled.result.structuredOutput).not.toHaveProperty("data");
+	});
+
 	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
-		// Regression: a detached (async) task job that fails with schema
-		// status "invalid" (not "valid") previously had its temp dir wiped
-		// immediately, breaking the "failed agent stays interrogable"
-		// invariant (task/index.ts) — the model could no longer read the
-		// failure via agent://<id> or history://<id> (PR #10625 review).
+		// Regression: a detached (async) task job that fails without a valid
+		// structured payload previously had its temp dir wiped immediately,
+		// breaking the "failed agent stays interrogable" invariant
+		// (task/index.ts) — the model could no longer read the failure via
+		// agent://<id> or history://<id> (PR #10625 review).
 		mockDiscovery();
 		let artifactsDir: string | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -650,7 +846,7 @@ describe("structured subagent primitive", () => {
 		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
 
 		expect(settled.result.exitCode).toBe(1);
-		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(settled.result.structuredOutput?.status).toBe("unavailable");
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
@@ -671,6 +867,25 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("names the preserved branch when nested persistence fails after a branch commit", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async () => ({
+			...result(),
+			branchName: "omp/task/Worker",
+			branchBaseSha: "base",
+			nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
+			error: "Nested patch capture failed: ENOSPC. Isolation workspace retained at /wt/abc.",
+		}));
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
+		);
+
+		expect(settled.mergeSummary).toContain("omp/task/Worker");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

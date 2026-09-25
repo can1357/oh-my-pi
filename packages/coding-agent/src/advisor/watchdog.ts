@@ -6,7 +6,7 @@ import { expandAtImports } from "../discovery/at-imports";
 import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
 import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
 import memoryContextTemplate from "../prompts/advisor/memory-context.md" with { type: "text" };
-import type { ActiveRepoContext } from "../utils/active-repo-context";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { normalizePromptPath } from "../utils/prompt-path";
 
 export function formatActiveRepoWatchdogPrompt(activeRepoContext: ActiveRepoContext): string {

@@ -30,7 +30,7 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 /** Minimal host `InteractiveModeContext`: only the members `CollabHost` reads. */
 function makeHostContext(manager: SessionManager): InteractiveModeContext {
 	return {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session: {
 			isStreaming: false,
@@ -77,7 +77,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 	const session = new AgentSession({ agent, sessionManager: manager, settings: Settings.isolated(), modelRegistry });
 
 	const ctx = {
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		session,
 		statusContainer: { clear: () => {}, disposeChildren: () => {} },
@@ -106,7 +106,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},
 		showError: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		eventBus: undefined,
 		collabGuest: undefined,
 		handleResumeSession: () => Promise.resolve(),
@@ -153,7 +153,7 @@ beforeAll(() => {
 	refreshDirsFromEnv();
 	installInMemoryRelay();
 	authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	authStorage.keys.setRuntime("anthropic", "test-key");
 	modelRegistry = new ModelRegistry(authStorage);
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("expected bundled anthropic model");

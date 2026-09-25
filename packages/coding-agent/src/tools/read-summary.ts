@@ -1,17 +1,21 @@
 import * as path from "node:path";
 import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { isMarkdownPath } from "../modes/theme/theme";
+import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
+import type { ClientBridge } from "../session/client-bridge";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import {
-	canMergeBracePair,
-	countTextLines,
-	type ElidedRange,
-	formatMergedBraceLine,
-	formatSingleLine,
-} from "./read-format";
+import { countTextLines } from "./read-format";
+import { formatReadSummary } from "@oh-my-pi/pi-tui/tools/read";
 import { throwIfAborted } from "./tool-errors";
+
+import {
+	cfgReadSummarizeMinBodyLines,
+	cfgReadSummarizeMinCommentLines,
+	cfgReadSummarizeMinTotalLines,
+	cfgReadSummarizeUnfoldLimit,
+	cfgReadSummarizeUnfoldUntil,
+} from "./settings";
 
 // Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
 // of (code, path, fold settings) but costs ~12-18ms for a ~1500-line file, and a
@@ -43,20 +47,27 @@ const MAX_SUMMARY_LINES = 20_000;
 export function isProseSummaryPath(filePath: string): boolean {
 	return isMarkdownPath(filePath) || path.extname(filePath).toLowerCase() === ".txt";
 }
+export function getReadTextFileBridge(session: ToolSession): ClientBridge | undefined {
+	const bridge = session.getClientBridge?.();
+	return bridge?.capabilities.readTextFile && bridge.readTextFile ? bridge : undefined;
+}
+
 export function routeReadThroughBridge(
 	session: ToolSession,
 	absolutePath: string,
 	options?: { line?: number; limit?: number },
 ): Promise<string> | undefined {
-	const bridge = session.getClientBridge?.();
-	if (!bridge?.capabilities.readTextFile || !bridge.readTextFile) return undefined;
-	return bridge.readTextFile({ path: absolutePath, ...options });
+	const bridge = getReadTextFileBridge(session);
+	return bridge ? bridge.readTextFile!({ path: absolutePath, ...options }) : undefined;
 }
 /**
  * Structural summary of `absolutePath`, or `null` when the file is too large,
  * too short, or unparseable. `diskText` lets a caller that already read the file
  * hand those bytes over instead of forcing a second read; an ACP bridge still
- * wins, since the editor's buffer is the source of truth.
+ * wins, since the editor's buffer is the source of truth. `languagePath`
+ * overrides only parser-language inference (speculative reads pass the
+ * requested lexical path while reading the resolved target); bytes and cache
+ * identity stay on `absolutePath`.
  */
 export async function trySummarize(
 	session: ToolSession,
@@ -64,6 +75,7 @@ export async function trySummarize(
 	fileSize: number,
 	signal?: AbortSignal,
 	diskText?: string,
+	languagePath?: string,
 ): Promise<SummaryResult | null> {
 	if (fileSize > MAX_SUMMARY_BYTES) return null;
 
@@ -75,19 +87,19 @@ export async function trySummarize(
 		throwIfAborted(signal);
 		const lineCount = countTextLines(code);
 		if (lineCount > MAX_SUMMARY_LINES) return null;
-		if (lineCount < session.settings.get("read.summarize.minTotalLines")) return null;
+		if (lineCount < cfgReadSummarizeMinTotalLines.get(session.settings)) return null;
 
-		const minBodyLines = session.settings.get("read.summarize.minBodyLines");
-		const minCommentLines = session.settings.get("read.summarize.minCommentLines");
-		const unfoldUntilLines = session.settings.get("read.summarize.unfoldUntil");
-		const unfoldLimitLines = session.settings.get("read.summarize.unfoldLimit");
+		const minBodyLines = cfgReadSummarizeMinBodyLines.get(session.settings);
+		const minCommentLines = cfgReadSummarizeMinCommentLines.get(session.settings);
+		const unfoldUntilLines = cfgReadSummarizeUnfoldUntil.get(session.settings);
+		const unfoldLimitLines = cfgReadSummarizeUnfoldLimit.get(session.settings);
 		const cache = getSummaryParseCache(session);
-		const cacheKey = `${absolutePath}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
+		const cacheKey = `${absolutePath}\0${languagePath ?? ""}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
 		const memoized = cache.get(cacheKey);
 		if (memoized !== undefined) return memoized || null;
 		const result = summarizeCode({
 			code,
-			path: absolutePath,
+			path: languagePath ?? absolutePath,
 			minBodyLines,
 			minCommentLines,
 			unfoldUntilLines,
@@ -101,104 +113,7 @@ export async function trySummarize(
 	}
 }
 
-export function renderSummary(
-	session: ToolSession,
-	summary: SummaryResult,
-): {
-	text: string;
-	displayText: string;
-	elidedRanges: ElidedRange[];
-	elidedLines: number;
-} {
-	const displayMode = resolveFileDisplayMode(session);
-	const shouldAddHashLines = displayMode.hashLines;
-	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
-
-	// Flatten segments into per-line units so we can merge a kept-head /
-	// elided / kept-tail sandwich into a single brace-pair line when the
-	// boundary lines look like `… {` and `}` (or matching variants).
-	type Unit =
-		| { kind: "line"; line: number; text: string }
-		| { kind: "elided"; startLine: number; endLine: number }
-		| {
-				kind: "merged";
-				startLine: number;
-				endLine: number;
-				headText: string;
-				tailText: string;
-		  };
-
-	const raw: Unit[] = [];
-	for (const segment of summary.segments) {
-		if (segment.kind === "elided") {
-			raw.push({ kind: "elided", startLine: segment.startLine, endLine: segment.endLine });
-			continue;
-		}
-		const text = segment.text ?? "";
-		if (text.length === 0) continue;
-		const lines = text.split("\n");
-		for (let i = 0; i < lines.length; i++) {
-			raw.push({ kind: "line", line: segment.startLine + i, text: lines[i] });
-		}
-	}
-
-	const units: Unit[] = [];
-	let i = 0;
-	while (i < raw.length) {
-		const cur = raw[i];
-		if (cur.kind === "elided") {
-			const prev = units.length > 0 ? units[units.length - 1] : null;
-			const next = i + 1 < raw.length ? raw[i + 1] : null;
-			if (prev?.kind === "line" && next?.kind === "line" && canMergeBracePair(prev.text, next.text)) {
-				units.pop();
-				units.push({
-					kind: "merged",
-					startLine: prev.line,
-					endLine: next.line,
-					headText: prev.text,
-					tailText: next.text,
-				});
-				i += 2;
-				continue;
-			}
-		}
-		units.push(cur);
-		i++;
-	}
-
-	const modelParts: string[] = [];
-	const displayParts: string[] = [];
-	const elidedRanges: ElidedRange[] = [];
-	let elidedLines = 0;
-	for (const unit of units) {
-		if (unit.kind === "elided") {
-			modelParts.push("…");
-			displayParts.push("…");
-			elidedRanges.push({ start: unit.startLine, end: unit.endLine });
-			elidedLines += unit.endLine - unit.startLine + 1;
-			continue;
-		}
-		if (unit.kind === "merged") {
-			const formatted = formatMergedBraceLine(
-				unit.startLine,
-				unit.endLine,
-				unit.headText,
-				unit.tailText,
-				shouldAddHashLines,
-				shouldAddLineNumbers,
-			);
-			modelParts.push(formatted.model);
-			displayParts.push(formatted.display);
-			// Suggest the full brace range so re-reading shows both braces
-			// plus the elided body in one shot.
-			elidedRanges.push({ start: unit.startLine, end: unit.endLine });
-			// Merged brace pair encloses (start+1)..(end-1) as elided.
-			elidedLines += Math.max(0, unit.endLine - unit.startLine - 1);
-			continue;
-		}
-		modelParts.push(formatSingleLine(unit.line, unit.text, shouldAddHashLines, shouldAddLineNumbers));
-		displayParts.push(unit.text);
-	}
-
-	return { text: modelParts.join("\n"), displayText: displayParts.join("\n"), elidedRanges, elidedLines };
+/** Read session display preferences and format a structural summary. */
+export function renderSummary(session: ToolSession, summary: SummaryResult) {
+	return formatReadSummary(resolveFileDisplayMode(session), summary);
 }

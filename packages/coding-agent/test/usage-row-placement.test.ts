@@ -7,15 +7,17 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+
+import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 // 4242 → "4.2K": distinctive enough not to collide with a read group's render.
 const USAGE_INPUT = 4242;
@@ -68,7 +70,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		ui: { requestRender: vi.fn() },
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		settings: { get: (key: string) => (key === "display.showTokenUsage" ? showTokenUsage : false) },
+		settings: Settings.isolated({ "display.showTokenUsage": showTokenUsage }),
 		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 		session: {
 			retryAttempt: 0,
@@ -141,7 +143,7 @@ describe("UiHelpers.renderSessionContext token-usage row placement", () => {
 describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		settings.set("display.showTokenUsage", true);
+		cfgDisplayShowTokenUsage.set(settings, true);
 	});
 	afterEach(() => {
 		resetSettingsForTest();

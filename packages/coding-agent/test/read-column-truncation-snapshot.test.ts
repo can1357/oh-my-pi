@@ -18,9 +18,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+import { cfgReadSummarizeEnabled, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 const HASHLINE_HEADER_LINE = /^\[([^#\r\n]+)#([0-9A-F]{4})\]$/m;
 const COLUMN_CAP = 64;
@@ -35,8 +37,8 @@ function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 
 function createSession(cwd: string): ToolSession {
 	const settings = Settings.isolated();
-	settings.set("tools.outputMaxColumns", COLUMN_CAP);
-	settings.set("read.summarize.enabled", false);
+	cfgToolsOutputMaxColumns.set(settings, COLUMN_CAP);
+	cfgReadSummarizeEnabled.set(settings, false);
 	return {
 		cwd,
 		hasUI: false,

@@ -10,9 +10,12 @@ import {
 } from "../eval/py/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { ExtensionRunner } from "../extensibility/extensions";
+import type { ToolSession } from "../tools";
 import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+
+import { cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
 
 /** Capabilities the eval runner borrows from its owning session. */
 export interface EvalRunnerHost {
@@ -20,6 +23,7 @@ export interface EvalRunnerHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	extensionRunner(): ExtensionRunner | undefined;
+	evalToolSession?: ToolSession;
 	isStreaming(): boolean;
 	appendSessionMessage(message: PythonExecutionMessage): void;
 }
@@ -75,10 +79,11 @@ export class EvalRunner {
 				cwd,
 				sessionId: namespacePythonSessionId(sessionId),
 				kernelOwnerId: this.#kernelOwnerId,
-				kernelMode: this.#host.settings.get("python.kernelMode"),
-				interpreter: this.#host.settings.get("python.interpreter")?.trim() || undefined,
+				kernelMode: cfgPythonKernelMode.get(this.#host.settings),
+				interpreter: cfgPythonInterpreter.get(this.#host.settings)?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,
+				toolSession: this.#host.evalToolSession,
 			});
 			this.recordPythonResult(code, result, options);
 			return result;
