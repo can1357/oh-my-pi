@@ -1,6 +1,11 @@
 // Provider-wire compat for "umans"; regenerated from the frozen census using deployment contract selectors.
 
 provider "umans" {
+	default-model "umans-coder"
+	env "UMANS_AI_CODING_PLAN_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Umans AI Coding Plan" allow-unauthenticated=#true
+
 	// Replaces resolve.ts's Umans provider baseline for Anthropic built-in tool names.
 	escape-builtin-tool-names #true
 	// residue: taxonomy ranks and exact globs do not isolate these models.

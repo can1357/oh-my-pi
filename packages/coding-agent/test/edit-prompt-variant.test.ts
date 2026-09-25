@@ -18,8 +18,7 @@ describe("resolveEditToolDescription", () => {
 
 	test("keeps the full prompt for models without the compact policy", () => {
 		const full = resolveEditToolDescription("hashline", undefined);
-		expect(full).toContain("<anti-patterns>");
-		expect(full).toContain("Decorator/doc-comment separate block");
+		expect(full).toBe(editDescription("hashline").trimEnd());
 		// Explicit "full" and an unset policy render identically.
 		expect(resolveEditToolDescription("hashline", { editPromptVariant: "full" })).toBe(full);
 	});

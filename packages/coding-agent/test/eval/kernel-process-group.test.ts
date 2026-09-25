@@ -79,41 +79,73 @@ describe("killProcessGroup", () => {
 });
 
 describe("BaseKernel shutdown", () => {
-	test.skipIf(!POSIX)("kills TERM-resistant descendants after the group leader exits", async () => {
-		const pidFile = `/tmp/omp-kernel-process-group-${process.pid}-${Date.now()}`;
-		const proc = Bun.spawn(
-			["sh", "-c", `trap 'exit 7' TERM; sh -c 'trap "" TERM; sleep 30' & echo $! > '${pidFile}'; wait`],
-			{ detached: true, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-		);
+	test.skipIf(!POSIX)("confirms a graceful zero-code exit on shutdown and repeated cleanup", async () => {
+		const proc = Bun.spawn(["sh", "-c", 'read request; [ "$request" = exit ]'], {
+			detached: true,
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const kernel = new TestKernel();
+		kernel.setProcess(proc);
 		try {
-			// This integration test must wait on real subprocess state; fake timers
-			// cannot advance fork, signal delivery, or filesystem visibility.
-			await Promise.race([
-				(async () => {
-					while (!(await Bun.file(pidFile).exists())) await Bun.sleep(10);
-				})(),
-				Bun.sleep(1_000).then(() => {
-					throw new Error("timed out waiting for the kernel descendant");
-				}),
-			]);
-
-			const kernel = new TestKernel();
-			kernel.setProcess(proc);
+			expect(await kernel.shutdown({ timeoutMs: 1_000 })).toEqual({ confirmed: true });
+			expect(await proc.exited).toBe(0);
+			expect(kernel.isAlive()).toBe(false);
 			expect(await kernel.shutdown()).toEqual({ confirmed: true });
-
-			await Promise.race([
-				(async () => {
-					while (processGroupExists(proc.pid)) await Bun.sleep(10);
-				})(),
-				Bun.sleep(1_000).then(() => {
-					throw new Error("kernel process group survived shutdown");
-				}),
-			]);
 		} finally {
 			killProcessGroup(proc.pid, "SIGKILL");
 			proc.kill("SIGKILL");
 			await proc.exited;
-			await Bun.file(pidFile).delete();
 		}
 	});
+
+	test.skipIf(!POSIX).each(["graceful", "timeout"] as const)(
+		"kills TERM-resistant descendants after a %s leader exit",
+		async exitMode => {
+			const pidFile = `/tmp/omp-kernel-process-group-${process.pid}-${Date.now()}`;
+			const child = `sh -c 'trap "" TERM; echo ready > "$1"; exec sleep 30' sh '${pidFile}' &`;
+			const command =
+				exitMode === "graceful"
+					? `${child} read request; [ "$request" = exit ]`
+					: `trap 'exit 0' TERM; ${child} wait`;
+			const proc = Bun.spawn(["sh", "-c", command], {
+				detached: true,
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			try {
+				// This integration test must wait on real subprocess state; fake timers
+				// cannot advance fork, signal delivery, or filesystem visibility.
+				await Promise.race([
+					(async () => {
+						while (!(await Bun.file(pidFile).exists())) await Bun.sleep(10);
+					})(),
+					Bun.sleep(1_000).then(() => {
+						throw new Error("timed out waiting for the kernel descendant");
+					}),
+				]);
+
+				const kernel = new TestKernel();
+				kernel.setProcess(proc);
+				expect(await kernel.shutdown({ timeoutMs: 1_000 })).toEqual({ confirmed: true });
+				expect(await proc.exited).toBe(0);
+
+				await Promise.race([
+					(async () => {
+						while (processGroupExists(proc.pid)) await Bun.sleep(10);
+					})(),
+					Bun.sleep(1_000).then(() => {
+						throw new Error("kernel process group survived shutdown");
+					}),
+				]);
+			} finally {
+				killProcessGroup(proc.pid, "SIGKILL");
+				proc.kill("SIGKILL");
+				await proc.exited;
+				await Bun.file(pidFile).delete();
+			}
+		},
+	);
 });

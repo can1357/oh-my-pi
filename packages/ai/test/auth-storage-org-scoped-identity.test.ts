@@ -85,11 +85,11 @@ describe("anthropic org-scoped credential identity", () => {
 		if (tempDir) await removeWithRetries(tempDir);
 	});
 
-	it("stores two subscriptions of one email side by side and updates same-org logins in place", () => {
+	it("stores two subscriptions of one email side by side and updates same-org logins in place", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
 
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
@@ -97,7 +97,7 @@ describe("anthropic org-scoped credential identity", () => {
 		]);
 
 		// Same-org re-login: replaces the matching row instead of adding a third.
-		const rows = store.upsertAuthCredentialForProvider(
+		const rows = await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team-renewed", orgId: TEAM_ORG }),
 		);
@@ -112,24 +112,24 @@ describe("anthropic org-scoped credential identity", () => {
 		}
 	});
 
-	it("upgrades a legacy email-keyed row on the first org-scoped login with the same email", () => {
+	it("upgrades a legacy email-keyed row on the first org-scoped login with the same email", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy" }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "legacy" }));
 		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: `email:${EMAIL}`, disabled_cause: null }]);
 
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${MAX_ORG}`, disabled_cause: null },
 		]);
 	});
 
-	it("never clobbers org-scoped rows with an org-less credential", () => {
+	it("never clobbers org-scoped rows with an org-less credential", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "orgless" }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "orgless" }));
 
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
@@ -138,26 +138,23 @@ describe("anthropic org-scoped credential identity", () => {
 		]);
 	});
 
-	it("scopes account-only identities (no email) by org so the second subscription cannot replace the first", () => {
+	it("scopes account-only identities (no email) by org so the second subscription cannot replace the first", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// The account UUID is identical across the orgs of one login account —
 		// without the org qualifier these two would collapse to one row.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team", orgId: TEAM_ORG, omitEmail: true }),
 		);
-		store.upsertAuthCredentialForProvider(
-			"anthropic",
-			orgCredential({ suffix: "max", orgId: MAX_ORG, omitEmail: true }),
-		);
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG, omitEmail: true }));
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
 			{ identity_key: `account:account-shared|org:${MAX_ORG}`, disabled_cause: null },
 		]);
 
 		// Same-org no-email re-login still replaces its own row in place.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team-renewed", orgId: TEAM_ORG, omitEmail: true }),
 		);
@@ -165,9 +162,9 @@ describe("anthropic org-scoped credential identity", () => {
 
 		// A legacy bare account-keyed row is claimed by the first org-scoped
 		// login with the same account, mirroring the email upgrade path.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
 		expect(readIdentityRows(dbPath)).toHaveLength(3);
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "claimed", orgId: "org-third-3333", omitEmail: true }),
 		);
@@ -178,11 +175,11 @@ describe("anthropic org-scoped credential identity", () => {
 		]);
 	});
 
-	it("upgrades an org-only row in place when a later same-org login recovers the identity", () => {
+	it("upgrades an org-only row in place when a later same-org login recovers the identity", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// Login recovered neither email nor account: the org alone keys the row.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "anon", orgId: TEAM_ORG, omitEmail: true, omitAccountId: true }),
 		);
@@ -190,14 +187,14 @@ describe("anthropic org-scoped credential identity", () => {
 
 		// Same org, identity recovered: claims the org-only row in place instead
 		// of duplicating the subscription.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "named", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "named", orgId: TEAM_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
 		]);
 
 		// One-way: a later org-only login of the same org must not claim the now
 		// base-keyed row — it gets its own row until identity is recovered again.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "anon-again", orgId: TEAM_ORG, omitEmail: true, omitAccountId: true }),
 		);
@@ -207,16 +204,16 @@ describe("anthropic org-scoped credential identity", () => {
 		]);
 	});
 
-	it("claims an account-keyed row once a later same-org login recovers the email", () => {
+	it("claims an account-keyed row once a later same-org login recovers the email", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// Email recovery failed for both subscriptions: the account UUID keys
 		// the rows, org-qualified.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team-no-email", orgId: TEAM_ORG, omitEmail: true }),
 		);
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "max-no-email", orgId: MAX_ORG, omitEmail: true }),
 		);
@@ -224,7 +221,7 @@ describe("anthropic org-scoped credential identity", () => {
 		// Same subscription (account + org), email recovered this time: the
 		// account-keyed row is claimed and re-keyed by email — NOT duplicated.
 		// The sibling org's row is untouched.
-		const rows = store.upsertAuthCredentialForProvider(
+		const rows = await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team-with-email", orgId: TEAM_ORG }),
 		);
@@ -239,34 +236,34 @@ describe("anthropic org-scoped credential identity", () => {
 		}
 	});
 
-	it("claims a bare legacy account-keyed row by an org-scoped login whose primary base is the email", () => {
+	it("claims a bare legacy account-keyed row by an org-scoped login whose primary base is the email", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// Pre-org row, email never recovered: keyed by the bare account.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
 		expect(readIdentityRows(dbPath)).toEqual([{ identity_key: "account:account-shared", disabled_cause: null }]);
 
 		// Org-scoped login carrying the same account AND an email: the key is
 		// email-based, but the shared account still claims the legacy row.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "upgraded", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "upgraded", orgId: TEAM_ORG }));
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `email:${EMAIL}|org:${TEAM_ORG}`, disabled_cause: null },
 		]);
 	});
 
-	it("keeps org-less logins on exact-key matching only (no cross-base claiming)", () => {
+	it("keeps org-less logins on exact-key matching only (no cross-base claiming)", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team", orgId: TEAM_ORG, omitEmail: true }),
 		);
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "legacy", omitEmail: true }));
 
 		// Org-less login carrying the same account plus an email resolves to the
 		// bare email key: it must neither claim the org-scoped account row nor
 		// the bare account row via the shared account base.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "orgless" }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "orgless" }));
 		expect(readIdentityRows(dbPath)).toEqual([
 			{ identity_key: `account:account-shared|org:${TEAM_ORG}`, disabled_cause: null },
 			{ identity_key: "account:account-shared", disabled_cause: null },
@@ -274,19 +271,19 @@ describe("anthropic org-scoped credential identity", () => {
 		]);
 	});
 
-	it("claims an email-keyed row when a later same-org login loses the email but keeps the account", () => {
+	it("claims an email-keyed row when a later same-org login loses the email but keeps the account", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		// Both subscriptions stored with full identity: keyed by email, but the
 		// stored credentials also carry the shared account UUID.
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "max", orgId: MAX_ORG }));
 
 		// Same subscription re-login where email recovery fails this time: the
 		// incoming key is account-based, but the STORED credential shares the
 		// account — the row is claimed and re-keyed, not duplicated. The
 		// sibling org's email-keyed row is untouched.
-		const rows = store.upsertAuthCredentialForProvider(
+		const rows = await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "team-lost-email", orgId: TEAM_ORG, omitEmail: true }),
 		);
@@ -301,15 +298,15 @@ describe("anthropic org-scoped credential identity", () => {
 		}
 	});
 
-	it("never claims across orgs even when the stored credential shares every base identity", () => {
+	it("never claims across orgs even when the stored credential shares every base identity", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.upsertAuthCredentialForProvider("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
+		await store.upsertAuthCredential("anthropic", orgCredential({ suffix: "team", orgId: TEAM_ORG }));
 
 		// Same account UUID, different org: a distinct subscription — it gets
 		// its own row and must never claim the sibling org's row, no matter
 		// how many base identifiers the stored credential shares.
-		store.upsertAuthCredentialForProvider(
+		await store.upsertAuthCredential(
 			"anthropic",
 			orgCredential({ suffix: "max-lost-email", orgId: MAX_ORG, omitEmail: true }),
 		);
@@ -340,17 +337,19 @@ function makeStore(
 		updateAuthCredential(id, credential) {
 			onUpdate?.(id, credential);
 		},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
-		replaceAuthCredentialsForProvider() {
+		async replaceAuthCredentials() {
 			return rows;
 		},
-		upsertAuthCredentialForProvider() {
+		async upsertAuthCredential() {
 			return rows;
 		},
-		deleteAuthCredentialsForProvider() {},
+		async deleteAuthCredentials() {},
 		getCache(key) {
 			const entry = cache.get(key);
 			if (!entry) return null;
@@ -422,11 +421,11 @@ describe("anthropic usage report dedupe partitions by org", () => {
 				usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 			},
 		);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => emailOnlyReport());
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "anthropic");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "anthropic");
 		expect(reports).toHaveLength(2);
 		const orgIds = reports.map(report => report.metadata?.orgId).sort();
 		expect(orgIds).toEqual([MAX_ORG, TEAM_ORG].sort());
@@ -447,14 +446,14 @@ describe("anthropic usage report dedupe partitions by org", () => {
 				usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 			},
 		);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => ({
 			...emailOnlyReport(),
 			metadata: { accountId: "account-shared" },
 		}));
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "anthropic");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "anthropic");
 		expect(reports).toHaveLength(2);
 		const orgIds = reports.map(report => report.metadata?.orgId).sort();
 		expect(orgIds).toEqual([MAX_ORG, TEAM_ORG].sort());
@@ -467,14 +466,14 @@ describe("anthropic usage report dedupe partitions by org", () => {
 		storage = new AuthStorage(makeStore([oauthRow(1, TEAM_ORG, "Team Workspace")]), {
 			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => ({
 			...emailOnlyReport(),
 			metadata: { email: EMAIL, accountId: "account-shared", orgId: TEAM_ORG },
 		}));
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "anthropic");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "anthropic");
 		expect(reports).toHaveLength(1);
 		expect(reports[0]?.metadata?.orgId).toBe(TEAM_ORG);
 		expect(reports[0]?.metadata?.orgName).toBe("Team Workspace");
@@ -484,11 +483,11 @@ describe("anthropic usage report dedupe partitions by org", () => {
 		storage = new AuthStorage(makeStore([oauthRow(1), oauthRow(2)]), {
 			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => emailOnlyReport());
 
-		const reports = ((await storage.fetchUsageReports()) ?? []).filter(r => r.provider === "anthropic");
+		const reports = ((await storage.usage.reports()) ?? []).filter(r => r.provider === "anthropic");
 		expect(reports).toHaveLength(1);
 	});
 });
@@ -526,11 +525,11 @@ describe("broker-backed refresh row addressing", () => {
 				}),
 			},
 		);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => emailOnlyReport());
 
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 		// Only the expired Max row (id 2) was rewritten; the Team row was never touched.
 		expect(updates).toEqual([2]);
 	});

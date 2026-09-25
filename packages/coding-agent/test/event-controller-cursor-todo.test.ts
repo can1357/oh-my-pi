@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -74,14 +74,22 @@ function todoEnd(
 	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
-function evalEnd(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
+function evalEnd(
+	toolCallId: string,
+	statusEvents?: Array<{
+		op: string;
+		committed?: boolean;
+		phases?: { name: string; tasks: { content: string; status: string }[] }[];
+	}>,
+	isError = false,
+): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
 	return {
 		type: "tool_execution_end",
 		toolCallId,
 		toolName: "eval",
-		isError: false,
-		result: { content: [{ type: "text", text: "done" }] },
-	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
+		isError,
+		result: { content: [{ type: "text", text: "done" }], details: statusEvents ? { statusEvents } : undefined },
+	} as unknown as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
 function evalStart(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_start" }> {
@@ -182,6 +190,33 @@ describe("EventController + Cursor todo bridge", () => {
 		expectRetirableResult(block);
 	});
 
+	it("shows current Todo phases rather than a snapshot captured during Eval", async () => {
+		const f = createFixture();
+		const recorded = [{ name: "Old", tasks: [{ content: "Earlier", status: "completed" }] }];
+		const current = [{ name: "Current", tasks: [{ content: "Later", status: "in_progress" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+
+		await f.controller.handleEvent(evalEnd("eval-todo-1", [{ op: "todo", committed: true, phases: recorded }]));
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+
+	it("keeps the Todo panel current when Eval fails after a nested update", async () => {
+		const f = createFixture();
+		const current = [{ name: "Current", tasks: [{ content: "Committed", status: "completed" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+
+		await f.controller.handleEvent(evalEnd("eval-todo-error", [{ op: "todo", committed: true }], true));
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+	it("does not restart Todo auto-clear after a nested read-only view", async () => {
+		const f = createFixture();
+		f.ctx.viewSession.getTodoPhases = () => [];
+		await f.controller.handleEvent(evalEnd("eval-todo-view", [{ op: "todo", committed: false }]));
+		expect(f.ctx.setTodos).not.toHaveBeenCalled();
+	});
+
 	it("settles a held completion when execution start creates the card", async () => {
 		const f = createFixture();
 
@@ -254,5 +289,75 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(f.blocks).toHaveLength(1);
 		expect(f.ctx.pendingTools.size).toBe(0);
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(phases);
+	});
+
+	it("restores buffered results as held completions after transcript reset", async () => {
+		const pending = {
+			role: "toolResult" as const,
+			toolCallId: "grep-restore-1",
+			toolName: "grep",
+			content: [{ type: "text" as const, text: "RESTORE_MATCH_LINE" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const ctx = createInteractiveModeContext({
+			streamingComponent: new AssistantMessageComponent(),
+			session: {
+				agent: {
+					getPendingToolResults: () => [pending],
+				},
+			},
+		});
+		const blocks: Component[] = [];
+		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
+			blocks.push(block);
+			addChild(block);
+		});
+		const controller = new EventController(ctx);
+		const showWarning = vi.spyOn(ctx, "showWarning");
+
+		controller.resetTranscriptAnchors();
+		await controller.handleEvent(streamedToolBlock("grep-restore-1", "grep", { pattern: "restore" }));
+		await controller.handleEvent(streamedToolBlock("grep-restore-1", "grep", { pattern: "restore" }));
+
+		expect(blocks).toHaveLength(1);
+		expect(ctx.pendingTools.size).toBe(0);
+		expect(Bun.stripANSI(blocks[0]!.render(120).join("\n"))).toContain("RESTORE_MATCH_LINE");
+		expect(showWarning).not.toHaveBeenCalled();
+	});
+
+	it("reseeds held completions from buffered results at agent_start", async () => {
+		const pending = {
+			role: "toolResult" as const,
+			toolCallId: "grep-restore-2",
+			toolName: "grep",
+			content: [{ type: "text" as const, text: "AGENT_START_MATCH" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const ctx = createInteractiveModeContext({
+			streamingComponent: new AssistantMessageComponent(),
+			session: {
+				agent: {
+					getPendingToolResults: () => [pending],
+				},
+			},
+		});
+		const blocks: Component[] = [];
+		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
+			blocks.push(block);
+			addChild(block);
+		});
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		await controller.handleEvent(streamedToolBlock("grep-restore-2", "grep", { pattern: "start" }));
+		await controller.handleEvent(streamedToolBlock("grep-restore-2", "grep", { pattern: "start" }));
+
+		expect(blocks).toHaveLength(1);
+		expect(ctx.pendingTools.size).toBe(0);
+		expect(Bun.stripANSI(blocks[0]!.render(120).join("\n"))).toContain("AGENT_START_MATCH");
 	});
 });

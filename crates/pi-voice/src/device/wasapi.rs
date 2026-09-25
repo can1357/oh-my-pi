@@ -255,7 +255,8 @@ impl ComApartment {
 
 impl Drop for ComApartment {
 	fn drop(&mut self) {
-		// SAFETY: paired with the successful `CoInitializeEx` on this same thread.
+		// SAFETY: paired with the successful `CoInitializeEx` on this same
+		// thread.
 		unsafe { CoUninitialize() };
 	}
 }
@@ -308,8 +309,8 @@ impl BaseStream {
 			ComPtr::new(device_raw, "IMMDeviceEnumerator::GetDefaultAudioEndpoint")?;
 
 		let mut client_raw = null_mut();
-		// SAFETY: the device is live, activation parameters are optional and null,
-		// and `client_raw` receives the requested interface.
+		// SAFETY: the device is live, activation parameters are optional and
+		// null, and `client_raw` receives the requested interface.
 		let hr = unsafe {
 			(device.vtable().activate)(
 				device.as_void(),
@@ -817,8 +818,8 @@ fn run_capture(
 							"IAudioCaptureClient::GetBuffer returned null".to_owned(),
 						));
 					}
-					// SAFETY: WASAPI returned `frames` readable mono IEEE-float samples
-					// for the format used to initialize this client.
+					// SAFETY: WASAPI returned `frames` readable mono IEEE-float
+					// samples for the format used to initialize this client.
 					let samples = unsafe { slice::from_raw_parts(data.cast::<f32>(), frames as usize) };
 					sink(samples);
 				}

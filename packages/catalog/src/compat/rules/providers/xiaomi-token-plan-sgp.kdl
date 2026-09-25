@@ -1,6 +1,9 @@
 // Provider-wire compat for "xiaomi-token-plan-sgp"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xiaomi-token-plan-sgp" {
+	default-model "mimo-v2.5"
+	env "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
+
 	class "mimo" {
 		family "v2" {
 			thinking-mode "effort"

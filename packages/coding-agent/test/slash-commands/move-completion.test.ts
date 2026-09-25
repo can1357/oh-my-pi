@@ -19,11 +19,6 @@ describe("/move directory completion", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	it("is wired to the /move command", () => {
-		expect(move).toBeDefined();
-		expect(move!.getArgumentCompletions).toBeDefined();
-	});
-
 	it("lists directories in the current project dir when no prefix is given", async () => {
 		await fs.mkdir(path.join(tempDir, "src"));
 		await fs.mkdir(path.join(tempDir, "tests"));

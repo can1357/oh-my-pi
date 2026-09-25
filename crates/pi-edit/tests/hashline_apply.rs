@@ -717,3 +717,43 @@ fn recovery_rejects_ambiguous_duplicate_anchor_context() {
 	.unwrap();
 	assert!(recovered.is_none());
 }
+
+#[test]
+fn recovery_refuses_a_remap_into_a_sibling_construct() {
+	// The diff aligns the surviving `"shared",` row of list `a` with the
+	// identical row of the newly added list `b`: a uniform offset with
+	// matching neighbors, landing the insert in the wrong list.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-sibling.py");
+	let previous = "cfg = {\n    \"a\": [\n        \"shared\",\n    ],\n}\n";
+	let current = "cfg = {\n    \"a\": [\n        \"changed\",\n    ],\n    \"b\": [\n        \
+	               \"shared\",\n    ],\n}\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: current,
+		file_hash: &tag,
+		edits: &[insert_after(3, "        \"new\",", 1)],
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_shift_inside_the_same_construct() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-same-construct.py");
+	let previous = "def f():\n    old()\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "import os\n\ndef f():\n    old()\n",
+		file_hash: &tag,
+		edits: &replacement(2, 2, &["    new()"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "import os\n\ndef f():\n    new()\n");
+}

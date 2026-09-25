@@ -22,7 +22,7 @@ describe("plan mode thinking level", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 		sessionSettings = Settings.isolated();
 		const sonnet = modelRegistry.find("anthropic", "claude-sonnet-4-5");
