@@ -314,16 +314,6 @@ export interface ResolveContext {
 	 * reject directory resources, so they never need the listing.
 	 */
 	skipDirectoryListing?: boolean;
-	/**
-	 * When set, handlers that would otherwise materialize expensive content
-	 * (e.g. reading a multi-MiB artifact into memory just to expose its
-	 * `sourcePath`) may return the resource shape without content. Callers
-	 * that only need `sourcePath` — search/grep, bash URL expansion — pass
-	 * this so a large `artifact://` still resolves to its backing file
-	 * without OOM risk. Handlers that cannot separate path from content
-	 * ignore the flag.
-	 */
-	pathOnly?: boolean;
 }
 
 /**

@@ -362,7 +362,7 @@ async function resolveInternalSearchInputs(opts: {
 
 	for (let idx = 0; idx < paths.length; idx++) {
 		const rawPath = paths[idx];
-		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canHandle(rawPath)) {
+		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canResolve(rawPath)) {
 			continue;
 		}
 		await gateMcpResourceRead(internalRouter, rawPath, opts.session);
