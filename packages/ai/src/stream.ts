@@ -2083,6 +2083,7 @@ function mapOptionsForApi<TApi extends Api>(
 		streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
+		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
 		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,
@@ -2095,6 +2096,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		anthropicCompaction: options?.anthropicCompaction,
+		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
 		// Gateway-forwarded continuation/structured-output fields: parsed from
 		// the wire by format parsers and must survive the provider mapping.

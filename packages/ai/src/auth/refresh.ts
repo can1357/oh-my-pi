@@ -4,7 +4,7 @@ import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } f
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
-import { authCredentialEquals, type CredentialPool } from "./pool";
+import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
 import type { AccountPolicies } from "./policy";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import { hasRefreshLeases, type AuthCredentialStore } from "./store";
@@ -226,7 +226,7 @@ export class OAuthRefresher {
 									})),
 							);
 							this.#deps.pool.reset(provider);
-							this.#deps.pool.emitDisabled({ provider, disabledCause });
+							this.#deps.pool.emitDisabled(credentialDisabledEvent(provider, row, disabledCause));
 							return { credential: undefined, refreshed: false, removed: true };
 						}
 						await this.#deps.pool.reload();

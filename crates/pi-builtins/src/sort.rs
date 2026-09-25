@@ -36,7 +36,11 @@ impl Compressor {
 		stdout: impl Into<Stdio>,
 		decompress: bool,
 	) -> SortResult<(Child, thread::JoinHandle<()>)> {
-		let mut command = self.env.command(&self.prog);
+		let mut command = self.env.command(&self.prog)
+			.map_err(|error| SortError::CompressProgExecutionFailed {
+				prog: self.prog.clone(),
+				error,
+			})?;
 		command.stdin(stdin).stdout(stdout);
 		if decompress {
 			command.arg("-d");
@@ -61,11 +65,13 @@ mod buffer_hint {
 // file that was distributed with this source code.
 
 //! Heuristics for determining buffer size for external sorting.
-use std::ffi::OsString;
+use std::{ffi::OsString, path::Path};
+
+use pi_vfs::BlockingFs;
 
 // Heuristics to size the external sort buffer without overcommit memory.
-pub(crate) fn automatic_buffer_size(files: &[OsString]) -> usize {
-	let file_hint = file_size_hint(files);
+pub(crate) fn automatic_buffer_size(fs: &BlockingFs, files: &[OsString]) -> usize {
+	let file_hint = file_size_hint(fs, files);
 	let mem_hint = available_memory_hint();
 
 	// Prefer the tighter bound when both hints exist, otherwise fall back to
@@ -78,7 +84,7 @@ pub(crate) fn automatic_buffer_size(files: &[OsString]) -> usize {
 	}
 }
 
-fn file_size_hint(files: &[OsString]) -> Option<usize> {
+fn file_size_hint(fs: &BlockingFs, files: &[OsString]) -> Option<usize> {
 	// Estimate total bytes across real files; non-regular inputs are skipped.
 	let mut total_bytes: u128 = 0;
 
@@ -87,7 +93,7 @@ fn file_size_hint(files: &[OsString]) -> Option<usize> {
 			continue;
 		}
 
-		let Ok(metadata) = std::fs::metadata(file) else {
+		let Ok(metadata) = fs.metadata(Path::new(file)) else {
 			continue;
 		};
 
@@ -218,6 +224,7 @@ use std::{cmp::Ordering, ffi::OsStr, io::Read, iter, thread};
 
 use flume::{Receiver, Sender};
 use itertools::Itertools;
+use pi_vfs::BlockingFs;
 
 use super::{
 	AtomicOrdering, GlobalSettings, SortError, SortResult,
@@ -230,7 +237,7 @@ use super::{
 /// # Returns
 ///
 /// The code we should exit with.
-pub fn check(path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
+pub fn check(fs: &BlockingFs, path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
 	let max_allowed_cmp = if settings.unique {
 		// If `unique` is enabled, the previous line must compare _less_ to the next
 		// one.
@@ -240,7 +247,7 @@ pub fn check(path: &OsStr, settings: &GlobalSettings) -> SortResult<()> {
 		// one.
 		Ordering::Equal
 	};
-	let file = open(path)?;
+	let file = open(fs, path)?;
 	let (recycled_sender, recycled_receiver) = flume::bounded(2);
 	let (loaded_sender, loaded_receiver) = flume::bounded(2);
 	thread::spawn({
@@ -919,9 +926,7 @@ mod threaded {
 
 use std::{
 	cmp::Ordering,
-	fs::File,
 	io::{Read, Write},
-	path::PathBuf,
 	thread,
 };
 
@@ -934,7 +939,7 @@ use super::super::{
 	compare_by, merge,
 	merge::{WriteableCompressedTmpFile, WriteablePlainTmpFile, WriteableTmpFile},
 	print_sorted, sort_by, strip_errno,
-	tmp_dir::TmpDirWrapper,
+	tmp_dir::{TmpDirWrapper, TmpFile},
 	AtomicOrdering,
 };
 
@@ -969,12 +974,14 @@ pub fn ext_sort(
 	// compressor installed only for the shell would be wrongly rejected.
 	let mut effective_settings = settings.clone();
 	if let Some(compress) = &settings.compress {
-		let mut probe = compress.env.command(&compress.prog);
-		probe
-			.stdin(std::process::Stdio::null())
-			.stdout(std::process::Stdio::null())
-			.stderr(std::process::Stdio::null());
-		match probe.spawn() {
+		let probe = compress.env.command(&compress.prog).and_then(|mut probe| {
+			probe
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.spawn()
+		});
+		match probe {
 			Ok(mut child) => {
 				// Kill the test process immediately
 				let _ = child.kill();
@@ -1214,7 +1221,7 @@ fn read_write_loop<I: WriteableTmpFile>(
 /// `compress` optionally pipes file contents through `--compress-program`.
 fn write<I: WriteableTmpFile>(
 	chunk: &Chunk,
-	file: (File, PathBuf),
+	file: TmpFile,
 	compress: Option<&Compressor>,
 	separator: u8,
 ) -> SortResult<I::Closed> {
@@ -1233,6 +1240,8 @@ fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) {
 #[cfg(test)]
 mod tests {
 	use std::io::{Cursor, Read};
+
+	use pi_vfs::BlockingFs;
 
 	use super::*;
 
@@ -1253,8 +1262,9 @@ mod tests {
 
 		let mut files =
 			std::iter::once(Ok(Box::new(Cursor::new(input.into_bytes())) as Box<dyn Read + Send>));
-		let output = Output::new(Some(out_path.as_os_str()), None).expect("open output");
-		let mut tmp_dir = TmpDirWrapper::new(std::env::temp_dir());
+		let fs = BlockingFs::native();
+		let output = Output::new(&fs, Some(out_path.as_os_str()), None).expect("open output");
+		let mut tmp_dir = TmpDirWrapper::new(fs, std::env::temp_dir());
 
 		ext_sort(
 			&mut files,
@@ -1362,8 +1372,7 @@ mod merge {
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
-	io::{BufWriter, Read, Write},
+	io::{self, BufWriter, Read, Write},
 	iter,
 	path::{Path, PathBuf},
 	process::{Child, ChildStdin, ChildStdout, Stdio},
@@ -1373,32 +1382,36 @@ use std::{
 
 use compare::Compare;
 use flume::{Receiver, Sender};
+use pi_vfs::{BlockingFs, File};
 
 use super::{
 	AtomicOrdering, Compressor, GlobalSettings, Output, SortError, SortResult,
 	chunks::{self, Chunk, RecycledChunk},
 	compare_by, current_open_fd_count, fd_soft_limit, open,
-	tmp_dir::TmpDirWrapper,
+	tmp_dir::{TmpDirWrapper, TmpFile},
 };
 
 /// If the output file occurs in the input files as well, copy the contents of
 /// the output file and replace its occurrences in the inputs with that copy.
 fn replace_output_file_in_input_files(
+	fs: &BlockingFs,
 	files: &mut [OsString],
 	output: Option<&OsStr>,
 	tmp_dir: &mut TmpDirWrapper,
 ) -> SortResult<()> {
 	let mut copy: Option<PathBuf> = None;
-	if let Some(Ok(output_path)) = output.map(|path| Path::new(path).canonicalize()) {
+	if let Some(Ok(output_path)) = output.map(|path| fs.canonicalize(Path::new(path))) {
 		for file in files {
-			if let Ok(file_path) = Path::new(file.as_os_str()).canonicalize()
+			if let Ok(file_path) = fs.canonicalize(Path::new(file.as_os_str()))
 				&& file_path == output_path
 			{
 				if let Some(copy) = &copy {
 					*file = copy.clone().into_os_string();
 				} else {
-					let (_file, copy_path) = tmp_dir.next_file()?;
-					fs::copy(file_path, &copy_path)
+					let TmpFile { file: mut temp, path: copy_path, .. } = tmp_dir.next_file()?;
+					fs.open(&file_path)
+						.and_then(|mut source| io::copy(&mut source, &mut temp))
+						.and_then(|_| temp.close())
 						.map_err(|error| SortError::OpenTmpFileFailed { error })?;
 					*file = copy_path.clone().into_os_string();
 					copy = Some(copy_path);
@@ -1443,15 +1456,16 @@ fn effective_merge_batch_size(settings: &GlobalSettings) -> usize {
 /// intermediate files will be used. If `settings.compress` is `Some`,
 /// intermediate files will be compressed with it.
 pub fn merge(
+	fs: &BlockingFs,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
 	tmp_dir: &mut TmpDirWrapper,
 ) -> SortResult<()> {
-	replace_output_file_in_input_files(files, output.as_output_name(), tmp_dir)?;
+	replace_output_file_in_input_files(fs, files, output.as_output_name(), tmp_dir)?;
 	let files = files
 		.iter()
-		.map(|file| open(file).map(|file| PlainMergeInput { inner: file }));
+		.map(|file| open(fs, file).map(|file| PlainMergeInput { inner: file }));
 	if settings.compress.is_none() {
 		merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
 	} else {
@@ -1636,8 +1650,13 @@ struct FileMerger<'a> {
 impl FileMerger<'_> {
 	/// Write the merged contents to the output file.
 	fn write_all(self, settings: &GlobalSettings, output: Output) -> SortResult<()> {
-		let mut out = output.into_write();
-		self.write_all_to(settings, &mut out)
+		let output_name = output.display_name();
+		let mut out = output
+			.into_write()
+			.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
+		self.write_all_to(settings, &mut out)?;
+		super::OutputSink::finish(out)
+			.map_err(|error| SortError::WriteFailed { path: output_name, error })
 	}
 
 	fn write_all_to(mut self, settings: &GlobalSettings, out: &mut impl Write) -> SortResult<()> {
@@ -1752,7 +1771,7 @@ fn check_child_success(mut child: Child, program: &str) -> SortResult<()> {
 pub trait WriteableTmpFile: Sized {
 	type Closed: ClosedTmpFile;
 	type InnerWrite: Write;
-	fn create(file: (File, PathBuf), compress: Option<&Compressor>) -> SortResult<Self>;
+	fn create(file: TmpFile, compress: Option<&Compressor>) -> SortResult<Self>;
 	/// Closes the temporary file.
 	fn finished_writing(self) -> SortResult<Self::Closed>;
 	fn as_write(&mut self) -> &mut Self::InnerWrite;
@@ -1774,25 +1793,38 @@ pub trait MergeInput: Send {
 
 pub struct WriteablePlainTmpFile {
 	path: PathBuf,
+	fs:   BlockingFs,
 	file: BufWriter<File>,
 }
 pub struct ClosedPlainTmpFile {
 	path: PathBuf,
+	fs:   BlockingFs,
 }
 pub struct PlainTmpMergeInput {
 	path: PathBuf,
+	fs:   BlockingFs,
 	file: File,
 }
 impl WriteableTmpFile for WriteablePlainTmpFile {
 	type Closed = ClosedPlainTmpFile;
 	type InnerWrite = BufWriter<File>;
 
-	fn create((file, path): (File, PathBuf), _: Option<&Compressor>) -> SortResult<Self> {
-		Ok(Self { file: BufWriter::new(file), path })
+	fn create(TmpFile { file, path, fs }: TmpFile, _: Option<&Compressor>) -> SortResult<Self> {
+		Ok(Self { file: BufWriter::new(file), path, fs })
 	}
 
 	fn finished_writing(self) -> SortResult<Self::Closed> {
-		Ok(ClosedPlainTmpFile { path: self.path })
+		// Flush and close now: a filesystem may report write errors only on
+		// close, and the file is reopened for reading later.
+		self.file
+			.into_inner()
+			.map_err(io::IntoInnerError::into_error)
+			.and_then(File::close)
+			.map_err(|error| SortError::WriteFailed {
+				path:  self.path.clone().into_os_string(),
+				error,
+			})?;
+		Ok(ClosedPlainTmpFile { path: self.path, fs: self.fs })
 	}
 
 	fn as_write(&mut self) -> &mut Self::InnerWrite {
@@ -1804,8 +1836,12 @@ impl ClosedTmpFile for ClosedPlainTmpFile {
 
 	fn reopen(self) -> SortResult<Self::Reopened> {
 		Ok(PlainTmpMergeInput {
-			file: File::open(&self.path).map_err(|error| SortError::OpenTmpFileFailed { error })?,
+			file: self
+				.fs
+				.open(&self.path)
+				.map_err(|error| SortError::OpenTmpFileFailed { error })?,
 			path: self.path,
+			fs:   self.fs,
 		})
 	}
 }
@@ -1816,7 +1852,10 @@ impl MergeInput for PlainTmpMergeInput {
 		// we ignore failures to delete the temporary file,
 		// because there is a race at the end of the execution and the whole
 		// temporary directory might already be gone.
-		let _ = fs::remove_file(self.path);
+		// Close before unlinking so the provider has released the handle;
+		// removal must still happen after cancellation.
+		let _ = self.file.close();
+		let _ = self.fs.for_cleanup().remove_file(&self.path);
 		Ok(())
 	}
 
@@ -1825,42 +1864,83 @@ impl MergeInput for PlainTmpMergeInput {
 	}
 }
 
+/// Copies bytes between a compressor pipe and a temporary file that has no
+/// host descriptor to hand the compressor directly.
+struct Pump(thread::JoinHandle<io::Result<()>>);
+
+impl Pump {
+	fn spawn(copy: impl FnOnce() -> io::Result<()> + Send + 'static) -> Self {
+		Self(thread::spawn(copy))
+	}
+
+	fn join(self) -> io::Result<()> {
+		self.0
+			.join()
+			.unwrap_or_else(|_| Err(io::Error::other("temporary file copy thread panicked")))
+	}
+}
+
 pub struct WriteableCompressedTmpFile {
 	path:        PathBuf,
+	fs:          BlockingFs,
 	compress:    Compressor,
 	child:       Child,
 	child_stdin: BufWriter<ChildStdin>,
 	/// Drains the compressor's stderr onto the command's; joined once the child
 	/// has exited so its diagnostics land before we report a result.
 	forwarder:   thread::JoinHandle<()>,
+	/// Copies compressor output into a temporary file without a host
+	/// descriptor; `None` when the compressor writes the file directly.
+	pump:        Option<Pump>,
 }
 pub struct ClosedCompressedTmpFile {
 	path:     PathBuf,
+	fs:       BlockingFs,
 	compress: Compressor,
 }
 pub struct CompressedTmpMergeInput {
 	path:         PathBuf,
+	fs:           BlockingFs,
 	compress:     Compressor,
 	child:        Child,
 	child_stdout: ChildStdout,
 	forwarder:    thread::JoinHandle<()>,
+	/// Feeds a temporary file without a host descriptor to the decompressor;
+	/// `None` when the decompressor reads the file directly.
+	pump:         Option<Pump>,
 }
 impl WriteableTmpFile for WriteableCompressedTmpFile {
 	type Closed = ClosedCompressedTmpFile;
 	type InnerWrite = BufWriter<ChildStdin>;
 
-	fn create((file, path): (File, PathBuf), compress: Option<&Compressor>) -> SortResult<Self> {
+	fn create(TmpFile { file, path, fs }: TmpFile, compress: Option<&Compressor>) -> SortResult<Self> {
 		let compress = compress
 			.expect("WriteableCompressedTmpFile is only selected when a compressor is configured")
 			.clone();
-		let (mut child, forwarder) = compress.spawn(Stdio::piped(), file, false)?;
+		let (mut child, forwarder, pump) = match file.into_native() {
+			Ok(native) => {
+				let (child, forwarder) = compress.spawn(Stdio::piped(), native, false)?;
+				(child, forwarder, None)
+			},
+			Err(mut file) => {
+				let (mut child, forwarder) = compress.spawn(Stdio::piped(), Stdio::piped(), false)?;
+				let mut child_stdout = child.stdout.take().expect("compressor stdout is piped");
+				let pump = Pump::spawn(move || {
+					io::copy(&mut child_stdout, &mut file)?;
+					file.close()
+				});
+				(child, forwarder, Some(pump))
+			},
+		};
 		let child_stdin = child.stdin.take().expect("compressor stdin is piped");
 		Ok(Self {
 			path,
+			fs,
 			compress,
 			child,
 			child_stdin: BufWriter::new(child_stdin),
 			forwarder,
+			pump,
 		})
 	}
 
@@ -1868,8 +1948,13 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 		drop(self.child_stdin);
 		let result = check_child_success(self.child, &self.compress.prog);
 		let _ = self.forwarder.join();
+		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
-		Ok(ClosedCompressedTmpFile { path: self.path, compress: self.compress })
+		copied.map_err(|error| SortError::WriteFailed {
+			path: self.path.clone().into_os_string(),
+			error,
+		})?;
+		Ok(ClosedCompressedTmpFile { path: self.path, fs: self.fs, compress: self.compress })
 	}
 
 	fn as_write(&mut self) -> &mut Self::InnerWrite {
@@ -1881,15 +1966,39 @@ impl ClosedTmpFile for ClosedCompressedTmpFile {
 
 	fn reopen(self) -> SortResult<Self::Reopened> {
 		// mirroring what is done for ClosedPlainTmpFile
-		let file = File::open(&self.path).map_err(|error| SortError::OpenTmpFileFailed { error })?;
-		let (mut child, forwarder) = self.compress.spawn(file, Stdio::piped(), true)?;
+		let file = self
+			.fs
+			.open(&self.path)
+			.map_err(|error| SortError::OpenTmpFileFailed { error })?;
+		let (mut child, forwarder, pump) = match file.into_native() {
+			Ok(native) => {
+				let (child, forwarder) = self.compress.spawn(native, Stdio::piped(), true)?;
+				(child, forwarder, None)
+			},
+			Err(mut file) => {
+				let (mut child, forwarder) =
+					self.compress.spawn(Stdio::piped(), Stdio::piped(), true)?;
+				let mut child_stdin = child.stdin.take().expect("decompressor stdin is piped");
+				let pump = Pump::spawn(move || {
+					match io::copy(&mut file, &mut child_stdin) {
+						// A decompressor may stop reading once its stream ends;
+						// its exit status reports whether that was an error.
+						Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+						result => result.map(drop),
+					}
+				});
+				(child, forwarder, Some(pump))
+			},
+		};
 		let child_stdout = child.stdout.take().expect("compressor stdout is piped");
 		Ok(CompressedTmpMergeInput {
 			path: self.path,
+			fs: self.fs,
 			compress: self.compress,
 			child,
 			child_stdout,
 			forwarder,
+			pump,
 		})
 	}
 }
@@ -1902,8 +2011,10 @@ impl MergeInput for CompressedTmpMergeInput {
 		drop(self.child_stdout);
 		let result = check_child_success(self.child, &self.compress.prog);
 		let _ = self.forwarder.join();
+		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
-		let _ = fs::remove_file(self.path);
+		copied.map_err(|error| SortError::ReadFailed { path: self.path.clone(), error })?;
+		let _ = self.fs.for_cleanup().remove_file(&self.path);
 		Ok(())
 	}
 
@@ -2359,52 +2470,74 @@ mod tmp_dir {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{fs::File, path::PathBuf};
+use std::path::{Path, PathBuf};
 
-use tempfile::TempDir;
+use pi_vfs::{BlockingFs, File, OpenOptions, TempOptions};
 
 use super::{SortError, SortResult};
 
-/// A wrapper around [`TempDir`] that handles the allocation of new temporary
-/// files in the temporary directory.
+/// A freshly created temporary file, with the filesystem that holds it.
+pub struct TmpFile {
+	pub file: File,
+	pub path: PathBuf,
+	pub fs:   BlockingFs,
+}
+
+/// A private temporary directory on the shell's filesystem that hands out new
+/// temporary files.
 ///
-/// The directory is only created once the first file is requested. Cleanup
-/// happens automatically when the [`TempDir`] is dropped.
+/// The directory is only created once the first file is requested. It and
+/// everything in it are removed when the wrapper is dropped.
 ///
-/// The host owns signal handling; `TempDir` cleanup remains scoped to this
-/// invocation through its `Drop` implementation.
+/// The host owns signal handling; cleanup remains scoped to this invocation
+/// through the `Drop` implementation.
 pub struct TmpDirWrapper {
-	temp_dir:    Option<TempDir>,
+	fs:          BlockingFs,
+	temp_dir:    Option<PathBuf>,
 	parent_path: PathBuf,
 	size:        usize,
 }
 
 impl TmpDirWrapper {
-	pub fn new(path: PathBuf) -> Self {
-		Self { parent_path: path, size: 0, temp_dir: None }
+	pub fn new(fs: BlockingFs, path: PathBuf) -> Self {
+		Self { fs, parent_path: path, size: 0, temp_dir: None }
 	}
 
 	fn init_tmp_dir(&mut self) -> SortResult<()> {
 		assert!(self.temp_dir.is_none());
 		assert_eq!(self.size, 0);
-		self.temp_dir = Some(
-			tempfile::Builder::new()
-				.prefix("uutils_sort")
-				.tempdir_in(&self.parent_path)
-				.map_err(|_| SortError::TmpFileCreationFailed { path: self.parent_path.clone() })?,
-		);
+		let dir = self
+			.fs
+			.create_temp_dir(&self.parent_path, &TempOptions::new().prefix("uutils_sort"))
+			.map_err(|_| SortError::TmpFileCreationFailed { path: self.parent_path.clone() })?;
+		self.temp_dir = Some(dir);
 		Ok(())
 	}
 
-	pub fn next_file(&mut self) -> SortResult<(File, PathBuf)> {
+	pub fn next_file(&mut self) -> SortResult<TmpFile> {
 		if self.temp_dir.is_none() {
 			self.init_tmp_dir()?;
 		}
-
-		let file_name = self.size.to_string();
+		let dir = self.temp_dir.as_deref().expect("temporary directory was created");
+		let path = pi_vfs::join_path(dir, Path::new(&self.size.to_string()));
+		let file = self
+			.fs
+			.open_with(&path, OpenOptions::new().write(true).create_new(true))
+			.map_err(|error| SortError::OpenTmpFileFailed { error })?;
 		self.size += 1;
-		let path = self.temp_dir.as_ref().unwrap().path().join(file_name);
-		Ok((File::create(&path).map_err(|error| SortError::OpenTmpFileFailed { error })?, path))
+		Ok(TmpFile { file, path, fs: self.fs.clone() })
+	}
+}
+
+impl Drop for TmpDirWrapper {
+	fn drop(&mut self) {
+		if let Some(dir) = &self.temp_dir {
+			// Best-effort cleanup, as `tempfile::TempDir` does on drop. The
+			// operation filesystem may already be cancelled; cleanup is not.
+			let filesystem = self.fs.for_cleanup();
+			let _ = filesystem.drain_closes();
+			let _ = filesystem.remove_dir_all(dir);
+		}
 	}
 }
 
@@ -2417,7 +2550,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
-	fs::{File, OpenOptions},
 	hash::{Hash, Hasher},
 	io::{BufRead, BufReader, BufWriter, Read, Write},
 	num::IntErrorKind,
@@ -2434,6 +2566,7 @@ use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
+use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
 use rayon::slice::ParallelSliceMut;
@@ -2456,7 +2589,10 @@ use uucore::{
 
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
-	sort::{buffer_hint::automatic_buffer_size, tmp_dir::TmpDirWrapper},
+	sort::{
+		buffer_hint::automatic_buffer_size,
+		tmp_dir::{TmpDirWrapper, TmpFile},
+	},
 };
 
 type SortResult<T> = Result<T, SortError>;
@@ -2509,11 +2645,15 @@ fn materialize_stdin(
 ) -> SortResult<()> {
 	let mut stdin = Some(&mut host.stdin);
 	for file in files.iter_mut().filter(|file| file.as_os_str() == OsStr::new(STDIN_FILE)) {
-		let (mut temp, path) = tmp_dir.next_file()?;
+		let TmpFile { file: mut temp, path, .. } = tmp_dir.next_file()?;
 		if let Some(reader) = stdin.take() {
 			std::io::copy(reader, &mut temp)
 				.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
 		}
+		temp.close().map_err(|error| SortError::WriteFailed {
+			path: path.clone().into_os_string(),
+			error,
+		})?;
 		*file = path.into_os_string();
 	}
 	Ok(())
@@ -2674,15 +2814,17 @@ pub struct Output {
 }
 
 impl Output {
-	fn new(name: Option<impl AsRef<OsStr>>, stdout: Option<OpenFile>) -> SortResult<Self> {
+	fn new(
+		fs: &BlockingFs,
+		name: Option<impl AsRef<OsStr>>,
+		stdout: Option<OpenFile>,
+	) -> SortResult<Self> {
 		let file = if let Some(name) = name {
 			let path = Path::new(name.as_ref());
-			// This is different from `File::create()` because we don't truncate the output
+			// This is different from `create()` because we don't truncate the output
 			// yet. This allows using the output file as an input file.
-			let file = OpenOptions::new()
-				.write(true)
-				.create(true)
-				.open(path)
+			let file = fs
+				.open_with(path, OpenOptions::new().write(true).create(true))
 				.map_err(|error| SortError::OpenFailed { path: path.to_owned(), error })?;
 			Some((name.as_ref().to_owned(), file))
 		} else {
@@ -2691,21 +2833,67 @@ impl Output {
 		Ok(Self { file, stdout })
 	}
 
-	fn into_write(mut self) -> BufWriter<Box<dyn Write>> {
-		BufWriter::new(match self.file {
+	fn into_write(mut self) -> std::io::Result<BufWriter<OutputSink>> {
+		Ok(BufWriter::new(match self.file {
 			Some((_name, file)) => {
-				// truncate the file
-				let _ = file.set_len(0);
-				Box::new(file)
+				// Truncate the file. Special files (devices, pipes) cannot be
+				// truncated and need not be; a regular file that keeps stale
+				// trailing bytes would be corrupt output.
+				if let Err(error) = file.set_len(0)
+					&& file.metadata().map_or(true, |metadata| metadata.is_file())
+				{
+					return Err(error);
+				}
+				OutputSink::File(file)
 			},
-			None => Box::new(self.stdout.take().expect("stdout is present")),
-		})
+			None => OutputSink::Stdout(self.stdout.take().expect("stdout is present")),
+		}))
 	}
 
 	fn as_output_name(&self) -> Option<&OsStr> {
 		match &self.file {
 			Some((name, _file)) => Some(name.as_os_str()),
 			None => None,
+		}
+	}
+
+	/// The output file's name, or "standard output", for diagnostics.
+	fn display_name(&self) -> OsString {
+		self.as_output_name()
+			.unwrap_or(OsStr::new("standard output"))
+			.to_owned()
+	}
+}
+
+/// Where sorted output is written: the `-o` file or standard output.
+pub enum OutputSink {
+	File(File),
+	Stdout(OpenFile),
+}
+
+impl OutputSink {
+	/// Flushes buffered output and closes an output file, so errors a
+	/// filesystem reports only on close are not lost.
+	fn finish(writer: BufWriter<Self>) -> std::io::Result<()> {
+		match writer.into_inner().map_err(std::io::IntoInnerError::into_error)? {
+			Self::File(file) => file.close(),
+			Self::Stdout(mut stdout) => stdout.flush(),
+		}
+	}
+}
+
+impl Write for OutputSink {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		match self {
+			Self::File(file) => file.write(buf),
+			Self::Stdout(stdout) => stdout.write(buf),
+		}
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		match self {
+			Self::File(file) => file.flush(),
+			Self::Stdout(stdout) => stdout.flush(),
 		}
 	}
 }
@@ -4432,6 +4620,7 @@ impl Utility for Sort {
 
 #[allow(clippy::cognitive_complexity)]
 fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWarning]) -> SortResult<()> {
+	let fs = host.fs().clone();
 	let mut settings = GlobalSettings {
 		numeric_locale: detect_numeric_locale(),
 		cancel: host.cancel_flag(),
@@ -4474,7 +4663,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 				.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
 			Box::new(std::io::Cursor::new(bytes))
 		} else {
-			open_with_open_failed_error(&files0_from)?
+			open_with_open_failed_error(&fs, &files0_from)?
 		};
 		let buf_reader = BufReader::new(reader);
 		for (line_num, line_res) in buf_reader.split(b'\0').enumerate() {
@@ -4583,7 +4772,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		})?;
 		settings.buffer_size_is_explicit = true;
 	} else {
-		settings.buffer_size = automatic_buffer_size(&files);
+		settings.buffer_size = automatic_buffer_size(&fs, &files);
 		settings.buffer_size_is_explicit = false;
 	}
 
@@ -4592,7 +4781,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		.map(PathBuf::from)
 		.or_else(|| host.var("TMPDIR").map(PathBuf::from))
 		.unwrap_or_else(|| PathBuf::from("/tmp"));
-	let mut tmp_dir = TmpDirWrapper::new(host.resolve(tmp_base));
+	let mut tmp_dir = TmpDirWrapper::new(fs.clone(), host.resolve(tmp_base));
 
 	settings.compress = matches
 		.get_one::<String>(options::COMPRESS_PROG)
@@ -4719,7 +4908,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 			.any(|selector| selector.settings.mode == SortMode::Random);
 	if needs_random {
 		settings.salt = Some(match settings.random_source.as_deref() {
-			Some(path) => salt_from_random_source(path)?,
+			Some(path) => salt_from_random_source(&fs, path)?,
 			None => get_rand_string(),
 		});
 	}
@@ -4729,13 +4918,13 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 	// Verify that we can open all input files. They are reopened later to avoid
 	// holding every descriptor while the output file is prepared.
 	for file in &files {
-		open(file)?;
+		open(&fs, file)?;
 	}
 
 	let output_path = matches
 		.get_one::<OsString>(options::OUTPUT)
 		.map(|path| host.resolve(path).into_os_string());
-	let output = Output::new(output_path.as_ref(), Some(host.stdout_clone()))?;
+	let output = Output::new(&fs, output_path.as_ref(), Some(host.stdout_clone()))?;
 
 	if settings.debug {
 		let global_flags = GlobalOptionFlags::from_matches(matches);
@@ -4749,7 +4938,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 
 	settings.init_precomputed(needs_locale_collation);
 
-	exec(&mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+	exec(&fs, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
 
 fn uu_app() -> Command {
@@ -4999,6 +5188,7 @@ pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 fn exec(
+	fs: &BlockingFs,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -5006,15 +5196,15 @@ fn exec(
 	stderr: OpenFile,
 ) -> SortResult<()> {
 	if settings.merge {
-		merge::merge(files, settings, output, tmp_dir)
+		merge::merge(fs, files, settings, output, tmp_dir)
 	} else if settings.check {
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
 		} else {
-			check::check(files.first().unwrap(), settings)
+			check::check(fs, files.first().unwrap(), settings)
 		}
 	} else {
-		let mut lines = files.iter().map(open);
+		let mut lines = files.iter().map(|file| open(fs, file));
 		ext_sort(&mut lines, settings, output, tmp_dir, stderr)
 	}
 }
@@ -5367,8 +5557,8 @@ const U64_LEN: usize = 8;
 const RANDOM_SOURCE_TAG: &[u8] = b"uutils-sort-random-source"; // Domain separation tag
 
 /// Create a 128-bit salt by hashing up to 1 MiB from the given file.
-fn salt_from_random_source(path: &Path) -> SortResult<[u8; SALT_LEN]> {
-	let mut reader = open_with_open_failed_error(path)?;
+fn salt_from_random_source(fs: &BlockingFs, path: &Path) -> SortResult<[u8; SALT_LEN]> {
+	let mut reader = open_with_open_failed_error(fs, path)?;
 	let mut buf = [0u8; BUF_LEN];
 	let mut total = 0usize;
 	// freeze seed for --random-source
@@ -5528,34 +5718,35 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 	settings: &GlobalSettings,
 	output: Output,
 ) -> SortResult<()> {
-	let output_name = output
-		.as_output_name()
-		.unwrap_or(OsStr::new("standard output"))
-		.to_owned();
+	let output_name = output.display_name();
 
-	let mut writer = output.into_write();
+	let mut writer = output
+		.into_write()
+		.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	for line in iter {
 		line.print(&mut writer, settings)
 			.map_err(|error| SortError::WriteFailed { path: output_name.clone(), error })?;
 	}
-	writer
-		.flush()
+	OutputSink::finish(writer)
 		.map_err(|error| SortError::WriteFailed { path: output_name, error })?;
 	Ok(())
 }
 
-fn open(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+fn open(fs: &BlockingFs, path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match fs.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::ReadFailed { path: path.to_owned(), error }),
 	}
 }
 
-fn open_with_open_failed_error(path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
+fn open_with_open_failed_error(
+	fs: &BlockingFs,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
 	// On error, returns an OpenFailed error instead of a ReadFailed error
 	let path = Path::new(path.as_ref());
-	match File::open(path) {
+	match fs.open(path) {
 		Ok(file) => Ok(Box::new(file)),
 		Err(error) => Err(SortError::OpenFailed { path: path.to_owned(), error }),
 	}
