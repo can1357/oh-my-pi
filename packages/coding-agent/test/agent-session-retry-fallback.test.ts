@@ -457,12 +457,23 @@ describe("AgentSession retry fallback", () => {
 		await session.refreshBaseSystemPrompt();
 		expect(session.agent.state.systemPrompt).toEqual(["edit:hashline"]);
 
+		// The event-time prompt is what extensions and listeners observe when a
+		// fallback lands: the re-sync must complete BEFORE `retry_fallback_applied`
+		// is broadcast, so no handler ever pairs the fallback model with the chain
+		// head's stale edit instructions (issue #11983).
+		const promptsAtFallbackEvent: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				promptsAtFallbackEvent.push(session?.agent.state.systemPrompt.join("\n") ?? "");
+			}
+		});
+
 		await session.prompt("Force a fallback onto the pinned-variant model");
 		await session.waitForIdle();
 
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
-		// Without the post-swap re-sync the base prompt stays `edit:hashline`.
+		expect(promptsAtFallbackEvent).toEqual(["edit:replace"]);
 		expect(session.agent.state.systemPrompt).toEqual(["edit:replace"]);
 	});
 
