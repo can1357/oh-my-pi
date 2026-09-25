@@ -1157,4 +1157,21 @@ describe("terminal title runtime", () => {
 		expect(last).toContain("my-session");
 		expectWorkingSeparator(last, "my-session");
 	});
+
+	it("appends the project directory to the session title (issue #12600)", () => {
+		// beforeEach leaves the run state idle, so the setter itself emits.
+		setSessionTerminalTitle("Fix auth", "C:/work/oh-my-pi");
+
+		expect(emittedTitles().at(-1)).toBe("π > Fix auth - oh-my-pi");
+	});
+
+	it("leaves the title alone without a cwd and never double-suffixes", () => {
+		setSessionTerminalTitle("Fix auth");
+
+		expect(emittedTitles().at(-1)).toBe("π > Fix auth");
+
+		setSessionTerminalTitle("Fix auth - oh-my-pi", "C:/work/oh-my-pi");
+
+		expect(emittedTitles().at(-1)).toBe("π > Fix auth - oh-my-pi");
+	});
 });
