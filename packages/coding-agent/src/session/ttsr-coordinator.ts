@@ -6,6 +6,8 @@ import {
 	type Agent,
 	type AgentEvent,
 	type AgentMessage,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
@@ -152,18 +154,24 @@ export class TtsrCoordinator {
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
 		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules match whole-file structure against the reconstructed edit/write
-		// snapshot, so they run once on the finalized call: per-delta snapshots are
-		// always partial source (a truncated prefix of the final arguments) and
-		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
-		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
-		// the streaming event path and wedges the loop (ui.loop-blocked).
-		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
-			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
-			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
-				return true;
-		}
 		return false;
+	}
+
+	/** AST parsing runs once on finalized arguments, before execution, not in
+	 * fire-and-forget stream listeners or on partial deltas. */
+	async beforeToolCall(ctx: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> {
+		if (!this.#manager?.hasAstRules()) return undefined;
+		const toolCall = { ...ctx.toolCall, arguments: ctx.args };
+		const matchContext = this.#inspector.matchContext(toolCall, 0);
+		const matches = await this.#checkAstStream(matchContext, toolCall);
+		if (matches.length > 0 && this.#handleMatches(matches, matchContext, ctx.assistantMessage.timestamp)) {
+			// Generation already ended: stop the tool turn before TTSR recovery retries it.
+			const reason = this.#formatAbortReason(matches);
+			ctx.assistantMessage.stopReason = "aborted";
+			ctx.assistantMessage.errorMessage = reason;
+			return { block: true, reason };
+		}
+		return undefined;
 	}
 
 	/** Settles the previous resume gate, queues any deferred injection, and starts judged-rule checks. */
