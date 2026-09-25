@@ -42,6 +42,7 @@
 - Improved authentication and credential management to support live broker and credential-store changes.
 
 ### Fixed
+- Failed checkpoint results no longer leave a session in checkpoint mode.
 
 - Fixed concurrent project access by enforcing file locking across processes.
 - Fixed Windows file reads with line selectors such as `:1-40`.
