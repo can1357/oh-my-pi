@@ -68,13 +68,50 @@ describe("safeDiscoverModels", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects 10/8, 192.168/16, 169.254/16, 0.0.0.0, localhost, and ::1 (negative)", async () => {
+	it("rejects 10/8, 172.16/12, 192.168/16, 169.254/16, 0.0.0.0, localhost, and ::1 (negative)", async () => {
 		const fetchSpy = forbidFetch();
-		const hosts = ["10.1.2.3", "192.168.0.1", "169.254.1.1", "0.0.0.0", "localhost", "[::1]"];
+		const hosts = [
+			"10.1.2.3",
+			"172.16.0.1",
+			"172.20.0.1",
+			"172.31.255.1",
+			"192.168.0.1",
+			"169.254.1.1",
+			"100.64.0.1",
+			"0.0.0.0",
+			"localhost",
+			"[::1]",
+			"[fd00::1]",
+			"[fe80::1]",
+		];
 		for (const host of hosts) {
 			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
 		}
 		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects IPv6 ULA and link-local discovery hosts (negative)", async () => {
+		const fetchSpy = forbidFetch();
+		const hosts = ["[fd00::1]", "[fe80::1]", "[fc00::1]"];
+		for (const host of hosts) {
+			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects non-2xx responses even when the body looks like a model list (negative)", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () =>
+					new Response(JSON.stringify({ data: [] }), {
+						status: 500,
+						headers: { "content-type": "application/json" },
+					}),
+				{ preconnect: fetch.preconnect },
+			),
+		);
+		await expect(safeDiscoverModels("https://example.com/v1/models")).rejects.toBeInstanceOf(SafeDiscoveryError);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("accepts a top-level JSON array", async () => {

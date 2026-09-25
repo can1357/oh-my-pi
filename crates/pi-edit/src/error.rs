@@ -17,6 +17,11 @@ pub enum EditError {
 	/// invalid op, auto-generated target, no-op, …).
 	#[error("{0}")]
 	Apply(String),
+	/// The target is not valid UTF-8 and the operation needs its text.
+	/// Existence-only operations (delete, create-existence checks) bypass
+	/// decoding and never produce this.
+	#[error("{display} is not valid UTF-8 at byte {valid_up_to}; refusing to edit")]
+	InvalidUtf8 { display: String, valid_up_to: usize },
 	/// A search anchor could not be located in the target text.
 	#[error("{0}")]
 	Match(String),
@@ -54,6 +59,11 @@ impl EditError {
 	/// Match failure carrying a preformatted message.
 	pub fn matched(message: impl Into<String>) -> Self {
 		Self::Match(message.into())
+	}
+
+	/// Whether this rejects an undecodable target.
+	pub const fn is_invalid_utf8(&self) -> bool {
+		matches!(self, Self::InvalidUtf8 { .. })
 	}
 
 	/// Whether this is `File not found` (ENOENT) for the given path.

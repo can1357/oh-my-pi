@@ -68,7 +68,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 
 async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
-	const authStorage = await discoverAuthStorage();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	const registry = new ModelRegistry(authStorage);
 	await registry.refresh();
 	await loadCliExtensionProviders(registry, settings, cwd);

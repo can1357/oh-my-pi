@@ -117,3 +117,10 @@ describe("fitsRequest", () => {
 		expect(fitsRequest(textOnly, { reasoning: true })).toBe(false);
 	});
 });
+
+it("rejects tool requests for a model that explicitly disables tools", () => {
+	const caps = capabilitiesFor({ ...fakeModel("no-tools"), supportsTools: false });
+	expect(fitsRequest(caps, { tools: true })).toBe(false);
+	expect(caps.parallelTools).toBe(false);
+	expect(fitsRequest(caps, {})).toBe(true);
+});

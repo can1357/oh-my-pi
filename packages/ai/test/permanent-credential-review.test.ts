@@ -20,7 +20,12 @@ function compiledRoute(): CompiledRoute {
 	});
 	const route = new RouteRegistry(id => (id === "primary" ? targetModel : undefined)).resolve("primary");
 	if (!route) throw new Error("Expected RouteRegistry to compile the primary target");
-	return { ...route, targets: ["primary"], fallbacks: { credential_permanent: ["backup"] } } as CompiledRoute;
+	return {
+		...route,
+		targets: ["primary"],
+		fallbacks: { credential_permanent: ["backup"] },
+		fallbackByTarget: { primary: { credential_permanent: ["backup"] } },
+	} as CompiledRoute;
 }
 
 function state(
@@ -88,4 +93,45 @@ describe("permanent credential conductor repair", () => {
 			}),
 		).toEqual({ type: "terminal" });
 	});
+});
+
+it("rotates permanent credential failures while retaining the post-commit boundary", () => {
+	const registry = new RouteRegistry(() => undefined);
+	registry.register({
+		id: "route",
+		root: {
+			type: "fallback",
+			on: ["credential_permanent"],
+			children: [
+				{ type: "target", model: "a" },
+				{ type: "target", model: "b" },
+			],
+		},
+	});
+	const route = registry.resolve("route")!;
+	const state: ExecutionState = {
+		routeId: route.id,
+		generation: route.generation,
+		attemptedTargets: new Set(["a"]),
+		attemptedCredentials: new Set<number>(),
+		retryCount: 0,
+		fallbackCount: 0,
+		committed: false,
+		currentTarget: "a",
+		siblingsExhausted: false,
+	};
+	const classification: GatewayErrorClassification = {
+		status: 401,
+		type: "authentication_error",
+		message: "revoked",
+		owner: "credential",
+		disposition: "credential_permanent",
+	};
+	expect(decideAttempt({ route, state, classification, commitState: "probing" })).toEqual({
+		type: "sibling_credential",
+	});
+	expect(
+		decideAttempt({ route, state: { ...state, siblingsExhausted: true }, classification, commitState: "probing" }),
+	).toEqual({ type: "fallback_target", targetModelId: "b" });
+	expect(decideAttempt({ route, state, classification, commitState: "committed" })).toEqual({ type: "terminal" });
 });

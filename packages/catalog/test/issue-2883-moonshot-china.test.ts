@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { moonshotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $pickenv } from "@oh-my-pi/pi-utils";
@@ -52,7 +52,7 @@ describe("Moonshot China platform (issue #2883)", () => {
 	test("moonshot accepts KIMI_API_KEY as an env-key fallback for MOONSHOT_API_KEY", () => {
 		// `getEnvApiKey("moonshot")` resolves a catalog provider via `$pickenv(...envVars)`
 		// (see ai/src/stream.ts), so the descriptor's env-var order IS the resolution order.
-		const envVars = getCatalogProviderEntry("moonshot")?.envVars;
+		const envVars = providerEntry("moonshot")?.envVars;
 		expect(envVars).toEqual(["MOONSHOT_API_KEY", "KIMI_API_KEY"]);
 
 		delete Bun.env.MOONSHOT_API_KEY;
@@ -61,7 +61,7 @@ describe("Moonshot China platform (issue #2883)", () => {
 	});
 
 	test("MOONSHOT_API_KEY keeps precedence over the KIMI_API_KEY alias", () => {
-		const envVars = getCatalogProviderEntry("moonshot")?.envVars ?? [];
+		const envVars = providerEntry("moonshot")?.envVars ?? [];
 		Bun.env.MOONSHOT_API_KEY = "moonshot-primary-key";
 		Bun.env.KIMI_API_KEY = "kimi-fallback-key";
 		expect($pickenv(...envVars)).toBe("moonshot-primary-key");

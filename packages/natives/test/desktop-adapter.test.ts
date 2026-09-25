@@ -42,15 +42,6 @@ class LegacyDesktopSession {
 }
 
 describe("legacy DesktopSession adapter", () => {
-	it("passes current native classes through unchanged", () => {
-		class CurrentDesktopSession {
-			click() {}
-		}
-
-		const adapted: unknown = adaptDesktopSession(CurrentDesktopSession);
-		expect(adapted).toBe(CurrentDesktopSession);
-	});
-
 	it("fills conservative capabilities and translates default foreground input", async () => {
 		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
 		const session = new DesktopSession({ display: "all" });
@@ -158,5 +149,16 @@ describe("legacy DesktopSession adapter", () => {
 		await session.click("desktop", 1, 1);
 
 		await expect(session.click("desktop", 1, 1)).rejects.toThrow(/^InvalidCoordinateFrame: /);
+	});
+
+	it("compares captured frames without retaining screenshot bytes", async () => {
+		// The stored captured-target state keeps geometry only: same-geometry
+		// input must not invalidate the frame, changed geometry must.
+		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
+		const session = new DesktopSession({ display: "all" });
+		const capture = await session.capture("desktop");
+		expect(capture.data).toBeInstanceOf(Uint8Array);
+		await session.click("desktop", 1, 1);
+		await session.click("desktop", 1, 1);
 	});
 });

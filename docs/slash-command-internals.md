@@ -271,3 +271,155 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 `/pause` is available only in the interactive TUI. It engages a process-global gate for the main agent, in-process subagents, and the advisor. Each agent parks at its next safe boundary: in-flight calls finish, nothing is aborted, and no new work starts until the gate is released.
 
 From the pause screen, press Esc, Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.
+
+## 11) Built-in command note: `/btw`
+
+`/btw <question>` asks an independent side question using the current session
+context. Bare `/btw` opens this session's history, with the newest question selected.
+Saved side questions are not appended to the main transcript or sent as history
+to unrelated turns. Each new `/btw <question>` remains independent; explicit
+follow-ups include only the selected side conversation alongside the current
+main-session context.
+
+Previous questions and answers are replayed as separate `user` and `assistant`
+messages, followed by the new user question, rather than embedded in one prompt.
+The original question template stays in the same position across follow-ups.
+History is snapshotted before asynchronous conversion and uses the normal
+provider normalization and secret-obfuscation pipeline.
+
+The main prompt-cache key and static system/tool prefix are retained. Each BTW
+topic has its own stable provider-side conversation identity, separate from the
+main conversation and other topics. Successful serialized follow-ups reuse it;
+after a cancelled, failed, or interrupted turn the next request uses a new
+transport generation, so an unwinding request cannot share its state.
+Standalone ephemeral callers without a conversation key keep per-request IDs.
+Actual cache hits depend on the provider. The main-session context is still
+current, not frozen at the first question; advancing or compacting it can change
+the prefix.
+Saved BTW records contain visible answer text, not opaque provider reasoning or
+replay signatures, so restoration preserves the dialogue roles and text rather
+than a byte-for-byte native provider transcript.
+
+- While an inline BTW is running, `Esc` cancels the request and keeps its partial
+  answer visible as `Cancelled`. Press `Esc` again to close the panel.
+- In history, `Esc` cancels the selected running topic without closing history;
+  otherwise it closes history. If another topic is still running, its inline
+  panel is restored rather than leaving it hidden in the background.
+- Completed, cancelled, and failed panels close with `Esc`; their history stays
+  saved. There is no hide-and-continue action or separate `x` cancellation key.
+- `c` copies the completed inline answer, or the selected topic's latest nonempty answer.
+- After an inline BTW answer completes, `f` opens that topic's follow-up input
+  directly, without requiring `/btw` first. The main editor must be empty and focused.
+- In history, `f` or `Enter` opens a native follow-up input for the selected topic.
+  Inside the input, `Enter` sends a nonempty question and `Esc` cancels the draft
+  and returns to history; `f`, `c`, and `x` are ordinary text.
+  Escape also cancels a submitted follow-up while its startup writes are pending,
+  without starting a model request. If its initial checkpoint was already underway,
+  the turn is saved as cancelled before another follow-up can start.
+- Follow-ups append to the same topic, retain prior answers and cancelled partial
+  output, and survive resume. The original question remains the history-list title;
+  `Details` shows every question and answer in chronological order.
+- In history, `Up`/`Down` select topics; `Tab` switches between history and
+  details. `Right` focuses details, `Left` returns to history.
+- Focused details support scrolling, `Page Up`/`Page Down`, and `Home`/`End`.
+  Narrow terminals show one pane at a time.
+- New questions and follow-ups are refused while any BTW request is running.
+  There is no implicit cancellation or queue.
+- A refused follow-up submission keeps the draft for retry; repeated Enter while
+  submission is pending cannot create duplicate requests.
+
+History is saved as private per-topic files under the session artifact
+directory's `btw-history/` subdirectory. This changes `/btw` from transient-only
+display to local retention alongside the session. Even a session containing only
+side questions is made resumable. `--no-session` keeps history in memory only.
+Ordinary transcript export/share does not include these sidecar records.
+
+Each topic uses an OS-backed cross-process lease and a revision check before an
+atomic replacement. Running turns keep their lease until a terminal checkpoint;
+another process cannot overwrite a live owner or a stale topic snapshot. A
+conflicting follow-up is rejected before any model request, and reopening or
+retrying reads the latest saved history. Rejected writes never replace the
+committed in-memory view.
+Root and follow-up timestamps must be nonnegative and within JavaScript's supported
+Date range (at most `8.64e15` milliseconds); invalid records are rejected before
+history rendering.
+
+Migration is non-destructive until the destination has been selected and
+validated. `/move`, `/wt`, and standalone persistent `!cd` refuse relocation while
+a BTW request is starting or running, asking the operator to finish or cancel it explicitly.
+For `/move`, the same gate is acquired before confirming or creating a missing
+destination directory and remains held through relocation. A busy request or
+unsaved checkpoint therefore leaves neither a new directory nor a moved session.
+The `/wt` gate is acquired before creating a branch or checkout and remains held
+through session relocation and configured source cleanup, so a busy refusal does
+not leave an unused worktree.
+The `!cd` guard runs before shell execution and remains held through cwd adoption
+or rollback, so a refused command cannot leave the shell in a different directory.
+Cancelled pickers, invalid destinations, and failed moves retain the BTW conversation.
+Successful relocation clears the old view only after moving the saved artifacts.
+
+Resuming from a path, the session picker, or an imported session cancels BTW and
+waits for its terminal checkpoint before switching. Confirmed deletion of the
+active session uses the same cleanup before detaching and removing its artifacts.
+Failed BTW persistence leaves the source session and its artifacts intact.
+Declining deletion or deleting an inactive session does not cancel the current BTW.
+Extension commands using `context.newSession`, `context.switchSession`, or
+`context.branch` also run this cleanup before changing session state or clearing
+extension UI. This applies both when extensions initialize and when their command
+context is reinitialized.
+
+Session operations wait at most 10 seconds for outstanding BTW persistence.
+A timeout stops the operation and leaves the current session in place; it does
+not cancel the underlying filesystem write or allow migration/deletion to run
+later when that write completes. A failed terminal checkpoint also stops these
+operations after its pending promise has settled; the unsaved answer remains
+available to view and copy. Retrying the operation retries the retained snapshot
+against its original disk revision. Transient I/O failures can recover, but a
+conflict never silently rebases over another writer's changes. An initial
+checkpoint rejection still prevents model dispatch and can reload history normally.
+Visible BTW errors use bounded, single-line text with control sequences removed
+and embedded home paths shortened; original errors remain available in diagnostic
+logs and exception causes for troubleshooting.
+
+Starting a question saves its running state. Completion, error, and explicit
+cancellation save a final checkpoint; cancelled answers retain text already
+received. A crash can lose uncheckpointed streaming text, but a saved running
+record reopens as `Interrupted` and is never automatically resubmitted.
+History remains attached to the session artifacts and follows operations that
+copy or remove those artifacts; it does not move the conversation leaf.
+
+The existing inline `b` action promotes a completed single-turn answer to a chat
+branch only when the original session/leaf is unchanged and the main session is
+idle. Multi-turn side conversations remain in BTW history; promoting only their
+latest pair would discard earlier context. History browsing does not promote
+answers or relax these branch guards.
+
+## 12) Bundled command note: `/annotate`
+
+`/annotate` lets the operator attach notes to a diff or text before the agent acts. With no argument it opens a source menu.
+
+| Command | Source |
+|---|---|
+| `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, or a GitHub PR |
+| `/annotate last` | Latest non-empty assistant reply on the active branch |
+| `/annotate session` | A message or block picked in the `/copy` selector |
+| `/annotate path/to/file` | Text read from a file |
+| `/annotate "text"` | Literal text |
+
+The whole remainder after `/annotate` is one source specification (`CustomCommand.execute` receives it verbatim as `rawArgs`):
+
+- A remainder wrapped in matching `"` or `'` is literal text; only the outer pair is stripped and the interior is kept byte-for-byte.
+- Unquoted `last`, `session`, and `code-review …` select those modes. To annotate a file whose path starts with one of these words, prefix it with `./` (for example `/annotate ./code-review notes.md`).
+- Anything else is one file path, spaces included, resolved with `resolveReadPath` against the live session cwd. Missing or non-regular paths notify and never fall back to literal text.
+
+Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
+
+**Code review.** The menu lists up to three GitHub PRs referenced in the conversation, then the local diff kinds. `/annotate code-review pr://owner/repo/N [focus]` skips the menu. The diff is resolved once in the live session cwd and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub.
+
+**Text sources.** Feedback is always pasted into the composer, never submitted. File and literal sources are embedded verbatim. The latest reply is referenced as "your last reply" and only the annotated lines are quoted. An older session message longer than 1,000 characters is condensed by one call to the current session model (its credentials, no fallback model); if that call fails or returns an unusable result, the full source is embedded with a warning.
+
+**Overlay keys.** `a` adds a line note, `A` a whole-file/whole-text note, `e` edits the note(s) at the cursor (with a chooser when several apply), `u` undoes the last add/edit/delete. In the note editor, Enter saves, Shift+Enter inserts a newline, Escape discards the draft, and the configured external-editor key replaces the draft without saving it. Notes are trimmed on save; saving an empty edit deletes the note, and an empty new note is ignored. Line anchors (quoted source line, diff hunk header and raw row) are kept exactly.
+
+## 13) Built-in command note: `/plan-review`
+
+`/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.

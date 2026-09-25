@@ -23,29 +23,26 @@
  *
  * When the user grants consent, push is automatically active against the
  * bundled endpoint (`dev.autoqaPush.endpoint`, default `qa.omp.sh`). Each
- * insert schedules a background flush that POSTs pending rows and deletes them
- * on HTTP 2xx. `PI_AUTO_QA_PUSH=1` forces push in non-interactive environments
- * where the consent dialog never fires. Device execution is never blocked on
- * the network and never throws.
+ * insert schedules a background flush that POSTs pending rows and marks them
+ * pushed on HTTP 2xx. Rows the collector permanently refuses (400/413/422) are
+ * isolated by bisecting the batch and parked with the server's error, so a
+ * single bad row can't block the queue. `PI_AUTO_QA_PUSH=1` forces push in
+ * non-interactive environments where the consent dialog never fires. Device
+ * execution is never blocked on the network and never throws.
  */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
-import type { Theme } from "../modes/theme/theme";
-import { renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from "./index";
-import { replaceTabs } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { XdevDispatch } from "./xdev";
 
-export const REPORT_ISSUE_DEVICE_NAME = "report_issue";
-export const REPORT_ISSUE_DEVICE_PATH = `xd://${REPORT_ISSUE_DEVICE_NAME}`;
+import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
+import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 /** Usage text for `read xd://report_issue`. */
 export function reportIssueDeviceUsage(): string {
@@ -61,18 +58,24 @@ export function isReportIssueToolCall(toolCall: { name: string; arguments?: Reco
 	return path === REPORT_ISSUE_DEVICE_PATH || path === `${REPORT_ISSUE_DEVICE_PATH}/`;
 }
 
-/** Call preview for an `xd://report_issue` write. */
-export function renderReportIssueDeviceCall(content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
-	const text = renderStatusLine(
-		{
-			icon: "pending",
-			title: "Report Tool Issue",
-			description: body ? truncateToWidth(body, 72) : undefined,
-		},
-		uiTheme,
-	);
-	return new Text(text, 0, 0);
+/**
+ * Maximum `tool` length the collector accepts, in UTF-8 bytes. An oversized
+ * entry makes the collector reject the *whole* batch with HTTP 400, so
+ * grievances are clamped at record time and again at send time — rows recorded
+ * before the clamp existed still sit in users' databases.
+ */
+const MAX_TOOL_BYTES = 128;
+
+/**
+ * Clamp a grievance to the collector's field limits.
+ *
+ * An over-long `tool` is prose the model put on line 1 instead of a tool name,
+ * so the original line is kept at the head of the report and only the stored
+ * name is truncated: nothing is lost and the row stops being a poison pill.
+ */
+function clampGrievance(tool: string, report: string): { tool: string; report: string } {
+	if (Buffer.byteLength(tool, "utf8") <= MAX_TOOL_BYTES) return { tool, report };
+	return { tool: truncateHeadBytes(tool, MAX_TOOL_BYTES).text, report: `${tool}\n${report}` };
 }
 
 function parseReportIssueBody(text: string): { tool: string; report: string } {
@@ -84,13 +87,13 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 	if (firstNewline >= 0) {
 		const tool = body.slice(0, firstNewline).trim();
 		const report = body.slice(firstNewline + 1).trim();
-		if (tool && report) return { tool, report };
+		if (tool && report) return clampGrievance(tool, report);
 	}
 	const colon = body.indexOf(":");
 	if (colon > 0) {
 		const tool = body.slice(0, colon).trim();
 		const report = body.slice(colon + 1).trim();
-		if (tool && report) return { tool, report };
+		if (tool && report) return clampGrievance(tool, report);
 	}
 	throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
 }
@@ -267,6 +270,9 @@ export function openAutoQaDb(): Database | null {
 		const db = new Database(dbPath, { create: true });
 		// Install the busy handler BEFORE any lock-taking statement. See #2421.
 		db.run("PRAGMA busy_timeout = 5000");
+		// `pushed` is tri-state: 0 = queued, 1 = accepted by the collector,
+		// -1 = permanently refused (`push_error` holds the collector's reason).
+		// Refused rows are parked so one bad row can't block the queue forever.
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS grievances (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,7 +281,8 @@ export function openAutoQaDb(): Database | null {
 				tool TEXT NOT NULL,
 				report TEXT NOT NULL,
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				pushed INTEGER NOT NULL DEFAULT 0
+				pushed INTEGER NOT NULL DEFAULT 0,
+				push_error TEXT
 			);
 		`);
 		// Legacy DBs (May 2026) predate `created_at`. ALTER TABLE only accepts
@@ -287,6 +294,8 @@ export function openAutoQaDb(): Database | null {
 				UPDATE grievances SET created_at = CURRENT_TIMESTAMP WHERE created_at = '';
 			`);
 		}
+		const hasPushError = db.prepare("SELECT 1 FROM pragma_table_info('grievances') WHERE name = 'push_error'").get();
+		if (!hasPushError) db.exec("ALTER TABLE grievances ADD COLUMN push_error TEXT;");
 		db.exec(`
 			CREATE INDEX IF NOT EXISTS grievances_pushed_created_at_idx
 			ON grievances (pushed, created_at, id);
@@ -304,9 +313,17 @@ export function openAutoQaDb(): Database | null {
 // ───────────────────────────────────────────────────────────────────────────
 
 export interface FlushResult {
+	/** Rows the collector accepted this flush. */
 	pushed: number;
 	ok: boolean;
 	skipped?: boolean;
+	/**
+	 * Rows the collector permanently refused. They are parked as `pushed = -1`
+	 * and never retried; only present when non-zero.
+	 */
+	rejected?: number;
+	/** Last collector error (`HTTP <status>: <body>`), for CLI reporting. */
+	error?: string;
 }
 
 /**
@@ -400,6 +417,28 @@ interface GrievanceRow {
 	report: string;
 }
 
+/** Cap on collector error text kept for logs, `FlushResult`, and `push_error`. */
+const MAX_PUSH_ERROR_CHARS = 300;
+
+async function describeErrorResponse(response: Response): Promise<string> {
+	let detail = "";
+	try {
+		detail = (await response.text()).trim();
+	} catch {
+		/* body already consumed or not readable — status alone is the error */
+	}
+	if (detail.length > MAX_PUSH_ERROR_CHARS) detail = `${detail.slice(0, MAX_PUSH_ERROR_CHARS)}…`;
+	return detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`;
+}
+
+type BatchOutcome =
+	/** Collector accepted every entry. */
+	| { kind: "sent" }
+	/** Collector refused the payload; retrying the same bytes is pointless. */
+	| { kind: "rejected"; error: string }
+	/** Transient failure (network, 5xx, rate limit, auth) — try again later. */
+	| { kind: "retry"; error: string };
+
 async function performFlush(db: Database, config: PushConfig, options: FlushOptions = {}): Promise<FlushResult> {
 	const selectStmt = db.prepare(
 		"SELECT id, model, version, tool, report FROM grievances WHERE pushed = 0 ORDER BY id ASC LIMIT ?",
@@ -413,10 +452,10 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 	}
 	const fetchImpl = options.fetch ?? fetch;
 	let totalPushed = 0;
-	for (;;) {
-		const rows = selectStmt.all(FLUSH_BATCH_SIZE) as GrievanceRow[];
-		if (rows.length === 0) return { pushed: totalPushed, ok: true };
+	let totalRejected = 0;
+	let lastError: string | undefined;
 
+	const postBatch = async (batch: GrievanceRow[]): Promise<BatchOutcome> => {
 		const body = JSON.stringify({
 			agent: { name: "omp", version: VERSION },
 			installId: getInstallId(),
@@ -425,7 +464,9 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 			// leaking the user's machine name.
 			platform: process.platform,
 			arch: process.arch,
-			entries: rows,
+			// Clamped on the way out so rows recorded before the record-time
+			// clamp existed still ship instead of poisoning every batch.
+			entries: batch.map(row => ({ ...row, ...clampGrievance(row.tool, row.report) })),
 		});
 		const headers: Record<string, string> = { "content-type": "application/json" };
 		if (config.token) headers.authorization = `Bearer ${config.token}`;
@@ -439,33 +480,74 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 				signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
 			});
 		} catch (error) {
+			return { kind: "retry", error: String(error) };
+		}
+		if (response.ok) return { kind: "sent" };
+		const error = await describeErrorResponse(response);
+		// 400/413/422 mean the payload itself is unacceptable — retrying the same
+		// bytes can only fail again. 5xx, 408, 429 and auth failures (401/403) say
+		// nothing about the rows, so they stay retryable.
+		const status = response.status;
+		const permanent = status === 400 || status === 413 || status === 422;
+		return permanent ? { kind: "rejected", error } : { kind: "retry", error };
+	};
+
+	/**
+	 * Ship one batch, bisecting on payload rejections until the offending rows
+	 * are isolated and parked. `false` means a transient failure — the caller
+	 * stops the flush and leaves everything queued for the next attempt.
+	 */
+	const shipBatch = async (batch: GrievanceRow[]): Promise<boolean> => {
+		const outcome = await postBatch(batch);
+		if (outcome.kind === "sent") {
+			const ids = batch.map(r => r.id);
+			const placeholders = ids.map(() => "?").join(",");
+			db.prepare(`UPDATE grievances SET pushed = 1 WHERE id IN (${placeholders})`).run(...ids);
+			totalPushed += batch.length;
+			options.onProgress?.(totalPushed);
+			return true;
+		}
+		lastError = outcome.error;
+		if (outcome.kind === "retry") return false;
+		if (batch.length === 1) {
+			const row = batch[0];
+			if (!row) return true;
+			db.prepare("UPDATE grievances SET pushed = -1, push_error = ? WHERE id = ?").run(outcome.error, row.id);
+			totalRejected += 1;
+			logger.warn("autoqa grievance rejected", {
+				endpoint: config.endpoint,
+				id: row.id,
+				tool: row.tool,
+				error: outcome.error,
+			});
+			return true;
+		}
+		const mid = Math.floor(batch.length / 2);
+		return (await shipBatch(batch.slice(0, mid))) && (await shipBatch(batch.slice(mid)));
+	};
+
+	let ok = true;
+	for (;;) {
+		const rows = selectStmt.all(FLUSH_BATCH_SIZE) as GrievanceRow[];
+		if (rows.length === 0) break;
+		if (!(await shipBatch(rows))) {
 			lastFailureAt = Date.now();
 			logger.warn("autoqa push failed", {
 				endpoint: config.endpoint,
-				error: String(error),
+				error: lastError,
 				batchSize: rows.length,
 				pushedSoFar: totalPushed,
 			});
-			return { pushed: totalPushed, ok: false };
+			ok = false;
+			break;
 		}
-
-		if (!response.ok) {
-			lastFailureAt = Date.now();
-			logger.warn("autoqa push failed", {
-				endpoint: config.endpoint,
-				status: response.status,
-				batchSize: rows.length,
-				pushedSoFar: totalPushed,
-			});
-			return { pushed: totalPushed, ok: false };
-		}
-
-		const ids = rows.map(r => r.id);
-		const placeholders = ids.map(() => "?").join(",");
-		db.prepare(`UPDATE grievances SET pushed = 1 WHERE id IN (${placeholders})`).run(...ids);
-		totalPushed += rows.length;
-		options.onProgress?.(totalPushed);
 	}
+	return {
+		pushed: totalPushed,
+		ok,
+		...(totalRejected > 0 ? { rejected: totalRejected } : {}),
+		...(lastError ? { error: lastError } : {}),
+	};
 }
 
 /**

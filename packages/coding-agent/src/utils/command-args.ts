@@ -1,11 +1,22 @@
-export function parseCommandArgs(argsString: string): string[] {
+/** Split command arguments, optionally enforcing complete quotes and shell-style escapes. */
+export function parseCommandArgs(argsString: string, options?: { strict?: boolean }): string[] {
 	const args: string[] = [];
 	let current = "";
 	let inQuote: string | null = null;
+	let started = false;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
-
+		if (options?.strict && char === "\\" && inQuote !== "'") {
+			const next = argsString[i + 1];
+			if (next === undefined) throw new Error("Incomplete command escape.");
+			if (inQuote === null || next === '"' || next === "\\" || next === "$" || next === "`") {
+				current += next;
+				started = true;
+				i++;
+				continue;
+			}
+		}
 		if (inQuote) {
 			if (char === inQuote) {
 				inQuote = null;
@@ -14,17 +25,21 @@ export function parseCommandArgs(argsString: string): string[] {
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
+			started = true;
 		} else if (char === " " || char === "\t") {
-			if (current) {
+			if (current || (options?.strict && started)) {
 				args.push(current);
 				current = "";
+				started = false;
 			}
 		} else {
 			current += char;
+			started = true;
 		}
 	}
 
-	if (current) {
+	if (options?.strict && inQuote) throw new Error("Unterminated command quote.");
+	if (current || (options?.strict && started)) {
 		args.push(current);
 	}
 
