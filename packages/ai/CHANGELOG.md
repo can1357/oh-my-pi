@@ -19,6 +19,9 @@
 ### Fixed
 
 - Fixed capped Anthropic and Bedrock Claude requests with thinking enabled, including on-demand compaction, ending at `max_tokens` with no answer; every capped request now gets its effort's thinking budget on top of the requested output ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
+### Added
+
+- Added the optional `AssistantMessage.promptCachePrefix` field and `PromptCachePrefix` type recording whether a request resent the previous request's cacheable prefix unchanged. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
 
 ## [18.3.1] - 2026-09-25
 

@@ -202,27 +202,49 @@ export interface AgentTypeStats {
  * >= 1024 tokens, the prompt did not shrink below 97% of its predecessor
  * (compaction/pruning), and the predecessor finished under 5 minutes earlier.
  * Models that never reported a cache read (all-time) are excluded: there is no
- * warm cache to miss. The smaller of the two prompts is the expected cache hit;
- * shortfalls up to 256 tokens are cache-block rounding and are not missed.
+ * warm cache to miss. Shortfalls up to 256 tokens are cache-block rounding and
+ * are not missed.
+ *
+ * Each pair is attributed with the request's send-time prefix status
+ * (`cache_prefix`): when omp changed part of the previous prompt, the loss is a
+ * prefix change (omp's side); otherwise it is a provider miss. When the
+ * previous request was sent unchanged (`intact`), the whole previous prompt is
+ * the expected cache hit; without a recorded status (older rows) the smaller of
+ * the two prompts is used as an estimate.
  */
 export interface CacheMissStats {
 	provider: string;
 	agentType: AgentType;
 	/** Warm-cache request pairs examined. */
 	pairs: number;
-	/** Pairs missing more than max(2048, 10% of expected) tokens. */
+	/** Pairs whose expected hit is exact: omp verified at send time that the previous prompt was resent unchanged. */
+	exactPairs: number;
+	/** Provider-side pairs (prefix not changed by omp) missing more than max(2048, 10% of expected) tokens. */
 	badPairs: number;
-	/** Prompt tokens the provider should have served from cache. */
+	/** Prompt tokens the provider should have served from cache (provider-side pairs). */
 	expectedTokens: number;
 	/** Expected tokens the provider did not read from cache. */
 	missedTokens: number;
 	/** missedTokens / expectedTokens (0-1). */
 	missRate: number;
-	/** badPairs / pairs (0-1). */
+	/** badPairs / provider-side pairs (0-1). */
 	badPairRate: number;
-	/** API-equivalent cost of the misses: missed tokens x (input - cache-read) rate. */
+	/** API-equivalent cost of the provider misses: missed tokens x (input - cache-read) rate. */
 	avoidableCost: number;
+	/** Pairs where omp changed part of the previous prompt before sending. */
+	prefixChangedPairs: number;
+	/** prefixChangedPairs / pairs (0-1). */
+	prefixChangedRate: number;
+	/** Previous-prompt tokens not read from cache on prefix-changed pairs. */
+	prefixChangedTokens: number;
+	/** API-equivalent cost of the prefix changes. */
+	prefixChangedCost: number;
+	/** Prefix-changed pairs by the first part that differed. */
+	prefixChangedBy: Record<PromptPrefixPart, number>;
 }
+
+/** Part of a request that omp changed relative to the previous request. */
+export type PromptPrefixPart = "system" | "tools" | "options" | "messages";
 
 /**
  * Behavior time-series point (daily bucket, per responding model).

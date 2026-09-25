@@ -212,6 +212,7 @@ export async function initDb(): Promise<Database> {
 			cost_no_cache_input REAL,
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
+			cache_prefix TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -297,6 +298,10 @@ export async function initDb(): Promise<Database> {
 	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
+	}
+	// Send-time prompt-cache prefix status; NULL for rows recorded before omp stamped it.
+	if (!messageColumns.some(column => column.name === "cache_prefix")) {
+		db.run("ALTER TABLE messages ADD COLUMN cache_prefix TEXT");
 	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
@@ -730,9 +735,9 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type
+			cost_unpriced, agent_type, cache_prefix
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
@@ -745,7 +750,8 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			cost_cache_write = excluded.cost_cache_write,
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
-			cost_unpriced = excluded.cost_unpriced
+			cost_unpriced = excluded.cost_unpriced,
+			cache_prefix = excluded.cache_prefix
 	`);
 
 	let inserted = 0;
@@ -779,6 +785,7 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 				noCacheInputCost,
 				unpriced ? 1 : 0,
 				s.agentType,
+				s.cachePrefix ?? null,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
 				s.entryId,
@@ -1034,15 +1041,24 @@ interface CacheMissRow {
 	provider: string;
 	agent_type: string | null;
 	pairs: number;
+	exact_pairs: number;
+	provider_pairs: number;
 	bad_pairs: number;
 	expected_tokens: number;
 	missed_tokens: number;
 	avoidable_cost: number | null;
+	prefix_changed_pairs: number;
+	prefix_changed_tokens: number;
+	prefix_changed_cost: number | null;
+	changed_system: number;
+	changed_tools: number;
+	changed_options: number;
+	changed_messages: number;
 }
 
 /**
  * Get unexpected prompt-cache misses grouped by provider and agent type,
- * sorted by missed tokens (descending).
+ * sorted by lost tokens (descending).
  *
  * Walks each transcript's requests in start order and pairs every request with
  * its predecessor. A pair counts only when the cache should still be warm: same
@@ -1050,14 +1066,19 @@ interface CacheMissRow {
  * (>= 1024 tokens), the prompt did not shrink below 97% of its predecessor
  * (compaction/pruning), and the idle gap between the predecessor finishing and
  * this request starting is under 5 minutes. Models that never reported a cache
- * read (all-time) have no warm cache to miss and are excluded. The smaller of
- * the two prompts is the expected cache hit; whatever this request did not
- * read from cache is missed, unless the shortfall is within cache-block
- * rounding (256 tokens).
+ * read (all-time) have no warm cache to miss and are excluded.
+ *
+ * The request's send-time `cache_prefix` decides the expected hit and who lost
+ * it. `intact`: omp resent the previous prompt unchanged, so all of it should
+ * be cached and any shortfall is the provider's. `changed:<part>`: omp altered
+ * the previous prompt, so the loss is reported as a prefix change instead.
+ * Without a status (older rows), the smaller of the two prompts is the
+ * estimated hit and the pair counts as provider-side. Shortfalls within
+ * cache-block rounding (256 tokens) are not missed.
  *
  * With a cutoff, pairs are selected by the later request's timestamp; the
- * predecessor may precede the cutoff. Avoidable cost prices missed tokens at
- * each model's all-time effective input rate minus its cache-read rate.
+ * predecessor may precede the cutoff. Costs price missed tokens at each
+ * model's all-time effective input rate minus its cache-read rate.
  */
 export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 	if (!db) return [];
@@ -1073,17 +1094,14 @@ export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 			FROM messages
 			${hasCutoff ? "WHERE session_file IN (SELECT session_file FROM messages WHERE timestamp >= ?)" : ""}
 		),
-		pairs AS (
+		candidates AS (
 			SELECT
 				b.provider,
 				b.model,
 				b.agent_type,
-				MIN(${prevPrompt}, ${prompt}) AS expected,
-				CASE
-					WHEN MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens > ${CACHE_BLOCK_ROUNDING_TOKENS}
-						THEN MIN(${prevPrompt}, ${prompt}) - b.cache_read_tokens
-					ELSE 0
-				END AS missed
+				b.cache_prefix,
+				CASE WHEN b.cache_prefix = 'intact' THEN ${prevPrompt} ELSE MIN(${prevPrompt}, ${prompt}) END AS expected,
+				b.cache_read_tokens AS cache_read
 			FROM ordered o
 			JOIN messages b ON b.id = o.id
 			JOIN messages a ON a.id = o.prev_id
@@ -1096,6 +1114,16 @@ export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 				AND ${prompt} >= ${CACHE_PROMPT_SHRINK_RATIO} * ${prevPrompt}
 				AND b.timestamp - a.timestamp - COALESCE(a.duration, 0) < ${CACHE_WARM_WINDOW_MS}
 				${hasCutoff ? "AND b.timestamp >= ?" : ""}
+		),
+		pairs AS (
+			SELECT
+				*,
+				COALESCE(cache_prefix LIKE 'changed:%', 0) AS prefix_changed,
+				CASE
+					WHEN expected - cache_read > ${CACHE_BLOCK_ROUNDING_TOKENS} THEN expected - cache_read
+					ELSE 0
+				END AS missed
+			FROM candidates
 		),
 		cached_models AS (
 			SELECT
@@ -1111,15 +1139,27 @@ export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 			p.provider,
 			p.agent_type,
 			COUNT(*) AS pairs,
-			SUM(CASE WHEN p.missed > MAX(${CACHE_BAD_MISS_MIN_TOKENS}, ${CACHE_BAD_MISS_RATIO} * p.expected)
+			SUM(p.cache_prefix = 'intact') AS exact_pairs,
+			SUM(1 - p.prefix_changed) AS provider_pairs,
+			SUM(CASE WHEN p.prefix_changed = 0
+				AND p.missed > MAX(${CACHE_BAD_MISS_MIN_TOKENS}, ${CACHE_BAD_MISS_RATIO} * p.expected)
 				THEN 1 ELSE 0 END) AS bad_pairs,
-			SUM(p.expected) AS expected_tokens,
-			SUM(p.missed) AS missed_tokens,
-			SUM(p.missed * MAX(0, m.input_price - m.cache_read_price)) AS avoidable_cost
+			SUM(CASE WHEN p.prefix_changed = 0 THEN p.expected ELSE 0 END) AS expected_tokens,
+			SUM(CASE WHEN p.prefix_changed = 0 THEN p.missed ELSE 0 END) AS missed_tokens,
+			SUM(CASE WHEN p.prefix_changed = 0
+				THEN p.missed * MAX(0, m.input_price - m.cache_read_price) ELSE 0 END) AS avoidable_cost,
+			SUM(p.prefix_changed) AS prefix_changed_pairs,
+			SUM(CASE WHEN p.prefix_changed = 1 THEN p.missed ELSE 0 END) AS prefix_changed_tokens,
+			SUM(CASE WHEN p.prefix_changed = 1
+				THEN p.missed * MAX(0, m.input_price - m.cache_read_price) ELSE 0 END) AS prefix_changed_cost,
+			SUM(p.cache_prefix = 'changed:system') AS changed_system,
+			SUM(p.cache_prefix = 'changed:tools') AS changed_tools,
+			SUM(p.cache_prefix = 'changed:options') AS changed_options,
+			SUM(p.cache_prefix = 'changed:messages') AS changed_messages
 		FROM pairs p
 		JOIN cached_models m ON m.provider = p.provider AND m.model = p.model
 		GROUP BY p.provider, p.agent_type
-		ORDER BY missed_tokens DESC, p.provider, p.agent_type
+		ORDER BY missed_tokens + prefix_changed_tokens DESC, p.provider, p.agent_type
 	`);
 
 	const rows = (hasCutoff ? stmt.all(cutoff, cutoff) : stmt.all()) as CacheMissRow[];
@@ -1127,12 +1167,23 @@ export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
 		provider: row.provider,
 		agentType: (row.agent_type as AgentType | null) ?? "main",
 		pairs: row.pairs,
+		exactPairs: row.exact_pairs ?? 0,
 		badPairs: row.bad_pairs,
 		expectedTokens: row.expected_tokens,
 		missedTokens: row.missed_tokens,
 		missRate: row.expected_tokens > 0 ? row.missed_tokens / row.expected_tokens : 0,
-		badPairRate: row.pairs > 0 ? row.bad_pairs / row.pairs : 0,
+		badPairRate: row.provider_pairs > 0 ? row.bad_pairs / row.provider_pairs : 0,
 		avoidableCost: row.avoidable_cost ?? 0,
+		prefixChangedPairs: row.prefix_changed_pairs,
+		prefixChangedRate: row.pairs > 0 ? row.prefix_changed_pairs / row.pairs : 0,
+		prefixChangedTokens: row.prefix_changed_tokens,
+		prefixChangedCost: row.prefix_changed_cost ?? 0,
+		prefixChangedBy: {
+			system: row.changed_system ?? 0,
+			tools: row.changed_tools ?? 0,
+			options: row.changed_options ?? 0,
+			messages: row.changed_messages ?? 0,
+		},
 	}));
 }
 
@@ -1449,6 +1500,7 @@ function rowToMessageStats(row: any): MessageStats {
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
 		costUnpriced: row.cost_unpriced === 1,
+		cachePrefix: row.cache_prefix ?? null,
 	};
 }
 

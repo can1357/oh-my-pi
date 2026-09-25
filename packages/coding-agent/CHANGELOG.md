@@ -98,6 +98,7 @@
 - Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
 - Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost.
 - Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
+- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost, plus how often omp itself changed the previous prompt (system prompt, tools, options, or messages). ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
 
 ## [18.3.1] - 2026-09-25
 

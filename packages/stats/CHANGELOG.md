@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an unexpected cache-miss metric per provider, split into main agent and subagents: prompt tokens the previous request in the same session already sent but the provider did not read from cache while it should still have been warm (same model, under 5 minutes idle, prompt not shrunk by compaction; models that never report cache reads are excluded; shortfalls up to 256 tokens are treated as cache-block rounding). Shown in the overview dashboard, `omp stats --summary`, and `getDashboardStats().cacheMisses`, with miss rate, bad-turn rate, missed tokens, and API-equivalent avoidable cost. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
+- Added an unexpected cache-miss metric per provider, split into main agent and subagents: prompt tokens the previous request in the same session already sent but the provider did not read from cache while it should still have been warm (same model, under 5 minutes idle, prompt not shrunk by compaction; models that never report cache reads are excluded; shortfalls up to 256 tokens are treated as cache-block rounding). Shown in the overview dashboard, `omp stats --summary`, and `getDashboardStats().cacheMisses`, with miss rate, bad-turn rate, missed tokens, and API-equivalent avoidable cost. Requests recorded with a send-time prompt-cache prefix status use the whole previous prompt as the expected hit when omp resent it unchanged, and turns where omp changed part of the previous prompt are reported separately as "Prefix changed" (by system prompt, tools, options, or messages) instead of as provider misses. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
 
 ## [18.2.9] - 2026-09-22
 

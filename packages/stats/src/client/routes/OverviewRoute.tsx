@@ -243,7 +243,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 						<Info size={14} className="stats-text-muted" aria-label={CACHE_MISS_HELP} />
 					</span>
 				}
-				subtitle="Cacheable prompt tokens not read from cache while the cache should have been warm (same session, under 5 min idle, prompt not shrunk)"
+				subtitle="Cacheable prompt tokens not read from cache while the cache should have been warm (same session, under 5 min idle, prompt not shrunk). Prefix changed: omp altered the previous prompt itself."
 			>
 				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
 					{overview && <CacheMissTable stats={overview.cacheMisses} />}

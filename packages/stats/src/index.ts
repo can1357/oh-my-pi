@@ -90,12 +90,17 @@ async function printStats(): Promise<void> {
 		}
 	}
 
-	const misses = cacheMisses.filter(m => m.missedTokens > 0);
+	const misses = cacheMisses.filter(m => m.missedTokens > 0 || m.prefixChangedPairs > 0);
 	if (misses.length > 0) {
 		console.log("\nUnexpected cache misses (warm cache, same session, prompt not shrunk):");
 		for (const m of misses) {
+			const by = m.prefixChangedBy;
+			const prefixChanged =
+				m.prefixChangedPairs > 0
+					? `; omp changed the prefix on ${formatPercent(m.prefixChangedRate)} of turns (system ${by.system}, tools ${by.tools}, options ${by.options}, messages ${by.messages}), ~${formatCost(m.prefixChangedCost)}`
+					: "";
 			console.log(
-				`  ${m.provider} ${m.agentType}: ${formatPercent(m.missRate)} of cacheable tokens missed (${formatNumber(m.missedTokens)} tokens, ${formatPercent(m.badPairRate)} of turns), ~${formatCost(m.avoidableCost)} API-equivalent`,
+				`  ${m.provider} ${m.agentType}: ${formatPercent(m.missRate)} of cacheable tokens missed (${formatNumber(m.missedTokens)} tokens, ${formatPercent(m.badPairRate)} of turns), ~${formatCost(m.avoidableCost)} API-equivalent${prefixChanged}`,
 			);
 		}
 	}
