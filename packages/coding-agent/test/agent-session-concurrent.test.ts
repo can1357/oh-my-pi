@@ -25,10 +25,15 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, shouldRenderAbortReason } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	isUserInterruptAbort,
+	shouldRenderAbortReason,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1976,6 +1981,300 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(text).toContain('rule="no-unwrap"');
 		expect(text).toContain("Do not use .unwrap()");
 		expect(text.indexOf("<system-reminder")).toBeLessThan(text.indexOf("edit applied"));
+	});
+
+	it.each(["always", "never"] as const)(
+		"settles AST rules before write dispatch without extensions (%s)",
+		async interruptMode => {
+			const target = path.join(tempDir, "probe.ts");
+			const parameters = type({ path: "string", content: "string" });
+			const writeTool: AgentTool<typeof parameters> = {
+				name: "write",
+				label: "Write",
+				description: "Write a file",
+				parameters,
+				matcherDigest: args => {
+					if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+					return typeof args.content === "string" ? args.content : undefined;
+				},
+				execute: async (_id, args) => {
+					await Bun.write(args.path, args.content);
+					return { content: [{ type: "text", text: "Written" }] };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								name: "write",
+								arguments: { path: target, content: "console.log('blocked');" },
+							},
+						],
+					},
+				],
+				handler: () => ({ content: ["Done"] }),
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [writeTool] },
+				streamFn: mock.stream,
+				convertToLlm,
+			});
+			const ttsrManager = new TtsrManager({
+				enabled: true,
+				interruptMode,
+				contextMode: "keep",
+				repeatMode: "once",
+				repeatGap: 10,
+			});
+			ttsrManager.addRule({
+				name: "no-console",
+				path: "no-console.md",
+				content: "Do not add console.log calls.",
+				astCondition: ["console.log($$$)"],
+				scope: ["tool:write(*.ts)"],
+				_source: { provider: "test", providerName: "test", path: "no-console.md", level: "project" },
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry: sharedModelRegistry,
+				ttsrManager,
+			});
+
+			await session.prompt("Write the source file");
+			await session.waitForIdle();
+			expect(mock.calls).toHaveLength(2);
+			const retriedMessages = mock.calls[1]!.context.messages;
+			const toolCalls = retriedMessages.flatMap(message =>
+				message.role === "assistant"
+					? message.content.filter(block => block.type === "toolCall").map(block => block.id)
+					: [],
+			);
+			const toolResults = retriedMessages.filter(message => message.role === "toolResult");
+			expect(toolCalls).toHaveLength(1);
+			expect(toolResults).toHaveLength(1);
+			for (const id of toolCalls) expect(toolResults.filter(result => result.toolCallId === id)).toHaveLength(1);
+			if (interruptMode === "always") {
+				const aborted = agent.state.messages.find(
+					message => message.role === "assistant" && message.stopReason === "aborted",
+				);
+				if (aborted?.role !== "assistant") throw new Error("Expected aborted assistant turn");
+				expect(isUserInterruptAbort(aborted)).toBe(false);
+			}
+
+			expect(await Bun.file(target).exists()).toBe(interruptMode === "never");
+			expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("Do not add console.log calls.");
+			expect(
+				sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "ttsr_injection")
+					.flatMap(entry => entry.injectedRules),
+			).toEqual(["no-console"]);
+		},
+	);
+	it("keeps direct never reminders after tool_result extensions", async () => {
+		const target = path.join(tempDir, "direct-never.ts");
+		const parameters = type({ path: "string", content: "string" });
+		const observedResults: string[] = [];
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("tool_result", event => {
+					observedResults.push(JSON.stringify(event.content));
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"direct-never-tool-result",
+		);
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			sharedModelRegistry,
+		);
+		extensionRunner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			} as never,
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			} as never,
+		);
+		const content = "FORBIDDEN_TOKEN\n";
+		const writeTool: AgentTool<typeof parameters> = {
+			name: "write",
+			label: "Write",
+			description: "Write a file",
+			parameters,
+			matcherDigest: args =>
+				args && typeof args === "object" && "content" in args && typeof args.content === "string"
+					? args.content
+					: undefined,
+			execute: async (_id, args) => {
+				await Bun.write(args.path, args.content);
+				return { content: [{ type: "text", text: "Written" }] };
+			},
+		};
+		const wrappedWrite = new ExtensionToolWrapper(writeTool, extensionRunner);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: target, content } }],
+				},
+			],
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [wrappedWrite] },
+			streamFn: mock.stream,
+			convertToLlm,
+			getToolContext: () =>
+				({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }), autoApprove: true }) as never,
+		});
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			interruptMode: "never",
+			contextMode: "keep",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule({
+			name: "no-forbidden-token-direct-extension",
+			path: "direct-extension.md",
+			content: "Do not write FORBIDDEN_TOKEN.",
+			condition: ["FORBIDDEN_TOKEN"],
+			scope: ["tool:write(*.ts)"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "direct-extension.md", level: "project" },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+			extensionRunner,
+			autoApprove: true,
+		});
+
+		await session.prompt("Write the source file");
+		await session.waitForIdle();
+		expect(await Bun.file(target).exists()).toBe(true);
+		expect(observedResults).toHaveLength(1);
+		expect(observedResults[0]).toContain("Written");
+		expect(observedResults[0]).not.toContain("Do not write FORBIDDEN_TOKEN.");
+		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
+		expect(modelResult.match(/Do not write FORBIDDEN_TOKEN\./g) ?? []).toHaveLength(1);
+	});
+	it("does not preflight a direct nested xd device dispatch", async () => {
+		const parameters = type({ path: "string", content: "string" });
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const extensionRunner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			tempDir,
+			sessionManager,
+			sharedModelRegistry,
+		);
+		const deviceTool: AgentTool<typeof parameters> = {
+			name: "lsp",
+			label: "LSP",
+			description: "Nested device",
+			parameters,
+			matcherDigest: args => {
+				if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+				return typeof args.content === "string" ? args.content : undefined;
+			},
+			execute: async () => ({ content: [{ type: "text", text: "device executed" }] }),
+		};
+		const inner = new ExtensionToolWrapper(deviceTool, extensionRunner);
+		const outerTool: AgentTool<typeof parameters> = {
+			name: "write",
+			label: "Write",
+			description: "Outer xd write",
+			parameters,
+			execute: (id, args, signal, onUpdate, context) =>
+				inner.execute(id, { path: "probe.ts", content: args.content }, signal, onUpdate, context),
+		};
+		const outer = new ExtensionToolWrapper(outerTool, extensionRunner);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", name: "write", arguments: { path: "xd://lsp", content: "DEVICE_RULE_TOKEN" } },
+					],
+				},
+			],
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [outer] },
+			streamFn: mock.stream,
+			convertToLlm,
+			getToolContext: () =>
+				({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }), autoApprove: true }) as never,
+		});
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			interruptMode: "never",
+			contextMode: "keep",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule({
+			name: "no-device-token",
+			path: "device-rule.md",
+			content: "Do not use DEVICE_RULE_TOKEN.",
+			condition: ["DEVICE_RULE_TOKEN"],
+			scope: ["tool:lsp"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "device-rule.md", level: "project" },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+			extensionRunner,
+			autoApprove: true,
+		});
+
+		await session.prompt("Use the lsp device through write");
+		await session.waitForIdle();
+		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
+		expect(modelResult).toContain("device executed");
+		expect(modelResult).not.toContain("Do not use DEVICE_RULE_TOKEN.");
 	});
 
 	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {

@@ -6,6 +6,10 @@ import {
 	type Agent,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentTool,
+	type AgentToolResult,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
@@ -152,18 +156,63 @@ export class TtsrCoordinator {
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
 		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules match whole-file structure against the reconstructed edit/write
-		// snapshot, so they run once on the finalized call: per-delta snapshots are
-		// always partial source (a truncated prefix of the final arguments) and
-		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
-		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
-		// the streaming event path and wedges the loop (ui.loop-blocked).
-		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
-			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
-			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
-				return true;
-		}
 		return false;
+	}
+
+	/** AST parsing runs once on finalized arguments, before execution, not in
+	 * fire-and-forget stream listeners or on partial deltas. */
+	async beforeToolCall(ctx: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> {
+		if (!this.#manager?.hasAstRules()) return undefined;
+		const toolCall = { ...ctx.toolCall, arguments: ctx.args };
+		const matchContext = this.#inspector.matchContext(toolCall, 0);
+		const matches = await this.#checkAstStream(matchContext, toolCall);
+		if (matches.length > 0 && this.#handleMatches(matches, matchContext, ctx.assistantMessage.timestamp)) {
+			// Generation already ended: stop the tool turn before TTSR recovery retries it.
+			const reason = this.#formatAbortReason(matches);
+			ctx.assistantMessage.stopReason = "aborted";
+			ctx.assistantMessage.errorMessage = reason;
+			return { block: true, reason };
+		}
+		return undefined;
+	}
+
+	/** Checks finalized arguments for a tool call issued through eval or another non-loop bridge. */
+	async beforeBridgedToolCall(
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+	): Promise<{ block?: boolean; reason?: string } | undefined> {
+		if (!this.#manager?.hasRules()) return undefined;
+		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
+		const matchContext = this.#inspector.matchContext(toolCall, 0);
+		let matches: Rule[];
+		try {
+			matches = [
+				...this.#checkStream("", matchContext, toolCall, true),
+				...(await this.#checkAstStream(matchContext, toolCall)),
+			].filter((rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index);
+		} finally {
+			if (matchContext.streamKey) this.#manager.clearStream(matchContext.streamKey);
+		}
+		if (matches.length === 0) return undefined;
+
+		this.#emitTriggerOnce(matchContext, matches);
+		if (!this.#shouldInterrupt(matches, matchContext)) {
+			this.#addPerToolInjections(toolCallId, matches, false);
+			return undefined;
+		}
+
+		const reminder = matches
+			.map(rule =>
+				prompt.render(ttsrInterruptTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		this.#markInjected(matches.map(rule => rule.name));
+		return { block: true, reason: this.#formatAbortReason(matches) + "\n" + reminder };
 	}
 
 	/** Settles the previous resume gate, queues any deferred injection, and starts judged-rule checks. */
@@ -212,9 +261,22 @@ export class TtsrCoordinator {
 
 	/** Folds per-tool reminders into the matched tool's result. */
 	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
-		const rules = this.#perToolInjections.get(ctx.toolCall.id);
+		return this.#buildToolReminder(ctx.toolCall.id, ctx.result);
+	}
+
+	afterBridgedToolCall(toolCallId: string, result: AgentToolResult): AgentToolResult | undefined {
+		const reminder = this.#buildToolReminder(toolCallId, result);
+		return reminder ? { ...result, ...reminder } : undefined;
+	}
+
+	cancelBridgedToolCall(toolCallId: string): void {
+		this.#perToolInjections.delete(toolCallId);
+	}
+
+	#buildToolReminder(toolCallId: string, result: AgentToolResult): AfterToolCallResult | undefined {
+		const rules = this.#perToolInjections.get(toolCallId);
 		if (!rules || rules.length === 0) return undefined;
-		this.#perToolInjections.delete(ctx.toolCall.id);
+		this.#perToolInjections.delete(toolCallId);
 		const reminder = rules
 			.map(rule =>
 				prompt.render(ttsrToolReminderTemplate, {
@@ -225,8 +287,8 @@ export class TtsrCoordinator {
 			)
 			.join("\n\n");
 		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
-		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
-		return { content: [{ type: "text", text: reminder }, ...ctx.result.content] };
+		if (ruleNames.length > 0) this.#markInjected(ruleNames);
+		return { content: [{ type: "text", text: reminder }, ...result.content] };
 	}
 
 	/** Resolves and clears the current resume gate. */
@@ -308,7 +370,7 @@ export class TtsrCoordinator {
 		return id.length > 0 ? id : undefined;
 	}
 
-	#addPerToolInjections(toolCallId: string, rules: Rule[]): void {
+	#addPerToolInjections(toolCallId: string, rules: Rule[], markInjected = true): void {
 		const bucket = this.#perToolInjections.get(toolCallId) ?? [];
 		const seen = new Set(bucket.map(rule => rule.name));
 		const claimedElsewhere = new Set<string>();
@@ -325,7 +387,7 @@ export class TtsrCoordinator {
 		}
 		if (bucket.length === 0) return;
 		this.#perToolInjections.set(toolCallId, bucket);
-		if (newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
+		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
 	}
 
 	#markInjected(ruleNames: string[]): void {

@@ -1821,6 +1821,11 @@ export class AgentSession implements SettingsScope {
 			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		this.#extensionRunner?.setToolCallPreflight?.({
+			before: (toolCallId, tool, args) => this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args),
+			after: (toolCallId, result) => this.#ttsr.afterBridgedToolCall(toolCallId, result),
+			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
+		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.#obfuscator = config.obfuscator;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
@@ -4434,6 +4439,12 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
 		const runner = this.#extensionRunner;
+		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
+		if (ttsrResult) {
+			runner?.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+			return ttsrResult;
+		}
 		if (!runner?.hasHandlers("tool_call")) return undefined;
 		const metadata = ctx.toolCall.providerMetadata;
 		const computer = metadata?.type === "computer" ? metadata : undefined;
@@ -4450,16 +4461,23 @@ export class AgentSession implements SettingsScope {
 			? { actions: computer.actions, pendingSafetyChecks: computer.pendingSafetyChecks }
 			: ctx.args;
 		runner.markToolCallEmitted(ctx.toolCall.id, ctx.tool.name);
-		const callResult = await runner.emitToolCall(
-			{
-				type: "tool_call",
-				toolName: ctx.tool.name,
-				toolCallId: ctx.toolCall.id,
-				input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
-			},
-			signal,
-		);
+		let callResult: Awaited<ReturnType<ExtensionRunner["emitToolCall"]>>;
+		try {
+			callResult = await runner.emitToolCall(
+				{
+					type: "tool_call",
+					toolName: ctx.tool.name,
+					toolCallId: ctx.toolCall.id,
+					input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
+				},
+				signal,
+			);
+		} catch (error) {
+			runner.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+			throw error;
+		}
 		if (callResult?.block) {
+			runner.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 			return { block: true, reason: callResult.reason || "Tool execution was blocked by an extension" };
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
