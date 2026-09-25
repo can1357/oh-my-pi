@@ -438,6 +438,12 @@ function oauthCodeLogin(node: KdlNodeView): CompiledOAuthCodeLogin {
 			case "client-secret":
 				login.clientSecret = authValue(child);
 				break;
+			case "base-url":
+				login.baseUrl = authValue(child);
+				break;
+			case "auth-url":
+				login.authUrl = authValue(child);
+				break;
 			case "authorize-url":
 				login.authorizeUrl = authValue(child);
 				break;
@@ -697,6 +703,23 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "allows-missing-api-key":
 				result.allowsMissingApiKey = singleBool(child);
 				break;
+			case "org-scoped-identity":
+				result.orgScopedIdentity = singleBool(child);
+				break;
+			case "oauth-token-env": {
+				leaf(child, []);
+				const vars = positionalStrings(child);
+				if (vars.length === 0 || vars.some(v => !v)) malformed(child);
+				result.oauthTokenEnv = vars;
+				break;
+			}
+			case "native-auth-api": {
+				leaf(child, []);
+				const apis = positionalStrings(child);
+				if (apis.length === 0 || apis.some(api => !api)) malformed(child);
+				result.nativeAuthApis = apis;
+				break;
+			}
 			case "available":
 				result.available = singleBool(child);
 				break;

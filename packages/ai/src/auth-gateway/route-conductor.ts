@@ -17,6 +17,7 @@ export interface ExecutionState {
 	fallbackCount: number;
 	committed: boolean;
 	currentTarget: string;
+	/** True after a sibling-credential retry for the current target failed. */
 	siblingsExhausted: boolean;
 }
 
@@ -27,7 +28,37 @@ export interface ExecutionState {
 type ConductorRoute = CompiledRoute & {
 	targets: readonly string[];
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	fallbackByTarget?: Readonly<
+		Partial<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>>
+	>;
 };
+
+const balanceRrCursor = new Map<string, number>();
+
+function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>): string | undefined {
+	if (route.root.type !== "balance") return undefined;
+	const unused = route.targets.filter(id => !attempted.has(id));
+	if (unused.length === 0) return undefined;
+	if (route.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = Number.NEGATIVE_INFINITY;
+		for (const child of route.root.children) {
+			if (child.type !== "target") continue;
+			if (attempted.has(child.model)) continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? unused[0];
+	}
+	const key = `${route.id}:${route.generation}`;
+	const cursor = balanceRrCursor.get(key) ?? 0;
+	const pick = unused[cursor % unused.length]!;
+	balanceRrCursor.set(key, cursor + 1);
+	return pick;
+}
 
 function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<string>): string | undefined {
 	if (!ids) return undefined;
@@ -35,6 +66,18 @@ function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<
 		if (!attempted.has(id)) return id;
 	}
 	return undefined;
+}
+
+function fallbackTargets(
+	route: ConductorRoute,
+	currentTarget: string,
+	disposition: GatewayErrorDisposition,
+): readonly string[] | undefined {
+	const byTarget = route.fallbackByTarget;
+	if (byTarget && Object.keys(byTarget).length > 0) {
+		return byTarget[currentTarget]?.[disposition];
+	}
+	return route.fallbacks[disposition];
 }
 
 /**
@@ -55,31 +98,35 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
-		const next = firstUnused(route.targets, state.attemptedTargets);
+		const next =
+			pickBalanceTarget(route, state.attemptedTargets) ?? firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 
 	const { disposition } = classification;
+	const candidates = route.fallbackByTarget
+		? route.fallbackByTarget[state.currentTarget]?.[disposition]
+		: route.fallbacks[disposition];
 	switch (disposition) {
 		case "cancelled":
 		case "request_terminal":
 		case "policy_terminal":
 		case "gateway_terminal":
-		case "credential_permanent":
 			return { type: "terminal" };
+		case "credential_permanent":
 		case "credential_quota":
 		case "credential_transient": {
 			if (!state.siblingsExhausted) {
 				return { type: "sibling_credential" };
 			}
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next = firstUnused(candidates, state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		case "provider_transient":
 		case "provider_unavailable":
 		case "model_unavailable":
 		case "context_overflow": {
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next = firstUnused(candidates, state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

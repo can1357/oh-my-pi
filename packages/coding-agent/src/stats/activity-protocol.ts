@@ -10,8 +10,7 @@
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { WorkerLogMessage } from "../subprocess/worker-client";
 
-/** Hidden CLI selector that boots the worker in the spawned subprocess (dispatched in `cli.ts`). */
-export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
+export { STATS_ACTIVITY_WORKER_ARG } from "../cli/worker-selectors";
 
 export type StatsActivityWorkerInbound =
 	| { type: "ping"; id: string }

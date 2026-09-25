@@ -9,7 +9,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
+import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -592,6 +592,7 @@ export function transformMessages<TApi extends Api>(
 	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
+	targetCredentialId?: number,
 ): Message[] {
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
@@ -703,6 +704,13 @@ export function transformMessages<TApi extends Api>(
 			// conservative direction (degraded reasoning, not broken requests).
 			const isOfficialAnthropicSource = isAnthropicReplay && assistantMsg.provider === "anthropic";
 			const isSigningAnthropicTarget = isAnthropicTarget && model.compat.signingEndpoint;
+			// Signatures and redacted thinking are bound to the credential that minted them.
+			// Unknown provenance preserves legacy replay for imported and older sessions.
+			const foreignCredential =
+				isSigningAnthropicTarget &&
+				assistantMsg.credentialId !== undefined &&
+				targetCredentialId !== undefined &&
+				assistantMsg.credentialId !== targetCredentialId;
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -767,6 +775,7 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
+				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
 					invalidBoundThinkingAssistantIndexes.has(index) &&
 					(block.type === "thinking" || block.type === "redactedThinking")
@@ -1231,11 +1240,15 @@ export function transformMessages<TApi extends Api>(
 				}
 				if (textParts.length > 0) {
 					const errorAttr = msg.isError ? ' is-error="true"' : "";
-					result.push({
+					const note: UserMessage & SyntheticUserCarrier = {
 						role: "user",
 						content: `<stale-tool-result tool="${msg.toolName}" id="${msg.toolCallId}"${errorAttr}>\n${textParts.join("\n")}\n</stale-tool-result>`,
 						timestamp: messageTimestamp,
-					} as UserMessage);
+					} as UserMessage;
+					// Synthesized, not sent by the user: prompt-cache decimation counts
+					// conversational turns and must skip this note.
+					note[kSyntheticUser] = true;
+					result.push(note);
 				}
 			}
 

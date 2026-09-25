@@ -19,7 +19,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
-import { truncateMiddle } from "./streaming-output";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 export interface HistoryFormatOptions {
 	/** Optional H1 prepended to the transcript. */
@@ -42,9 +42,11 @@ export interface HistoryFormatOptions {
 	 */
 	expandPrimaryContext?: boolean;
 	/**
-	 * Append the full unified diff (from a tool result's `details.diff`) below
+	 * Append the unified diff (from a tool result's `details.diff`) below
 	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
-	 * this so it sees what changed without re-reading the file.
+	 * this so it sees what changed without re-reading the file. Bounded by the
+	 * same per-tool budget as expanded tool IO: a huge diff is middle-truncated
+	 * rather than admitted whole.
 	 */
 	expandEditDiffs?: boolean;
 	/**
@@ -204,11 +206,6 @@ function fencedText(text: string, language: string): string {
 	return `${fence}${language}\n${text}\n${fence}`;
 }
 
-/** Wrap a diff in the shared adaptive Markdown fence. */
-function fenceDiff(diff: string): string {
-	return fencedText(diff, "diff");
-}
-
 function boundedToolContext(text: string): string {
 	return truncateMiddle(text, {
 		maxBytes: EXPANDED_TOOL_IO_MAX_BYTES,
@@ -329,7 +326,7 @@ function toolCallLine(
 	if (expandEditDiffs) {
 		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
 		if (typeof diff === "string" && diff.trim()) {
-			base = `${base}\n${fenceDiff(diff)}`;
+			base = `${base}\n${boundedFencedToolContext(transformExpandedToolIO?.(diff) ?? diff, "diff")}`;
 		}
 	}
 
