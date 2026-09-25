@@ -946,11 +946,16 @@ function resolveGooglePolicy(
 const DEFAULT_REASONING_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
 const DEFAULT_REASONING_EFFORTS_WITH_XHIGH: readonly Effort[] = [...DEFAULT_REASONING_EFFORTS, Effort.XHigh];
 
-function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
-		return false;
+function omitsWireReasoningEffort(spec: ModelSpec<Api>, compat: CompatOf<Api>): boolean {
+	if (compat === undefined || !("omitReasoningEffort" in compat) || compat.omitReasoningEffort !== true) return false;
+	if (
+		spec.api === "openai-responses" ||
+		spec.api === "openai-codex-responses" ||
+		spec.api === "azure-openai-responses"
+	) {
+		return true;
 	}
-	return compat !== undefined && "supportsReasoningEffort" in compat && compat.supportsReasoningEffort === false;
+	return "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true;
 }
 
 function readCompatEffortMap(compat: CompatOf<Api>): Partial<Record<Effort, string>> | undefined {
@@ -1118,8 +1123,11 @@ function resolveThinkingPolicy<TApi extends Api>(
 	) {
 		return undefined;
 	}
-	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	if (omitsWireReasoningEffort(spec, compat)) return undefined;
 	if (explicitThinking !== undefined) {
+		if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
+			return explicitThinking;
+		}
 		return fillExplicitThinking(spec, facts, compat, explicitThinking, rule);
 	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {

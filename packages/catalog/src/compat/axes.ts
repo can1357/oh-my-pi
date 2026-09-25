@@ -136,6 +136,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-thinking-as-text": wire("requiresThinkingAsText", ["openai"]),
 	"requires-tool-result-name": wire("requiresToolResultName", ["openai"]),
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
+	"requires-structured-output-hardening": wire("requiresStructuredOutputHardening", OAI),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
@@ -220,7 +221,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
-	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin"]),
+	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
 	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),

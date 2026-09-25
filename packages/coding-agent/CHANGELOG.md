@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Merge Gateway can now be connected with `/login merge-gateway` or `MERGE_GATEWAY_API_KEY`, exposing its coding-agent-compatible catalog; schema-bound Merge subagents fail closed and use yield-only correction after invalid results.
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))

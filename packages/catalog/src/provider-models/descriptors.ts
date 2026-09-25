@@ -14,6 +14,7 @@ import type { Api } from "../types";
 import type { ModelManagerOptions } from "../model-manager";
 import type { ModelManagerConfig, ProviderDescriptor } from "./descriptor-types";
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
+import { mergeGatewayModelManagerOptions } from "./merge-gateway";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	abliterationModelManagerOptions,
@@ -123,6 +124,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	local: () => localModelManagerOptions(),
 	"lm-studio": config => lmStudioModelManagerOptions(config),
 	mistral: config => mistralModelManagerOptions(config),
+	"merge-gateway": config => mergeGatewayModelManagerOptions(config),
 	"muse-code": config => museCodeModelManagerOptions(config),
 	meta: config => metaModelManagerOptions(config),
 	moonshot: config => moonshotModelManagerOptions(config),

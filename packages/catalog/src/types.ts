@@ -256,6 +256,13 @@ export interface OpenAICompat {
 	supportsReasoningEffort?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
+	/**
+	 * Trust only explicit `thinking` metadata; never derive or expand an effort
+	 * surface from model identity or provider defaults.
+	 */
+	trustExplicitThinkingOnly?: boolean;
+	/** Require fail-closed structured-output correction when this model may serve a schema-bearing agent. */
+	requiresStructuredOutputHardening?: boolean;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
@@ -779,6 +786,8 @@ export interface ResolvedOpenAISharedCompat {
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
 	/** See {@link OpenAICompat.streamRevision}. */
 	streamRevision?: OpenAICompat["streamRevision"];
+	/** Require fail-closed structured-output correction when this model may serve a schema-bearing agent. */
+	requiresStructuredOutputHardening?: boolean;
 	/** See {@link OpenAICompat.streamFirstEventTimeoutMs}. */
 	streamFirstEventTimeoutMs?: number;
 	reasoningDeltasMayBeCumulative: boolean;
@@ -827,6 +836,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsDeveloperRole"
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
+			| "trustExplicitThinkingOnly"
+			| "requiresStructuredOutputHardening"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
@@ -888,6 +899,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "whenThinking"
 		>
 	> & {
+		trustExplicitThinkingOnly?: boolean;
+		requiresStructuredOutputHardening?: boolean;
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 		extraBody?: OpenAICompat["extraBody"];
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
@@ -1187,6 +1200,15 @@ export interface ModelAccountAccess {
 	cyberPrograms?: readonly string[];
 }
 
+/** Capabilities declared by the serving provider, independent of OMP harness policy. */
+export interface DeclaredModelCapabilities {
+	nativeToolCalling: boolean;
+	nativeToolChoice: boolean;
+	nativeStructuredOutputs: boolean;
+	streaming: boolean;
+	zeroDataRetention: boolean;
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -1263,6 +1285,8 @@ export interface Model<TApi extends Api = Api> {
 	 * reports that native tool calling is unsupported.
 	 */
 	supportsTools?: boolean;
+	/** Provider declarations, kept separate from OMP's compatibility and fallback policy. */
+	declaredCapabilities?: DeclaredModelCapabilities;
 	/** Whether this model accepts the GA OpenAI Responses `{ type: "computer" }` native tool. */
 	supportsComputerUse?: boolean;
 	/** Verbatim explicit computer-use support from the spec; undefined when `buildModel` inferred the runtime value. */

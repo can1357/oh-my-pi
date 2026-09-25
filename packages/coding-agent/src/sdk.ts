@@ -703,6 +703,15 @@ export interface CreateAgentSessionOptions {
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Active tool names to retain after the first schema-invalid yield; undefined keeps the current set. */
+	outputSchemaFailureToolNames?: readonly string[];
+	/**
+	 * Re-resolve correction policy against the live model after a runtime switch.
+	 * Returning undefined leaves a permissive session unlocked.
+	 */
+	resolveOutputSchemaFailurePolicy?: (
+		model: Model,
+	) => { mode: StructuredSubagentSchemaMode; toolNames: readonly string[] } | undefined;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/**
@@ -2016,6 +2025,68 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		const outputSchemaFailureToolNames = options.outputSchemaFailureToolNames
+			? [...options.outputSchemaFailureToolNames]
+			: undefined;
+		const canResolveOutputSchemaFailurePolicy =
+			outputSchemaFailureToolNames !== undefined || options.resolveOutputSchemaFailurePolicy !== undefined;
+		let outputSchemaCorrectionLocked = false;
+		let lockedOutputSchemaFailurePolicy:
+			| { mode: StructuredSubagentSchemaMode | undefined; toolNames: readonly string[] }
+			| undefined;
+		const resolveOutputSchemaFailurePolicy = ():
+			| { mode: StructuredSubagentSchemaMode | undefined; toolNames: readonly string[] }
+			| undefined => {
+			if (outputSchemaCorrectionLocked) return lockedOutputSchemaFailurePolicy;
+			const activeModel = session?.model;
+			if (options.resolveOutputSchemaFailurePolicy && activeModel) {
+				return options.resolveOutputSchemaFailurePolicy(activeModel);
+			}
+			return outputSchemaFailureToolNames
+				? {
+						mode: options.outputSchemaMode,
+						toolNames: outputSchemaFailureToolNames,
+					}
+				: undefined;
+		};
+		let activeToolBatchAbortController: AbortController | undefined;
+		const createToolBatchAbortScope = canResolveOutputSchemaFailurePolicy
+			? () => {
+					const controller = new AbortController();
+					activeToolBatchAbortController = controller;
+					return {
+						signal: controller.signal,
+						shouldAbort: (toolName: string) => {
+							const policy = resolveOutputSchemaFailurePolicy();
+							return policy !== undefined && !policy.toolNames.includes(toolName);
+						},
+					};
+				}
+			: undefined;
+		const lockOutputSchemaCorrectionTools = canResolveOutputSchemaFailurePolicy
+			? async (): Promise<boolean> => {
+					const policy = resolveOutputSchemaFailurePolicy();
+					if (!policy) return false;
+					outputSchemaCorrectionLocked = true;
+					lockedOutputSchemaFailurePolicy = policy;
+					activeToolBatchAbortController?.abort(
+						new DOMException("Structured-output correction locked this batch to allowed tools", "AbortError"),
+					);
+					await session.setActiveToolCeiling([...policy.toolNames]);
+					const init = sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+					if (init?.type !== "session_init") return true;
+					const { type: _type, id: _id, parentId: _parentId, timestamp: _timestamp, ...contract } = init;
+					sessionManager.appendSessionInit({
+						...contract,
+						tools: [...policy.toolNames],
+						outputSchemaMode: policy.mode ?? contract.outputSchemaMode,
+						outputSchemaFailureToolNames: [...policy.toolNames],
+						outputSchemaCorrectionLocked: true,
+						restrictToolNames: true,
+					});
+					return true;
+				}
+			: undefined;
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -2070,6 +2141,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			subagentEventBus,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
+			onOutputSchemaValidationFailure: lockOutputSchemaCorrectionTools,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
@@ -4136,6 +4208,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			dialectResolver: dialectModel => resolveDialect(cfgToolsFormat.get(settings), dialectModel),
 			abortOnFabricatedToolResult: cfgToolsAbortOnFabricatedResult.get(settings),
 			speculativeToolExecution,
+			createToolBatchAbortScope,
 			getToolChoice: () => session?.nextToolChoiceDirective(),
 			onToolChoiceUnavailable: () => session?.toolChoiceQueue.reject("unavailable"),
 			telemetry: options.telemetry,
@@ -4430,6 +4503,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
+		}
+		if (options.resolveOutputSchemaFailurePolicy) {
+			const resolveLiveOutputSchemaPolicy = () => {
+				if (outputSchemaCorrectionLocked) return;
+				const liveModel = session?.model;
+				if (liveModel) options.resolveOutputSchemaFailurePolicy?.(liveModel);
+			};
+			resolveLiveOutputSchemaPolicy();
+			const unsubscribeOutputSchemaPolicy = session.subscribe(event => {
+				if (event.type === "model_changed") resolveLiveOutputSchemaPolicy();
+			});
+			disposeCallbacks.add(unsubscribeOutputSchemaPolicy);
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

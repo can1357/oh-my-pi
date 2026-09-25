@@ -40,6 +40,7 @@ export type KnownProvider =
 	| "litellm"
 	| "lm-studio"
 	| "local"
+	| "merge-gateway"
 	| "meta"
 	| "minimax"
 	| "minimax-code"

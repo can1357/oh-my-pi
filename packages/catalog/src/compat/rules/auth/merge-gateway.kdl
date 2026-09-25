@@ -1,0 +1,10 @@
+auth "merge-gateway" {
+	name "Merge Gateway"
+	env "MERGE_GATEWAY_API_KEY"
+	login "api-key" {
+		auth-url "https://gateway.merge.dev/api-keys"
+		instructions "Copy your Merge Gateway API key from the Gateway dashboard"
+		prompt "Paste your Merge Gateway API key" placeholder="mg_..."
+		validate "models-endpoint" label="Merge Gateway" url="https://api-gateway.merge.dev/v1/models?limit=1"
+	}
+}

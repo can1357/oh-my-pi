@@ -277,6 +277,7 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	#activeToolCeiling: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -964,13 +965,17 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
+		const activeToolCeiling = this.#activeToolCeiling;
+		if (activeToolCeiling) {
+			toolNames = toolNames.filter(name => activeToolCeiling.has(name));
+		}
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
 			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
 			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
 			enabledToolNames: toolNames,
-			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+			evalTransportAvailable: !activeToolCeiling && this.#hasCodeModeEvalTransport(),
 		});
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
@@ -1030,7 +1035,9 @@ export class SessionTools {
 
 		const pinnedWrite = isPresentationPinned("write");
 		const activeDeferrableTool = tools.some(tool => tool.deferrable === true);
-		const transportNeeded = mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled();
+		const writeTransportAllowed = !activeToolCeiling || activeToolCeiling.has("write");
+		const transportNeeded =
+			writeTransportAllowed && (mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled());
 		if (transportNeeded && !builtInWriteAvailable) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
 			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
@@ -1586,6 +1593,14 @@ export class SessionTools {
 				this.#xdev?.mountedNames ?? new Set(),
 				this.getActiveToolNames().includes("write"),
 			);
+		});
+	}
+
+	/** Permanently constrains this session's active tools until disposal. */
+	setActiveToolCeiling(toolNames: string[]): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			this.#activeToolCeiling = new Set(normalizeToolNames(toolNames));
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
 		});
 	}
 
