@@ -1,24 +1,21 @@
 /**
- * Repeated `hub` waits must not stack "waiting on N jobs" frames in the
+ * Repeated `wait` calls must not stack "waiting on N jobs" frames in the
  * transcript: a wait whose watched jobs are all still running stays live
- * (displaceable) and the next `hub` call replaces it — one persistent wait.
+ * (displaceable) and the next `wait` call replaces it — one persistent wait.
  *
  * Contracts under test:
  *  - ToolExecutionComponent: a waiting-poll result stays displaceable but
  *    finalizes like any other settled result (so it can retire as history
  *    instead of pinning the live viewport); seal() always freezes.
- *  - EventController: a follow-up `hub` call removes the tracked waiting
+ *  - EventController: a follow-up `wait` call removes the tracked waiting
  *    poll from the transcript; any other tool seals it in place.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	ToolExecutionComponent,
-	type ToolExecutionHandle,
-} from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
@@ -69,7 +66,7 @@ function trackComponent(components: ToolExecutionComponent[], component: ToolExe
 	return component;
 }
 
-describe("hub waiting-poll block lifecycle", () => {
+describe("wait block lifecycle", () => {
 	const created: ToolExecutionComponent[] = [];
 
 	beforeEach(async () => {
@@ -87,10 +84,7 @@ describe("hub waiting-poll block lifecycle", () => {
 	});
 
 	function makeJobComponent() {
-		return trackComponent(
-			created,
-			new ToolExecutionComponent("hub", { op: "wait", ids: ["j0", "j1"] }, {}, undefined, uiStub),
-		);
+		return trackComponent(created, new ToolExecutionComponent("wait", {}, {}, undefined, uiStub));
 	}
 
 	it("keeps an all-running poll displaceable yet finalized until sealed", () => {
@@ -175,15 +169,15 @@ describe("EventController displaces consecutive waiting polls", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId,
-			toolName: "hub",
-			args: { op: "wait", ids: ["j0"] },
+			toolName: "wait",
+			args: {},
 		});
 		const component = children[children.length - 1] as ToolExecutionComponent;
 		trackComponent(created, component);
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId,
-			toolName: "hub",
+			toolName: "wait",
 			result: pollResult(["running", "running"]),
 			isError: false,
 		});
@@ -209,7 +203,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 		return component;
 	}
 
-	it("removes the previous waiting poll when the next hub call starts", async () => {
+	it("removes the previous waiting poll when the next wait call starts", async () => {
 		const { controller, children } = createFixture();
 
 		const first = await runPoll(controller, children, "t1");
@@ -364,14 +358,14 @@ describe("EventController displaces consecutive waiting polls", () => {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "t1",
-			toolName: "hub",
-			args: { op: "wait", ids: ["j0"] },
+			toolName: "wait",
+			args: {},
 		});
 		const settled = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId: "t1",
-			toolName: "hub",
+			toolName: "wait",
 			result: pollResult(["completed", "running"]),
 			isError: false,
 		});

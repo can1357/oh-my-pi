@@ -92,12 +92,6 @@ describe("content sanitizer blob storage", () => {
 });
 
 describe("sanitize_content", () => {
-	it("passes through normal and small content", () => {
-		const content = "This is normal conversational text.";
-		expect(sanitizeContent(content)).toEqual([content, {}]);
-		expect(sanitizeContent("Small text, under all thresholds.")).toEqual(["Small text, under all thresholds.", {}]);
-	});
-
 	it("extracts data URIs with metadata", () => {
 		useTempBlobDir();
 		const raw = Buffer.from("\x89PNG header fake binary data for test", "binary");

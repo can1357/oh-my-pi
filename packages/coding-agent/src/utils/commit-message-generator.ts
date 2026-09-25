@@ -12,7 +12,7 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
-import { concreteThinkingLevel, toReasoningEffort } from "../thinking";
+import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 
 const COMMIT_SYSTEM_PROMPT = prompt.render(commitSystemPrompt);
 const MAX_DIFF_CHARS = 4000;
@@ -106,20 +106,22 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
-			const response = await retryTransientCompletion(() =>
-				completeSimple(
-					candidate.model,
-					{
-						systemPrompt: [COMMIT_SYSTEM_PROMPT],
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-					},
-					{
-						apiKey: registry.resolver(candidate.model, sessionId),
-						sessionId,
-						maxTokens,
-						reasoning: toReasoningEffort(candidate.thinkingLevel),
-					},
-				),
+			const response = await retryTransientCompletion(
+				() =>
+					completeSimple(
+						candidate.model,
+						{
+							systemPrompt: [COMMIT_SYSTEM_PROMPT],
+							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						},
+						{
+							apiKey: registry.resolver(candidate.model, sessionId),
+							sessionId,
+							maxTokens,
+							reasoning: toReasoningEffort(candidate.thinkingLevel),
+						},
+					),
+				{ provider: candidate.model.provider },
 			);
 
 			if (response.stopReason === "error") {

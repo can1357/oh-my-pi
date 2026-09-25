@@ -16,7 +16,7 @@ describe("auth-gateway RouteRegistry wiring", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "mock/route-wire" });
 		mock.push({ content: ["ok"] });
 		const resolve = spyOn(RouteRegistry.prototype, "resolve");

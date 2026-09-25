@@ -16,7 +16,7 @@ describe("auth-gateway decision-trace wiring", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "mock/trace-wire" });
 		mock.push({ content: ["ok"] });
 		const traces = new RouteDecisionTraceLog();
@@ -53,7 +53,7 @@ describe("auth-gateway decision-trace wiring", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-exec-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "mock/trace-exec" });
 		mock.push({ content: ["ok"] });
 		const traces = new RouteDecisionTraceLog();
@@ -146,7 +146,7 @@ describe("auth-gateway decision-trace wiring", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-lookup-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		const mock = createMockModel({ provider: "openrouter", id: "mock/trace-lookup" });
-		vi.spyOn(storage, "getApiKey").mockRejectedValue(new Error("credential broker unavailable"));
+		vi.spyOn(storage.keys, "get").mockRejectedValue(new Error("credential broker unavailable"));
 		const traces = new RouteDecisionTraceLog();
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",

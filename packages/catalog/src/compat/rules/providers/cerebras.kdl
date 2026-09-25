@@ -1,6 +1,10 @@
 // Provider-wire compat for "cerebras"; regenerated from the frozen census using deployment contract selectors.
 
 provider "cerebras" {
+	default-model "zai-glm-4.7"
+	env "CEREBRAS_API_KEY"
+	discovery label="Cerebras"
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces the Cerebras provider branches in the completions baseline.
@@ -12,6 +16,16 @@ provider "cerebras" {
 		input-modalities "text" "image"
 	}
 	thinking-mode "effort"
+	// Cerebras accepts OpenAI `reasoning_effort`, not Qwen-native thinking
+	// fields such as `enable_thinking`.
+	class "qwen" {
+		thinking-format "openai"
+	}
+	// Qwen 3.8 accepts low/medium/high; `none` is its wire-only off value.
+	models "qwen-3.8-27b" {
+		thinking-efforts "low" "medium" "high"
+		reasoning-disable-mode "none-effort"
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "zai-glm-4.7" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"

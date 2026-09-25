@@ -52,6 +52,9 @@
 		"k3",
 		"zai/glm-5.3",
 		"glm-5.3",
+		"anthropic/claude-opus-5-5",
+		"claude-opus-5-5",
+		"opus-5-5",
 		"anthropic/claude-opus-5",
 		"claude-opus-5",
 		"opus-5",
@@ -61,5 +64,60 @@
 		"claude-opus-4.8",
 		"opus-4-8",
 		"opus-4.8"
+	],
+	"image": [
+		"openai/gpt-image-1",
+		"openai-codex/gpt-image-1",
+		"google-antigravity/gemini-3-pro-image",
+		"xai/grok-imagine-image",
+		"xai-oauth/grok-imagine-image",
+		"openrouter/google/gemini-3-pro-image-preview",
+		"google/gemini-3-pro-image-preview",
+		"deepinfra/black-forest-labs/FLUX-2-pro"
+	],
+	"web": [
+		"web/parallel",
+		"web/perplexity",
+		"google/gemini-2.5-flash",
+		"google-antigravity/gemini-2.5-flash",
+		"anthropic/claude-haiku-4-5",
+		"openai-codex/gpt-5.6-luna",
+		"openai-codex/gpt-5.6",
+		"openai-codex/gpt-5.5",
+		"xai/grok-4.5",
+		"xai-oauth/grok-4.5",
+		"web/zai",
+		"web/exa",
+		"web/tinyfish",
+		"web/jina",
+		"web/kagi",
+		"web/tavily",
+		"web/firecrawl",
+		"web/brave",
+		"web/kimi",
+		"web/synthetic",
+		"web/ollama",
+		"web/searxng",
+		"web/startpage",
+		"web/duckduckgo",
+		"web/ecosia",
+		"web/google",
+		"web/mojeek",
+		"web/public"
+	],
+	"speech": [
+		"local/kokoro",
+		"xai/grok-tts",
+		"xai-oauth/grok-tts"
+	],
+	"dictation": [
+		"local/parakeet-tdt-0.6b-v3"
+	],
+	"judge": [
+		"typesafe/jev-latest",
+		"openrouter/~typesafe/jev-latest",
+		"@tiny",
+		"@smol",
+		"@default"
 	]
 }
