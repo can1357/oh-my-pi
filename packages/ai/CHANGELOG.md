@@ -9,16 +9,13 @@
 
 ### Fixed
 
-- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
-- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
-- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
-- Fixed OpenAI Responses gateway retries to preserve caller storage through strict-tool fallback, retain structured-output descriptions, and treat top-level `event: error` SSE frames as terminal failures.
-- Provider preludes remain eligible for fallback, and successful empty streams retain their response frames.
 - Gateway requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema (including `description`) to the flat `text.format` shape and never send Chat-Completions-only `seed`, and native `/v1/responses` `text.format` is parsed into `responseFormat`.
-
-### Fixed
-
 - Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context. Azure Responses requests now forward `previous_response_id`, `store`, `parallel_tool_calls`, `user`, and `text.format` the same way.
+- Gateway `/v1/responses` responses now expose the upstream provider's response id instead of a locally minted one, and the gateway remembers which session key stored each response id so a later `previous_response_id` continuation stays on the account that can actually resolve it; `previous_response_id` sent to `openai-codex-responses` models is rejected loudly instead of silently dropping prior context.
+- Fixed gateway error classification swallowing retryable failures: authoritative statuses now outrank abort wording, 403 account caps rotate as quota, Trusted-Access/cyber-policy denials rotate credentials instead of terminating, statusless policy/OAuth-expiry wording reaches the same credential dispositions instead of a synthetic 502, 400 model-missing responses fail over by model, dead OAuth grants (`invalid_token` et al) retire permanently, and concurrency-cap 429s stay in provider backoff.
+- Fixed OpenAI Responses gateway retries to preserve caller storage through strict-tool fallback, retain structured-output descriptions, and treat top-level `event: error` SSE frames as terminal failures.
+- Stream commit classification now recognizes Anthropic `message_delta`, `content_block_stop`, and `message_stop` SSE events instead of treating them as generated output.
+- Provider preludes remain eligible for fallback, and successful empty streams retain their response frames.
 - Azure Responses continuations retain prior response IDs, and invalid gateway requests return HTTP 400.
 - Treat deterministic request-validation failures as terminal instead of retrying another provider.
 
