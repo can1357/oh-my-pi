@@ -202,7 +202,8 @@ export interface AgentTypeStats {
  * >= 1024 tokens, the prompt did not shrink below 97% of its predecessor
  * (compaction/pruning), and the predecessor finished under 5 minutes earlier.
  * Models that never reported a cache read (all-time) are excluded: there is no
- * warm cache to miss. The smaller of the two prompts is the expected cache hit.
+ * warm cache to miss. The smaller of the two prompts is the expected cache hit;
+ * shortfalls up to 256 tokens are cache-block rounding and are not missed.
  */
 export interface CacheMissStats {
 	provider: string;

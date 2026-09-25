@@ -107,6 +107,16 @@ function seed(): void {
 			cacheRead: 18_000,
 			agentType: "subagent",
 		}),
+		// Hit short of the predecessor by 179 tokens (cache-block rounding):
+		// expected 20000, missed 0.
+		request({
+			sessionFile: SUB,
+			entryId: "s3",
+			timestamp: T0 + 15.5 * SECOND,
+			input: 279,
+			cacheRead: 19_821,
+			agentType: "subagent",
+		}),
 	]);
 }
 
@@ -127,8 +137,8 @@ describe("getCacheMissStats", () => {
 		expect(main.badPairRate).toBeCloseTo(1 / 3, 10);
 		expect(main.avoidableCost).toBeCloseTo(11_000 * (INPUT_PRICE - CACHE_READ_PRICE), 12);
 
-		expect(sub).toMatchObject({ pairs: 1, badPairs: 0, expectedTokens: 20_000, missedTokens: 2_000 });
-		expect(sub.missRate).toBeCloseTo(0.1, 10);
+		expect(sub).toMatchObject({ pairs: 2, badPairs: 0, expectedTokens: 40_000, missedTokens: 2_000 });
+		expect(sub.missRate).toBeCloseTo(0.05, 10);
 		expect(sub.avoidableCost).toBeCloseTo(2_000 * (INPUT_PRICE - CACHE_READ_PRICE), 12);
 	});
 

@@ -7,7 +7,7 @@ import { AGENT_META } from "./AgentTokenShare";
 export const CACHE_MISS_HELP =
 	"Consecutive requests in one session, same provider and model, neither errored, both prompts >= 1024 tokens, " +
 	"prompt not shrunk below 97% (compaction), and under 5 minutes idle. Models that never reported a cache read " +
-	"are excluded. The smaller prompt is the expected cache hit; miss rate is the share of it not read from cache. " +
+	"are excluded. The smaller prompt is the expected cache hit; miss rate is the share of it not read from cache, ignoring shortfalls up to 256 tokens (cache-block rounding). " +
 	"A bad turn misses more than max(2048 tokens, 10%). " +
 	"Avoidable $ prices missed tokens at the model's input minus cache-read rate.";
 
