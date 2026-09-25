@@ -56,6 +56,7 @@ import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import { SpeculativeOperationCoordinator } from "./speculative-execution";
+import type { PromptCachePrefixObservation } from "./prompt-cache-prefix";
 import {
 	type AgentTelemetry,
 	failChatSpan,
@@ -1989,6 +1990,20 @@ async function streamAssistantResponse(
 		return userOnResponse?.(response, modelInfo);
 	};
 
+	// Compare the final wire payload (after extension rewrites) with the
+	// session's previous request. Retries rebuild the payload, so the last
+	// observation wins; it becomes the baseline only if the request succeeds.
+	const prefixTracker = config.promptCachePrefixTracker;
+	let prefixObservation: PromptCachePrefixObservation | undefined;
+	const userOnPayload = config.onPayload;
+	const observeOnPayload: AgentLoopConfig["onPayload"] = prefixTracker
+		? async (payload, payloadModel, signal) => {
+				const replacement = await userOnPayload?.(payload, payloadModel, signal);
+				prefixObservation = prefixTracker.observe(replacement ?? payload, (payloadModel ?? model).id);
+				return replacement;
+			}
+		: userOnPayload;
+
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
@@ -2011,6 +2026,7 @@ async function streamAssistantResponse(
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
+				onPayload: observeOnPayload,
 				onResponse: captureOnResponse,
 				liveSteering: providerCall.liveSteering,
 			});
@@ -2142,6 +2158,10 @@ async function streamAssistantResponse(
 							}
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
+						if (prefixObservation) {
+							finalMessage.promptCachePrefix = prefixObservation.result;
+							if (finalMessage.stopReason !== "error") prefixTracker?.accept(prefixObservation);
+						}
 						// Expand inline macros (and any other registered rewrite) on the
 						// finalized message before it reaches the context, the UI, or tool
 						// dispatch — so a single mutation is the source of truth for all three.

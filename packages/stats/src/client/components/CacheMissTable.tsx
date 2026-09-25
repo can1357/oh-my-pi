@@ -7,9 +7,21 @@ import { AGENT_META } from "./AgentTokenShare";
 export const CACHE_MISS_HELP =
 	"Consecutive requests in one session, same provider and model, neither errored, both prompts >= 1024 tokens, " +
 	"prompt not shrunk below 97% (compaction), and under 5 minutes idle. Models that never reported a cache read " +
-	"are excluded. The smaller prompt is the expected cache hit; miss rate is the share of it not read from cache, ignoring shortfalls up to 256 tokens (cache-block rounding). " +
+	"are excluded. At send time omp checks whether it resent the previous prompt unchanged. If it did, all of the " +
+	"previous prompt is the expected cache hit and any shortfall is the provider's miss. If omp changed part of it " +
+	"(system prompt, tools, options, or earlier messages), the turn counts under Prefix changed instead. Older requests " +
+	"without that check use the smaller prompt as an estimate. Shortfalls up to 256 tokens are cache-block rounding. " +
 	"A bad turn misses more than max(2048 tokens, 10%). " +
 	"Avoidable $ prices missed tokens at the model's input minus cache-read rate.";
+
+function prefixChangedTitle(item: CacheMissStats): string {
+	const by = item.prefixChangedBy;
+	return (
+		`${formatInteger(item.prefixChangedPairs)} of ${formatInteger(item.pairs)} warm turns; ` +
+		`system ${by.system}, tools ${by.tools}, options ${by.options}, messages ${by.messages}; ` +
+		`${formatInteger(item.prefixChangedTokens)} tokens, ${formatCost(item.prefixChangedCost)}`
+	);
+}
 
 function AgentCell({ item }: { item: CacheMissStats }) {
 	const meta = AGENT_META[item.agentType];
@@ -50,6 +62,12 @@ const COLUMNS: DataTableColumn<CacheMissStats>[] = [
 	},
 	{ key: "missed", header: "Missed tokens", numeric: true, render: item => formatCompact(item.missedTokens) },
 	{ key: "avoidable", header: "Avoidable $", numeric: true, render: item => formatCost(item.avoidableCost) },
+	{
+		key: "prefixChanged",
+		header: "Prefix changed",
+		numeric: true,
+		render: item => <span title={prefixChangedTitle(item)}>{formatPercent(item.prefixChangedRate, 2)}</span>,
+	},
 ];
 
 function renderMobileCard(item: CacheMissStats) {
@@ -75,6 +93,12 @@ function renderMobileCard(item: CacheMissStats) {
 				<div>
 					<div className="stats-mobile-card-label">Avoidable $</div>
 					<div className="stats-mobile-card-value">{formatCost(item.avoidableCost)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Prefix changed</div>
+					<div className="stats-mobile-card-value" title={prefixChangedTitle(item)}>
+						{formatPercent(item.prefixChangedRate, 2)}
+					</div>
 				</div>
 			</div>
 		</div>

@@ -21,6 +21,7 @@ interface RequestSpec {
 	provider?: string;
 	stopReason?: MessageStats["stopReason"];
 	agentType?: AgentType;
+	cachePrefix?: string;
 }
 
 function request(spec: RequestSpec): MessageStats {
@@ -54,6 +55,7 @@ function request(spec: RequestSpec): MessageStats {
 			},
 		},
 		agentType: spec.agentType ?? "main",
+		cachePrefix: spec.cachePrefix ?? null,
 	};
 }
 
@@ -156,6 +158,48 @@ describe("getCacheMissStats", () => {
 		const stats = getCacheMissStats();
 
 		expect(stats.map(s => s.provider)).toEqual(["prov-a", "prov-a"]);
+	});
+
+	it("charges misses on a changed prefix to omp instead of the provider", async () => {
+		await initDb();
+		const session = { sessionFile: "/tmp/project/prefix.jsonl", provider: "prov-c" };
+		insertMessageStats([
+			request({ ...session, entryId: "p1", timestamp: T0, input: 10_000, cachePrefix: "first" }),
+			// Resent unchanged, 1000 of the 10000-token prefix not read: a provider miss.
+			request({
+				...session,
+				entryId: "p2",
+				timestamp: T0 + 10 * SECOND,
+				input: 1_000,
+				cacheRead: 9_000,
+				cachePrefix: "intact",
+			}),
+			// omp rewrote the system prompt: the full loss is omp's, not the provider's.
+			request({
+				...session,
+				entryId: "p3",
+				timestamp: T0 + 20 * SECOND,
+				input: 11_000,
+				cachePrefix: "changed:system",
+			}),
+		]);
+
+		const [stats] = getCacheMissStats();
+
+		expect(stats).toMatchObject({
+			provider: "prov-c",
+			pairs: 2,
+			exactPairs: 1,
+			badPairs: 0,
+			expectedTokens: 10_000,
+			missedTokens: 1_000,
+			prefixChangedPairs: 1,
+			prefixChangedTokens: 10_000,
+			prefixChangedBy: { system: 1, tools: 0, options: 0, messages: 0 },
+		});
+		expect(stats.missRate).toBeCloseTo(0.1, 10);
+		expect(stats.prefixChangedRate).toBeCloseTo(0.5, 10);
+		expect(stats.prefixChangedCost).toBeCloseTo(10_000 * (INPUT_PRICE - CACHE_READ_PRICE), 12);
 	});
 
 	it("selects pairs by the later request while pairing across the cutoff", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PromptCachePrefixTracker`: each main-loop request's final wire payload is compared with the session's previous request, and the assistant message records whether omp resent that prompt unchanged (`promptCachePrefix`: `first`, `intact`, or `changed` with the part that differed). Moving cache markers are ignored. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

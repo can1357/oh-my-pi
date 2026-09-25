@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional `AssistantMessage.promptCachePrefix` field and `PromptCachePrefix` type recording whether a request resent the previous request's cacheable prefix unchanged. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

@@ -1171,7 +1171,29 @@ export interface AssistantMessage {
 	ttft?: number; // Time to first token in milliseconds
 	/** Local wall-clock time the response finished streaming (ms since epoch); stamped by the session at message_end so prompt→yield timing never depends on provider-reported duration. */
 	completedAt?: number;
+	/** Whether this request resent the previous request's cacheable prefix unchanged; stamped by the agent loop at send time. */
+	promptCachePrefix?: PromptCachePrefix;
 }
+
+/**
+ * Send-time comparison of a request's cacheable prefix (system prompt, tools,
+ * cache-relevant options, earlier conversation items) with the previous request
+ * of the same agent session. Moving cache markers are ignored.
+ * - `first`: nothing comparable before it (first request, new model, or a
+ *   server-chained predecessor whose full input was not sent).
+ * - `intact`: the previous request is an unchanged prefix of this one, so the
+ *   provider could serve all of it from cache.
+ * - `changed`: omp itself changed part of the previous prompt.
+ */
+export type PromptCachePrefix =
+	| { status: "first" | "intact" }
+	| {
+			status: "changed";
+			/** First part that differs from the previous request. */
+			part: "system" | "tools" | "options" | "messages";
+			/** Index of the first differing conversation item when `part` is `messages` or a system item inside it. */
+			index?: number;
+	  };
 
 export interface ToolResultMessage<TDetails = unknown> {
 	role: "toolResult";

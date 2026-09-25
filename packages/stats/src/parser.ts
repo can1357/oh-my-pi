@@ -288,7 +288,17 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		cachePrefix: cachePrefixColumn(msg.promptCachePrefix),
 	};
+}
+
+/** Flatten a recorded prompt-cache prefix status into its stats column value. */
+function cachePrefixColumn(prefix: unknown): string | null {
+	if (!prefix || typeof prefix !== "object") return null;
+	const { status, part } = prefix as { status?: unknown; part?: unknown };
+	if (status === "first" || status === "intact") return status;
+	if (status === "changed" && typeof part === "string") return `changed:${part}`;
+	return null;
 }
 
 function extractModelUsageStats(

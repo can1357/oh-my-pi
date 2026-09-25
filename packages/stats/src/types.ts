@@ -43,6 +43,12 @@ export interface MessageStats {
 	 * `MessageStats` too.
 	 */
 	costUnpriced?: boolean;
+	/**
+	 * Send-time prompt-cache prefix status (`AssistantMessage.promptCachePrefix`):
+	 * `first`, `intact`, or `changed:<part>`. `null` for requests recorded before
+	 * omp stamped it, or through transports that expose no payload.
+	 */
+	cachePrefix?: string | null;
 }
 
 /**

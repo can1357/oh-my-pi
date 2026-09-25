@@ -25,6 +25,7 @@ import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
+import type { PromptCachePrefixTracker } from "./prompt-cache-prefix";
 import type { AgentTelemetryConfig } from "./telemetry";
 
 /** Stream function - can return sync or Promise for async config lookup */
@@ -249,6 +250,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
 	sentToolDefinitions?: SentToolDefinitions;
+
+	/** Compares each request's cacheable prefix with the session's previous request; stamps `promptCachePrefix`. */
+	promptCachePrefixTracker?: PromptCachePrefixTracker;
 
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.
