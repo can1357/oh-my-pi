@@ -17,6 +17,7 @@ members = [
    "crates/pi-walker",
    "crates/vendor/brush-core",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
@@ -33,6 +34,9 @@ brush-core = { path = "crates/vendor/brush-core" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
+# vendored copy carries the upstream grammar fix (see its README.md).
+tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
 
 [profile.release]
 opt-level = 3
