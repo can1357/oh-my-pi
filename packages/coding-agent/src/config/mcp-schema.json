@@ -165,12 +165,30 @@
           "additionalProperties": false,
           "required": ["command"],
           "properties": {
-            "enabled": {},
-            "timeout": {},
-            "requestIdFormat": {},
-            "instructions": {},
-            "auth": {},
-            "oauth": {},
+            "enabled": {
+              "$ref": "#/$defs/serverBase/properties/enabled"
+            },
+            "timeout": {
+              "$ref": "#/$defs/serverBase/properties/timeout"
+            },
+            "requestIdFormat": {
+              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
+            },
+            "instructions": {
+              "$ref": "#/$defs/serverBase/properties/instructions"
+            },
+            "auth": {
+              "$ref": "#/$defs/serverBase/properties/auth"
+            },
+            "oauth": {
+              "$ref": "#/$defs/serverBase/properties/oauth"
+            },
+            "enabledTools": {
+              "$ref": "#/$defs/serverBase/properties/enabledTools"
+            },
+            "disabledTools": {
+              "$ref": "#/$defs/serverBase/properties/disabledTools"
+            },
             "type": {
               "type": "string",
               "enum": ["stdio"],
@@ -195,27 +213,6 @@
             "cwd": {
               "type": "string",
               "description": "Working directory used when spawning the stdio process."
-            },
-            "enabled": {
-              "$ref": "#/$defs/serverBase/properties/enabled"
-            },
-            "timeout": {
-              "$ref": "#/$defs/serverBase/properties/timeout"
-            },
-            "requestIdFormat": {
-              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
-            },
-            "auth": {
-              "$ref": "#/$defs/serverBase/properties/auth"
-            },
-            "oauth": {
-              "$ref": "#/$defs/serverBase/properties/oauth"
-            },
-            "enabledTools": {
-              "$ref": "#/$defs/serverBase/properties/enabledTools"
-            },
-            "disabledTools": {
-              "$ref": "#/$defs/serverBase/properties/disabledTools"
             }
           },
           "not": {
@@ -234,12 +231,24 @@
           "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
-            "enabled": {},
-            "timeout": {},
-            "requestIdFormat": {},
-            "instructions": {},
-            "auth": {},
-            "oauth": {},
+            "enabled": {
+              "$ref": "#/$defs/serverBase/properties/enabled"
+            },
+            "timeout": {
+              "$ref": "#/$defs/serverBase/properties/timeout"
+            },
+            "requestIdFormat": {
+              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
+            },
+            "instructions": {
+              "$ref": "#/$defs/serverBase/properties/instructions"
+            },
+            "auth": {
+              "$ref": "#/$defs/serverBase/properties/auth"
+            },
+            "oauth": {
+              "$ref": "#/$defs/serverBase/properties/oauth"
+            },
             "type": {
               "type": "string",
               "enum": ["http"],
@@ -253,21 +262,6 @@
             "headers": {
               "$ref": "#/$defs/stringMap",
               "description": "HTTP headers sent with MCP requests."
-            },
-            "enabled": {
-              "$ref": "#/$defs/serverBase/properties/enabled"
-            },
-            "timeout": {
-              "$ref": "#/$defs/serverBase/properties/timeout"
-            },
-            "requestIdFormat": {
-              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
-            },
-            "auth": {
-              "$ref": "#/$defs/serverBase/properties/auth"
-            },
-            "oauth": {
-              "$ref": "#/$defs/serverBase/properties/oauth"
             },
             "enabledTools": {
               "$ref": "#/$defs/serverBase/properties/enabledTools"
@@ -292,12 +286,24 @@
           "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
-            "enabled": {},
-            "timeout": {},
-            "requestIdFormat": {},
-            "instructions": {},
-            "auth": {},
-            "oauth": {},
+            "enabled": {
+              "$ref": "#/$defs/serverBase/properties/enabled"
+            },
+            "timeout": {
+              "$ref": "#/$defs/serverBase/properties/timeout"
+            },
+            "requestIdFormat": {
+              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
+            },
+            "instructions": {
+              "$ref": "#/$defs/serverBase/properties/instructions"
+            },
+            "auth": {
+              "$ref": "#/$defs/serverBase/properties/auth"
+            },
+            "oauth": {
+              "$ref": "#/$defs/serverBase/properties/oauth"
+            },
             "type": {
               "type": "string",
               "enum": ["sse"],
@@ -311,21 +317,6 @@
             "headers": {
               "$ref": "#/$defs/stringMap",
               "description": "HTTP headers sent with the SSE transport."
-            },
-            "enabled": {
-              "$ref": "#/$defs/serverBase/properties/enabled"
-            },
-            "timeout": {
-              "$ref": "#/$defs/serverBase/properties/timeout"
-            },
-            "requestIdFormat": {
-              "$ref": "#/$defs/serverBase/properties/requestIdFormat"
-            },
-            "auth": {
-              "$ref": "#/$defs/serverBase/properties/auth"
-            },
-            "oauth": {
-              "$ref": "#/$defs/serverBase/properties/oauth"
             },
             "enabledTools": {
               "$ref": "#/$defs/serverBase/properties/enabledTools"

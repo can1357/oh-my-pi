@@ -59,6 +59,16 @@ test("a denylist entry matching nothing is harmless and stays out of unmatched",
 	expect(result.allowed).toEqual(NAMES);
 	expect(result.unmatched).toEqual([]);
 });
+test("empty filter arrays are fail-open (same as absent)", () => {
+	// An empty allowlist contributes no members, so `filterMCPTools` degrades
+	// to filter-off: the server contributes every advertised tool. Documented
+	// in docs/mcp-config.md (both filter bullets); pinned here so a future
+	// fail-closed change trips loudly.
+	expect(run(NAMES, [], []).allowed).toEqual(NAMES);
+	expect(run(NAMES, []).allowed).toEqual(NAMES);
+	expect(run(NAMES, undefined, []).allowed).toEqual(NAMES);
+	expect(run(NAMES, [], []).filterEmpty).toBe(false);
+});
 
 test("glob metacharacters: star, question, brace alternation", () => {
 	expect(run(NAMES, ["*_message"]).allowed).toEqual(["send_message"]);
