@@ -137,9 +137,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return (await this.status()) !== "running";
 		}
 
-		async wait({ timeout } = {}) {
+		async wait(opts, ...rest) {
 			if (this._result !== HANDLE_UNSET) return this._result;
-			return (await wait([this], { timeout }))[0];
+			const options = optionsArg("AgentHandle.wait", opts, rest, ["timeout"], "{ timeout }");
+			return (await wait([this], options))[0];
 		}
 
 		async cancel() {
@@ -248,7 +249,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
-	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
+	const wait = async (handles, opts, ...rest) => {
+		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
