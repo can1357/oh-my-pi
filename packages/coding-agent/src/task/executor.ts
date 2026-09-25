@@ -296,7 +296,6 @@ function installSubagentRetryFallbackChain(args: {
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
-	modelSelectionClosed?: boolean;
 }): string | undefined {
 	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
@@ -3953,7 +3952,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
 			if (modelSelectionClosed) {
-				subagentSettings.override("retry.fallbackChains", {});
+				// Record settings merge by key, so an empty map does not mask the
+				// parent's exact, wildcard, role, or default chains.
+				const inheritedChains = cfgRetryFallbackChains.get(subagentSettings);
+				cfgRetryFallbackChains.override(
+					subagentSettings,
+					Object.fromEntries(Object.keys(inheritedChains).map(key => [key, []])),
+				);
 			}
 			const inheritedRetryFallbackChain =
 				!modelSelectionClosed && configuredModelPatterns.length === 1
@@ -4014,7 +4019,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
-				modelSelectionClosed,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
@@ -4152,11 +4156,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						modelSelectionClosed || model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: options.parentActiveModelPattern,
 					modelPatternFallbackRole:
-						modelSelectionClosed || model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:
-						modelSelectionClosed || model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+						modelSelectionClosed || model || modelOverride === undefined
+							? undefined
+							: inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.

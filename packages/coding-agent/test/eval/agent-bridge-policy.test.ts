@@ -395,7 +395,6 @@ describe("runEvalAgent", () => {
 				"async.enabled": false,
 				"task.isolation.enabled": false,
 				"task.enableLsp": true,
-				"task.agentModelOverrides": { task: "anthropic/claude-haiku-4-5" },
 			}),
 		});
 

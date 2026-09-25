@@ -16,7 +16,12 @@ describe("task schema (single-spawn)", () => {
 	it.each(["provider/model", ["provider/first", "provider/second"]])(
 		"accepts a non-empty model selector %j",
 		model => {
-			const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", solutionSpace: "c", model: model as string | string[] });
+			const parsed = taskSchema({
+				agent: "scout",
+				task: "Map the auth module.",
+				solutionSpace: "c",
+				model: model as string | string[],
+			});
 			expect(parsed instanceof type.errors).toBe(false);
 			if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
 		},

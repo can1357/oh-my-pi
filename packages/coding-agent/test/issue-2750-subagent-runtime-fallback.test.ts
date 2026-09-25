@@ -352,7 +352,7 @@ describe("subagent runtime model resolution", () => {
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
 			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 		const settings = Settings.isolated({
@@ -380,7 +380,13 @@ describe("subagent runtime model resolution", () => {
 			enableLsp: false,
 		});
 
-		expect(childFallbackChains).toEqual({ "subagent:issue-2750-closed": ["fallback/working-model"] });
+		expect(childFallbackChains).toEqual({
+			default: [],
+			"primary/*": [],
+			"primary/bad-runtime-model": [],
+			role: [],
+			"subagent:issue-2750-closed": ["fallback/working-model"],
+		});
 		expect(result.resolvedModel).toBe("fallback/working-model");
 	});
 
@@ -389,7 +395,7 @@ describe("subagent runtime model resolution", () => {
 		let childFallbackChains: Record<string, string[]> | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (!options) throw new Error("Expected createAgentSession options");
-			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
 			return { session: createYieldingSession("none"), extensionsResult: {}, setToolUIContext: () => {} } as never;
 		});
 		const settings = Settings.isolated({
@@ -416,7 +422,7 @@ describe("subagent runtime model resolution", () => {
 			enableLsp: false,
 		});
 
-		expect(childFallbackChains).toEqual({});
+		expect(childFallbackChains).toEqual({ default: [], "primary/bad-runtime-model": [] });
 	});
 
 	it("closed single caller does not fall back to an authenticated parent when caller auth expires", async () => {

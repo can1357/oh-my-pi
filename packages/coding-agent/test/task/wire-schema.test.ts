@@ -62,14 +62,19 @@ describe("task wire schema", () => {
 	it.each(["provider/model", ["provider/first", "provider/second"]])(
 		"accepts flat model %j and preserves its order",
 		model => {
-			const parsed = taskSchema({ agent: "scout", task: "map the auth flow", model: model as string | string[] });
+			const parsed = taskSchema({
+				agent: "scout",
+				task: "map the auth flow",
+				solutionSpace: "c",
+				model: model as string | string[],
+			});
 			expect(parsed instanceof type.errors).toBe(false);
 			if (!(parsed instanceof type.errors)) expect((parsed as { model?: unknown }).model).toEqual(model);
 		},
 	);
 
 	it.each(["", "  "])("rejects empty flat model %j", model => {
-		const parsed = taskSchema({ agent: "scout", task: "map the auth flow", model });
+		const parsed = taskSchema({ agent: "scout", task: "map the auth flow", solutionSpace: "c", model });
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
@@ -108,13 +113,13 @@ describe("task wire schema", () => {
 
 	it.each(["provider/model", ["provider/first", "provider/second"]])("accepts batch item model %j", model => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", model }] }));
+		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", model }] }));
 		expect(items[0]?.model).toEqual(model);
 	});
 
 	it("does not expose a model on the batch container and rejects raw top-level model", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const parsed = batch({ context: "ctx", model: "provider/model", tasks: [{ task: "x" }] });
+		const parsed = batch({ context: "ctx", model: "provider/model", tasks: [{ task: "x", solutionSpace: "c" }] });
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
