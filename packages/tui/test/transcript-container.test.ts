@@ -134,6 +134,18 @@ const finalAnswer: AssistantMessage = {
 const frame = { tick: 0, now: 0 };
 
 describe("TranscriptContainer", () => {
+	it("renders externally added children after removing another child", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["first"], false);
+		const removed = new Block(["removed"], false);
+		const external = new Block(["external"], false);
+		transcript.addChild(first);
+		transcript.addChild(removed);
+		transcript.children.push(external);
+		transcript.removeChild(removed);
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["first", "", "external"]);
+	});
+
 	it("preserves retirement while externally reordered and replaced live children settle", () => {
 		const transcript = new TranscriptContainer();
 		const archived = new Block(["archived"], true);
