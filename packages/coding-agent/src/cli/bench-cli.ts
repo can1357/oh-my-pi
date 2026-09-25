@@ -42,12 +42,23 @@ import {
 import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "../session/settings";
+
 const DEFAULT_PAR = 4;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
 const DEFAULT_CACHE_PREFIX_BYTES = 8_192;
 const DEFAULT_CACHE_PAIRS = 1;
 const DEFAULT_CACHE_CONCURRENCY = 1;
 const DEFAULT_PREFILL_BYTES = 32_768;
+/**
+ * Default prefill input cap per context-window token. Dense tokenizers pack
+ * the filler at ~2.3 bytes/token (Apple's on-device model), so 1.5 bytes per
+ * window token stays under ~2/3 of the window — room for the instruction and
+ * output on small local models.
+ */
+const PREFILL_BYTES_PER_CONTEXT_TOKEN = 1.5;
+/** `--detailed` requests per phase (the parallel phase rounds up to whole `--par` waves). */
+const DETAILED_DEFAULT_RUNS = 4;
 const ERROR_WIDTH = 110;
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder();
@@ -74,6 +85,15 @@ const CHALLENGE_KINDS = ["chat", "prefill", "generation"] as const;
 
 /** Default max output tokens per challenge kind (`--max-tokens` overrides all). */
 const CHALLENGE_MAX_TOKENS: Record<BenchChallengeKind, number> = { chat: 512, prefill: 64, generation: 2048 };
+
+/**
+ * One `--detailed` phase, run in order against each model:
+ * - `single`: chat challenges one at a time — uncontended single-user latency.
+ * - `parallel`: chat challenges `--par` at a time — latency under load and the
+ *   aggregate throughput the endpoint sustains across concurrent users.
+ * - `prefill`: prefill challenges one at a time — uncontended input processing.
+ */
+export type BenchPhase = "single" | "parallel" | "prefill";
 
 /** Default requests per model; mix needs a multiple of the kind count. */
 const PROFILE_DEFAULT_RUNS: Record<BenchProfile, number> = { mix: 9, chat: 10, prefill: 5, generation: 5 };
@@ -116,8 +136,10 @@ export interface BenchCommandArgs {
 		par?: number;
 		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
 		profile?: string;
-		/** Synthetic input size for prefill challenges (default: 32768 bytes). */
+		/** Synthetic input size for prefill challenges (default: 32768 bytes, capped by the model's context window). */
 		prefillBytes?: number;
+		/** Run the single-user, parallel, and prefill phases instead of one `--profile` workload. */
+		detailed?: boolean;
 		cache?: boolean;
 		cachePrefixFile?: string;
 		cachePrefixBytes?: number;
@@ -130,6 +152,8 @@ export interface BenchRunSuccess {
 	ok: true;
 	/** Challenge kind this run exercised; absent in `--cache` mode. */
 	challenge?: BenchChallengeKind;
+	/** `--detailed` phase this run belongs to. */
+	phase?: BenchPhase;
 	/** Request start → first streamed token: queue + prefill window. */
 	ttftMs: number;
 	/** First streamed token → done: decode window (0 when the response arrived buffered). */
@@ -156,6 +180,8 @@ export interface BenchRunFailure {
 	ok: false;
 	/** Challenge kind this run exercised; absent in `--cache` mode. */
 	challenge?: BenchChallengeKind;
+	/** `--detailed` phase this run belongs to. */
+	phase?: BenchPhase;
 	error: string;
 }
 
@@ -225,6 +251,24 @@ export interface BenchStats {
 	cost: number;
 }
 
+/** One `--detailed` phase's outcome for a model. */
+export interface BenchPhaseReport {
+	/** Requests kept in flight at once. */
+	concurrency: number;
+	/** Requests finished (successful or not). */
+	runs: number;
+	/** Phase start → last finished request. */
+	wallMs: number;
+	/**
+	 * Output tokens of successful runs per wall-clock second: the throughput the
+	 * endpoint sustained across all in-flight requests. Compare `parallel` to
+	 * `single` to see whether concurrent users scale or queue.
+	 */
+	aggregateTps: number;
+	/** Per-request aggregates over successful runs; null when every run failed. */
+	stats: BenchStats | null;
+}
+
 export interface BenchModelReport {
 	/** Selector as the user typed it (e.g. "opus" or "gemini-3.5:low"). */
 	selector: string;
@@ -237,15 +281,20 @@ export interface BenchModelReport {
 	stats: BenchStats | null;
 	/** Aggregates per challenge kind; empty in `--cache` mode. */
 	byChallenge: Partial<Record<BenchChallengeKind, BenchStats>>;
+	/** Per-phase outcomes; empty unless `--detailed`. */
+	phases: Partial<Record<BenchPhase, BenchPhaseReport>>;
 	cachePairs?: BenchCachePairReport[];
 }
 
 export interface BenchSummary {
+	/** Requests per model (`--detailed`: summed over phases). */
 	runs: number;
 	/** Explicit `--max-tokens` override (cache mode: resolved value); absent when per-challenge defaults apply. */
 	maxTokens?: number;
-	/** Benchmark workload; absent in `--cache` mode. */
+	/** Benchmark workload; absent in `--cache` and `--detailed` modes. */
 	profile?: BenchProfile;
+	/** Set when `--detailed` ran the phases; each model's `phases` holds the results. */
+	detailed?: { runsPerPhase: number; par: number };
 	models: BenchModelReport[];
 	failures: number;
 	/** Requested per-family service tiers, resolved per model before reaching the wire. */
@@ -517,10 +566,53 @@ function buildBenchChallenge(kind: BenchChallengeKind, opts: BenchChallengeOptio
 				kind,
 				maxTokens,
 				messages: user(
-					`Benchmark run ${opts.nonce}.\n\n${generatedCachePrefix(opts.prefillBytes)}\n\n${opts.promptOverride ?? prefillInstruction.trim()}`,
+					`Benchmark run ${opts.nonce}.\n\n${generatedCachePrefix(opts.prefillBytes)}\n\n${prefillInstruction.trim()}`,
 				),
 			};
 	}
+}
+
+/**
+ * Prefill input size for `model`: an explicit `--prefill-bytes` wins; the
+ * default is capped by the context window so small local models (e.g. Apple's
+ * ~4K-token on-device model) are measured instead of rejected.
+ */
+function prefillBytesFor(model: Model<Api>, explicit: number | undefined): number {
+	if (explicit !== undefined) return explicit;
+	const window = model.contextWindow;
+	return window !== null && Number.isFinite(window) && window > 0
+		? Math.min(DEFAULT_PREFILL_BYTES, Math.floor(window * PREFILL_BYTES_PER_CONTEXT_TOKEN))
+		: DEFAULT_PREFILL_BYTES;
+}
+
+/** One workload each model runs: a challenge rotation at a fixed concurrency. */
+interface BenchStep {
+	/** `--detailed` phase; absent for a plain `--profile` run. */
+	phase?: BenchPhase;
+	kinds: readonly BenchChallengeKind[];
+	runs: number;
+	concurrency: number;
+}
+
+/** `--detailed` plan: single-user chat, `par`-way parallel chat (whole waves), single-user prefill. */
+function detailedSteps(runs: number, par: number): BenchStep[] {
+	return [
+		{ phase: "single", kinds: ["chat"], runs, concurrency: 1 },
+		{ phase: "parallel", kinds: ["chat"], runs: par * Math.ceil(runs / par), concurrency: par },
+		{ phase: "prefill", kinds: ["prefill"], runs, concurrency: 1 },
+	];
+}
+
+function buildPhaseReport(concurrency: number, results: readonly BenchRunResult[], wallMs: number): BenchPhaseReport {
+	const successes = results.filter((result): result is BenchRunSuccess => result.ok);
+	const outputTokens = successes.reduce((sum, result) => sum + result.outputTokens, 0);
+	return {
+		concurrency,
+		runs: results.length,
+		wallMs,
+		aggregateTps: wallMs > 0 ? (outputTokens * 1000) / wallMs : 0,
+		stats: successes.length === 0 ? null : computeBenchStats(successes),
+	};
 }
 
 async function runWithConcurrency<T>(
@@ -691,6 +783,7 @@ function buildModelReport(
 	model: Model<Api>,
 	thinking: ResolvedThinkingLevel | undefined,
 	results: BenchRunResult[],
+	phases: BenchModelReport["phases"] = {},
 ): BenchModelReport {
 	const successes = results.filter((result): result is BenchRunSuccess => result.ok);
 	const byChallenge: BenchModelReport["byChallenge"] = {};
@@ -705,6 +798,7 @@ function buildModelReport(
 		results,
 		stats: successes.length === 0 ? null : computeBenchStats(successes),
 		byChallenge,
+		phases,
 	};
 }
 function computeBenchStats(successes: BenchRunSuccess[]): BenchStats {
@@ -743,6 +837,8 @@ function formatRunLine(result: BenchRunResult, index: number, total: number, opt
 	}
 	return `  ${chalk.red("✗")} ${prefix} ${kind}${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
 }
+
+const PHASE_LABELS: Record<BenchPhase, string> = { single: "single-user", parallel: "parallel", prefill: "prefill" };
 
 /** Placeholder cell for a value the live footer has not measured yet. */
 const PENDING_CELL = "…";
@@ -799,11 +895,29 @@ const KIND_HEADLINES: Record<
 	generation: { header: "decode", metric: "tokensPerSecond", digits: 1 },
 };
 
-function benchTableColumns(kinds: readonly BenchChallengeKind[]): BenchTableColumn[] {
+/** Comparison-table layout: columns plus the rate rows are ranked by (undefined = unmeasured). */
+interface BenchTableSpec {
+	columns: BenchTableColumn[];
+	rank(report: BenchModelReport): number | undefined;
+}
+
+const MODEL_COLUMN: BenchTableColumn = { header: "model", value: formatBenchModelLabel };
+
+const COST_COLUMN: BenchTableColumn = {
+	header: "cost/run",
+	value: r => {
+		if (!r.stats) return undefined;
+		// Zero cost means the model is unpriced, not free.
+		return r.stats.cost > 0 ? formatCost(r.stats.cost) : "-";
+	},
+};
+
+/** `--profile` table: lead-kind latency plus each kind's headline rate, ranked by the lead kind's rate. */
+function profileTableSpec(kinds: readonly BenchChallengeKind[]): BenchTableSpec {
 	// The lead kind (chat when mixed) carries the representative latency.
 	const lead = kinds[0]!;
 	const columns: BenchTableColumn[] = [
-		{ header: "model", value: formatBenchModelLabel },
+		MODEL_COLUMN,
 		{
 			header: "TTFT p50",
 			value: r => {
@@ -823,34 +937,60 @@ function benchTableColumns(kinds: readonly BenchChallengeKind[]): BenchTableColu
 		const { header, metric, digits } = KIND_HEADLINES[kind];
 		columns.push({ header, value: r => r.byChallenge[kind]?.[metric].p50.toFixed(digits) });
 	}
-	columns.push({
-		header: "cost/run",
-		value: r => {
-			if (!r.stats) return undefined;
-			// Zero cost means the model is unpriced, not free.
-			return r.stats.cost > 0 ? formatCost(r.stats.cost) : "-";
-		},
-	});
-	return columns;
+	columns.push(COST_COLUMN);
+	const { metric } = KIND_HEADLINES[lead];
+	return { columns, rank: r => r.byChallenge[lead]?.[metric].p50 };
 }
 
 /**
- * Comparison table ranked by the lead kind's headline rate (chat tok/s when
- * mixed); medians, not means, so one queue hiccup cannot reorder rows. It is
- * also the live footer: unfinished rows show {@link PENDING_CELL} for
- * unmeasured cells and a trailing status animated by `spinner`.
+ * `--detailed` table: single-user latency/rate, the same under `par`
+ * concurrent users plus their aggregate rate and scaling, then prefill rate;
+ * ranked by single-user tok/s.
  */
-function formatBenchTable(
-	rows: readonly BenchTableRow[],
-	kinds: readonly BenchChallengeKind[],
-	spinner = "",
-): string[] {
-	const lead = kinds[0]!;
-	const { metric } = KIND_HEADLINES[lead];
+function detailedTableSpec(par: number): BenchTableSpec {
+	// Phase columns stay pending until the phase has a successful run.
+	const single = (r: BenchModelReport) => r.phases.single?.stats ?? undefined;
+	const parallel = (r: BenchModelReport) => r.phases.parallel?.stats ?? undefined;
+	const ttft = (stats: BenchStats | undefined) => stats && formatMs(stats.ttftMs.p50);
+	return {
+		columns: [
+			MODEL_COLUMN,
+			{ header: "TTFT", value: r => ttft(single(r)) },
+			{ header: "tok/s", value: r => single(r)?.tokensPerSecond.p50.toFixed(1) },
+			{ header: `TTFT@${par}`, value: r => ttft(parallel(r)) },
+			{ header: `tok/s@${par}`, value: r => parallel(r)?.tokensPerSecond.p50.toFixed(1) },
+			{
+				header: `agg@${par}`,
+				value: r => (r.phases.parallel?.stats ? r.phases.parallel.aggregateTps.toFixed(1) : undefined),
+			},
+			{
+				// Parallel aggregate rate over single-user aggregate rate: ~1× means
+				// concurrent requests queue behind each other, ~N× means they scale.
+				header: "scale",
+				value: r => {
+					const base = r.phases.single?.aggregateTps;
+					const loaded = r.phases.parallel?.aggregateTps;
+					return base && loaded ? `${(loaded / base).toFixed(1)}×` : undefined;
+				},
+			},
+			{ header: "prefill", value: r => r.phases.prefill?.stats?.prefillTps.p50.toFixed(0) },
+			COST_COLUMN,
+		],
+		rank: r => single(r)?.tokensPerSecond.p50,
+	};
+}
+
+/**
+ * Comparison table ranked by `spec.rank` (medians, not means, so one queue
+ * hiccup cannot reorder rows). It is also the live footer: unfinished rows
+ * show {@link PENDING_CELL} for unmeasured cells and a trailing status
+ * animated by `spinner`.
+ */
+function formatBenchTable(rows: readonly BenchTableRow[], spec: BenchTableSpec, spinner = ""): string[] {
 	const ranked = rows
-		.map(row => ({ row, rate: row.report.byChallenge[lead]?.[metric].p50 ?? Number.NEGATIVE_INFINITY }))
+		.map(row => ({ row, rate: spec.rank(row.report) ?? Number.NEGATIVE_INFINITY }))
 		.sort((a, b) => b.rate - a.rate);
-	const columns = benchTableColumns(kinds);
+	const { columns } = spec;
 	const texts = ranked.map(({ row }) =>
 		columns.map(column => column.value(row.report) ?? (row.state === "done" ? "-" : PENDING_CELL)),
 	);
@@ -899,6 +1039,13 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	if (cacheMode && (command.flags.par ?? 1) > 1) {
 		throw new Error("--par cannot parallelize cold/warm pairs; use --cache-concurrency instead");
 	}
+	const detailed = command.flags.detailed === true;
+	if (detailed && cacheMode) throw new Error("--detailed cannot be combined with --cache");
+	if (detailed && command.flags.profile !== undefined) {
+		throw new Error(
+			"--profile cannot be combined with --detailed, which runs single-user, parallel, and prefill phases",
+		);
+	}
 	const profileFlag = command.flags.profile;
 	if (
 		profileFlag !== undefined &&
@@ -913,8 +1060,11 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	if (!cacheMode && command.flags.prompt !== undefined && profile !== "chat" && profile !== "generation") {
 		throw new Error("--prompt requires --profile chat or generation");
 	}
-	if (command.flags.prefillBytes !== undefined && (cacheMode || (profile !== "mix" && profile !== "prefill"))) {
-		throw new Error("--prefill-bytes requires prefill challenges (--profile mix or prefill)");
+	if (
+		command.flags.prefillBytes !== undefined &&
+		(cacheMode || (!detailed && profile !== "mix" && profile !== "prefill"))
+	) {
+		throw new Error("--prefill-bytes requires prefill challenges (--detailed, or --profile mix or prefill)");
 	}
 
 	const cachePairs = cacheMode
@@ -923,9 +1073,11 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const cacheConcurrency = cacheMode
 		? normalizePositiveInteger("cache-concurrency", command.flags.cacheConcurrency, DEFAULT_CACHE_CONCURRENCY)
 		: undefined;
-	const runs = cacheMode
-		? cachePairs! * 2
-		: normalizePositiveInteger("runs", command.flags.runs, PROFILE_DEFAULT_RUNS[profile]);
+	const runsPerStep = normalizePositiveInteger(
+		"runs",
+		command.flags.runs,
+		detailed ? DETAILED_DEFAULT_RUNS : PROFILE_DEFAULT_RUNS[profile],
+	);
 	const maxTokensOverride =
 		command.flags.maxTokens !== undefined
 			? normalizePositiveInteger("max-tokens", command.flags.maxTokens, 1)
@@ -933,9 +1085,19 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const cacheMaxTokens = cacheMode ? (maxTokensOverride ?? DEFAULT_CACHE_MAX_TOKENS) : undefined;
 	const par =
 		command.flags.par !== undefined ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
+	if (detailed && par < 2) throw new Error("--detailed needs --par of at least 2 for its parallel phase");
 	const promptOverride = command.flags.prompt?.trim() || undefined;
-	const prefillBytes = normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES);
+	const explicitPrefillBytes =
+		command.flags.prefillBytes !== undefined
+			? normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES)
+			: undefined;
 	const kinds: readonly BenchChallengeKind[] = profile === "mix" ? CHALLENGE_KINDS : [profile];
+	const steps: BenchStep[] = detailed
+		? detailedSteps(runsPerStep, par)
+		: [{ kinds, runs: runsPerStep, concurrency: par }];
+	const runs = cacheMode ? cachePairs! * 2 : steps.reduce((sum, step) => sum + step.runs, 0);
+	const tableSpec = detailed ? detailedTableSpec(par) : profileTableSpec(kinds);
+	// Detailed phases each run a single kind under a phase header; only a mixed profile needs per-run kind tags.
 	const tagKind = kinds.length > 1;
 	const random = deps.random ?? Math.random;
 	const json = command.flags.json === true;
@@ -960,7 +1122,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	let rows: BenchTableRow[] = [];
 	const renderLive = (spinner: string): string[] => {
 		if (!cacheMode) {
-			return rows.some(row => row.state !== "done") ? ["", ...formatBenchTable(rows, kinds, spinner)] : [];
+			return rows.some(row => row.state !== "done") ? ["", ...formatBenchTable(rows, tableSpec, spinner)] : [];
 		}
 		const running = rows.find(row => row.state === "running");
 		if (!running) return [];
@@ -998,9 +1160,9 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const serviceTierByFamily = command.flags.serviceTier
 			? serviceTierForAllFamilies(flagTier)
 			: buildServiceTierByFamily(
-					runtime.settings?.get("tier.openai") ?? "none",
-					runtime.settings?.get("tier.anthropic") ?? "none",
-					runtime.settings?.get("tier.google") ?? "none",
+					(runtime.settings ? cfgTierOpenai.get(runtime.settings) : undefined) ?? "none",
+					(runtime.settings ? cfgTierAnthropic.get(runtime.settings) : undefined) ?? "none",
+					(runtime.settings ? cfgTierGoogle.get(runtime.settings) : undefined) ?? "none",
 				);
 		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
 		const total = cacheMode ? cachePairs! : runs;
@@ -1131,57 +1293,75 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 				continue;
 			}
 
-			// We will launch up to `par` workers/requests concurrently.
-			// To keep output clean, non-JSON output emits entries in correct index order.
-			let nextToPrint = 0;
-			const runWorker = async (index: number) => {
-				const sessionId = index === 0 ? testSessionId : randomSessionId();
-				const challenge = buildBenchChallenge(kinds[index % kinds.length]!, {
-					promptOverride,
-					prefillBytes,
-					nonce: randomSessionId(),
-					random,
-					maxTokensOverride,
-				});
-				const result = await runBenchRequest(
-					model,
-					{
-						apiKey: runtime.modelRegistry.resolver(model, sessionId),
-						sessionId,
-						messages: challenge.messages,
-						maxTokens: challenge.maxTokens,
-						reasoning: toReasoningEffort(thinking),
-						disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
-						serviceTier,
-					},
-					streamFn,
-					now,
-				);
-				results[index] = { ...result, challenge: challenge.kind };
-			};
-			const queue = Array.from({ length: runs }, (_, i) => i);
-			const activeWorkers: Promise<void>[] = [];
-			const processNext = async (): Promise<void> => {
-				if (queue.length === 0) return;
-				const index = queue.shift()!;
-				progress.inFlight++;
-				board?.repaint();
-				await runWorker(index);
-				progress.inFlight--;
-				progress.completed++;
-				if (!results[index]!.ok) progress.failed++;
-				row.report = buildModelReport(selector, model, thinking, results);
-				board?.repaint();
-				if (!json) {
-					while (nextToPrint < runs && results[nextToPrint] !== undefined) {
-						print(formatRunLine(results[nextToPrint], nextToPrint, runs, { tagKind }));
-						nextToPrint++;
-					}
+			const prefillBytes = prefillBytesFor(model, explicitPrefillBytes);
+			const phases: BenchModelReport["phases"] = {};
+			let offset = 0;
+			// Steps run back to back so one phase's load never skews the next.
+			for (const step of steps) {
+				const { phase } = step;
+				if (!json && phase) {
+					print(
+						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(`· ${step.concurrency} concurrent · ${step.runs} runs`)}`,
+					);
 				}
-				await processNext();
-			};
-			for (let worker = 0; worker < Math.min(par, runs); worker++) activeWorkers.push(processNext());
-			await Promise.all(activeWorkers);
+				const finished: BenchRunResult[] = [];
+				const startedAt = now();
+				// Runs finish out of order under concurrency; lines print in index order.
+				let nextToPrint = 0;
+				await runWithConcurrency(step.runs, step.concurrency, async index => {
+					const runIndex = offset + index;
+					const sessionId = runIndex === 0 ? testSessionId : randomSessionId();
+					const challenge = buildBenchChallenge(step.kinds[index % step.kinds.length]!, {
+						promptOverride,
+						prefillBytes,
+						nonce: randomSessionId(),
+						random,
+						maxTokensOverride,
+					});
+					progress.inFlight++;
+					board?.repaint();
+					const result: BenchRunResult = {
+						...(await runBenchRequest(
+							model,
+							{
+								apiKey: runtime.modelRegistry.resolver(model, sessionId),
+								sessionId,
+								messages: challenge.messages,
+								maxTokens: challenge.maxTokens,
+								reasoning: toReasoningEffort(thinking),
+								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
+								serviceTier,
+							},
+							streamFn,
+							now,
+						)),
+						challenge: challenge.kind,
+						phase,
+					};
+					results[runIndex] = result;
+					finished.push(result);
+					progress.inFlight--;
+					progress.completed++;
+					if (!result.ok) progress.failed++;
+					if (phase) phases[phase] = buildPhaseReport(step.concurrency, finished, now() - startedAt);
+					row.report = buildModelReport(selector, model, thinking, results, phases);
+					board?.repaint();
+					if (!json) {
+						while (nextToPrint < step.runs && results[offset + nextToPrint] !== undefined) {
+							print(formatRunLine(results[offset + nextToPrint]!, nextToPrint, step.runs, { tagKind }));
+							nextToPrint++;
+						}
+					}
+				});
+				// Chat phases close with the combined output rate across every in-flight request.
+				const phaseReport = phase && phase !== "prefill" ? phases[phase] : undefined;
+				if (!json && phaseReport) {
+					print(
+						`    ${chalk.dim("aggregate")} ${phaseReport.aggregateTps.toFixed(1)} tok/s ${chalk.dim(`over ${formatMs(phaseReport.wallMs)} wall`)}`,
+					);
+				}
+				offset += step.runs;
+			}
 			row.state = "done";
 		}
 		const reports = rows.map(row => row.report);
@@ -1196,12 +1376,16 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			models: reports,
 			failures,
 			serviceTierByFamily,
-			...(cacheMode ? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } } : { profile }),
+			...(cacheMode
+				? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } }
+				: detailed
+					? { detailed: { runsPerPhase: runsPerStep, par } }
+					: { profile }),
 		};
 		if (json) {
 			writeStdout(`${JSON.stringify(summary, null, 2)}\n`);
 		} else if (!cacheMode && (reports.length > 1 || runs > 1)) {
-			print(["", ...formatBenchTable(rows, kinds)].join("\n"));
+			print(["", ...formatBenchTable(rows, tableSpec)].join("\n"));
 		}
 		if (failures > 0) setExitCode(1);
 		return summary;

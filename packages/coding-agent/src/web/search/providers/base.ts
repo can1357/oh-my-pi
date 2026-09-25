@@ -1,4 +1,5 @@
 import type { Api, AuthStorage, FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
 import type { SearchProviderId, SearchResponse } from "../types";
@@ -66,6 +67,8 @@ export interface SearchParams {
 	authStorage: AuthStorage;
 	/** Selected catalog model that chose this engine or grounding backend. */
 	model: Model<Api>;
+	/** Thinking selector resolved from the model-role candidate. */
+	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Provider/model transport settings used by native search endpoints. */
 	modelRegistry: ModelRegistry;
 	/** Whether the selected model came from an explicit role-chain entry. */

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, type CredentialDisabledEvent } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type CredentialDisabledEvent, getOAuthProviders } from "@oh-my-pi/pi-ai";
 import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -10,6 +10,8 @@ import type { Extension, ExtensionError, ExtensionFactory } from "@oh-my-pi/pi-c
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -178,7 +180,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 			const extEvent = await observed;
 
 			expect(embedderEvents).toEqual([
-				{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
+				{
+					provider: "anthropic",
+					disabledCause: expect.stringContaining("invalid_grant"),
+					credentialId: expect.any(Number),
+				},
 			]);
 			expect(extEvent.provider).toBe("anthropic");
 			expect(extEvent.disabledCause).toContain("invalid_grant");
@@ -218,8 +224,16 @@ describe("createAgentSession credential_disabled subscription", () => {
 		await drainCredentialDisabledDispatch();
 
 		expect(embedderEvents).toEqual([
-			{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
-			{ provider: "openai", disabledCause: expect.stringContaining("invalid_grant") },
+			{
+				provider: "anthropic",
+				disabledCause: expect.stringContaining("invalid_grant"),
+				credentialId: expect.any(Number),
+			},
+			{
+				provider: "openai",
+				disabledCause: expect.stringContaining("invalid_grant"),
+				credentialId: expect.any(Number),
+			},
 		]);
 		expect(ext.events).toHaveLength(1);
 		expect(ext.events[0]?.provider).toBe("anthropic");
@@ -407,7 +421,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 		await drainCredentialDisabledDispatch();
 
 		expect(embedderEvents).toEqual([
-			{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
+			{
+				provider: "anthropic",
+				disabledCause: expect.stringContaining("invalid_grant"),
+				credentialId: expect.any(Number),
+			},
 		]);
 	});
 	it("subscribes through the registry's auth storage when only options.modelRegistry is provided", async () => {
@@ -447,7 +465,11 @@ describe("createAgentSession credential_disabled subscription", () => {
 			const extEvent = await observed;
 
 			expect(embedderEvents).toEqual([
-				{ provider: "anthropic", disabledCause: expect.stringContaining("invalid_grant") },
+				{
+					provider: "anthropic",
+					disabledCause: expect.stringContaining("invalid_grant"),
+					credentialId: expect.any(Number),
+				},
 			]);
 			expect(extEvent.provider).toBe("anthropic");
 			expect(extEvent.disabledCause).toContain("invalid_grant");
@@ -570,6 +592,64 @@ describe("createAgentSession credential_disabled subscription", () => {
 			});
 		} finally {
 			authStorage.close();
+		}
+	});
+
+	const recordNotices = (session: AgentSession): Array<Extract<AgentSessionEvent, { type: "notice" }>> => {
+		const notices: Array<Extract<AgentSessionEvent, { type: "notice" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event);
+		});
+		return notices;
+	};
+
+	it("warns the live session, without the provider's text, when a signed-in account is disabled", async () => {
+		const dirs = makeDirs("notice");
+		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"));
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+		const notices = recordNotices(session);
+		try {
+			await authStorage.credentials.set("anthropic", [{ ...expiredOAuth(), email: "alice@example.com" }]);
+			failOAuthRefresh();
+
+			await authStorage.keys.get("anthropic", "session-notice");
+
+			const name = getOAuthProviders().find(provider => provider.id === "anthropic")?.name;
+			expect(name).toBeDefined();
+			expect(notices).toEqual([
+				{
+					type: "notice",
+					level: "warning",
+					source: CREDENTIAL_DISABLED_NOTICE_SOURCE,
+					message: `${name} account alice@example.com was signed out automatically. Run /login to sign in again.`,
+				},
+			]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not prescribe /login for a disabled credential that has no login entry", async () => {
+		const dirs = makeDirs("notice-no-login");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+		const notices = recordNotices(session);
+		try {
+			const provider = "mcp_oauth:https://mcp.example.test/sse";
+			await authStorage.credentials.set(provider, [expiredOAuth()]);
+			const [row] = authStorage.credentials.list(provider);
+
+			expect(await authStorage.credentials.disable(row!.id, "oauth refresh failed: invalid_grant")).toBe(true);
+
+			expect(embedderEvents.map(event => event.provider)).toEqual([provider]);
+			expect(notices).toEqual([]);
+		} finally {
+			await session.dispose();
 		}
 	});
 });

@@ -216,6 +216,13 @@ export class StreamPublisher {
 		socket.on("close", () => this.#detach());
 	}
 
+	/** Swap the row redactor and force a full repaint so the live viewport is re-redacted. */
+	setRedactor(redactor: StreamRedactor): void {
+		if (this.#disposed) return;
+		this.#encoder.setRedactor(redactor);
+		this.#tui.requestRender(true);
+	}
+
 	#scheduleFlush(): void {
 		if (this.#flushTimer || this.#disposed) return;
 		this.#flushTimer = setTimeout(() => {
