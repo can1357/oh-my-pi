@@ -261,9 +261,18 @@ describe("Kimi K3 thinking transport", () => {
 		expect(payload).not.toHaveProperty("thinking.budget_tokens");
 	});
 
-	it("keeps the legacy K2 default on the Anthropic transport", async () => {
+	it("keeps budgeted thinking on the Anthropic transport for models without the native effort contract", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
-		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
+		// Discovery marks a model `thinkingFormat: "kimi"` only when `/models`
+		// advertises `think_efforts`; legacy rows (today `kimi-for-coding-highspeed`,
+		// historically `kimi-for-coding` itself) stay on the budget dialect.
+		const model = buildModel({
+			...K3_MODEL,
+			id: "kimi-for-coding-highspeed",
+			name: "Kimi For Coding (highspeed)",
+			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+			compat: { ...K3_MODEL.compatConfig, thinkingFormat: "zai", kimiApiFormat: "anthropic" },
+		} satisfies ModelSpec<"openai-completions">);
 
 		const payload = await captureKimiPayload(model, Effort.High);
 

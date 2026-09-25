@@ -1,7 +1,8 @@
-Generates/edits images.
+Generates or edits images with the configured image-model role.
 
-<instructions>
-- One detailed `subject` prompt: generation or editing.
-- Multiple `input`: describe each image's role in `subject` (e.g. `Image 1` for composition, `Image 2` for lighting).
-- Text: add "sharp, legible, correctly spelled"; keep short.
-</instructions>
+<instruction>
+- Write one detailed `subject` for generation or editing.
+- Multiple `input`: identify each image's role in `subject` (for example, `Image 1` composition; `Image 2` lighting).
+- Specific catalog model required? Set `model`; otherwise omit it.
+- Text: request "sharp, legible, correctly spelled"; keep it short.
+</instruction>

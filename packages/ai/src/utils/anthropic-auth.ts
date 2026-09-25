@@ -9,11 +9,8 @@
  * through {@link buildAnthropicAuthConfig} for header/URL shaping.
  */
 import { $env } from "@oh-my-pi/pi-utils";
-import {
-	buildAnthropicHeaders as buildProviderAnthropicHeaders,
-	normalizeAnthropicBaseUrl,
-	resolveAnthropicCustomHeadersForBaseUrl,
-} from "../providers/anthropic";
+import { buildAnthropicHeaders, resolveAnthropicCustomHeadersForBaseUrl } from "../providers/anthropic";
+import { normalizeAnthropicBaseUrl } from "../providers/anthropic-state";
 import { isFoundryEnabled } from "./foundry";
 
 /** Auth configuration for Anthropic */
@@ -73,7 +70,7 @@ export function buildAnthropicAuthConfig(apiKey: string, baseUrl?: string): Anth
  * gateway), matching the streaming path so web search behaves identically.
  */
 export function buildAnthropicSearchHeaders(auth: AnthropicAuthConfig): Record<string, string> {
-	return buildProviderAnthropicHeaders({
+	return buildAnthropicHeaders({
 		apiKey: auth.apiKey,
 		baseUrl: auth.baseUrl,
 		isOAuth: auth.isOAuth,

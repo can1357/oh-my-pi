@@ -1,47 +1,77 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { enforceInlineByteCap } from "../session/streaming-output";
-// @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
-import browserDeclarations from "./browser/declarations.d.ts" with { type: "text" };
-// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
-import browserJavascript from "./browser/prelude.js" with { type: "text" };
-import browserPython from "./browser/prelude.py" with { type: "text" };
+import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
+import { resolveSpawnArgs } from "./browser/attach";
 import {
 	acquireBrowser,
+	browserKey,
 	type BrowserHandle,
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
 	releaseBrowser,
 } from "./browser/registry";
+import { ensureChromiumExecutable } from "./browser/launch";
+import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import type { OutputMeta } from "./output-meta";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	type AcquireTabResult,
 	acquireTab,
+	cancelIdleCloseForOwner,
 	dropHeadlessTabs,
 	getTab,
+	listTabs,
 	releaseAllTabs,
+	releaseIdleTabsForOwner,
 	releaseTab,
 	runInTab,
 } from "./browser/tab-supervisor";
 import { renderTabCall } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderFunctionRun } from "./run-code";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { renderCallChain, renderFunctionRun } from "./run-code";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-export { type AriaSnapshotOptions, buildAriaSnapshotScript, parseAriaRefSelector } from "./browser/aria/aria-snapshot";
+export type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
+
+/** First-use boundary for the generated Playwright ARIA evaluator bundle. */
+export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
+	return require("./browser/aria/aria-snapshot").buildAriaSnapshotScript(selector, options);
+}
+
+/** First-use boundary for ARIA-ref parsing; keeps evaluator construction out of tool registration. */
+export function parseAriaRefSelector(selector: string): string | null {
+	return require("./browser/aria/aria-snapshot").parseAriaRefSelector(selector);
+}
+
 export { cmuxSnapshotToObservation, mapWaitUntil, resolveCmuxKind, serializeEval } from "./browser/cmux/rpc";
 export { CmuxSocketClient } from "./browser/cmux/socket-client";
-export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } from "./browser/readable";
+export {
+	extractMarkdownOutline,
+	extractReadableFromHtml,
+	filterMarkdownSections,
+	type ReadableExtractOptions,
+	type ReadableFormat,
+	type ReadableResult,
+} from "./browser/readable";
+export {
+	ariaSnapshotBaselineKey,
+	collectAriaSnapshotRefs,
+	diffAriaSnapshot,
+	postProcessAriaSnapshot,
+	type AriaSnapshotBaseline,
+	type AriaSnapshotDiffResult,
+	type SnapshotPostProcessOptions,
+} from "./browser/snapshot-plus";
 export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
@@ -62,7 +92,7 @@ const tabCallStepSchema = type({
 });
 
 const browserSchema = type({
-	action: type("'open' | 'close' | 'run' | 'call'").describe("operation"),
+	action: type("'open' | 'close' | 'run' | 'call' | 'tabs'").describe("operation"),
 	"name?": type("string").describe("tab id (default 'main')"),
 	"url?": type("string").describe("url to open"),
 	"app?": appSchema,
@@ -75,6 +105,13 @@ const browserSchema = type({
 		"navigation wait condition",
 	),
 	"dialogs?": type("'accept' | 'dismiss'").describe("auto-handle dialogs"),
+	"allowed_domains?": type("string[]").describe("allowed request hostnames"),
+	"init_scripts?": type("string[]").describe("document-start JavaScript sources or cwd-relative file paths"),
+	"downloads?": type("string").describe("cwd-relative download directory"),
+	"user_agent?": type("string").describe("tab user agent override"),
+	"ignore_https_errors?": type("boolean").describe("ignore invalid HTTPS certificates"),
+	"allow_file_access?": type("boolean").describe("allow file URLs to read local files"),
+	"headed?": type("boolean").describe("override the configured browser display mode"),
 	"code?": type("string").describe("js body to run in tab"),
 	"fn?": type("string").describe("serialized JavaScript function to run in tab"),
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
@@ -82,13 +119,14 @@ const browserSchema = type({
 	"timeout?": type("number").describe("timeout in seconds"),
 	"all?": type("boolean").describe("release every managed tab"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
+	"persist?": type("boolean").describe("keep tab live across turn settle and idle close"),
 });
 
 type BrowserParams = typeof browserSchema.infer;
 
 interface BrowserPreludeDetails {
 	meta?: OutputMeta;
-	action: "open" | "close" | "run" | "call";
+	action: "open" | "close" | "run" | "call" | "tabs";
 	name: string;
 	url?: string;
 	browser?: BrowserKindTag;
@@ -104,7 +142,14 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	}
 	if (app?.path) {
 		const exe = resolveToCwd(app.path, session.cwd);
-		return { kind: "spawned", path: exe };
+		const args = resolveSpawnArgs(exe, app.args, session.cwd);
+		if (params.ignore_https_errors && !args.includes("--ignore-certificate-errors")) {
+			args.push("--ignore-certificate-errors");
+		}
+		if (params.allow_file_access && !args.includes("--allow-file-access-from-files")) {
+			args.push("--allow-file-access-from-files");
+		}
+		return { kind: "spawned", path: exe, args };
 	}
 	const relayUrl = session.settings.get("browser.relayUrl");
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
@@ -134,28 +179,71 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	if (cmuxKind) {
 		return cmuxKind;
 	}
-	const headless = session.settings.get("browser.headless");
-	return { kind: "headless", headless };
+	const headless = params.headed === undefined ? session.settings.get("browser.headless") : !params.headed;
+	return {
+		kind: "headless",
+		headless,
+		ignoreHttpsErrors: params.ignore_https_errors,
+		allowFileAccess: params.allow_file_access,
+	};
 }
 
 /** Create the enabled-only browser host prelude for one tool session. */
 export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
-	return {
-		name: "browser",
-		documentation: browserDescription,
-		javascript: browserJavascript,
-		python: browserPython,
-		exports: ["browser"],
-		codeModeDeclarations: browserDeclarations,
-		approval: "exec",
-		enabled: () => session.settings.get("browser.enabled"),
-		invoke: (parameters, context) => invokeBrowser(session, parameters, context),
-	};
+	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+	// JavaScript or Python kernel actually asks for its enabled preludes.
+	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
+	return createBrowserPreludeDefinition(session, {
+		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
+		status: describeBrowserCall,
+	});
+}
+
+/** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
+function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknown>): string | undefined {
+	const parsed = browserSchema(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	const name = parsed.name ?? DEFAULT_TAB_NAME;
+	switch (parsed.action) {
+		case "open": {
+			const url = isRecord(result.details) ? result.details.url : undefined;
+			return typeof url === "string" && url.length > 0 ? `open ${name} ${url}` : `open ${name}`;
+		}
+		case "close":
+			return parsed.all ? "close all" : `close ${name}`;
+		case "run":
+			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "call":
+			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+		case "tabs":
+			return "tabs";
+	}
 }
 
 /** Drop headless tabs so a browser mode change applies to the next open. */
 export async function restartBrowserForModeChange(): Promise<void> {
 	await dropHeadlessTabs();
+}
+
+/**
+ * Best-effort idle-close sweep for the calling session's owned headless
+ * tabs. Never throws — callers detach it (`void`) so a slow reap cannot
+ * delay the open it follows.
+ */
+function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
+	const ownerId = session.getSessionId?.() ?? undefined;
+	if (!ownerId) return Promise.resolve(0);
+	const idleSec = session.settings.get("browser.idleCloseSec");
+	if (!(idleSec > 0)) {
+		cancelIdleCloseForOwner(ownerId);
+		return Promise.resolve(0);
+	}
+	return releaseIdleTabsForOwner(ownerId, { idleMs: idleSec * 1000 }).catch((error: unknown) => {
+		logger.debug("Browser idle-close sweep failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return 0;
+	});
 }
 
 async function invokeBrowser(
@@ -180,6 +268,9 @@ async function invokeBrowser(
 				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "close":
 				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
+			case "tabs":
+				details.value = listTabs();
+				return toolResult(details).done();
 			case "run":
 			case "call":
 				return await runBrowser(session, name, parsed, details, timeoutMs, context.signal);
@@ -202,15 +293,24 @@ async function openBrowser(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
 	const kind = resolveBrowserKind(params, session);
+	const downloadsPath = params.downloads === undefined ? undefined : resolveToCwd(params.downloads, session.cwd);
 	details.browser = kind.kind;
 
 	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
 	const existing = getTab(name);
-	if (existing && !sameBrowserKind(existing.browser.kind, kind)) {
+	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
 		throw new ToolError(
 			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 		);
 	}
+
+	// First browser use may have to download Chrome for Testing (~180 MB).
+	// That is a one-time install, not part of the open, so it runs before the
+	// deadline below starts: charged against the 30s default it timed out on
+	// connections where installation alone exceeds that budget.
+	// The download promise is module-cached, so a caller abort here leaves it
+	// finishing in the background and the next open picks up the result.
+	if (kind.kind === "headless") await untilAborted(signal, () => ensureChromiumExecutable());
 
 	// The requested timeout must cover the *entire* open — browser
 	// acquisition (CDP discovery/connect), queued tab acquisition, worker
@@ -234,7 +334,6 @@ async function openBrowser(
 							deviceScaleFactor: params.viewport.scale,
 						}
 					: undefined,
-				appArgs: params.app?.args,
 				signal: openSignal,
 			}),
 		);
@@ -250,6 +349,20 @@ async function openBrowser(
 		holdBrowser(browser);
 		let result: AcquireTabResult;
 		try {
+			const initScripts = await untilAborted(openSignal, () =>
+				resolveInitScriptSources(params.init_scripts, session.cwd),
+			);
+			// Worker-init options cannot be applied to a live tab: recycle it so the
+			// reopened tab starts with them.
+			if (
+				existing &&
+				(initScripts.length > 0 ||
+					params.downloads !== undefined ||
+					params.user_agent !== undefined ||
+					params.ignore_https_errors === true)
+			) {
+				await untilAborted(openSignal, () => releaseTab(name, { kill: false, timeoutMs }));
+			}
 			result = await untilAborted(openSignal, () =>
 				acquireTab(name, browser, {
 					url: params.url,
@@ -265,8 +378,16 @@ async function openBrowser(
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,
+					allowedDomains: params.allowed_domains,
+					initScripts,
+					downloadsPath,
+					userAgent: params.user_agent,
+					ignoreHttpsErrors: params.ignore_https_errors,
 					signal: openSignal,
 					ownerSessionId: session.getSessionId?.() ?? undefined,
+					// Omitted stays undefined: creation defaults it to false
+					// while reuse by the owner leaves a set value alone.
+					persist: params.persist,
 				}),
 			);
 		} catch (error) {
@@ -276,6 +397,13 @@ async function openBrowser(
 			throw error;
 		}
 		await releaseBrowser(browser, { kill: false });
+		// Opportunistic idle-close sweep for long turns that rarely settle:
+		// close owned tabs idle past the timeout. Detached by design (same
+		// as the orphan-target sweep on attach) — failures only log. Freeze
+		// is deliberately NOT done here: freezing a sibling with an
+		// in-flight run would stall it mid-execution, while turn_end is
+		// race-free by construction (all tool results are paired).
+		void sweepIdleOwnedTabs(session);
 
 		const tab = result.tab;
 		const url = tab.info.url;
@@ -414,14 +542,4 @@ function describeKind(kind: BrowserKind): string {
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 	}
-}
-
-function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
-	if (a.kind !== b.kind) return false;
-	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
-	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
-	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
-	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
-	if (a.kind === "cmux" && b.kind === "cmux") return a.socketPath === b.socketPath;
-	return false;
 }

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	expandDelimitedPathEntries,
 	parseFindPattern,
@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { globToolRenderer } from "../../src/tools/glob";
+import { globToolRenderer } from "@oh-my-pi/pi-tui/tools/glob";
 
 let uiTheme: Theme;
 

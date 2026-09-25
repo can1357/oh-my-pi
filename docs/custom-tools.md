@@ -56,7 +56,8 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 - Duplicate resolved paths are deduplicated.
 - Tool name conflicts are rejected against built-ins and already-loaded custom tools.
-- `.md` and `.json` files are discovered as tool metadata by some providers, but the executable module loader rejects them as runnable tools.
+- Automatic tool-directory scans discover `.ts` and `.js` modules; native OMP discovery also checks immediate subdirectories for `index.ts`. Executable discovery excludes `.d.ts` and filters out metadata and scripts before tool-name deduplication. Declarative metadata such as `.md` and `.json` remains available to capability consumers but is not loaded as executable tools.
+- `.mjs` and `.cjs` modules can be loaded through explicitly configured paths or declared plugin tool entries, but the tool-directory scans above do not discover them automatically. Explicitly configured `.md` or `.json` paths still produce a load error.
 - Relative configured paths are resolved from `cwd`; `~` is expanded.
 
 ## Module contract
@@ -149,7 +150,7 @@ execute(toolCallId, params, onUpdate, ctx, signal);
 
 The session bootstrap bridge converts custom tools to extension `ToolDefinition`s and forwards calls in the correct argument order. `CustomToolAdapter` remains available to library consumers that directly adapt a custom tool to the agent tool interface.
 
-Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `mcpServerName`, `mcpToolName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `computer`, `eval`, `task`, `hub`, `learn`, and `manage_skill`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level. Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery bridge does not propagate that callback into the registered tool definition, so it cannot customize approval details on the normal integration paths.
+Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `mcpServerName`, `mcpToolName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `computer`, `eval`, `task`, `wait`, `learn`, and `manage_skill`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level. Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery bridge does not propagate that callback into the registered tool definition, so it cannot customize approval details on the normal integration paths.
 
 ## How tools are exposed to the model
 

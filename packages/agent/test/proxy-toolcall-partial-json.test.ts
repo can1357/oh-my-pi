@@ -208,6 +208,65 @@ describe("streamProxy — tool-call streaming and partialJson isolation", () => 
 		expect(toolCall.arguments).toEqual({ path: "/tmp/x" });
 	});
 
+	it("parses the full buffer at toolcall_end even when throttled deltas lag", async () => {
+		// Many small deltas can all fall below the throttle growth gate, so
+		// mid-stream parses never fire. toolcall_end must still produce the
+		// complete arguments — mirroring the unconditional final parse that
+		// native providers perform.
+		const deltas = ["{", '"c', "om", "ma", "nd", '":', '"l', 's"', "}"];
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
+			...deltas.map(delta => ({ type: "toolcall_delta", contentIndex: 0, delta }) as const),
+			{ type: "toolcall_end", contentIndex: 0 },
+			{
+				type: "done",
+				reason: "toolUse",
+				usage: { ...baseUsage },
+				content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
+			},
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const stream = streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		});
+
+		const seen = await collectEvents(stream);
+		const end = seen.find(event => event.type === "toolcall_end");
+		expect(end?.type).toBe("toolcall_end");
+		if (end?.type === "toolcall_end") expect(end.toolCall.arguments).toEqual({ command: "ls" });
+		const result = await stream.result();
+		expect(extractToolCall(result).arguments).toEqual({ command: "ls" });
+	});
+
+	it("finalizes throttled trailing deltas when done arrives without toolcall_end", async () => {
+		// done with content omitted finalizes the partial as-is; trailing
+		// deltas below the throttle gate must still land in arguments.
+		const deltas = ["{", '"c', "om", "ma", "nd", '":', '"l', 's"', "}"];
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
+			...deltas.map(delta => ({ type: "toolcall_delta", contentIndex: 0, delta }) as const),
+			{ type: "done", reason: "toolUse", usage: { ...baseUsage } },
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const stream = streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		});
+
+		await collectEvents(stream);
+		const result = await stream.result();
+		expect(extractToolCall(result).arguments).toEqual({ command: "ls" });
+	});
+
 	it("does not leak partialJson when stream ends without toolcall_end", async () => {
 		// Stream ends abruptly after toolcall_delta — no toolcall_end, then
 		// a done event. The partialJson state must not leak into the result.
@@ -216,7 +275,6 @@ describe("streamProxy — tool-call streaming and partialJson isolation", () => 
 			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "edit" },
 			{ type: "toolcall_delta", contentIndex: 0, delta: '{"path' },
 			{ type: "toolcall_delta", contentIndex: 0, delta: '":"/a"}' },
-			// Missing toolcall_end — stream goes straight to done
 			{
 				type: "done",
 				reason: "toolUse",

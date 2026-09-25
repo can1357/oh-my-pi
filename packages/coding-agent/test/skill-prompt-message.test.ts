@@ -25,15 +25,21 @@ describe("buildSkillPromptMessage", () => {
 	test("defaults public skill prompt rendering to user-invoked bug-fix directory guidance", async () => {
 		const { dir, skill } = await createSkill("Review the supplied code carefully.");
 		try {
-			const built = await buildSkillPromptMessage(skill, "focus on risks");
+			const built = await buildSkillPromptMessage(skill, {
+				args: "focus on risks",
+				prompt: "/skill:reviewer focus on risks",
+			});
 
 			expect(built.message).toContain("Review the supplied code carefully.");
 			expect(built.message).toContain(`[Skill directory: ${dir}]`);
 			expect(built.message).toContain("focus on risks");
+			// The raw draft is display-only: it never reaches the wire text.
+			expect(built.message).not.toContain("/skill:reviewer");
 			expect(built.details).toMatchObject({
 				name: "reviewer",
 				path: skill.filePath,
 				args: "focus on risks",
+				prompt: "/skill:reviewer focus on risks",
 				lineCount: 1,
 			});
 		} finally {
@@ -44,7 +50,7 @@ describe("buildSkillPromptMessage", () => {
 	test("keeps autoload skills on non-user minimal framing", async () => {
 		const { dir, skill } = await createSkill("Review silently loaded context.");
 		try {
-			const built = await buildSkillPromptMessage(skill, "", "autoload");
+			const built = await buildSkillPromptMessage(skill, { args: "" }, "autoload");
 
 			expect(built.message).toContain("Review silently loaded context.");
 			expect(built.message).toContain(`Skill: ${skill.filePath}`);

@@ -33,11 +33,12 @@ class "qwen" {
 	}
 	// Qwen 3.8+ open-weight chat templates steer thinking depth through the
 	// `reasoning_effort` template kwarg (wire-exact low/medium/xhigh, template
-	// default xhigh) and raise on `enable_thinking: false`, so local
-	// llama.cpp-style hosts route the selected effort onto the template instead
-	// of always reasoning at xhigh. vLLM ignores top-level
-	// `enable_thinking`, so it rides the chat-template-kwargs dialect.
-	on "llama.cpp" "lm-studio" {
+	// default xhigh) and raise on `enable_thinking: false`. LM Studio routes
+	// the selected effort onto the template instead of always reasoning at
+	// xhigh; llama.cpp owns its equivalent policy in the provider rule. vLLM
+	// ignores top-level `enable_thinking`, so it rides the
+	// chat-template-kwargs dialect.
+	on "lm-studio" {
 		revision ">=3.8" {
 			supports-reasoning-effort #true
 			template-reasoning-effort #true
