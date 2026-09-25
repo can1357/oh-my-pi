@@ -18,6 +18,8 @@ import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODELS } from "../tts";
 import { selectSetupModel } from "@oh-my-pi/pi-tui/apps/setup-model-picker";
 
+import { cfgPythonInterpreter } from "../eval/settings";
+
 export type SetupComponent = "python" | "speech";
 
 export interface SetupCommandArgs {
@@ -121,7 +123,7 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
 	const cwd = getProjectDir();
 	const projectSettings = await Settings.init({ cwd });
-	const interpreter = projectSettings.get("python.interpreter")?.trim() || undefined;
+	const interpreter = cfgPythonInterpreter.get(projectSettings)?.trim() || undefined;
 	const check = await checkPythonSetup(cwd, interpreter);
 
 	if (flags.json) {

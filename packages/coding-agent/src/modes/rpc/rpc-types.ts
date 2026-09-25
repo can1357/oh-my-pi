@@ -32,6 +32,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "open_session"; sessionDir: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -43,6 +44,7 @@ export type RpcCommand =
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
+	| { id?: string; type: "set_event_filter"; events: string[] | null }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
 
@@ -112,6 +114,10 @@ export interface RpcSessionState {
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
+	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	hasPendingAsyncWork: boolean;
+	/** Same predicate as `session_settled`: idle with nothing queued or pending. */
+	isSettled: boolean;
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
@@ -134,10 +140,57 @@ export interface RpcAvailableCommandsUpdateFrame {
 	commands: RpcAvailableSlashCommand[];
 }
 
+/** How a prompt's work ended, as reported by its {@link RpcPromptResultFrame}. */
+export type RpcPromptStatus = "completed" | "aborted" | "error";
+
+/**
+ * Failure detail for a `prompt_result` with `status: "error"`. `message` is the
+ * provider's error text without OMP-local diagnostics (e.g. request dump paths).
+ */
+export interface RpcPromptError {
+	message: string;
+	provider?: string;
+	model?: string;
+	/** HTTP status reported by the provider, when the failure came from a request. */
+	httpStatus?: number;
+	/** The failure is classified transient: resubmitting later may succeed. OMP's own retries are already exhausted. */
+	retryable: boolean;
+}
+
+/**
+ * Terminal frame emitted exactly once per accepted `prompt`/`abort_and_prompt`,
+ * after all work the prompt caused has settled. Correlate on `id`.
+ */
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
+	/** False when the prompt completed locally (slash command) or failed before reaching the agent. */
 	agentInvoked: boolean;
+	status: RpcPromptStatus;
+	error?: RpcPromptError;
+	/**
+	 * The agent yielded and nothing will wake the session again: no run is live and no
+	 * queued message or background job (async bash/task/eval) will inject a follow-up.
+	 * When false, a {@link RpcSessionSettledFrame} follows once that work is done.
+	 */
+	sessionSettled: boolean;
+}
+
+/**
+ * Emitted when the session goes quiet after agent activity: the last run yielded
+ * and no background work remains that could inject messages and wake it again.
+ * Distinct from a terminal `agent_end`, which only means one run yielded.
+ */
+export interface RpcSessionSettledFrame {
+	type: "session_settled";
+}
+
+/** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
+export interface RpcOpenSessionResult {
+	cancelled: boolean;
+	resumed: boolean;
+	sessionId: string;
+	sessionFile?: string;
 }
 
 export interface RpcReadyFrame {
@@ -209,6 +262,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -243,6 +297,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
 	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
+	| { id?: string; type: "response"; command: "set_event_filter"; success: true; data: { events: string[] | null } }
 	| {
 			id?: string;
 			type: "response";
@@ -382,7 +437,22 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+/** Message lifecycle event kinds that RPC mode stamps with a `messageId`. */
+export type RpcMessageEventType = "message_start" | "message_update" | "message_end";
+
+/**
+ * Message lifecycle frame as written by RPC mode. `messageId` is shared by the
+ * `message_start`, every `message_update`, and the `message_end` of one message;
+ * it is unique within the RPC process.
+ */
+export type RpcMessageEventFrame = Extract<AgentSessionEvent, { type: RpcMessageEventType }> & { messageId: string };
+
+/** Session event as written to stdout: message lifecycle events carry a `messageId`. */
+export type RpcAgentSessionEventFrame =
+	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
+	| RpcMessageEventFrame;
+
+export type RpcSessionEventFrame = RpcAgentSessionEventFrame | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)
