@@ -526,6 +526,14 @@ export class SessionMaintenance {
 	#midTurnDeadEndPendingPrePrompt = false;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
+	/**
+	 * {@link #nativeSpeculationKey} of the session and model whose native
+	 * speculative compaction failed for a reason a retry would hit again (an
+	 * exhausted output budget, a tool call, a refusal). Until a compaction
+	 * commits, speculation does not re-send the request and the threshold pass
+	 * falls back to the next method instead.
+	 */
+	#failedNativeSpeculation: string | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
@@ -2049,6 +2057,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return;
+		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
 
@@ -2056,6 +2065,9 @@ export class SessionMaintenance {
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const model = this.#model;
+		// Keyed now: the session can switch before the run settles.
+		const nativeKey = model && this.#nativeSpeculationKey(model);
 		this.#speculation = run;
 		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
 			logger.debug("Speculative compaction failed", {
@@ -2063,7 +2075,26 @@ export class SessionMaintenance {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			if (this.#speculation === run) this.#speculation = undefined;
+			// Keyed by the live model even when a compaction-model candidate made the
+			// failing request: every consumer checks the live model, and a false hit
+			// only moves this cycle to the next configured method. Errors with no
+			// HTTP status classify by message text, so an unrecognised transient
+			// failure costs the same single early fallback.
+			if (
+				method === "remote" &&
+				model &&
+				!controller.signal.aborted &&
+				error instanceof NativeCompactionError &&
+				!AIError.retriable(AIError.classify(error.cause, model.api))
+			) {
+				this.#failedNativeSpeculation = nativeKey;
+			}
 		});
+	}
+
+	/** Identity of `model`'s native speculation in the current session. */
+	#nativeSpeculationKey(model: Model): string {
+		return `${this.#host.sessionManager.getSessionId()}/${model.provider}/${model.id}`;
 	}
 
 	/**
@@ -2095,6 +2126,7 @@ export class SessionMaintenance {
 		if (!model) return false;
 		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return false;
+		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
 			thresholdTokens + resolveSpeculationLeadTokens(thresholdTokens),
@@ -2349,6 +2381,8 @@ export class SessionMaintenance {
 						: this.#projectCompactedContextTokens(args),
 			},
 		);
+		// A committed compaction starts a new cycle; native compaction gets a fresh try.
+		this.#failedNativeSpeculation = undefined;
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -4034,6 +4068,7 @@ export class SessionMaintenance {
 				}),
 			},
 		);
+		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
@@ -4150,6 +4185,30 @@ export class SessionMaintenance {
 				)
 			)
 				continue;
+			// Re-sending a native request that just failed for good only delays the
+			// fallback. Skip it while a later method can still run.
+			const liveModel = this.#model;
+			if (
+				candidate === "remote" &&
+				liveModel &&
+				this.#failedNativeSpeculation === this.#nativeSpeculationKey(liveModel) &&
+				methods
+					.slice(index + 1)
+					.some(next =>
+						isCompactionMethodUsable(
+							next,
+							reason,
+							liveModel,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
+					)
+			) {
+				logger.debug("Skipping native compaction after a failed speculative attempt", {
+					model: `${liveModel.provider}/${liveModel.id}`,
+				});
+				continue;
+			}
 			method = candidate;
 			methodIndex = index;
 			break;
