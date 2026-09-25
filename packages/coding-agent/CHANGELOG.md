@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost.
+- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
 
 ## [18.3.1] - 2026-09-25
 
