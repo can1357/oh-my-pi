@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Provider headings honor explicit brand spellings, rendering `commandcode` as "Command Code" instead of the id-derived "Commandcode" (#12402 by @c4ys).
 
 ## [18.3.1] - 2026-09-25
 
