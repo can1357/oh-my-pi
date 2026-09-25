@@ -639,7 +639,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const filteredMatches: GrepMatch[] = [];
 					for (const match of result.matches) {
 						const abs = resolveSearchResultPath(searchPath, match.path);
-						const ranges = rangesByAbsPath.get(abs);
+						// Native absolute matches can retain forward slashes on Windows; range keys use path.resolve.
+						const ranges = rangesByAbsPath.get(path.isAbsolute(match.path) ? path.resolve(abs) : abs);
 						if (!ranges) {
 							// Path has no line-range constraint (e.g. a peer entry without `:N-M`).
 							filteredMatches.push(match);
