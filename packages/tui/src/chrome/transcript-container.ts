@@ -149,6 +149,9 @@ export interface TranscriptViewportSpan {
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
+	#trackedChildren: Component[];
+	#childrenDirty = false;
+	#childrenUntrusted = false;
 	#frontier = 0;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
@@ -164,7 +167,31 @@ export class TranscriptContainer extends Container {
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
+	constructor() {
+		super();
+		this.#trackedChildren = this.#trackChildren(this.children);
+		this.children = this.#trackedChildren;
+	}
+
+	#trackChildren(children: Component[]): Component[] {
+		return new Proxy(children, {
+			set: (target, key, value) => {
+				this.#childrenDirty = true;
+				return Reflect.set(target, key, value);
+			},
+			deleteProperty: (target, key) => {
+				this.#childrenDirty = true;
+				return Reflect.deleteProperty(target, key);
+			},
+			defineProperty: (target, key, descriptor) => {
+				this.#childrenDirty = true;
+				return Reflect.defineProperty(target, key, descriptor);
+			},
+		});
+	}
+
 	override addChild(component: Component): void {
+		this.#syncEntries();
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
 		this.#entries.push({
@@ -177,6 +204,7 @@ export class TranscriptContainer extends Container {
 			emitted: 0,
 			stableFrozen: false,
 		});
+		this.#childrenDirty = false;
 	}
 
 	override removeChild(component: Component): void {
@@ -185,10 +213,15 @@ export class TranscriptContainer extends Container {
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		this.#childrenDirty = false;
 	}
 
 	override clear(): void {
 		super.clear();
+		this.#trackedChildren = this.#trackChildren(this.children);
+		this.children = this.#trackedChildren;
+		this.#childrenDirty = false;
+		this.#childrenUntrusted = false;
 		this.#entries = [];
 		this.#frontier = 0;
 		this.#offered = undefined;
@@ -874,6 +907,10 @@ export class TranscriptContainer extends Container {
 	}
 
 	#syncEntries(): void {
+		// A replaced public array may still have a mutable external alias.
+		if (this.children !== this.#trackedChildren) this.#childrenUntrusted = true;
+		if (!this.#childrenDirty && !this.#childrenUntrusted) return;
+		this.#childrenDirty = false;
 		if (
 			this.#entries.length === this.children.length &&
 			this.#entries.every((entry, index) => entry.component === this.children[index])

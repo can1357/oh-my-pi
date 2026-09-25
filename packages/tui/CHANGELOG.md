@@ -19,6 +19,8 @@
 ### Changed
 
 - Updated the settings selector so clearing an input field fully unsets the corresponding setting.
+- Reduced repaint CPU use as transcripts grow ([#13243](https://github.com/can1357/oh-my-pi/pull/13243) by [@iliaal](https://github.com/iliaal)).
+- Updated settings selector to perform full unsets when input fields are cleared
 
 ### Fixed
 
