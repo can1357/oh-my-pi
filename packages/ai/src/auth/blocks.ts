@@ -3,6 +3,7 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { CredentialPool } from "./pool";
+import type { QuotaProbeLeaseBook } from "./probe-lease";
 import { isSqliteCorruptionError, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import { isUsageLimitReached, usageReportMetadataValue, usageReportScopeAccountId } from "./usage-report";
@@ -109,6 +110,12 @@ export interface CredentialBlocksDeps {
 	health: BlockStoreHealth;
 	usageCache: UsageCache;
 	strategies: RankingStrategyResolver;
+	/**
+	 * Shared probe-lease book. When present, mark() feeds hard/retry-after
+	 * cooldowns and blockedUntil() re-asserts Retry-After provenance for
+	 * still-active persisted blocks (restarts lose in-memory provenance).
+	 */
+	probeBook?: QuotaProbeLeaseBook;
 }
 
 /** Temporary rate-limit blocks: id-keyed in memory, mirrored to the store, healed by live usage. */
@@ -309,6 +316,11 @@ export class CredentialBlocks implements BlocksApi {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 		this.#deps.usageCache.invalidate(provider);
 
+		const probeBook = this.#deps.probeBook;
+		if (probeBook && !probeBook.isRetryAfterSourced(credentialId, blockScope ?? "")) {
+			probeBook.noteHardCooldown(credentialId, blockScope ?? "");
+		}
+
 		const upsertCredentialBlock = this.#deps.store.upsertCredentialBlock?.bind(this.#deps.store);
 		if (!upsertCredentialBlock || this.#deps.health.damaged) return;
 		try {
@@ -317,6 +329,7 @@ export class CredentialBlocks implements BlocksApi {
 				providerKey,
 				blockScope: blockScope ?? "",
 				blockedUntilMs: nextBlockedUntil,
+				retryAfter: probeBook?.isRetryAfterSourced(credentialId, blockScope ?? ""),
 			});
 		} catch (err) {
 			if (this.#deps.health.handle(err)) return;
@@ -327,6 +340,47 @@ export class CredentialBlocks implements BlocksApi {
 				providerKey,
 				blockScope,
 				blockedUntilMs: nextBlockedUntil,
+			});
+		}
+	}
+
+	/**
+	 * Record provider-stated Retry-After provenance for a credential+scope so
+	 * quota-probe leases refuse while the wait is active, and the persisted
+	 * block written by {@link mark} is tagged `retryAfter`.
+	 */
+	noteRetryAfter(credentialId: number, blockScope: string, blockedUntilMs: number): void {
+		this.#deps.probeBook?.noteRetryAfterBlock(credentialId, blockScope, blockedUntilMs);
+	}
+
+	/**
+	 * Record a heuristic (non-Retry-After) hard cooldown: bumps the probe-lease
+	 * generation so a stale in-flight probe cannot clear the new cooldown.
+	 */
+	noteHardCooldown(credentialId: number, blockScope: string): void {
+		this.#deps.probeBook?.noteHardCooldown(credentialId, blockScope);
+	}
+
+	/**
+	 * Drop every in-memory and persisted block for a credential across both
+	 * credential-type keys — used when the row's identity (and hence its
+	 * incarnation) changes and prior cooldowns no longer apply.
+	 */
+	clearCredential(provider: string, credentialId: number): void {
+		for (const type of ["oauth", "api_key"] as const) {
+			const baseKey = providerTypeKey(provider, type);
+			const scopedPrefix = `${baseKey}\0`;
+			for (const key of this.#credentialBackoff.keys()) {
+				if (key === baseKey || key.startsWith(scopedPrefix)) this.#deleteCredentialBackoff(key, credentialId);
+			}
+		}
+		try {
+			this.deleteAll(credentialId);
+		} catch (err) {
+			logger.debug("Failed to clear persisted credential blocks", {
+				err,
+				provider,
+				credentialId,
 			});
 		}
 	}
