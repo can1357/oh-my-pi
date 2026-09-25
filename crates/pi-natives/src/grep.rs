@@ -102,6 +102,9 @@ pub struct GrepOptions<'env> {
 	pub path:               String,
 	/// Glob filter for filenames (e.g., "*.ts").
 	pub glob:               Option<String>,
+	/// Match simple glob patterns at any depth (default: true; `*.ts` ->
+	/// `**/*.ts`). Set false when `glob` is already relative to `path`.
+	pub recursive:          Option<bool>,
 	/// Filter by file type (e.g., "js", "py", "rust").
 	pub r#type:             Option<String>,
 	/// Case-insensitive search.
@@ -798,6 +801,7 @@ pub(crate) struct GrepConfig {
 	pub(crate) pattern:            String,
 	pub(crate) path:               String,
 	pub(crate) glob:               Option<String>,
+	pub(crate) recursive:          Option<bool>,
 	pub(crate) type_filter:        Option<String>,
 	pub(crate) ignore_case:        Option<bool>,
 	pub(crate) multiline:          Option<bool>,
@@ -1121,8 +1125,7 @@ fn build_grep_walk_request(
 	order: pi_walker::WalkOrder,
 ) -> Result<pi_walker::WalkRequest> {
 	let mut filter = pi_walker::WalkFilter::files_only();
-	if let Some(glob) = glob.map(str::trim).filter(|value| !value.is_empty()) {
-		let pattern = glob_util::build_glob_pattern(glob, true);
+	if let Some(pattern) = glob {
 		let compiled = pi_walker::CompiledWalkGlob::new([pattern])
 			.map_err(|err| Error::from_reason(format!("Invalid glob pattern: {err}")))?;
 		filter = filter.glob(compiled);
@@ -1949,8 +1952,14 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	let offset = options.offset.unwrap_or(0) as u64;
 	let include_hidden = options.hidden.unwrap_or(true);
 	let use_gitignore = options.gitignore.unwrap_or(true);
-	let glob = options.glob.as_deref();
-	let _ = glob_util::try_compile_glob(glob, true)?;
+	let glob = options
+		.glob
+		.as_deref()
+		.map(str::trim)
+		.filter(|value| !value.is_empty())
+		.map(|value| glob_util::build_glob_pattern(value, options.recursive.unwrap_or(true)));
+	let _ = glob_util::try_compile_glob(glob.as_deref(), false)?;
+	let glob = glob.as_deref();
 	let type_filter = resolve_type_filter(options.type_filter.as_deref());
 
 	let params = SearchParams {
@@ -2239,6 +2248,7 @@ pub fn grep(
 		pattern,
 		path,
 		glob,
+		recursive,
 		r#type,
 		ignore_case,
 		multiline,
@@ -2262,6 +2272,7 @@ pub fn grep(
 		pattern,
 		path,
 		glob,
+		recursive,
 		type_filter: r#type,
 		ignore_case,
 		multiline,
@@ -2357,6 +2368,7 @@ mod tests {
 			pattern:            "needle".to_string(),
 			path:               path.to_string_lossy().into_owned(),
 			glob:               None,
+			recursive:          None,
 			type_filter:        None,
 			ignore_case:        None,
 			multiline:          None,
@@ -2593,6 +2605,30 @@ mod tests {
 		assert_eq!(result.matches.len(), 1);
 		assert_eq!(result.matches[0].path, "kept.rs");
 		assert_eq!(result.matches[0].line, "needle kept");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grep_non_recursive_glob_matches_only_direct_children() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("x.go"), "needle root\n");
+		write_file(&root.path().join("svc/y.go"), "needle nested\n");
+
+		let mut config = base_grep_config(root.path());
+		config.glob = Some("*.go".to_string());
+		config.recursive = Some(false);
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("non-recursive glob grep should succeed");
+		let paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+		assert_eq!(paths, ["x.go"]);
+
+		let mut config = base_grep_config(root.path());
+		config.glob = Some("*.go".to_string());
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("default glob grep should succeed");
+		let mut paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+		paths.sort_unstable();
+		assert_eq!(paths, ["svc/y.go", "x.go"]);
 	}
 
 	#[cfg(unix)]
