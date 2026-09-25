@@ -16,10 +16,12 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolChoice,
+	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -70,6 +72,17 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entrie
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
+
+import {
+	cfgFeaturesUnexpectedStopDetection,
+	cfgModelLoopGuardEnabled,
+	cfgRetry,
+	cfgRetryEnabled,
+	cfgRetryModelFallback,
+	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
+	cfgRetryUsageReservePolicy,
+} from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
@@ -280,6 +293,10 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#activeFallbackCreditRedemption?: {
+		targetSelector: string;
+		handle: AnthropicFallbackCreditHandle;
+	};
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -425,11 +442,26 @@ export class TurnRecovery {
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#silentEmptyStopFallbackArmed = false;
 		this.#emptyStopCycleHadBilling = false;
+		this.#activeFallbackCreditRedemption = undefined;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
 	setAcceptTerminalEmptyStop(accept: boolean): void {
 		this.#acceptTerminalEmptyStopForPrompt = accept;
+	}
+
+	/** Consumes any queued Anthropic fallback credit handle for the retry turn. */
+	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
+		const active = this.#activeFallbackCreditRedemption;
+		if (!active) return undefined;
+		if (targetModel && `${targetModel.provider}/${targetModel.id}` !== active.targetSelector) {
+			return undefined;
+		}
+		this.#activeFallbackCreditRedemption = undefined;
+		if (Date.now() >= active.handle.expiresAt) {
+			return undefined;
+		}
+		return active.handle;
 	}
 
 	/**
@@ -1016,7 +1048,7 @@ export class TurnRecovery {
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
-		const mode = this.#host.settings.get("features.unexpectedStopDetection");
+		const mode = cfgFeaturesUnexpectedStopDetection.get(this.#host.settings);
 		if (mode === "none") {
 			return false;
 		}
@@ -1358,7 +1390,7 @@ export class TurnRecovery {
 			if (!replayUnsafe) this.removeAssistantMessageFromActiveContext(message, "request-body-timeout-terminal");
 			return "handled-terminal";
 		};
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (
 			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
 			!retrySettings.enabled ||
@@ -1772,7 +1804,7 @@ export class TurnRecovery {
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
-		if (!this.#host.settings.get("retry.usageAwareFallback")) return false;
+		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
@@ -1782,7 +1814,7 @@ export class TurnRecovery {
 				modelId: currentModel.id,
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
-				reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
+				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
 				signal,
 			});
 		} catch (error) {
@@ -1813,7 +1845,7 @@ export class TurnRecovery {
 		}
 		if (health.state !== "reserve") this.#usageReserveApprovedSelector = undefined;
 
-		const reservePolicy = this.#host.settings.get("retry.usageReservePolicy");
+		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
 		if (reservePolicy === "fail-closed") {
 			const condition = health.state === "reserve" ? "reserve reached" : "usage depleted";
 			throw new Error(
@@ -1827,7 +1859,7 @@ export class TurnRecovery {
 		) {
 			return false;
 		}
-		if (!this.#host.settings.get("retry.modelFallback")) return false;
+		if (!cfgRetryModelFallback.get(this.#host.settings)) return false;
 
 		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -1850,7 +1882,7 @@ export class TurnRecovery {
 							modelId: candidateModel.id,
 							sessionId: this.#host.sessionId(),
 							baseUrl: candidateModel.baseUrl,
-							reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
+							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
 							signal,
 						},
 					);
@@ -1918,7 +1950,7 @@ export class TurnRecovery {
 			pinFallback: true,
 			apiKey: fallback.apiKey,
 			signal,
-			reason: describeUsageFallback(health, this.#host.settings.get("retry.usageReservePct")),
+			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
 		});
 	}
 
@@ -2078,6 +2110,11 @@ export class TurnRecovery {
 			: this.#host.agent.state.messages.findLast(
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
+		// Permitted redemption targets are catalog policy on the refused model.
+		const failedModel = failedMessage.fallbackCreditHandle
+			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
+			: undefined;
+		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2108,7 +2145,16 @@ export class TurnRecovery {
 				// model switch can satisfy neither constraint, so keep retrying the
 				// source model or consider a later cross-provider candidate whose
 				// message transform can safely demote the foreign thinking.
+				// Exception: when redeeming Anthropic fallback credit on refusal, the server
+				// validates thinking blocks across the boundary itself using the credit token.
+				const canRedeemFallbackCredit =
+					failedMessage.fallbackCreditHandle !== undefined &&
+					candidate.api === "anthropic-messages" &&
+					candidate.provider === failedMessage.provider &&
+					creditTargets.includes(candidate.id) &&
+					Date.now() < failedMessage.fallbackCreditHandle.expiresAt;
 				if (
+					!canRedeemFallbackCredit &&
 					candidate.api === "anthropic-messages" &&
 					latestAssistant?.api === "anthropic-messages" &&
 					latestAssistant.provider === candidate.provider &&
@@ -2132,10 +2178,19 @@ export class TurnRecovery {
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
-				return this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+				const previousEditMode = this.#host.resolveActiveEditMode();
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
+				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
+				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
+					this.#activeFallbackCreditRedemption = {
+						targetSelector: `${candidate.provider}/${candidate.id}`,
+						handle: failedMessage.fallbackCreditHandle!,
+					};
+				}
+				return applied;
 			}
 		}
 
@@ -2201,7 +2256,7 @@ export class TurnRecovery {
 				message.errorMessage?.startsWith("400 ") === true) &&
 			IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN.test(message.errorMessage ?? "");
 		if (immutableAnthropicThinkingError) return false;
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
@@ -2338,7 +2393,7 @@ export class TurnRecovery {
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
-		const retrySettings = this.#host.settings.getGroup("retry");
+		const retrySettings = cfgRetry.get(this.#host.settings);
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
@@ -2820,7 +2875,7 @@ export class TurnRecovery {
 	 */
 	#maybeInjectThinkingLoopRedirect(id: number): void {
 		if (!AIError.is(id, AIError.Flag.ThinkingLoop)) return;
-		if (this.#host.settings.get("model.loopGuard.enabled") !== true) return;
+		if (cfgModelLoopGuardEnabled.get(this.#host.settings) !== true) return;
 		this.#host.agent.appendMessage({
 			role: "custom",
 			customType: THINKING_LOOP_REDIRECT_TYPE,
@@ -2872,7 +2927,7 @@ export class TurnRecovery {
 
 	/** Whether auto-retry is enabled */
 	get autoRetryEnabled(): boolean {
-		return this.#host.settings.get("retry.enabled") ?? true;
+		return cfgRetryEnabled.get(this.#host.settings);
 	}
 
 	/**
@@ -2883,10 +2938,10 @@ export class TurnRecovery {
 	 */
 	setAutoRetryEnabled(enabled: boolean, persist = false): void {
 		if (persist) {
-			this.#host.settings.set("retry.enabled", enabled);
-			this.#host.settings.clearOverride("retry.enabled");
+			cfgRetryEnabled.set(this.#host.settings, enabled);
+			cfgRetryEnabled.clearOverride(this.#host.settings);
 		} else {
-			this.#host.settings.override("retry.enabled", enabled);
+			cfgRetryEnabled.override(this.#host.settings, enabled);
 		}
 	}
 	/**

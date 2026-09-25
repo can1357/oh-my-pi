@@ -7,6 +7,9 @@ import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { resolveEvalBackends } from "@oh-my-pi/pi-coding-agent/tools/eval-backends";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
+import { cfgEvalJs, cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgToolsMaxTimeout } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 let originalPiPy: string | undefined;
 let originalPiJs: string | undefined;
 
@@ -86,7 +89,7 @@ describe("EvalTool language dispatch", () => {
 
 	it("bounds backend probing by the effective global eval timeout", async () => {
 		const settings = Settings.isolated();
-		settings.set("tools.maxTimeout", 1);
+		cfgToolsMaxTimeout.set(settings, 1);
 		const probeSpy = vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockResolvedValue(false);
 
 		const tool = new EvalTool(makeSession(settings));
@@ -127,7 +130,7 @@ describe("EvalTool language dispatch", () => {
 
 	it("rejects py cells when eval.py is disabled", async () => {
 		const settings = Settings.isolated();
-		settings.set("eval.py", false);
+		cfgEvalPy.set(settings, false);
 		const tool = new EvalTool(makeSession(settings));
 		await expect(
 			tool.execute("call-py-disabled", {
@@ -139,7 +142,7 @@ describe("EvalTool language dispatch", () => {
 
 	it("rejects js cells when eval.js is disabled", async () => {
 		const settings = Settings.isolated();
-		settings.set("eval.js", false);
+		cfgEvalJs.set(settings, false);
 		const tool = new EvalTool(makeSession(settings));
 		await expect(
 			tool.execute("call-js-disabled", {
@@ -152,8 +155,8 @@ describe("EvalTool language dispatch", () => {
 	it("uses settings for eval backends whose env flag is unset", () => {
 		Bun.env.PI_PY = "1";
 		const settings = Settings.isolated();
-		settings.set("eval.py", false);
-		settings.set("eval.js", false);
+		cfgEvalPy.set(settings, false);
+		cfgEvalJs.set(settings, false);
 
 		expect(resolveEvalBackends(makeSession(settings))).toEqual({
 			python: true,
@@ -164,7 +167,7 @@ describe("EvalTool language dispatch", () => {
 	it("lets PI_JS disable js execution even when eval.js is enabled", async () => {
 		Bun.env.PI_JS = "0";
 		const settings = Settings.isolated();
-		settings.set("eval.js", true);
+		cfgEvalJs.set(settings, true);
 		const tool = new EvalTool(makeSession(settings));
 
 		await expect(

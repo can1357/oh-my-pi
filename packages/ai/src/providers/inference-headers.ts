@@ -1,6 +1,6 @@
 /** Shared inference request identity headers. */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { APP_NAME, APP_URL, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -33,6 +33,12 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
  * understood by the active inference protocol and host.
  */
 export function applyInferenceHeaders(headers: Record<string, string>, options: InferenceHeaderOptions): void {
+	if (options.provider === "vercel-ai-gateway") {
+		// Vercel AI Gateway app attribution; caller/config headers take precedence.
+		setHeaderIfAbsent(headers, "http-referer", APP_URL);
+		setHeaderIfAbsent(headers, "x-title", APP_NAME);
+	}
+
 	const isOpenCode = options.provider === "opencode-go" || options.provider === "opencode-zen";
 	const sessionId = options.sessionId;
 	if (!sessionId) return;
