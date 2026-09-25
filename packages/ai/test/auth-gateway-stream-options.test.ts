@@ -70,7 +70,7 @@ for (const mode of ["chat", "chat-no-sampling", "responses"] as const) {
 		});
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-wire-fields-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "local-test-key");
+		storage.keys.setRuntime("openai", "local-test-key");
 		const model = buildModel({
 			id: "wire-capture",
 			name: "Wire capture",

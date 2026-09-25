@@ -47,6 +47,25 @@ describe("tool path root alias", () => {
 		expect(resolveToCwd("///", tempDir)).toBe(tempDir);
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"preserves an absolute path verbatim so the kernel resolves `..` across a symlink (#11587)",
+		async () => {
+			// `link -> other/dir`; the kernel resolves `base/link/../target.txt` to
+			// `other/target.txt`, but a lexical path.resolve would collapse it to the
+			// nonexistent `base/target.txt`. resolveToCwd must not canonicalize here.
+			await fs.mkdir(path.join(tempDir, "other", "dir"), { recursive: true });
+			await fs.mkdir(path.join(tempDir, "base"), { recursive: true });
+			await Bun.write(path.join(tempDir, "other", "target.txt"), "kernel-correct\n");
+			await Bun.write(path.join(tempDir, "base", "target.txt"), "lexical-wrong\n");
+			await fs.symlink(path.join(tempDir, "other", "dir"), path.join(tempDir, "base", "link"));
+
+			const input = `${path.join(tempDir, "base", "link")}${path.sep}..${path.sep}target.txt`;
+			const resolved = resolveToCwd(input, tempDir);
+			expect(resolved).toBe(input);
+			expect(await Bun.file(resolved).text()).toBe("kernel-correct\n");
+		},
+	);
+
 	it("rejects local:/ (single-slash) as an internal URL", () => {
 		expect(() => resolveToCwd("local:/PLAN.md", tempDir)).toThrow("internal scheme");
 	});

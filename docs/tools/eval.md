@@ -23,7 +23,7 @@ The params object is one cell. There is no `cells` array, header parser, languag
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `language` | `"py" \| "js"` | Yes | Explicit backend token. Normally the live schema includes only enabled runtimes. |
-| `code` | `string` | Yes | Cell body, verbatim. |
+| `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. |
 | `title` | `string` | No | Short transcript label. |
 | `timeout` | `number` | No | Runtime-work timeout in seconds. Default 30; `0` disables the cell timeout. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. |
 | `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
@@ -42,6 +42,24 @@ Example across three calls:
 {"language":"py","title":"reuse state","code":"display(sorted(data['dependencies']))"}
 ```
 
+## Scripts and dependencies
+
+Save reusable setup in a file, then load it once:
+
+```json
+{"language":"py","code":"%load ./analysis.py"}
+```
+
+Later cells reuse its definitions. Calling `%load` again executes the current file again; editing it alone does not reload it. The host reads the file (quote paths containing spaces; `local://` files are supported) and runs it with its filename: Python sets `__file__`, puts the script directory on `sys.path`, and reports tracebacks against the script; JavaScript/TypeScript resolves relative imports from the script while eval keeps its working directory.
+
+Python dependencies install with `%pip install pillow`: the runner's pip magic runs `python -m pip` for the kernel's own interpreter, pauses the cell watchdog while it runs, and keeps kernel variables. A missing-module error reminds that distribution names can differ from import names (`PIL` belongs to `pillow`).
+
+JavaScript dependencies install with `%bun add csv-parse` into an OMP-managed package environment shared by sessions in the same project; each worker keeps its own variables. Installation does not restart the worker; already imported modules stay cached until an explicit reset. Lifecycle scripts are disabled; packages needing native builds/postinstall must be prepared explicitly. `%environment project` selects the repository itself for package/lockfile changes; `%environment managed` returns to OMP-managed dependencies. The selection persists for later calls through that eval tool.
+
+Percent commands are standalone cells, not extra tool arguments; quote requirements containing spaces.
+
+Compaction receives a bounded live-kernel snapshot with environment and successfully loaded paths, not variable values. Resuming in a fresh process does not restore historical kernel state.
+
 ## Backend availability
 
 `resolveEvalBackends(...)` combines settings with environment overrides:
@@ -52,6 +70,8 @@ Example across three calls:
 | `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
 
 When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+
+`eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
 ## Outputs
 
@@ -64,7 +84,7 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 
 `EvalToolDetails`:
 
-- `cells`: a one-element `EvalCellResult[]` with `index`, `title?`, `code`, backend `language`, `output`, `status`, `durationMs?`, `exitCode?`, `statusEvents?`, and `hasMarkdown?`.
+- `cells`: a one-element `EvalCellResult[]` with `index`, `title?`, `code`, backend `language`, `output`, `status`, `durationMs?`, `exitCode?`, `statusEvents?`, and `hasMarkdown?`. File-backed cells retain the original `%load` command for display rather than duplicating the script source.
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
 - `jsonOutputs`: values captured through structured display.
 - `images`: present on live updates when images have arrived; final images are content blocks.
@@ -79,7 +99,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 ## Execution flow
 
 1. `EvalTool` builds a session-specific schema from enabled languages. It is essential, strict, `approval="exec"`, and `concurrency="exclusive"` within one agent session.
-2. `execute()` maps `py/js` to `python/js`, resolves availability, and wraps the single input in the renderer-compatible internal cell list.
+2. `execute()` maps `py/js` to `python/js`, resolves availability, reads JS file-backed source once, and wraps the input in the renderer-compatible cell list. The JS backend installs requested packages inside the cancellation/background lifecycle.
 3. It obtains the retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`, allocates the output sink/artifact, and registers the run through `trackEvalExecution?.(...)`.
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
 5. Waiting on `agent()` and `completion()` handles emits pause/resume status operations: time spent in those host bridges does not consume the cell's runtime-work budget. Compute, output, status helpers, and ordinary `tool.*` calls do consume it.
@@ -150,7 +170,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
-- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and `wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (addressable through `hub`/`history://`) and **do not share the caller's eval executor** (`shareEvalSession=false`).
+- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and **do not share the caller's eval executor** (`shareEvalSession=false`).
 
 ### `wait()`
 
@@ -163,8 +183,8 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
 - The pool name is both its aggregate async-job id and label. Its first full drain settles and closes the pool; create a new named pool for another phase. The aggregate result auto-delivers once, while internal batch jobs are consumed.
-- Completely blocked? Leave eval and call `hub` with `{ op: "wait", ids: [pool.name] }`; re-issue until settled. There is no `pool.wait()`, so the kernel remains free to serve `@tool` calls.
-- `.status()` reports worker/item counts and context usage; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local; after a restart their workers remain parked keep-alive agents reachable through `hub`.
+- Completely blocked? Leave eval and call the zero-argument `wait` tool. Results auto-deliver; never poll. There is no `pool.wait()`, so the kernel remains free to serve `@tool` calls.
+- `.status()` reports worker/item counts and context usage; `.peek()` returns a non-consuming `{ batches, pending }` snapshot; `.close()` drops still-queued items. Pools are process-local; after a restart their workers remain parked keep-alive agents reachable via `write agent://<id>`.
 
 ### Kernel-defined tools (`@tool` / `tool(fn)`)
 
@@ -179,7 +199,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 ## Side effects and cancellation
 
 - Prelude helpers may read/write files and call arbitrary registered tools; JS exposes network-capable `fetch`.
-- Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses a worker VM.
+- Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
 - Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles, and closes the owner's work pools.

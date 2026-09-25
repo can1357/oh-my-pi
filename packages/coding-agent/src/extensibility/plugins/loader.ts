@@ -6,9 +6,10 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getPluginsDir, getPluginsLockfile, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getPluginsDir, getPluginsLockfile, hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
@@ -69,6 +70,18 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 	return {};
 }
 /**
+ * A plugin root the process is not allowed to read is an environment
+ * condition — a sandbox, restrictive permissions, or a manifest symlinked into
+ * a denied path — not a broken configuration. Skip the root with a warning:
+ * rethrowing aborts plugin tool-path collection, which fails agent and
+ * subagent startup outright, and no plugin is worth that. A malformed manifest
+ * still throws, because that one is the user's to fix.
+ */
+function isUnreadableRoot(err: unknown): boolean {
+	return isEacces(err) || hasFsCode(err, "EPERM");
+}
+
+/**
  * Per-root enumeration of plugins from `<root>/node_modules`,
  * `<root>/package.json#dependencies`, and `<root>/omp-plugins.lock.json#plugins`.
  * Honors `projectOverrides.disabled` and `projectOverrides.features`. Returns an
@@ -92,6 +105,10 @@ async function collectPluginsAtRoot(
 	} catch (err) {
 		// Linked-only setups may have no `<root>/package.json` yet — that's
 		// fine, the lockfile still records the link.
+		if (isUnreadableRoot(err)) {
+			logger.warn("plugins: skipping unreadable plugin root", { root, path: pkgJsonPath });
+			return [];
+		}
 		if (!isEnoent(err)) throw err;
 	}
 
@@ -100,6 +117,10 @@ async function collectPluginsAtRoot(
 	try {
 		runtimeConfig = normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
 	} catch (err) {
+		if (isUnreadableRoot(err)) {
+			logger.warn("plugins: skipping unreadable plugin root", { root, path: lockPath });
+			return [];
+		}
 		if (!isEnoent(err)) throw err;
 		runtimeConfig = normalizePluginRuntimeConfig({});
 	}
@@ -117,6 +138,10 @@ async function collectPluginsAtRoot(
 			return (await fs.promises.lstat(target)).isSymbolicLink();
 		} catch (err) {
 			if (isEnoent(err)) return false;
+			// Unreadable means unclassifiable, and the caller only asks in order
+			// to keep a lockfile-only entry: treat it as not linked and let that
+			// entry be skipped with its own warning.
+			if (isUnreadableRoot(err)) return false;
 			throw err;
 		}
 	};
@@ -141,6 +166,13 @@ async function collectPluginsAtRoot(
 			// Lockfile entry without a corresponding node_modules tree means the
 			// link was deleted out from under us; skip silently.
 			if (isEnoent(err)) continue;
+			// One unreadable plugin does not invalidate its siblings, so skip
+			// just this one — loudly, because unlike a deleted link it is a
+			// plugin the user still expects to load.
+			if (isUnreadableRoot(err)) {
+				logger.warn("plugins: skipping unreadable plugin", { name, root, path: pluginPkgPath });
+				continue;
+			}
 			throw err;
 		}
 
@@ -252,124 +284,18 @@ function isModuleFile(name: string): boolean {
 	return MANIFEST_ENTRY_MODULE_EXTENSIONS.includes(path.extname(name)) && !DECLARATION_FILE_RE.test(name);
 }
 
-/** First `index.{ts,js,mjs,cjs}` inside `dir`, or null when none exists. */
-function findDirectoryIndex(dir: string): string | null {
-	for (const name of MANIFEST_ENTRY_INDEX_NAMES) {
-		const candidate = path.join(dir, name);
-		if (fs.existsSync(candidate)) return candidate;
-	}
-	return null;
-}
-
-interface DeclaredManifestEntries {
-	/** True when the directory's package.json declares a non-empty `omp`/`pi` `extensions` array. */
-	declared: boolean;
-	/** Resolved, existing module files for the declared entries (may be empty when declared files are missing). */
-	files: string[];
-}
-
-/**
- * Read the extension entries declared by `dir`'s own package.json `omp`/`pi`
- * manifest. `declared` distinguishes "a manifest explicitly lists extensions"
- * (authoritative — callers must not fall back to index/scan, so a missing
- * declared file surfaces as a missing entry instead of silently loading a stale
- * index) from "no manifest / no extensions field" (callers fall back to
- * convention). Mirrors the manifest branch of the configured-directory (`-e`)
- * scanner: a declared entry that is a file resolves to itself; one that is a
- * directory resolves to its direct index.{ts,js,mjs,cjs}.
- */
-function readDeclaredManifestEntries(dir: string): DeclaredManifestEntries {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(path.join(dir, "package.json"), "utf8");
-	} catch {
-		return { declared: false, files: [] };
-	}
-	let pkg: { omp?: { extensions?: unknown }; pi?: { extensions?: unknown } };
-	try {
-		pkg = JSON.parse(raw) as { omp?: { extensions?: unknown }; pi?: { extensions?: unknown } };
-	} catch {
-		return { declared: false, files: [] };
-	}
-	const declared = (pkg.omp ?? pkg.pi)?.extensions;
-	if (!Array.isArray(declared) || declared.length === 0) {
-		return { declared: false, files: [] };
-	}
-	const files: string[] = [];
-	for (const entry of declared) {
-		if (typeof entry !== "string") continue;
-		const candidate = path.resolve(dir, entry);
-		let candidateStats: fs.Stats;
-		try {
-			candidateStats = fs.statSync(candidate);
-		} catch {
-			continue;
-		}
-		if (candidateStats.isDirectory()) {
-			const index = findDirectoryIndex(candidate);
-			if (index) files.push(index);
-		} else {
-			files.push(candidate);
-		}
-	}
-	return { declared: true, files };
-}
-
-/**
- * Resolve a directory to its loadable extension module files, mirroring the
- * configured-directory (`-e`) scanner in extensions/loader.ts:
- *   1. the directory's own package.json `omp`/`pi` `extensions` entries —
- *      authoritative: a manifest that lists extensions suppresses the index/scan
- *      fallback, so a missing declared file is reported rather than silently
- *      replaced by a decoy index
- *   2. a direct index.{ts,js,mjs,cjs}
- *   3. one level of children: each direct *.{ts,js,mjs,cjs} file plus each
- *      sub-directory resolved by the same precedence (manifest, then index)
- */
-function resolveDirectoryEntries(dir: string): string[] {
-	const manifest = readDeclaredManifestEntries(dir);
-	if (manifest.declared) return manifest.files;
-
-	const directIndex = findDirectoryIndex(dir);
-	if (directIndex) return [directIndex];
-
-	let children: string[];
-	try {
-		children = fs.readdirSync(dir);
-	} catch {
-		return [];
-	}
-	const resolved: string[] = [];
-	for (const child of children.sort()) {
-		const childPath = path.join(dir, child);
-		let childStats: fs.Stats;
-		try {
-			// statSync follows symlinks, matching the configured-dir loader.
-			childStats = fs.statSync(childPath);
-		} catch {
-			continue;
-		}
-		if (childStats.isDirectory()) {
-			const childManifest = readDeclaredManifestEntries(childPath);
-			if (childManifest.declared) {
-				resolved.push(...childManifest.files);
-			} else {
-				const index = findDirectoryIndex(childPath);
-				if (index) resolved.push(index);
-			}
-		} else if (isModuleFile(child)) {
-			resolved.push(childPath);
-		}
-	}
-	return resolved;
-}
+const PLUGIN_EXTENSION_DIRECTORY_OPTIONS = {
+	indexNames: MANIFEST_ENTRY_INDEX_NAMES,
+	isScanFile: isModuleFile,
+	sortChildren: true,
+};
 
 /**
  * Resolve a plugin manifest entry to the loadable module files it names:
  * - a file entry → that file
  * - a directory:
  *   - when `expandDirectory` (the `extensions` key), resolved by
- *     {@link resolveDirectoryEntries} — its own package.json `omp`/`pi`
+ *     {@link resolveExtensionDirectory} — its own package.json `omp`/`pi`
  *     `extensions`, then a direct index, then a one-level scan of
  *     sub-extensions — matching the pi `extensions/<name>/index.ts` convention
  *     and OMP's configured-directory (`-e`) extension loader
@@ -392,9 +318,9 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
 		return [joined];
 	}
 	if (expandDirectory) {
-		return resolveDirectoryEntries(joined);
+		return resolveExtensionDirectory(joined, PLUGIN_EXTENSION_DIRECTORY_OPTIONS).files;
 	}
-	const index = findDirectoryIndex(joined);
+	const index = findExtensionDirectoryIndex(joined, MANIFEST_ENTRY_INDEX_NAMES);
 	return index ? [index] : [];
 }
 
