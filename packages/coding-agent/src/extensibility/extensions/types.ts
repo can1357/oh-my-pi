@@ -469,6 +469,8 @@ export interface ExtensionContext {
 	isProjectTrusted(): boolean;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
+	/** Name of the currently active primary persona, or null if no persona is loaded. Set via Tab-cycle or --agent flag. */
+	activePersonaName: string | null;
 
 	/** Run a /btw-style side turn without appending to history or executing tool calls.
 	 * Pass tools: false to omit tool definitions; existing context/provider hooks still run.

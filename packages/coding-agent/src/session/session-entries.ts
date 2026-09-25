@@ -74,6 +74,11 @@ export interface SessionEntryBase {
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
+	/** Name of the active agent definition when this message was recorded.
+	 * Mirrors the `agent` field on OpenCode message rows; omitted for sessions
+	 * without an active agent definition (vanilla Pi, or OMP before an agent
+	 * is applied). */
+	agent?: string;
 	message: AgentMessage;
 }
 
@@ -296,6 +301,17 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	attribution?: MessageAttribution;
 }
 
+/**
+ * Records a user-initiated persona switch that has not yet produced a stamped
+ * message. Scanned by getLastAgentName() so that resume picks up the correct
+ * persona even when the user switched and exited before sending anything.
+ */
+export interface PersonaChangeEntry extends SessionEntryBase {
+	type: "persona_change";
+	/** Name of the persona that became active, or null when the persona was explicitly cleared. */
+	personaName: string | null;
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -312,6 +328,7 @@ export type SessionEntry =
 	| TtsrInjectionEntry
 	| SessionInitEntry
 	| ModeChangeEntry
+	| PersonaChangeEntry
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
 

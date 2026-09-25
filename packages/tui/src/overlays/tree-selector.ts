@@ -24,6 +24,7 @@ import {
 	matchesSelectUp,
 } from "../keybinding-matchers";
 import { isUserRequestEntry, type TranscriptEntryLike } from "../chat/transcript-entry";
+import { sanitizeStatusText } from "../chrome/shared";
 
 /** Fields consumed when displaying persisted entries in the session tree. */
 export type SessionTreeEntry = { id: string; parentId: string | null } & (
@@ -38,6 +39,7 @@ export type SessionTreeEntry = { id: string; parentId: string | null } & (
 	| { type: "service_tier_change"; serviceTier: Partial<Record<string, string>> | null }
 	| { type: "title_change"; title: string }
 	| { type: "mode_change"; mode: string }
+	| { type: "persona_change"; personaName: string | null }
 	| { type: "credential_pin"; provider: string }
 	| { type: "ttsr_injection"; injectedRules: string[] }
 	| { type: "session_init" | "reset_boundary" }
@@ -332,6 +334,7 @@ class TreeList implements Component {
 				entry.type === "model_change" ||
 				entry.type === "model_usage" ||
 				entry.type === "thinking_level_change" ||
+				entry.type === "persona_change" ||
 				entry.type === "service_tier_change" ||
 				entry.type === "title_change" ||
 				entry.type === "credential_pin" ||
@@ -432,6 +435,9 @@ class TreeList implements Component {
 				break;
 			case "custom":
 				parts.push("custom", entry.customType);
+				break;
+			case "persona_change":
+				parts.push("persona", sanitizeStatusText(entry.personaName ?? ""));
 				break;
 			case "label":
 				parts.push("label", entry.label ?? "");
@@ -737,6 +743,9 @@ class TreeList implements Component {
 				break;
 			case "label":
 				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
+				break;
+			case "persona_change":
+				result = theme.fg("dim", `[persona: ${sanitizeStatusText(entry.personaName ?? "")}]`);
 				break;
 			case "service_tier_change": {
 				// Per-family map, or null when the session went back to the default.

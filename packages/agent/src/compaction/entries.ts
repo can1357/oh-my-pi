@@ -119,6 +119,12 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+export interface PersonaChangeEntry extends SessionEntryBase {
+	type: "persona_change";
+	/** Name of the persona that became active, or null when explicitly cleared. */
+	personaName: string | null;
+}
+
 /**
  * Durable context-reset marker recorded by an in-place `/clear`. It carries no
  * payload — its presence on the branch means every entry before it was dropped
@@ -128,7 +134,6 @@ export interface ModeChangeEntry extends SessionEntryBase {
 export interface ResetBoundaryEntry extends SessionEntryBase {
 	type: "reset_boundary";
 }
-
 export interface CustomCompactionSessionEntries {}
 
 export type SessionEntry =
@@ -145,6 +150,7 @@ export type SessionEntry =
 	| TtsrInjectionEntry
 	| SessionInitEntry
 	| ModeChangeEntry
+	| PersonaChangeEntry
 	| ResetBoundaryEntry
 	| CustomCompactionSessionEntries[keyof CustomCompactionSessionEntries];
 

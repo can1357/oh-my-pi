@@ -83,6 +83,7 @@ import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
+import { getPrimaryAgents } from "./discovery/helpers";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
@@ -211,6 +212,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { discoverAgents } from "./task/discovery";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
@@ -276,6 +278,7 @@ import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
 import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -806,6 +809,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
+	/** Agent name from --agent CLI flag: auto-load this named agent as the initial persona. */
+	initialAgentName?: string;
 }
 
 /** Result from createAgentSession */
@@ -3079,6 +3084,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
+			() => session?.activePersonaName ?? null,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
 		);
@@ -4356,6 +4362,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
+			// Persona restoration on every session switch (resume, ACP, RPC, collab).
+			// sdk.ts is the only place that has access to discoverAgents + settings,
+			// so the callback lives here and is called internally by switchSession().
+			resolvePersona: async (name, cwd) => {
+				// null = explicit clear sentinel — honor it (no persona on restore).
+				if (name === null) return null;
+				const { agents } = await discoverAgents(cwd);
+				const disabled = cfgTaskDisabledAgents.get(settings);
+				const primary = getPrimaryAgents(agents, disabled);
+				if (!primary.length) return null;
+				return name ? (primary.find(a => a.name.toLowerCase() === name.toLowerCase()) ?? primary[0]) : primary[0];
+			},
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
@@ -4373,6 +4391,94 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Auto-load initial persona for top-level sessions
+		if (taskDepth === 0) {
+			const { agents: discoveredAgentsForPersona } = await discoverAgents(cwd);
+			const disabledAgents = cfgTaskDisabledAgents.get(settings);
+			const primaryAgents = getPrimaryAgents(discoveredAgentsForPersona, disabledAgents);
+			// Resolve --agent against primary agents only (case-insensitive).
+			// Non-primary/subagent definitions are spawn-only; loading one as the
+			// top-level persona would bypass the mode: "primary" opt-in contract.
+			const namedAgent = options.initialAgentName
+				? (primaryAgents.find(a => a.name.toLowerCase() === options.initialAgentName!.toLowerCase()) ?? null)
+				: null;
+			if (options.initialAgentName && !namedAgent) {
+				logger.warn(
+					`--agent: no primary agent named "${options.initialAgentName}" found; falling back to first primary`,
+				);
+			}
+			// Restore from the last session stamp only when no --agent flag was
+			// given at all. An invalid --agent (typo/subagent name) must not
+			// silently load an unrelated prior persona — it should fall through
+			// to the first primary instead.
+			// Extract before ?? coercion to distinguish null (explicit clear)
+			// from undefined (no stamp) — both would otherwise collapse to "".
+			const lastAgentName = session.sessionManager.getLastAgentName();
+			const sessionAgent =
+				options.initialAgentName === undefined && lastAgentName !== null
+					? (primaryAgents.find(a => a.name.toLowerCase() === (lastAgentName ?? "").toLowerCase()) ?? null)
+					: null;
+			// When the explicit-clear sentinel (null) is present and no --agent flag
+			// overrides it, don't fall through to primaryAgents[0] — matches the
+			// resolvePersona callback behavior in switchSession/newSession/branch.
+			const startAgent =
+				namedAgent ??
+				(lastAgentName === null && options.initialAgentName === undefined
+					? null
+					: (sessionAgent ?? primaryAgents[0] ?? null));
+			if (startAgent) {
+				// Apply (and record) the persona model only for a genuinely fresh
+				// selection: no prior session, or an explicit --agent request. An
+				// unstamped legacy session (no persona_change/agent stamp, created
+				// before this feature) still has its model correctly restored from
+				// model_change history earlier in startup — falling back to
+				// primaryAgents[0] here must not treat that as a "cycle" and
+				// silently overwrite the already-restored model.
+				// A fork is a continuation even when the parent's own history is
+				// empty (e.g. `--fork <path>` against a subagent session, or an
+				// externally-created empty session file) — `hasExistingSession`
+				// alone can't see that, since it only counts entries actually
+				// copied over. Treat any forked session as non-fresh here so its
+				// caller-resolved model (already threaded through the normal
+				// fallback chain above) survives persona application undisturbed.
+				// A project-sourced default primary is discovered from the repo's own
+				// files, not chosen by the user — a bare checkout could ship
+				// `mode: primary` plus a `model:` pointing at another authenticated
+				// provider and silently reroute the user's main session merely by
+				// opening it. Only "bundled" (shipped with OMP) and "user" (the
+				// user's own ~/.omp/agent config) sources are trusted to auto-apply
+				// their model on a fresh session; a project-sourced persona still
+				// gets its prompt/tools applied via mode: "restore" below, just not
+				// an unsolicited provider/model swap. Explicit `--agent` always wins
+				// regardless of source — that's informed user action.
+				const isFork = session.sessionManager.getHeader()?.parentSession !== undefined;
+				// Explicit user-supplied startup params always win over persona
+				// defaults: `--model`/`model:` and `--thinking-level` are informed,
+				// deliberate choices made at process start — a persona's own
+				// frontmatter model/thinking level must never silently override
+				// them, regardless of --agent or source. See issue where an
+				// explicit `model:` option was clobbered by the auto-loaded
+				// default persona's configured model.
+				const applyModel =
+					!hasExplicitModel &&
+					options.thinkingLevel === undefined &&
+					((!hasExistingSession && !isFork && startAgent.source !== "project") || !!namedAgent);
+				const { modelFailed } = await session.applyAgentPersona(startAgent, {
+					mode: applyModel ? "cycle" : "restore",
+				});
+				if (modelFailed) {
+					logger.warn(`--agent: persona "${startAgent.name}" model not available — using current model`, {
+						err: modelFailed,
+					});
+					// Sanitize frontmatter name before embedding in a TUI notice string.
+					const safePersonaName = sanitizeStatusText(startAgent.name);
+					session.emitNotice(
+						"warning",
+						`Persona "${safePersonaName}" loaded — model not available, using current model`,
+					);
+				}
+			}
+		}
 		credentialNoticeSession = session;
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage);

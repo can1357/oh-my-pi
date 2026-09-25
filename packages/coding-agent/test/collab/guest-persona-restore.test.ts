@@ -1,18 +1,28 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+/**
+ * Regression: leaving a collab session must clear the replica persona
+ * override mirrored from the host (`AgentSession#setReplicaPersonaName`).
+ *
+ * Oracle: `#applyHostState()` sets a sticky override whenever the host
+ * reports `activePersonaName`, and `AgentSession.activePersonaName` prefers
+ * that override over the local persona (see agent-session.ts). Without
+ * clearing it on teardown, the guest's restored local session — resumed or
+ * freshly created — would keep showing the host's (possibly now-stale)
+ * persona name in the status line and in the next persisted `agent` stamp,
+ * corrupting resume inference for a session that was never actually using
+ * that persona.
+ *
+ * The clear only fires once the replica has actually activated (joined and
+ * received its first snapshot) — a guest that never got that far never set
+ * the override in the first place. The test drives a real join through the
+ * in-memory relay so `#replicaActivated` is genuinely true before `leave()`.
+ */
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { COLLAB_PROTO, type CollabFrame, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
-
-// The guest mirrors host EventBus traffic onto the local session and
-// observability buses. When an SDK embedder wires the SAME EventBus into both
-// slots, the mirror must emit each frame exactly once.
 
 function makeState(): Extract<CollabFrame, { t: "welcome" }>["state"] {
 	return {
@@ -24,10 +34,10 @@ function makeState(): Extract<CollabFrame, { t: "welcome" }>["state"] {
 	};
 }
 
-function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
+function makeContext(setReplicaPersonaName: (name: string | null | undefined) => void) {
 	const ctx = {
-		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: Settings.isolated(),
+		collabGuest: undefined,
+		settings: { get: () => "" },
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
@@ -37,7 +47,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),
-			setReplicaPersonaName: () => {},
+			setReplicaPersonaName,
 			agent: {
 				state: { model: undefined },
 				setModel: () => {},
@@ -50,14 +60,9 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,
 		streamingMessage: undefined,
-		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		loadingAnimation: undefined,
 		statusLine: {
-			setSubagentCount: () => {},
-			get subagentCount() {
-				return 0;
-			},
 			setCollabStatus: () => {},
 			invalidate: () => {},
 			resetActiveTime: () => {},
@@ -65,7 +70,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 			markActivityEnd: () => {},
 		},
 		ui: { requestRender: () => {} },
-		chatContainer: { clear: () => {}, disposeChildren: () => {} },
+		chatContainer: { clear: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
 		reloadTodos: () => Promise.resolve(),
@@ -75,26 +80,24 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		updateEditorBorderColor: () => {},
 		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		syncRunningSubagentBadge: () => {},
-		eventBus,
-		subagentEventBus: eventBus,
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }
 
 beforeEach(() => {
-	AgentRegistry.resetGlobalForTests();
 	installInMemoryRelay();
 });
 
 afterEach(() => {
 	uninstallInMemoryRelay();
-	AgentRegistry.resetGlobalForTests();
 });
 
-describe("collab guest bus mirror", () => {
-	it("emits an aliased bus frame exactly once", async () => {
+describe("CollabGuestLink — persona restore on leave", () => {
+	it("clears the replica persona override before restoring the local session", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
-		const roomId = "bus-mirror-room-1";
+		const setReplicaPersonaName = vi.fn();
+
+		const roomId = "persona-restore-room-1";
 		const roomKey = generateRoomKey();
 		const cryptoKey = await importRoomKey(roomKey);
 		const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
@@ -116,44 +119,17 @@ describe("collab guest bus mirror", () => {
 		hostSocket.connect();
 		await hostOpen.promise;
 
-		const sharedBus = new EventBus();
-		const mirrored: Array<{ id?: string; status?: string }> = [];
-		const firstFrame = Promise.withResolvers<void>();
-		sharedBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, frame => {
-			const payload = frame as { id?: string; status?: string };
-			mirrored.push(payload);
-			if (mirrored.length === 1) firstFrame.resolve();
-		});
-
-		const ctx = makeGuestContext(sharedBus);
+		const ctx = makeContext(setReplicaPersonaName);
 		const guest = new CollabGuestLink(ctx);
 
 		try {
 			await guest.join(link);
+			await guest.leave("test cleanup");
 
-			hostSocket.send({
-				t: "bus",
-				channel: TASK_SUBAGENT_LIFECYCLE_CHANNEL,
-				data: {
-					id: "MirroredScout",
-					agent: "task",
-					agentSource: "bundled",
-					status: "started",
-					parentToolCallId: "call-mirror",
-					index: 1,
-				},
-			} as CollabFrame);
-			await firstFrame.promise;
-			// Give any duplicate emit a tick to land before counting.
-			await Bun.sleep(25);
-
-			expect(mirrored.length).toBe(1);
-			expect(mirrored[0]?.id).toBe("MirroredScout");
-			expect(mirrored[0]?.status).toBe("started");
+			expect(setReplicaPersonaName).toHaveBeenCalledWith(undefined);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();
-			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
 });

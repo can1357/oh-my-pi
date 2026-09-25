@@ -12,6 +12,7 @@ import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import { getPrimaryAgents } from "../../discovery/helpers";
 import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -40,6 +41,8 @@ import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
+import { discoverAgents } from "../../task/discovery";
+import { cfgTaskDisabledAgents } from "../../task/settings";
 import { getTinyLocalModelSpec, isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
@@ -62,6 +65,7 @@ import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-for
 import { VideoError, buildVideoContactSheetPng, probeVideo } from "../../utils/video";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { resizeImage } from "../../utils/image-resize";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
@@ -253,6 +257,20 @@ export class InputController {
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
+	#personaCycleInFlight = false;
+	// Eagerly primed (fire-and-forget) so the FIRST Tab press after startup/persona
+	// discovery already knows whether any primary agents exist, instead of only
+	// learning it after a throwaway cyclePersona() call. `undefined` = discovery
+	// hasn't resolved yet (distinct from a known-empty project): while unknown,
+	// Tab presses fall through to cyclePersona() (which does its own fresh
+	// discovery) rather than being misrouted to autocomplete before the prime
+	// settles. Kept in sync by cyclePersona() and by #refreshHasPrimaryAgents()
+	// whenever the cache reads false (e.g. an /agents-created-while-running
+	// primary is invisible until this refreshes it).
+	#hasPrimaryAgents: boolean | undefined = undefined;
+	// Prevents #refreshHasPrimaryAgents() from stacking a fresh discoverAgents()
+	// call on every Tab press while a project genuinely has zero primary agents.
+	#hasPrimaryAgentsRefreshInFlight = false;
 	#btwCopyListenerInstalled = false;
 	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
@@ -630,6 +648,34 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => this.cycleThinkingLevel();
+		this.ctx.editor.setActionKeys(
+			"app.persona.cycleForward",
+			this.ctx.keybindings.getKeys("app.persona.cycleForward"),
+		);
+		this.ctx.editor.onCyclePersonaForward = (): false | undefined => {
+			// Return false when no persona is active so the editor falls through to
+			// its built-in tab-completion path (file/slash completions) rather than
+			// silently consuming the Tab key.
+			if (!this.#personaCycleInFlight && this.#hasPrimaryAgents === false) {
+				this.#refreshHasPrimaryAgents();
+				return false;
+			}
+			this.cyclePersona(1).catch(err => logger.error("cyclePersona(1) failed", { err: String(err) }));
+		};
+		this.ctx.editor.setActionKeys(
+			"app.persona.cycleBackward",
+			this.ctx.keybindings.getKeys("app.persona.cycleBackward"),
+		);
+		this.ctx.editor.onCyclePersonaBackward = (): false | undefined => {
+			if (!this.#personaCycleInFlight && this.#hasPrimaryAgents === false) {
+				this.#refreshHasPrimaryAgents();
+				return false;
+			}
+			this.cyclePersona(-1).catch(err => logger.error("cyclePersona(-1) failed", { err: String(err) }));
+		};
+		// Eagerly discover whether any primary agents exist so the first Tab press
+		// works immediately instead of relying on a throwaway cyclePersona() call.
+		this.#refreshHasPrimaryAgents();
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
@@ -2428,6 +2474,83 @@ export class InputController {
 		} else {
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
+		}
+	}
+
+	/**
+	 * Fire-and-forget re-check of whether any primary agent exists, used to heal
+	 * a stale `#hasPrimaryAgents === false` cache — e.g. a project starts with
+	 * zero primary agents (cache correctly false), the user then creates or
+	 * enables the first `mode: primary` agent via `/agents` while OMP is still
+	 * running, and without this refresh the Tab guard keeps falling through to
+	 * tab-completion until restart, since nothing else re-runs discovery.
+	 * `#personaCycleInFlight`-gated callers already get a fresh list from
+	 * cyclePersona() itself; this only fires on the false-cache fallthrough path.
+	 */
+	#refreshHasPrimaryAgents(): void {
+		if (this.#hasPrimaryAgentsRefreshInFlight) return;
+		this.#hasPrimaryAgentsRefreshInFlight = true;
+		(async () => {
+			const { agents } = await discoverAgents(this.ctx.sessionManager.getCwd());
+			const disabledAgents = cfgTaskDisabledAgents.get(this.ctx.session.settings);
+			this.#hasPrimaryAgents = getPrimaryAgents(agents, disabledAgents).length > 0;
+		})()
+			.catch(err => logger.error("persona primary-agent discovery failed", { err: String(err) }))
+			.finally(() => {
+				this.#hasPrimaryAgentsRefreshInFlight = false;
+			});
+	}
+
+	async cyclePersona(dir: 1 | -1): Promise<void> {
+		// Guard against rapid Tab presses racing through the async discoverAgents call.
+		if (this.#personaCycleInFlight) return;
+		// Block cycling while the main session is streaming: stamp timing could
+		// attribute the in-flight turn's messages to the next persona instead of
+		// the one that generated them, corrupting /resume inference.
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showStatus("Persona cycling is paused while the session is streaming");
+			return;
+		}
+		// Block cycling while a subagent is focused: persona applies to the main session,
+		// not the focused view. Matches the guard in cycleThinkingLevel.
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Persona cycling applies to the main session — press ←← to return first");
+			return;
+		}
+		this.#personaCycleInFlight = true;
+		try {
+			logger.debug("cyclePersona called", { dir });
+			const { agents } = await discoverAgents(this.ctx.sessionManager.getCwd());
+			const disabledAgents = cfgTaskDisabledAgents.get(this.ctx.session.settings);
+			const primary = getPrimaryAgents(agents, disabledAgents);
+			this.#hasPrimaryAgents = primary.length > 0;
+			logger.debug("cyclePersona agents found", {
+				total: agents.length,
+				primary: primary.length,
+				names: primary.map(a => a.name),
+				orders: primary.map(a => ({ name: a.name, order: a.order })),
+			});
+			if (primary.length === 0) return;
+			const currentName = this.ctx.session.activePersonaName;
+			const currentIdx = primary.findIndex(a => a.name === currentName);
+			const baseIdx = currentIdx === -1 && dir === -1 ? primary.length : currentIdx;
+			const nextIdx = (((baseIdx + dir) % primary.length) + primary.length) % primary.length;
+			const next = primary[nextIdx];
+			// Single-persona projects (or a no-op cycle back to the currently active
+			// persona) would otherwise still append a persona_change/model_change
+			// entry and re-run setModel(), resetting provider session state for
+			// zero actual change.
+			if (next.name === currentName) return;
+			const safeName = sanitizeStatusText(next.name);
+			logger.debug("cyclePersona switching", { from: currentName, to: next.name });
+			const { modelFailed } = await this.ctx.session.applyAgentPersona(next, { mode: "cycle" });
+			if (modelFailed) {
+				this.ctx.showStatus(`Persona: ${safeName} (model not available — using current)`);
+			} else {
+				this.ctx.showStatus(`Persona: ${safeName}`);
+			}
+		} finally {
+			this.#personaCycleInFlight = false;
 		}
 	}
 

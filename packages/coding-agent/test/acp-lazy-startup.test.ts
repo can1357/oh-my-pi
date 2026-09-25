@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -8,6 +8,7 @@ import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mod
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type Client,
@@ -176,7 +177,15 @@ async function closeTransport(writable: WritableStream<unknown>): Promise<void> 
 }
 
 describe("ACP lazy startup", () => {
-	it("applies schema defaults for ACP background jobs", async () => {
+	beforeEach(() => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies schema defaults for ACP background jobs and preserves explicit overrides", async () => {
 		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 
 		type ObservedBackgroundSettings = {

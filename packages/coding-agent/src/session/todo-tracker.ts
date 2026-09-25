@@ -64,6 +64,7 @@ export interface TodoTrackerHost {
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	activePersonaName(): string | null;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -288,7 +289,7 @@ export class TodoTracker {
 		this.#mutationsSinceLastTouch = 0;
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
-		this.#host.sessionManager.appendMessage(reminderMessage);
+		this.#host.sessionManager.appendMessage(reminderMessage, this.#host.activePersonaName() ?? undefined);
 		this.#host.scheduleAgentContinue({
 			source: "todo-reminder",
 			generation: this.#host.promptGeneration(),

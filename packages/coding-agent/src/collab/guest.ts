@@ -634,10 +634,10 @@ export class CollabGuestLink {
 	}
 
 	/**
-	 * Apply the host's real model/thinking state to the replica agent so model
-	 * display and context-window math are native (no display-string overrides).
-	 * Pure agent-state mutation: session.setModel/setThinkingLevel would
-	 * persist entries and clamp to local credentials.
+	 * Apply the host's real model/thinking/persona state to the replica agent
+	 * so model display and context-window math are native (no display-string
+	 * overrides). Pure agent-state mutation: session.setModel/setThinkingLevel
+	 * would persist entries and clamp to local credentials.
 	 */
 	#applyHostState(state: CollabSessionState): void {
 		const session = this.#ctx.session;
@@ -651,6 +651,9 @@ export class CollabGuestLink {
 		const level = state.thinkingLevel as ThinkingLevel | undefined;
 		session.agent.setThinkingLevel(toReasoningEffort(level));
 		session.agent.setDisableReasoning(shouldDisableReasoning(level));
+		if (state.activePersonaName !== undefined) {
+			session.setReplicaPersonaName(state.activePersonaName);
+		}
 	}
 
 	/** Diff a host agent snapshot into the local registry (refs keep `session: null`). */
@@ -821,6 +824,11 @@ export class CollabGuestLink {
 		this.#clearAgentMirror();
 		this.#ctx.syncRunningSubagentBadge();
 		this.#ctx.resetObserverRegistry();
+		// Clear the host-mirrored persona override before restoring/creating the
+		// local session — otherwise the stale host persona (or an explicit null
+		// from the host clearing its own persona) outlives the collab and
+		// corrupts the status line and next resume's persona stamp.
+		this.#ctx.session.setReplicaPersonaName(undefined);
 		this.#clearTransientUi();
 		// Replica file stays on disk: it is a valid session file outside the
 		// sessions dir, so it never shows up in /resume but remains readable.

@@ -1709,6 +1709,8 @@ export class SelectorController {
 		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
+		// The active persona is restored automatically via the resolvePersona
+		// callback configured in sdk.ts; no additional persona discovery needed here.
 		if (
 			(await this.ctx.session.switchSession(sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
@@ -1722,8 +1724,8 @@ export class SelectorController {
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
+
 		this.#refreshSessionTerminalTitle();
-		this.ctx.updateEditorBorderColor();
 
 		// Clear and re-render the chat
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });

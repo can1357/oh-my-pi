@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { getPrimaryAgents, parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 describe("parseAgentFields", () => {
@@ -170,6 +171,73 @@ describe("parseAgentFields", () => {
 
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
+	});
+
+	describe("mode field", () => {
+		test("parses mode: primary", () => {
+			const fields = parseAgentFields({ name: "sisyphus", description: "desc", mode: "primary" });
+			expect(fields?.mode).toBe("primary");
+		});
+
+		test("parses mode: subagent", () => {
+			const fields = parseAgentFields({ name: "explore", description: "desc", mode: "subagent" });
+			expect(fields?.mode).toBe("subagent");
+		});
+
+		test("rejects invalid mode → undefined", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", mode: "primary2" });
+			expect(fields?.mode).toBeUndefined();
+		});
+
+		test("returns undefined mode when field absent", () => {
+			const fields = parseAgentFields({ name: "x", description: "d" });
+			expect(fields?.mode).toBeUndefined();
+		});
+	});
+
+	test("getPrimaryAgents admits only enabled agents with mode exactly primary", () => {
+		const base = { description: "desc", systemPrompt: "", source: "bundled" } as const;
+		const agents = [
+			{ ...base, name: "disabled-primary", mode: "primary" },
+			{ ...base, name: "no-mode" },
+			{ ...base, name: "enabled-primary", mode: "primary" },
+		] as unknown as AgentDefinition[];
+
+		const result = getPrimaryAgents(agents, ["disabled-primary"]);
+
+		expect(result.map(a => a.name)).toEqual(["enabled-primary"]);
+	});
+
+	describe("order field", () => {
+		test("parses finite integer order", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", order: 1 });
+			expect(fields?.order).toBe(1);
+		});
+
+		test("parses fractional order", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", order: 1.5 });
+			expect(fields?.order).toBe(1.5);
+		});
+
+		test("rejects string order → undefined", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", order: "1" });
+			expect(fields?.order).toBeUndefined();
+		});
+
+		test("rejects NaN order → undefined", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", order: NaN });
+			expect(fields?.order).toBeUndefined();
+		});
+
+		test("rejects Infinity order → undefined", () => {
+			const fields = parseAgentFields({ name: "x", description: "d", order: Infinity });
+			expect(fields?.order).toBeUndefined();
+		});
+
+		test("returns undefined order when field absent", () => {
+			const fields = parseAgentFields({ name: "x", description: "d" });
+			expect(fields?.order).toBeUndefined();
+		});
 	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);

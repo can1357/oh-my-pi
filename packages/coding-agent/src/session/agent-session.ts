@@ -113,9 +113,12 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
+	formatModelString,
 	getModelMatchPreferences,
-	type ResolvedModelRoleValue,
+	resolveAgentModelPatterns,
 	resolveCliModel,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
@@ -205,6 +208,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import type { PersonaApplyMode, PersonaStamp } from "../task/types";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
@@ -252,6 +256,7 @@ import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { resumeCommand } from "../utils/resume-command";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
@@ -457,7 +462,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
-import { cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskBatch, cfgTaskDisabledAgents } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
 	cfgExtendedContext,
@@ -715,9 +720,20 @@ export class AgentSession implements SettingsScope {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	/** Notices emitted before the first subscriber is registered; drained on first subscribe(). */
+	#startupNoticeQueue: Array<Extract<AgentSessionEvent, { type: "notice" }>> = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
+	#resolvePersona: ((name: PersonaStamp, cwd: string) => Promise<AgentDefinition | null>) | undefined;
+	#activePersona: AgentDefinition | null = null;
+	#personaBlock: string | null = null;
+	/**
+	 * Persona name mirrored from a collab host onto this guest replica session,
+	 * overriding `#activePersona` for display purposes only. `undefined` means
+	 * "not a replica / no override"; `null` means the host has no active persona.
+	 */
+	#replicaPersonaName: string | null | undefined = undefined;
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
 
@@ -1416,6 +1432,7 @@ export class AgentSession implements SettingsScope {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			activePersonaName: () => this.activePersonaName,
 			extensionRunner: () => this.#extensionRunner,
 			isStreaming: () => this.isStreaming,
 		};
@@ -1430,7 +1447,7 @@ export class AgentSession implements SettingsScope {
 			isStreaming: () => this.isStreaming,
 			appendSessionMessage: message => {
 				this.agent.appendMessage(message);
-				this.sessionManager.appendMessage(message);
+				this.sessionManager.appendMessage(message, this.activePersonaName ?? undefined);
 			},
 		};
 		this.#eval = new EvalRunner(evalHost, {
@@ -1492,6 +1509,7 @@ export class AgentSession implements SettingsScope {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			activePersonaName: () => this.activePersonaName,
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#modelMentions = new ModelMentionRegistry({
@@ -1758,6 +1776,7 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.#resolvePersona = config.resolvePersona;
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1782,6 +1801,7 @@ export class AgentSession implements SettingsScope {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			onSystemPromptRebuild: () => this.#reapplyPersonaBlock(),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -2798,7 +2818,14 @@ export class AgentSession implements SettingsScope {
 	 * react to (e.g. background queue flush failures).
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
-		this.#emit({ type: "notice", level, message, source });
+		const event = { type: "notice" as const, level, message, source };
+		if (this.#eventListeners.length === 0) {
+			// No subscriber yet (e.g. startup persona apply before interactive mode
+			// constructs its EventController). Queue and drain on first subscribe().
+			this.#startupNoticeQueue.push(event);
+		} else {
+			this.#emit(event);
+		}
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -3128,7 +3155,7 @@ export class AgentSession implements SettingsScope {
 	): string {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
-		const entryId = this.sessionManager.appendMessage(message);
+		const entryId = this.sessionManager.appendMessage(message, this.activePersonaName ?? undefined);
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
 		}
@@ -4736,8 +4763,16 @@ export class AgentSession implements SettingsScope {
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
+		const wasEmpty = this.#eventListeners.length === 0;
 		this.#eventListeners.push(listener);
-
+		// Drain any notices that were emitted before the first subscriber (e.g.
+		// startup persona model failure before interactive mode subscribes).
+		if (wasEmpty && this.#startupNoticeQueue.length > 0) {
+			const queued = this.#startupNoticeQueue.splice(0);
+			for (const event of queued) {
+				this.#emit(event);
+			}
+		}
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
@@ -5201,6 +5236,7 @@ export class AgentSession implements SettingsScope {
 		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#eventListeners = [];
+		this.#startupNoticeQueue = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
 
@@ -5429,6 +5465,23 @@ export class AgentSession implements SettingsScope {
 	/** Full agent state */
 	get state(): AgentState {
 		return this.agent.state;
+	}
+
+	/** Name of the active persona agent, or null when no persona is loaded. */
+	get activePersonaName(): string | null {
+		if (this.#replicaPersonaName !== undefined) return this.#replicaPersonaName;
+		return this.#activePersona?.name ?? null;
+	}
+
+	/**
+	 * Sets the display-facing persona name mirrored from a collab host onto this
+	 * guest replica session. Pure display-state mutation — unlike
+	 * `applyAgentPersona()`, this never touches the system prompt or model,
+	 * matching how collab guests apply host model/thinkingLevel directly onto
+	 * agent state without replaying persona side effects.
+	 */
+	setReplicaPersonaName(name: string | null | undefined): void {
+		this.#replicaPersonaName = name;
 	}
 
 	/** Current model (may be undefined if not yet selected) */
@@ -7088,12 +7141,19 @@ export class AgentSession implements SettingsScope {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
+					let turnSystemPrompt: string[];
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
+						turnSystemPrompt = result.systemPrompt;
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+						turnSystemPrompt = this.#tools.baseSystemPrompt;
 					}
+					// Extensions and tool-policy rebuilds are persona-agnostic (see class doc);
+					// re-append the active persona block so it survives every agent start —
+					// direct or queued — not just the moment applyAgentPersona() ran.
+					this.#reapplyPersonaBlock(turnSystemPrompt);
 					return messages;
 				},
 			};
@@ -7373,6 +7433,7 @@ export class AgentSession implements SettingsScope {
 			return this.#extensionRunner.createCommandContext();
 		}
 
+		const session = this;
 		return {
 			ui: noOpUIContext,
 			mode: "print",
@@ -7431,6 +7492,9 @@ export class AgentSession implements SettingsScope {
 				await this.reload();
 			},
 			getSystemPrompt: () => this.systemPrompt,
+			get activePersonaName() {
+				return session.activePersonaName;
+			},
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
 			setInterval: (callback, ms, ...args) => this.#fallbackTimers().setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#fallbackTimers().setTimeout(callback, ms, ...args),
@@ -7468,6 +7532,9 @@ export class AgentSession implements SettingsScope {
 		const baseCtx = this.#createCommandContext();
 		const ctx = {
 			...baseCtx,
+			get activePersonaName() {
+				return baseCtx.activePersonaName;
+			},
 			hasQueuedMessages: baseCtx.hasPendingMessages,
 		} as unknown as CustomCommandContext;
 
@@ -8776,6 +8843,24 @@ export class AgentSession implements SettingsScope {
 
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+			// Record the carry-over model so resume can restore the exact model that
+			// produced turns in this session. mode: "fresh" keeps the in-memory model
+			// intact, but without this entry getRestorableSessionModels returns nothing
+			// and resume defaults to whatever the startup-time model is.
+			const currentModel = this.model;
+			if (currentModel) {
+				this.sessionManager.appendModelChange(`${currentModel.provider}/${currentModel.id}`);
+			}
+			// Mirror the thinking/serviceTier pattern: apply and record the default persona
+			// for fresh-session semantics (/new is a clean slate — resolves to first primary).
+			// mode: "fresh" — if this default persona differs from the one just active,
+			// its own model/thinking level applies (see PersonaApplyMode); otherwise the
+			// current model is left alone.
+			if (this.#resolvePersona) {
+				const def = await this.#resolvePersona(undefined, this.sessionManager.getCwd());
+				const { modelFailed } = await this.applyAgentPersona(def, { mode: "fresh" });
+				if (modelFailed && def) this.#emitPersonaModelWarn(def);
+			}
 
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
@@ -8927,6 +9012,7 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			record?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
@@ -8952,8 +9038,186 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		return this.#models.applyRoleModel(entry);
+	applyRoleModel(entry: ResolvedRoleModel, options?: { record?: boolean }): Promise<void> {
+		return this.#models.applyRoleModel(entry, options);
+	}
+
+	/**
+	 * Apply a persona agent as the active HOW block.
+	 * Replaces the last prompt block with the persona's systemPrompt,
+	 * preserving global blocks. Also applies the persona's model if configured.
+	 */
+	async applyAgentPersona(
+		def: AgentDefinition | null,
+		options?: { mode?: PersonaApplyMode },
+	): Promise<{ modelFailed?: string }> {
+		const mode = options?.mode ?? "cycle";
+		// "fresh" (/new) always resolves to the default persona regardless of what
+		// was active — a clean slate, not a continuation. When that default persona
+		// differs from the one active a moment ago, the in-memory model still
+		// belongs to the OUTGOING persona (set by its own frontmatter during the
+		// prior cycle); leaving it untouched would attach e.g. Beta's GPT-5.4 to
+		// Sisyphus's identity. Only skip model application when /new resolves back
+		// to the SAME persona that was already active — that's the case where the
+		// current model may be a deliberate manual /model override worth preserving.
+		const personaChanged = (def?.name?.toLowerCase() ?? null) !== (this.#activePersona?.name?.toLowerCase() ?? null);
+		// "restore" is silent: no model change, no thinking-level change, no history
+		// recording. "cycle" (Tab / explicit --agent) always swaps the model.
+		const applyModel = mode === "cycle" || (mode === "fresh" && personaChanged);
+		const record = mode !== "restore";
+		logger.debug("applyAgentPersona called", { name: def?.name ?? null, mode });
+		// Apply the model before mutating visible persona state. Failure is returned
+		// as { modelFailed } so callers that show UI can surface a visible warning;
+		// the persona prompt/state still applies so users get the HOW block even if
+		// their model config is incomplete.
+		let modelFailed: string | undefined;
+		let modelApplied = false;
+		let modelSetExplicitThinking = false;
+		// Check per-agent model override from /agents settings — takes precedence
+		// over frontmatter model. The override is exclusive: if it is present and
+		// fails to resolve/apply, the loop stops and surfaces modelFailed rather
+		// than silently falling through to frontmatter, matching resolveAgentModelPatterns()'s
+		// settingsOverride branch (which is likewise exclusive of the agent's own model).
+		const agentModelOverrides = cfgTaskAgentModelOverrides.get(this.settings);
+		const settingsModelOverride = def?.name ? agentModelOverrides[def.name] : undefined;
+		// Frontmatter models route through resolveAgentModelPatterns — the same
+		// resolver spawned agents use — so a bare `pi/task`/`pi/default` alias
+		// resolves identically whether the agent runs as a subagent or as the
+		// main persona: an explicitly configured role wins, otherwise it inherits
+		// the session's currently active model instead of silently snapping back
+		// to the globally configured default. Skipped when def.model is empty so
+		// a persona with no model field never re-applies the current model as a
+		// spurious "cycle" (would append a no-op model_change/reset the provider
+		// session for zero actual change).
+		const effectiveModelList =
+			settingsModelOverride || def?.model?.length
+				? resolveAgentModelPatterns({
+						settingsOverride: settingsModelOverride,
+						agentModel: def?.model,
+						settings: this.settings,
+						activeModelPattern: this.model ? formatModelString(this.model) : undefined,
+					})
+				: [];
+		if (effectiveModelList.length && applyModel) {
+			const availableModels = this.#modelRegistry.getAvailable();
+			const matchPreferences = getModelMatchPreferences(this.settings);
+			for (const modelStr of effectiveModelList) {
+				const resolved = resolveModelRoleValue(modelStr, availableModels, {
+					settings: this.settings,
+					matchPreferences,
+				});
+				if (resolved.model) {
+					try {
+						await this.applyRoleModel(
+							{
+								role: "persona",
+								model: resolved.model,
+								thinkingLevel: resolved.thinkingLevel,
+								explicitThinkingLevel: resolved.explicitThinkingLevel,
+							},
+							{ record },
+						);
+						modelApplied = true;
+						modelSetExplicitThinking = resolved.explicitThinkingLevel === true;
+						break; // success — stop trying further candidates
+					} catch (err) {
+						// Auth failure or other error — log and try the next candidate.
+						modelFailed = String(err);
+						logger.warn("applyAgentPersona: model swap failed, trying next candidate", {
+							model: modelStr,
+							err: modelFailed,
+						});
+					}
+				}
+			}
+			// All model strings iterated without a resolvable match — report failure so
+			// callers (startup, resume, Tab cycle) can surface a visible warning instead
+			// of silently keeping whatever model was previously active.
+			if (!modelApplied && !modelFailed) {
+				modelFailed = `No model from [${effectiveModelList.join(", ")}] could be resolved`;
+				logger.warn("applyAgentPersona: no persona model could be resolved, keeping current model", {
+					models: effectiveModelList,
+				});
+			}
+		}
+		// Apply top-level thinking level from frontmatter if set and this is a
+		// user-initiated action. The model-selector suffix (:high) already handled
+		// thinking via applyRoleModel; this covers the case where the persona sets
+		// thinking without specifying a model string suffix. Skipped when the model
+		// selector already set an explicit thinking level — frontmatter must not
+		// clobber a user's `:high`-style override.
+		if (
+			def?.thinkingLevel !== undefined &&
+			(mode === "cycle" || (mode === "fresh" && personaChanged)) &&
+			!modelSetExplicitThinking
+		) {
+			this.setThinkingLevel(def.thinkingLevel, false, record);
+		}
+		this.#activePersona = def;
+		this.#personaBlock = def?.systemPrompt ?? null;
+		this.agent.setSystemPrompt(
+			this.#personaBlock !== null
+				? [...this.#tools.baseSystemPrompt, this.#personaBlock]
+				: [...this.#tools.baseSystemPrompt],
+		);
+		// Record the persona switch so getLastAgentName() can recover it on resume
+		// even when the user switched and exited before sending any message.
+		// For explicit clears (def === null), write a null sentinel so a stale
+		// persona_change from a prior switch doesn't survive to the next resume.
+		// Only for user-initiated actions (mode !== "restore", i.e. `record`).
+		if (record) {
+			this.sessionManager.appendPersonaChange(def?.name ?? null);
+		}
+		this.#emitPersonaChangedEvent(def);
+		// Only report modelFailed when no model was successfully applied — a
+		// fallback candidate that succeeded after an earlier auth failure still
+		// means the model is in a good state; the user should not see a warning.
+		return !modelApplied && modelFailed !== undefined ? { modelFailed } : {};
+	}
+
+	/**
+	 * Re-appends the active persona's system-prompt block after the base prompt
+	 * is rebuilt (tool changes, model switches) or after a one-turn override is
+	 * applied (memory-backend turn-start injection, an extension's
+	 * `before_agent_start` systemPrompt override). No-op when no persona is
+	 * active.
+	 *
+	 * Defaults to the current persistent base (`#tools.baseSystemPrompt`) for
+	 * the tool/model-change call sites, which rebuild that base directly. Turn-
+	 * scoped callers that computed a one-off variant of it (memory injection,
+	 * extension override) MUST pass that variant explicitly — reapplying onto
+	 * the default would silently discard their one-turn addition.
+	 */
+	#reapplyPersonaBlock(base: string[] = this.#tools.baseSystemPrompt): void {
+		if (this.#personaBlock === null) return;
+		if (base[base.length - 1] !== this.#personaBlock) {
+			this.agent.setSystemPrompt([...base, this.#personaBlock]);
+		}
+	}
+
+	#emitPersonaChangedEvent(def: AgentDefinition | null): void {
+		this.#emit({ type: "persona_changed", personaName: def?.name ?? null, source: def?.source });
+	}
+
+	#emitPersonaModelWarn(def: AgentDefinition): void {
+		const safeName = sanitizeStatusText(def.name);
+		this.emitNotice("warning", `Persona "${safeName}" loaded — model not available, using current model`);
+	}
+
+	/**
+	 * Re-applies the persona recorded in the current branch after any in-place
+	 * leaf navigation (navigateTree, branch). Mirrors the persona restoration in
+	 * switchSession() but without a settings reload — in-place navigation stays
+	 * on the same project so task.disabledAgents is already current.
+	 * No-op when no resolvePersona callback was provided at session creation.
+	 */
+	async #restorePersonaForBranch(): Promise<void> {
+		if (!this.#resolvePersona) return;
+		const name = this.sessionManager.getLastAgentName();
+		const cwd = this.sessionManager.getCwd();
+		const def = await this.#resolvePersona(name, cwd);
+		const { modelFailed } = await this.applyAgentPersona(def, { mode: "restore" });
+		if (modelFailed && def) this.#emitPersonaModelWarn(def);
 	}
 
 	/** Cycles the configured role models in the supplied order. */
@@ -8970,8 +9234,12 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Selects the session thinking level and optionally persists it as the default. */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
-		this.#models.setThinkingLevel(level, persist);
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		record: boolean = true,
+	): void {
+		this.#models.setThinkingLevel(level, persist, record);
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
@@ -10086,6 +10354,14 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		// Settings is a shared instance (main session + every task subagent hold
+		// the same reference); the persona-restore block below calls
+		// reloadForCwd(cwd) to re-scope project settings BEFORE it's known
+		// whether the switch will succeed. Snapshot so a failed switch can put
+		// project-layer settings (task.disabledAgents, task.agentModelOverrides,
+		// provider preferences, …) back where they were, not left pointing at
+		// the target project's config.
+		const previousSettingsCwd = this.settings.getCwd();
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -10257,6 +10533,26 @@ export class AgentSession implements SettingsScope {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			// Restore the active persona from the loaded session's history.
+			// Runs after model/thinking/serviceTier restoration so the persona
+			// prompt is applied last (same order as a fresh startup).
+			// Only fires when the session provides a resolvePersona callback;
+			// non-TUI callers (RPC, ACP, collab) benefit automatically once
+			// sdk.ts wires the callback into AgentSessionConfig.
+			if (this.#resolvePersona) {
+				const name = this.sessionManager.getLastAgentName();
+				const cwd = this.sessionManager.getCwd();
+				// Reload project-layer settings for the destination cwd before resolving
+				// the persona — otherwise task.disabledAgents and task.agentModelOverrides
+				// are still scoped to the previous project. reloadForCwd is a no-op when
+				// the cwd is unchanged (same-project resume). applyCwdChange() called later
+				// by the TUI layer is guarded the same way and will skip the second reload.
+				await this.settings.reloadForCwd(cwd);
+				const def = await this.#resolvePersona(name, cwd);
+				const { modelFailed } = await this.applyAgentPersona(def, { mode: "restore" });
+				if (modelFailed && def) this.#emitPersonaModelWarn(def);
+			}
+
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -10303,6 +10599,12 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
+			// Undo the reloadForCwd(cwd) the persona-restore block ran before the
+			// failure — restore project-layer settings to the previous project
+			// before rebuilding the display context below (which reads settings).
+			if (this.settings.getCwd() !== previousSettingsCwd) {
+				await this.settings.reloadForCwd(previousSettingsCwd);
+			}
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
@@ -10482,6 +10784,7 @@ export class AgentSession implements SettingsScope {
 
 			if (!skipConversationRestore) {
 				this.agent.replaceMessages(sessionContext.messages);
+				await this.#restorePersonaForBranch();
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
@@ -10593,13 +10896,14 @@ export class AgentSession implements SettingsScope {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
-			this.sessionManager.appendMessage({
-				role: "user",
-				content: [{ type: "text", text: question }],
-				attribution: "user",
-				timestamp: Date.now(),
-			});
-			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
+			this.sessionManager.appendMessage(
+				{ role: "user", content: [{ type: "text", text: question }], attribution: "user", timestamp: Date.now() },
+				this.activePersonaName ?? undefined,
+			);
+			this.sessionManager.appendMessage(
+				sanitizeAssistantForReparentedHistory(assistantMessage),
+				this.activePersonaName ?? undefined,
+			);
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
@@ -10941,6 +11245,7 @@ export class AgentSession implements SettingsScope {
 		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.agent.replaceMessages(displayContext.messages);
+		await this.#restorePersonaForBranch();
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

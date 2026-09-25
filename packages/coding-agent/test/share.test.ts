@@ -132,6 +132,56 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(plain)).toContain("hunter2-XYZZY");
 	});
 
+	test("redacts persona names in persona_change entries and message agent stamps", () => {
+		const secret = "personaleak-QRSTU";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "persona_change",
+				id: "p1",
+				parentId: null,
+				timestamp: ts,
+				personaName: `reviewer-${secret}`,
+			} as SessionEntry,
+			{
+				type: "persona_change",
+				id: "p2",
+				parentId: "p1",
+				timestamp: ts,
+				personaName: null,
+			} as SessionEntry,
+			{
+				type: "message",
+				id: "e1",
+				parentId: "p2",
+				timestamp: ts,
+				agent: `reviewer-${secret}`,
+				message: { role: "user", content: [{ type: "text", text: "hi" }] },
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "e1").header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+
+		expect(JSON.stringify(snapshot)).not.toContain(secret);
+		const personaEntries = snapshot.entries.filter(
+			(e): e is Extract<SessionEntry, { type: "persona_change" }> => e.type === "persona_change",
+		);
+		expect(personaEntries).toHaveLength(2);
+		expect(personaEntries[0]?.personaName).not.toBeNull();
+		expect(personaEntries[0]?.personaName).not.toContain(secret);
+		// Explicit-clear sentinel (null) must survive redaction as null, not become a string.
+		expect(personaEntries[1]?.personaName).toBeNull();
+
+		// Source entries must keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
 	test("redacts header cwd, bookmark labels, and file-mention paths", () => {
 		const secret = "shareleak-ABCDE";
 		const ts = "2026-06-12T00:00:00.000Z";

@@ -63,6 +63,84 @@ describe("CustomEditor keybindings", () => {
 		expect(onDisplayReset).toHaveBeenCalledTimes(1);
 		expect(onLiveToggle).toHaveBeenCalledTimes(1);
 	});
+
+	describe("persona cycle — Tab only fires on empty editor", () => {
+		it("cycles forward on Tab when the editor is empty", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			const onCycleForward = vi.fn();
+			editor.onCyclePersonaForward = onCycleForward;
+			editor.handleInput("\t");
+			expect(onCycleForward).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not cycle forward on Tab when the editor has text", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			const onCycleForward = vi.fn();
+			editor.onCyclePersonaForward = onCycleForward;
+			editor.handleInput("/");
+			editor.handleInput("\t");
+			expect(onCycleForward).not.toHaveBeenCalled();
+		});
+
+		it("cycles backward on Shift+Tab when the editor is empty", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			editor.setActionKeys("app.thinking.cycle", ["ctrl+tab"]);
+			editor.setActionKeys("app.persona.cycleBackward", ["shift+tab"]);
+			const onCycleBackward = vi.fn();
+			editor.onCyclePersonaBackward = onCycleBackward;
+			editor.handleInput("\x1b[Z");
+			expect(onCycleBackward).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not cycle backward on Shift+Tab when the editor has text", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			editor.setActionKeys("app.thinking.cycle", ["ctrl+tab"]);
+			editor.setActionKeys("app.persona.cycleBackward", ["shift+tab"]);
+			const onCycleBackward = vi.fn();
+			editor.onCyclePersonaBackward = onCycleBackward;
+			editor.handleInput("h");
+			editor.handleInput("\x1b[Z");
+			expect(onCycleBackward).not.toHaveBeenCalled();
+		});
+
+		it("falls through to base Tab completion when onCyclePersonaForward returns false", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			const onCycle = vi.fn(() => false as false);
+			editor.onCyclePersonaForward = onCycle;
+			editor.handleInput("\t");
+			// Callback fired once — the "no personas" signal was received
+			expect(onCycle).toHaveBeenCalledTimes(1);
+			// Base editor Tab completion opens a suggestion popup rather than inserting a
+			// literal tab character, so the text buffer stays empty.
+			expect(editor.getText()).toBe("");
+		});
+
+		it("falls through to thinking-level cycle when onCyclePersonaBackward returns false", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			editor.setActionKeys("app.thinking.cycle", ["ctrl+tab"]);
+			editor.setActionKeys("app.persona.cycleBackward", ["shift+tab"]);
+			const onCycleBackward = vi.fn(() => false as false);
+			const onCycleThinking = vi.fn();
+			editor.onCyclePersonaBackward = onCycleBackward;
+			editor.onCycleThinkingLevel = onCycleThinking;
+			editor.handleInput("\x1b[Z"); // Shift+Tab
+			expect(onCycleBackward).toHaveBeenCalledTimes(1);
+			expect(onCycleThinking).toHaveBeenCalledTimes(1);
+		});
+
+		it("does NOT call thinking cycle when persona backward succeeds (returns undefined)", () => {
+			const editor = new CustomEditor(getEditorTheme());
+			editor.setActionKeys("app.thinking.cycle", ["ctrl+tab"]);
+			editor.setActionKeys("app.persona.cycleBackward", ["shift+tab"]);
+			const onCycleBackward = vi.fn(); // returns undefined — success
+			const onCycleThinking = vi.fn();
+			editor.onCyclePersonaBackward = onCycleBackward;
+			editor.onCycleThinkingLevel = onCycleThinking;
+			editor.handleInput("\x1b[Z");
+			expect(onCycleBackward).toHaveBeenCalledTimes(1);
+			expect(onCycleThinking).not.toHaveBeenCalled();
+		});
+	});
 	it("exits on ctrl+d with an empty draft", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onExit = vi.fn();

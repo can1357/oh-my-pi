@@ -57,6 +57,7 @@ function makeGuestContext(): InteractiveModeContext {
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),
+			setReplicaPersonaName: () => {},
 			agent: {
 				state: { model: undefined },
 				setModel: () => {},
