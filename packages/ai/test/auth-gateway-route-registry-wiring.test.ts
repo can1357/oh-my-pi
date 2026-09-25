@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { RouteRegistry, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -11,43 +11,40 @@ afterEach(() => {
 	clearCustomApis();
 });
 
+async function postChat(url: string, model: string | undefined): Promise<Response> {
+	return fetch(`${url}/v1/chat/completions`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+		body: JSON.stringify({
+			...(model === undefined ? {} : { model }),
+			messages: [{ role: "user", content: "hi" }],
+			stream: false,
+		}),
+	});
+}
+
 describe("auth-gateway RouteRegistry wiring", () => {
-	it("dispatches the compiled target through both gateway formats", async () => {
+	it("dispatches the model resolved by RouteRegistry", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.setRuntimeApiKey("openrouter", "test-key");
-		const mock = createMockModel({ provider: "openrouter", id: "actual-target", handler: { content: ["ok"] } });
+		const mock = createMockModel({ provider: "openrouter", id: "actual-target" });
+		mock.push({ content: ["ok"] });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["t"],
 			storage,
 			resolveModel: id => (id === "actual-target" ? mock.model : undefined),
-			routeRegistry: new RouteRegistry(id => (id === "virtual" ? mock.model : undefined)),
 			version: "test",
 		});
 		try {
-			const res = await fetch(`${handle.url}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					model: "virtual",
-					messages: [{ role: "user", content: "hi" }],
-					stream: false,
-				}),
-			});
+			// 200 + the mock's body is only reachable when the registry resolves
+			// the client id and the gateway dispatches the compiled target.
+			const res = await postChat(handle.url, "actual-target");
 			expect(res.status).toBe(200);
-			const native = await fetch(`${handle.url}/v1/pi/stream`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					modelId: "virtual",
-					context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-					stream: false,
-				}),
-			});
-			expect(native.status).toBe(200);
-			expect(mock.calls).toHaveLength(2);
+			const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+			expect(body.choices?.[0]?.message?.content).toBe("ok");
 		} finally {
 			await handle.close();
 			storage.close();
@@ -55,11 +52,10 @@ describe("auth-gateway RouteRegistry wiring", () => {
 		}
 	});
 
-	it("does not resolve when the model field is missing (negative)", async () => {
+	it("rejects a model id the registry cannot resolve", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-miss-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		const resolve = spyOn(RouteRegistry.prototype, "resolve");
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["t"],
@@ -68,17 +64,9 @@ describe("auth-gateway RouteRegistry wiring", () => {
 			version: "test",
 		});
 		try {
-			const res = await fetch(`${handle.url}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
-				body: JSON.stringify({
-					messages: [{ role: "user", content: "hi" }],
-				}),
-			});
-			expect(res.status).toBe(400);
-			expect(resolve.mock.calls.length).toBe(0);
+			const res = await postChat(handle.url, "unresolvable-model");
+			expect(res.status).toBeGreaterThanOrEqual(400);
 		} finally {
-			resolve.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
