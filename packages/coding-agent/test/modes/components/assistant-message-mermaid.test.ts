@@ -234,12 +234,13 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 		expect(new Set(boxRows.map(displayCols)).size).toBe(1);
 	});
 
-	it("falls back to the fenced code block when Mermaid rendering fails", () => {
+	it("falls back to the framed code block when Mermaid rendering fails", () => {
 		const rendered = renderAssistantMessage("```mermaid\nthis is not mermaid\n```");
 
 		expect(TERMINAL.imageProtocol).toBeNull();
-		expect(rendered).toContain("```mermaid");
+		expect(rendered).toContain("╭─── mermaid ");
 		expect(rendered).toContain("this is not mermaid");
+		expect(rendered).not.toContain("```");
 	});
 });
 

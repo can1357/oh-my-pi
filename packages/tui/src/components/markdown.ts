@@ -2676,6 +2676,48 @@ export class Markdown implements Component {
 		return bodyLines;
 	}
 
+	/**
+	 * Render a code token as framed bars: a `╭─── lang ─────╮` rule above and a
+	 * `╰─────╯` rule below, with the body rows emitted literally between them.
+	 * The body keeps the literal-row contract (#7055): no rails, margins or
+	 * fills, so a terminal mouse-selection still copies the code byte-exact and
+	 * a copied heredoc terminator stays at column zero.
+	 */
+	#renderCodeBlockLines(token: Token, width: number): RenderedLine[] {
+		const codeIndent = padding(this.#codeBlockIndent);
+		const body = this.#renderCodeBodyLines(token, codeIndent);
+		const lineWidth = Math.max(1, width);
+		// Narrower than a minimal bar (`╭───╮`): a frame would exceed the render
+		// width and the wrap pass would shatter it, so emit the bare body rows.
+		if (lineWidth < 5) return body;
+
+		const box = this.#theme.symbols.boxRound;
+		const h = box.horizontal;
+		const cap = h.repeat(3);
+		const border = (text: string) => this.#theme.codeBlockBorder(text);
+		const lang = "lang" in token && typeof token.lang === "string" ? token.lang.trim() : "";
+
+		// Top bar: `╭─── lang ─────╮`; the label truncates like renderOutputBlock.
+		const topLeft = `${box.topLeft}${cap}`;
+		const topRight = box.topRight;
+		const maxLabelWidth = Math.max(0, lineWidth - visibleWidth(topLeft) - visibleWidth(topRight));
+		const label = lang && maxLabelWidth > 1 ? truncateToWidth(` ${lang} `, maxLabelWidth, Ellipsis.Omit) : "";
+		const topFill = h.repeat(
+			Math.max(0, lineWidth - visibleWidth(topLeft) - visibleWidth(label) - visibleWidth(topRight)),
+		);
+
+		// Bottom bar.
+		const bottomLeft = `${box.bottomLeft}${cap}`;
+		const bottomRight = box.bottomRight;
+		const bottomFill = h.repeat(Math.max(0, lineWidth - visibleWidth(bottomLeft) - visibleWidth(bottomRight)));
+
+		return [
+			renderedLine(`${border(topLeft)}${border(label)}${border(topFill)}${border(topRight)}`),
+			...body,
+			renderedLine(`${border(bottomLeft)}${border(bottomFill)}${border(bottomRight)}`),
+		];
+	}
+
 	#codeTokenHasClosingFence(token: Token): boolean {
 		const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
 		const firstLineEnd = raw.indexOf("\n");
@@ -2983,12 +3025,9 @@ export class Markdown implements Component {
 					}
 				}
 
-				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push(renderedLine(this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`)));
-				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
-					lines.push(bodyLine);
+				for (const codeLine of this.#renderCodeBlockLines(token, width)) {
+					lines.push(codeLine);
 				}
-				lines.push(renderedLine(this.#theme.codeBlockBorder("```")));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(renderedLine("")); // Add spacing after code blocks (unless space token follows)
 				}
@@ -3343,8 +3382,15 @@ export class Markdown implements Component {
 			const continuationIndent = indent + padding(visibleWidth(bullet));
 
 			// Process item tokens; nested-list lines arrive structurally tagged and
-			// already carry their own full indent.
-			const itemLines = this.#renderListItem(item.tokens || [], depth, width, styleContext);
+			// already carry their own full indent. Code blocks inside the item get
+			// the hang width so their bars compose inside the bullet indent.
+			const itemLines = this.#renderListItem(
+				item.tokens || [],
+				depth,
+				width,
+				styleContext,
+				visibleWidth(continuationIndent),
+			);
 
 			if (itemLines.length > 0) {
 				const firstLine = itemLines[0]!;
@@ -3381,6 +3427,7 @@ export class Markdown implements Component {
 		parentDepth: number,
 		width: number,
 		styleContext?: InlineStyleContext,
+		codeIndentWidth = 0,
 	): RenderedListItemLine[] {
 		const lines: RenderedListItemLine[] = [];
 
@@ -3417,13 +3464,14 @@ export class Markdown implements Component {
 					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
 				}
 			} else if (token.type === "code") {
-				// Code block in list item
-				const codeIndent = padding(this.#codeBlockIndent);
-				lines.push({ text: this.#theme.codeBlockBorder(`\`\`\`${token.lang || ""}`), nested: false });
-				for (const bodyLine of this.#renderCodeBodyLines(token, codeIndent)) {
-					lines.push({ ...bodyLine, nested: false });
+				// Code block in a list item. Bars are composed inside the item's
+				// hang width so the wrapper's bullet/hang prefixes still apply to
+				// them (a code-first item keeps its bullet); literal body rows
+				// stay flush at column 0, preserving byte-exact terminal copies.
+				const codeWidth = Math.max(1, width - codeIndentWidth);
+				for (const codeLine of this.#renderCodeBlockLines(token, codeWidth)) {
+					lines.push({ ...codeLine, nested: false });
 				}
-				lines.push({ text: this.#theme.codeBlockBorder("```"), nested: false });
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));

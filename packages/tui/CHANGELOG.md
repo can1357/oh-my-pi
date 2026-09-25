@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Message code blocks render between framed bars (language label above, rule below) instead of bare ``` fence rails; the body keeps the literal-row contract, so terminal selections stay byte-exact.
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

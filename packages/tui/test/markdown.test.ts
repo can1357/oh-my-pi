@@ -320,7 +320,8 @@ Average Latency: 1,240 ms
 			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
 
 			expect(plainLines.some(line => line.includes("| :--- | :--- |"))).toBe(true);
-			expect(plainLines.filter(line => line.includes("+"))).toHaveLength(0);
+			// Only the code block's own frame bars carry "+": no table rendered.
+			expect(plainLines.filter(line => line.includes("+"))).toHaveLength(2);
 		});
 
 		it("keeps a four-space-indented tree child inside its paragraph", () => {
@@ -846,15 +847,15 @@ again, hello world`,
 			const lines = markdown.render(80);
 			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
 
-			const closingBackticksIndex = plainLines.indexOf("```");
-			expect(closingBackticksIndex !== -1, "Should have closing backticks").toBeTruthy();
+			const closingBarIndex = plainLines.findLastIndex(line => /^\+-+\+$/.test(line));
+			expect(closingBarIndex !== -1, "Should have a code block frame").toBeTruthy();
 
-			const afterBackticks = plainLines.slice(closingBackticksIndex + 1);
-			const emptyLineCount = afterBackticks.findIndex(line => line !== "");
+			const afterFrame = plainLines.slice(closingBarIndex + 1);
+			const emptyLineCount = afterFrame.findIndex(line => line !== "");
 
 			expect(
 				emptyLineCount,
-				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after backticks: ${JSON.stringify(afterBackticks.slice(0, 5))}`,
+				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after frame: ${JSON.stringify(afterFrame.slice(0, 5))}`,
 			).toBe(1);
 		});
 
@@ -873,7 +874,8 @@ code block
 
 more text`,
 			];
-			const expectedLines = ["hello this is text", "", "```", "  code block", "```", "", "more text"];
+			const bar = `+${"-".repeat(78)}+`;
+			const expectedLines = ["hello this is text", "", bar, "  code block", bar, "", "more text"];
 
 			for (const text of cases) {
 				const markdown = new Markdown(text, 0, 0, defaultMarkdownTheme);
@@ -889,7 +891,43 @@ more text`,
 
 			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
 
-			expect(plainLines).toEqual([" ```sh", "cat <<'EOF'", "EOF", " ```"]);
+			// Framed bars carry the margin and fill; the body stays flush at
+			// column zero so a terminal copy pastes byte-exact (#7055).
+			const bar = (label: string) => {
+				const left = `+---${label}`;
+				return ` ${left}${"-".repeat(78 - left.length - 1)}+`;
+			};
+			expect(plainLines).toEqual([bar(" sh "), "cat <<'EOF'", "EOF", bar("")]);
+		});
+
+		it("keeps the bullet when a code block is a list item's first token", () => {
+			const markdown = new Markdown(
+				"- ```bash\n  echo hi\n  ```\n- second item",
+				1,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				0,
+			);
+			const plainLines = markdown.render(60).map(line => stripVTControlCharacters(line).trimEnd());
+
+			// The top bar takes the bullet on the item's first row, the hang
+			// indent frames the bottom bar, and the body stays flush at column 0.
+			expect(plainLines[0]!.startsWith(" - +--- bash ")).toBe(true);
+			expect(plainLines[1]).toBe("echo hi");
+			expect(plainLines[2]!.startsWith("   +---")).toBe(true);
+			expect(plainLines[3]).toBe(" - second item");
+		});
+
+		it("falls back to unframed rows when the width cannot fit a bar", () => {
+			const markdown = new Markdown("```sh\nabcdef\n```", 1, 0, defaultMarkdownTheme, undefined, 0);
+			const lines = markdown.render(6);
+
+			// A frame wider than the render width would be shattered by the wrap
+			// pass, so the bars step aside and the body renders bare.
+			expect(Math.max(...lines.map(line => visibleWidth(line)))).toBeLessThanOrEqual(6);
+			expect(stripVTControlCharacters(lines.join("\n"))).not.toContain("+---");
+			expect(stripVTControlCharacters(lines.join(""))).toContain("abcdef");
 		});
 
 		it("keeps literal code body rows unprefixed through nested container wrapping", () => {
@@ -976,7 +1014,7 @@ more text`,
 			expect(plainLines).toEqual([" Start", "   |", " Stop"]);
 		});
 
-		it("falls back to the original fenced code block when mermaid resolution returns null", () => {
+		it("falls back to the framed code block when mermaid resolution returns null", () => {
 			const invalidMermaid = "```mermaid\nflowchart TD\n  A --\n```";
 			const invalidSource = "flowchart TD\n  A --";
 			const seenSources: string[] = [];
@@ -987,7 +1025,11 @@ more text`,
 			});
 
 			expect(seenSources).toEqual([invalidSource]);
-			expect(plainLines).toEqual(["```mermaid", "  flowchart TD", "    A --", "```"]);
+			const bar = (label: string) => {
+				const left = `+---${label}`;
+				return `${left}${"-".repeat(80 - left.length - 1)}+`;
+			};
+			expect(plainLines).toEqual([bar(" mermaid "), "  flowchart TD", "    A --", bar("")]);
 		});
 	});
 
@@ -1379,9 +1421,9 @@ bar`,
 			const output = lines.join("\n");
 			const plainOutput = quotedLines.join("\n");
 
-			expect(plainOutput.includes("```js")).toBeTruthy();
+			expect(plainOutput.includes("+--- js ")).toBeTruthy();
 			expect(plainOutput.includes("console.log(1)")).toBeTruthy();
-			expect(plainOutput.includes("```")).toBeTruthy();
+			expect(plainOutput.split("\n").filter(line => line.includes("+")).length).toBe(2);
 			expect(output.includes("\x1b[35m")).toBeFalsy();
 			expect(output.includes("\x1b[3m")).toBeTruthy();
 		});
@@ -2595,9 +2637,11 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(code.length).toBeGreaterThan(2 * 1024);
 
 		const rendered = plain(doc);
-		// Exactly one fence pair: a window cut inside the block would close and
-		// reopen it (or spill code lines into prose).
-		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
+		// Exactly one framed block: a window cut inside it would close and
+		// reopen its bars (or spill code lines into prose).
+		expect(
+			rendered.filter(line => line.trim().startsWith("+---") && line.trim().endsWith("+")),
+		).toHaveLength(2);
 		const first = rendered.findIndex(line => line.includes("const value0 = 0;"));
 		expect(first).toBeGreaterThan(-1);
 		for (let i = 0; i < 200; i++) {

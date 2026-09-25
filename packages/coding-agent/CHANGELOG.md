@@ -15,6 +15,7 @@
 ### Added
 
 - Added `ctx.agent` to the extension context, reporting whether the session is the top-level agent or a subagent, plus its registry id, agent definition name, task depth and parent id, so handlers rebound to subagent sessions can tell which agent they serve ([#13314](https://github.com/can1357/oh-my-pi/pull/13314) by [@andrebrait](https://github.com/andrebrait))
+- Message code blocks now render with a language bar above and a closing rule below instead of ``` fence rails; the body rows keep the literal-row contract, so terminal copies stay byte-exact.
 
 ## [18.3.1] - 2026-09-25
 
