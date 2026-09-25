@@ -1,3 +1,4 @@
+import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -10,8 +11,6 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveReader,
@@ -20,78 +19,49 @@ import {
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
 import { getEditStore } from "../edit/store";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { formatHashlineHeader } from "./hashline-format";
+import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
+import { isOmpDocsRoot, ompDocsScopeEntries } from "../internal-urls/omp-scope";
 import { InternalUrlRouter } from "../internal-urls/router";
+import { tryResolveInternalUrlSync } from "../internal-urls/hyperlink-targets";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
-import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
+import { DEFAULT_MAX_COLUMN, truncateHead, truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
-import {
-	Ellipsis,
-	fileHyperlink,
-	getTreeBranch,
-	getTreeContinuePrefix,
-	renderStatusLine,
-	renderTreeList,
-	truncateToWidth,
-	tryResolveInternalUrlSync,
-	uriHyperlink,
-} from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { getExperimentalContextSession } from "./context-notes";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
-import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
-import { formatMatchLine } from "./match-line-format";
-import type { OutputMeta } from "./output-meta";
+import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
+import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	hasGlobPathChars,
 	isLineInRanges,
-	type LineRange,
-	parseLineRanges,
 	pathTargetsSsh,
+	probeLiteralPathExists,
 	type ResolvedSearchTarget,
 	resolveReadPath,
 	resolveToolSearchScope,
-	selectorLineRanges,
-	splitInternalUrlSel,
-	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
-	toPathList,
 } from "./path-utils";
+import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRawSelector } from "./read-selector";
-import {
-	createCachedComponent,
-	formatCodeFrameLine,
-	formatCount,
-	formatEmptyMessage,
-	formatErrorMessage,
-	formatMoreItems,
-	PREVIEW_LIMITS,
-	replaceTabs,
-} from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-const searchPathEntry = type("string").describe(
-	'file, directory, glob, internal URL, or "<file>:<lines>" selector to search (e.g. "src/foo.ts:50-100", "src/foo.ts:50+10", "src/foo.ts:50-100,200-300")',
-);
 const searchSchema = type({
-	pattern: type("string").describe("regex pattern"),
-	"path?": searchPathEntry.describe(
-		'file, directory, glob, internal URL, or "<file>:<lines>" selector to search; pass several as a semicolon-delimited list ("src; tests"). Omitted -> searches the workspace root (".")',
-	),
-	"case?": type("boolean").describe("case-sensitive search"),
-	"gitignore?": type("boolean").describe("respect gitignore"),
-	"skip?": type("number")
-		.or("null")
-		.describe("files to skip before collecting results — use to paginate when the prior call hit the file limit"),
+	pattern: type("string"),
+	"path?": "string",
+	"case?": "boolean",
+	"gitignore?": "boolean",
+	"skip?": type("number").or("null"),
 });
 
 export type GrepToolInput = typeof searchSchema.infer;
@@ -196,7 +166,7 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 					`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
 				);
 			}
-			if (hasGlobPathChars(split.path)) {
+			if (hasGlobPathChars(split.path) && (await probeLiteralPathExists(split.path, cwd)) === "missing") {
 				throw new ToolError(`Line-range selector requires a single file, not a glob: ${entry}`);
 			}
 			clean = split.path;
@@ -349,8 +319,6 @@ interface IndexedContentLines {
 	lines: string[];
 	starts: number[];
 }
-
-const OMP_ROOT_URL_RE = /^omp:\/\/(?:\/?|docs\/?)$/i;
 
 function normalizeSearchLine(line: string): string {
 	return line.endsWith("\r") ? line.slice(0, -1) : line;
@@ -549,7 +517,7 @@ async function nativeChunkedLineIndexes(
 }
 
 function makeContextLine(lines: readonly string[], lineIndex: number): { lineNumber: number; line: string } {
-	const { text } = truncateLine(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
+	const { text } = truncateLineBytes(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
 	return { lineNumber: lineIndex + 1, line: text };
 }
 
@@ -563,7 +531,7 @@ function makeVirtualMatch(
 	nextMatchLine: number,
 ): GrepMatch {
 	const lineNumber = lineIndex + 1;
-	const { text, wasTruncated } = truncateLine(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
+	const { text, wasTruncated } = truncateLineBytes(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
 	const match: GrepMatch = {
 		path: resource.path,
 		lineNumber,
@@ -746,25 +714,13 @@ function mergeGrepResults(left: GrepResult, right: GrepResult, maxCount: number)
 async function expandVirtualInternalResource(
 	rawPath: string,
 	resource: InternalResource,
-	internalRouter: InternalUrlRouter,
 	context: ResolveContext,
 	ranges: readonly LineRange[] | undefined,
 ): Promise<VirtualSearchResource[]> {
-	if (OMP_ROOT_URL_RE.test(rawPath)) {
-		const completions = await internalRouter.complete("omp", "");
-		if (completions && completions.length > 0) {
-			const resources: VirtualSearchResource[] = [];
-			const seen = new Set<string>();
-			for (const completion of completions) {
-				if (seen.has(completion.value)) continue;
-				seen.add(completion.value);
-				const docUrl = `omp://${completion.value}`;
-				const doc = await internalRouter.resolve(docUrl, context);
-				if (!doc.sourcePath) {
-					resources.push({ path: docUrl, content: doc.content, ranges });
-				}
-			}
-			if (resources.length > 0) return resources;
+	if (isOmpDocsRoot(rawPath)) {
+		const entries = await ompDocsScopeEntries(context);
+		if (entries.length > 0) {
+			return entries.map(entry => ({ path: entry.url, content: entry.content, ranges }));
 		}
 	}
 
@@ -786,6 +742,7 @@ async function resolveInternalSearchInputs(opts: {
 	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	session?: ResolveContext["session"];
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -801,6 +758,7 @@ async function resolveInternalSearchInputs(opts: {
 		sessionFile: opts.sessionFile,
 		sessionId: opts.sessionId,
 		agentRegistry: opts.agentRegistry,
+		session: opts.session,
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
 		rules: opts.rules,
@@ -850,13 +808,7 @@ async function resolveInternalSearchInputs(opts: {
 		}
 
 		const ranges = opts.pathSpecs[idx]?.ranges;
-		const expanded = await expandVirtualInternalResource(
-			rawPath,
-			resource,
-			internalRouter,
-			{ ...context, pathOnly: false },
-			ranges,
-		);
+		const expanded = await expandVirtualInternalResource(rawPath, resource, { ...context, pathOnly: false }, ranges);
 		virtualInputIndexes.add(idx);
 		for (const virtual of expanded) {
 			virtualResources.push(virtual);
@@ -874,36 +826,6 @@ async function resolveInternalSearchInputs(opts: {
 		immutableSourcePaths,
 		virtualScopePath,
 	};
-}
-
-export interface GrepToolDetails {
-	truncation?: TruncationResult;
-	fileLimitReached?: number;
-	perFileLimitReached?: number;
-	linesTruncated?: boolean;
-	meta?: OutputMeta;
-	scopePath?: string;
-	matchCount?: number;
-	fileCount?: number;
-	files?: string[];
-	fileMatches?: Array<{ path: string; count: number }>;
-	truncated?: boolean;
-	error?: string;
-	/** Pre-formatted text for the user-visible TUI render. Mirrors the model-facing
-	 * `result.text` lines but uses a `│` gutter and `*` to mark match lines (vs space for
-	 * context). The TUI uses this directly so it never parses model-facing hashline anchors. */
-	displayContent?: string;
-	/** Absolute base directory used during search. Used by the renderer to resolve
-	 * display-relative paths to absolute paths for OSC 8 hyperlinks. */
-	searchPath?: string;
-	/** Session cwd at search time. The renderer resolves the display-relative
-	 * (cwd-relative) header/match paths against this for OSC 8 hyperlinks;
-	 * `searchPath` is the scope label target, not the display-path base. */
-	cwd?: string;
-	/** User-supplied paths whose base directory was missing on disk. The tool
-	 * skipped these and continued with the surviving entries; surfaced as a
-	 * non-fatal warning in the renderer and in the model-facing text. */
-	missingPaths?: string[];
 }
 
 type SearchParams = typeof searchSchema.infer;
@@ -932,12 +854,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";
-	readonly summary = "Grep file contents using ripgrep (fast regex search)";
+	readonly summary = "Search file contents by regex";
 	get description(): string {
 		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(grepDescription, {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
@@ -1023,6 +946,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
+					session: this.session,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
@@ -1595,6 +1519,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 				const output = truncation.content;
 				const displayText = displayLines.join("\n");
+				let displayTargets: Record<string, string> | undefined;
+				for (const line of displayLines) {
+					const header = /^#+\s+([a-z][a-z0-9+.-]*:\/\/.*)$/i.exec(line);
+					if (!header) continue;
+					const target = header[1]!.trimEnd().replace(/\s+\([^)]*\)\s*$/, "");
+					const resolved = tryResolveInternalUrlSync(target);
+					if (resolved) (displayTargets ??= {})[target] = resolved;
+				}
 				const truncated = Boolean(
 					fileLimitReached ||
 					perFileLimitReached ||
@@ -1622,13 +1554,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							? perFileMatchCap
 							: undefined,
 					displayContent: displayText,
+					displayTargets,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};
 				if (truncation.truncated) details.truncation = truncation;
 				if (linesTruncated) details.linesTruncated = true;
 				const resultBuilder = toolResult(details)
 					.text(output)
-					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined });
+					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined, columnUnit: "bytes" });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}
@@ -1639,322 +1572,3 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		});
 	}
 }
-
-// =============================================================================
-// TUI Renderer
-// =============================================================================
-
-interface GrepRenderArgs {
-	pattern: string;
-	path?: string | string[];
-	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
-	paths?: string | string[];
-	case?: boolean;
-	gitignore?: boolean;
-	skip?: number;
-}
-
-const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
-/** Line budget for the expanded view. Larger than collapsed so expanding
- * reveals more matches with context, but still bounded so a single hot file
- * whose matches span the whole file can't dump its entire length. */
-const EXPANDED_TEXT_LIMIT = PREVIEW_LIMITS.EXPANDED_LINES * 2;
-
-const SEARCH_CODE_FRAME_LINE_RE = /^\s*\*?(\d+)│/;
-
-function searchScopeMeta(details: GrepToolDetails | undefined): string | undefined {
-	if (!details?.scopePath) return undefined;
-	const label = details.searchPath ? fileHyperlink(details.searchPath, details.scopePath) : details.scopePath;
-	return `in ${label}`;
-}
-
-function linkUrlLikeSearchHeader(raw: string, styled: string): { line: string; absPath?: string } {
-	const resolvedPath = tryResolveInternalUrlSync(raw);
-	if (resolvedPath) return { line: fileHyperlink(resolvedPath, styled), absPath: resolvedPath };
-	return { line: uriHyperlink(raw, styled) };
-}
-
-function parseSearchDisplayLineNumber(line: string): number | undefined {
-	const match = SEARCH_CODE_FRAME_LINE_RE.exec(line);
-	if (!match) return undefined;
-	return Number.parseInt(match[1]!, 10);
-}
-
-const SEARCH_MATCH_LINE_RE = /^\s*\*\d+(?:│|[:|])/;
-
-interface RenderedSearchLine {
-	raw: string;
-	styled: string;
-}
-
-function isSearchMatchLine(line: string): boolean {
-	return SEARCH_MATCH_LINE_RE.test(line);
-}
-
-function isSearchHeaderLine(line: string): boolean {
-	return /^#+ /.test(line);
-}
-
-const URL_HEADER_PREFIX_RE = /^#+\s+/;
-
-function renderSearchDisplayLines(
-	lines: readonly string[],
-	headerBase: string | undefined,
-	fileScope: string | undefined,
-	uiTheme: Theme,
-): RenderedSearchLine[] {
-	const contexts = classifyGroupedLines(lines, headerBase, fileScope);
-	// `classifyGroupedLines` can't resolve internal URLs (TUI-only), so track the
-	// resolved URL target here and use it for the body lines that follow.
-	let urlFile: string | undefined;
-	return lines.map((line, index) => {
-		const ctx = contexts[index]!;
-		if (ctx.kind === "dir") {
-			urlFile = undefined;
-			const styled = uiTheme.fg("accent", line);
-			return { raw: line, styled: ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled };
-		}
-		if (ctx.kind === "file") {
-			if (ctx.isUrl) {
-				const raw = line
-					.replace(URL_HEADER_PREFIX_RE, "")
-					.trimEnd()
-					.replace(/\s+\([^)]*\)\s*$/, "");
-				const linked = linkUrlLikeSearchHeader(raw, uiTheme.fg("accent", line));
-				urlFile = linked.absPath;
-				return { raw: line, styled: linked.line };
-			}
-			urlFile = undefined;
-			// Root-level files keep the bright accent; nested file headers are dimmed.
-			const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-			return { raw: line, styled: ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled };
-		}
-		const styled = uiTheme.fg("toolOutput", line);
-		const lineNumber = parseSearchDisplayLineNumber(line);
-		const filePath = ctx.filePath ?? urlFile;
-		return {
-			raw: line,
-			styled: filePath && lineNumber !== undefined ? fileHyperlink(filePath, styled, { line: lineNumber }) : styled,
-		};
-	});
-}
-
-function compactSearchPreviewGroup(group: RenderedSearchLine[]): RenderedSearchLine[] {
-	const compact = group.filter(line => isSearchHeaderLine(line.raw) || isSearchMatchLine(line.raw));
-	return compact.length > 0 ? compact : group;
-}
-
-function countPreviewMatches(lines: readonly RenderedSearchLine[], hasMarkedMatches: boolean): number {
-	if (hasMarkedMatches) return lines.reduce((count, line) => count + (isSearchMatchLine(line.raw) ? 1 : 0), 0);
-	return lines.reduce((count, line) => count + (!isSearchHeaderLine(line.raw) && line.raw.length > 0 ? 1 : 0), 0);
-}
-
-function renderBudgetedSearchGroups(
-	groups: RenderedSearchLine[][],
-	maxLines: number,
-	matchCount: number,
-	uiTheme: Theme,
-	compact: boolean,
-): string[] {
-	if (maxLines <= 0) return [];
-	const renderedGroups = groups
-		.map(group => (compact ? compactSearchPreviewGroup(group) : group))
-		.filter(group => group.length > 0);
-	if (renderedGroups.length === 0) return [];
-
-	let totalLines = 0;
-	let totalMarkedMatches = 0;
-	let totalFallbackMatches = 0;
-	for (const group of renderedGroups) {
-		totalLines += group.length;
-		totalMarkedMatches += countPreviewMatches(group, true);
-		totalFallbackMatches += countPreviewMatches(group, false);
-	}
-	const hasMarkedMatches = totalMarkedMatches > 0;
-	const needsSummary = totalLines > maxLines;
-	const contentBudget = needsSummary ? Math.max(maxLines - 1, 0) : maxLines;
-	const visibleGroups: RenderedSearchLine[][] = [];
-	let visibleLineCount = 0;
-	let visibleMatches = 0;
-	for (const group of renderedGroups) {
-		if (visibleLineCount >= contentBudget) break;
-		const available = contentBudget - visibleLineCount;
-		const take = Math.min(group.length, available);
-		if (take <= 0) break;
-		const visibleGroup = group.slice(0, take);
-		visibleGroups.push(visibleGroup);
-		visibleLineCount += visibleGroup.length;
-		visibleMatches += countPreviewMatches(visibleGroup, hasMarkedMatches);
-	}
-
-	const totalMatches = hasMarkedMatches ? totalMarkedMatches : Math.max(matchCount, totalFallbackMatches);
-	const hiddenMatches = Math.max(totalMatches - visibleMatches, 0);
-	const hiddenLines = Math.max(totalLines - visibleLineCount, 0);
-	const hasSummary = needsSummary && (hiddenMatches > 0 || hiddenLines > 0);
-	const lines: string[] = [];
-	for (let i = 0; i < visibleGroups.length; i++) {
-		const group = visibleGroups[i]!;
-		const isLast = !hasSummary && i === visibleGroups.length - 1;
-		const prefix = `${uiTheme.fg("dim", getTreeBranch(isLast, uiTheme))} `;
-		const continuePrefix = uiTheme.fg("dim", getTreeContinuePrefix(isLast, uiTheme));
-		lines.push(`${prefix}${replaceTabs(group[0]!.styled)}`);
-		for (let j = 1; j < group.length; j++) {
-			lines.push(`${continuePrefix}${replaceTabs(group[j]!.styled)}`);
-		}
-	}
-	if (hasSummary) {
-		const hiddenLabel =
-			hiddenMatches > 0 ? formatMoreItems(hiddenMatches, "match") : formatMoreItems(hiddenLines, "line");
-		lines.push(`${uiTheme.fg("dim", uiTheme.tree.last)} ${uiTheme.fg("muted", hiddenLabel)}`);
-	}
-	return lines;
-}
-
-function grepStatusIcon(uiTheme: Theme): string {
-	return uiTheme.fg("toolTitle", uiTheme.symbol("icon.search"));
-}
-
-export const grepToolRenderer = {
-	inline: true,
-	renderCall(args: GrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const paths = toPathList(args.path ?? args.paths);
-		const meta: string[] = [];
-		if (paths.length) meta.push(`in ${paths.join(", ")}`);
-		if (args.case === false) meta.push("case:insensitive");
-		if (args.gitignore === false) meta.push("gitignore:false");
-		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
-
-		const text = renderStatusLine(
-			{ icon: "pending", title: "Grep", titleColor: "toolTitle", description: args.pattern || "?", meta },
-			uiTheme,
-		);
-		return new Text(text, 1, 0);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: GrepToolDetails; isError?: boolean },
-		options: RenderResultOptions,
-		uiTheme: Theme,
-		args?: GrepRenderArgs,
-	): Component {
-		const details = result.details;
-
-		if (result.isError || details?.error) {
-			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
-		}
-
-		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
-
-		if (!hasDetailedData) {
-			const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text;
-			if (!textContent || textContent === "No matches found") {
-				return new Text(formatEmptyMessage("No matches found", uiTheme), 1, 0);
-			}
-			const lines = textContent.split("\n").filter(line => line.trim() !== "");
-			const description = args?.pattern ?? undefined;
-			const header = renderStatusLine(
-				{
-					iconOverride: grepStatusIcon(uiTheme),
-					title: "Grep",
-					titleColor: "toolTitle",
-					description,
-					meta: [formatCount("item", lines.length)],
-				},
-				uiTheme,
-			);
-			return createCachedComponent(
-				() => options.expanded,
-				width => {
-					const listLines = renderTreeList(
-						{
-							items: lines,
-							expanded: options.expanded,
-							maxCollapsed: COLLAPSED_TEXT_LIMIT,
-							maxCollapsedLines: COLLAPSED_TEXT_LIMIT,
-							itemType: "item",
-							renderItem: line => uiTheme.fg("toolOutput", line),
-						},
-						uiTheme,
-					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
-				},
-				{ paddingX: 1 },
-			);
-		}
-
-		const matchCount = details?.matchCount ?? 0;
-		const fileCount = details?.fileCount ?? 0;
-		const truncation = details?.meta?.truncation;
-		const limits = details?.meta?.limits;
-		const truncated = Boolean(details?.truncated || truncation || limits?.columnTruncated);
-
-		const missingPathsList = details?.missingPaths ?? [];
-		const missingNote =
-			missingPathsList.length > 0
-				? uiTheme.fg("warning", `skipped missing: ${missingPathsList.join(", ")}`)
-				: undefined;
-
-		if (matchCount === 0) {
-			const meta = ["0 matches"];
-			const scopeMeta = searchScopeMeta(details);
-			if (scopeMeta) meta.push(scopeMeta);
-			const header = renderStatusLine(
-				{ icon: "warning", title: "Grep", titleColor: "toolTitle", description: args?.pattern, meta },
-				uiTheme,
-			);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
-			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 1, 0);
-		}
-
-		const summaryParts = [formatCount("match", matchCount), formatCount("file", fileCount)];
-		const meta = [...summaryParts];
-		const scopeMeta = searchScopeMeta(details);
-		if (scopeMeta) meta.push(scopeMeta);
-		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
-		const description = args?.pattern ?? undefined;
-		const header = renderStatusLine(
-			{
-				...(truncated ? { icon: "warning" as const } : { iconOverride: grepStatusIcon(uiTheme) }),
-				title: "Grep",
-				titleColor: "toolTitle",
-				description,
-				meta,
-			},
-			uiTheme,
-		);
-
-		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
-		const allLines = textContent.split("\n");
-		// Resolve hyperlinks once over the whole output so a nested directory stack
-		// reconstructs correctly across blank-line group boundaries.
-		// Header/match display paths are cwd-relative, so resolve them against cwd
-		// (falling back to searchPath for legacy results that predate `cwd`); the
-		// scoped file's absolute path seeds body lines in single-file searches.
-		const renderedLines = renderSearchDisplayLines(
-			allLines,
-			details?.cwd ?? details?.searchPath,
-			details?.searchPath,
-			uiTheme,
-		);
-		const matchGroups = groupLineIndicesByBlank(allLines).map(indices => indices.map(i => renderedLines[i]!));
-
-		const extraLines: string[] = [];
-		if (missingNote) extraLines.push(missingNote);
-
-		return createCachedComponent(
-			() => options.expanded,
-			width => {
-				const budget = Math.max(
-					(options.expanded ? EXPANDED_TEXT_LIMIT : COLLAPSED_TEXT_LIMIT) - extraLines.length,
-					0,
-				);
-				const matchLines = renderBudgetedSearchGroups(matchGroups, budget, matchCount, uiTheme, !options.expanded);
-				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
-			},
-			{ paddingX: 1 },
-		);
-	},
-	mergeCallAndResult: true,
-};

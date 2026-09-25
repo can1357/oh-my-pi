@@ -454,7 +454,6 @@ fn generated_filename(display: &str) -> Option<String> {
 		r"\.gen\.(go|ts|js|py)$",
 		r"^generated\.(go|ts|js|py)$",
 		r"\.swagger\.json$",
-		r"\.openapi\.json$",
 		r"\.mock\.(go|ts)$",
 		r"\.mocks?\.(go|ts|js)$",
 	];
@@ -687,6 +686,19 @@ mod tests {
 		assert!(
 			p.auto_generated_message("guard.txt", b"// @generated")
 				.is_none()
+		);
+	}
+
+	#[test]
+	fn permits_hand_authored_openapi_json() {
+		let tmp = tempfile::tempdir().unwrap();
+		let p = policy(tmp.path());
+		assert!(
+			p.auto_generated_message(
+				"api.openapi.json",
+				br#"{"openapi":"3.1.0","info":{"title":"Demo","version":"v1"}}"#
+			)
+			.is_none()
 		);
 	}
 

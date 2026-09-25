@@ -3,6 +3,57 @@
 // from neutral seeds instead of TypeScript per-id branches.
 
 provider "grokbot" {
+	default-model "sand-default"
+	env "GROKBOT_RENEWAL_CREDENTIAL" "SAND_INFERENCE_RENEWAL_CREDENTIAL"
+	dynamic-models-authoritative #true
+	discovery label="Grok Bot (not Cursor, not xAI)" {
+		env "GROKBOT_RENEWAL_CREDENTIAL" "SAND_INFERENCE_RENEWAL_CREDENTIAL"
+	}
+
+	// Tiny offline seed (sand routers + Auto + grok-4.6). Live AvailableModels
+	// is authoritative when a renewer is present; `fallback` keeps the seed out
+	// of bundles regenerated with a live snapshot. Runtime `staticModels` stay
+	// code-side (`buildGrokbotStaticSeed`) so `baseUrl` overrides still apply —
+	// keep these rows in sync with GROKBOT_MODEL_SEEDS.
+	seed api="grokbot-sand" base-url="https://api2.cursor.sh" bundle="fallback" {
+		model "sand-default" name="sand-default (routed)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "sand-cua" name="sand-cua (routed)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "sand-automation" name="sand-automation (routed)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "default" name="Auto" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "auto" name="auto" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "grok-4.6" name="Grok 4.6 (sand)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+	}
+
 	// AvailableModels / seed-owned ladders must survive generate-models rebake,
 	// and buildModel must not invent fallback efforts when no thinking-efforts
 	// rule matched (routers, fast-only, unrecognized upstream-only values).

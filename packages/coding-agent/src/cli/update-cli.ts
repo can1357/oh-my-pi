@@ -4,7 +4,6 @@
  * Handles `omp update` to check for and install updates.
  * Uses the installer that owns the active omp executable when it can be detected.
  */
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,31 +14,26 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { settings } from "../config/settings";
-import { theme } from "../modes/theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	isTimeoutError,
 	isUnsupportedProxyError,
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
+import {
+	DEFAULT_NPM_REGISTRY,
+	loadNpmRegistryResolver,
+	type NpmRegistry,
+	type NpmRegistryResolver,
+	npmRegistryPackageUrl,
+} from "./npm-registry";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
-/**
- * Official npm registry origin.
- *
- * Pinned across both the version check and the bun install step so the two
- * agree on which catalog they are talking to. A user's bun may be pointed at
- * an unofficial mirror (corporate proxy, Taobao, etc.) that lags the upstream
- * registry by minutes-to-hours, in which case `getLatestRelease` would resolve
- * a version the mirror has not yet replicated and the install would fail with
- * `No version matching "X" found for specifier "<pkg>" (but package exists)`.
- * See #1686.
- */
-const NPM_REGISTRY = "https://registry.npmjs.org/";
 const GITHUB_API = "https://api.github.com";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
@@ -97,6 +91,11 @@ export interface ReleaseInfo {
 	dist?: ReleaseDist;
 	/** npm names to install, resolved after following any `omp.rename` pointers. */
 	packages: ReleasePackages;
+	/**
+	 * Registry URL the version was resolved from; bun/npm installs pin to it
+	 * so the install sees the same catalog as the check. See #1686.
+	 */
+	registry: string;
 }
 
 export interface ReleaseBinaryAsset {
@@ -107,6 +106,46 @@ export interface ReleaseBinaryAsset {
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+type GitHubCliTokenRunner = (ghPath: string) => Promise<string | undefined>;
+
+async function readGitHubCliToken(ghPath: string): Promise<string | undefined> {
+	try {
+		const result = await $`${ghPath} auth token --hostname github.com`.quiet().nothrow();
+		if (result.exitCode !== 0) return undefined;
+		const token = result.text().trim();
+		return token.length > 0 ? token : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function resolveGitHubToken(
+	options: {
+		envToken?: string;
+		ghPath?: string | null;
+		runGhAuthToken?: GitHubCliTokenRunner;
+	} = {},
+): Promise<string | undefined> {
+	const envToken = options.envToken ?? ($env.GITHUB_TOKEN || $env.GH_TOKEN);
+	if (envToken) return envToken;
+
+	const ghPath = options.ghPath === null ? undefined : (options.ghPath ?? $which("gh"));
+	if (!ghPath) return undefined;
+
+	const token = await (options.runGhAuthToken ?? readGitHubCliToken)(ghPath);
+	return token?.trim() || undefined;
+}
+
+/** Test hook for the GitHub credential precedence without invoking a real CLI. */
+export async function resolveGitHubTokenForTest(
+	options: {
+		envToken?: string;
+		ghPath?: string | null;
+		runGhAuthToken?: GitHubCliTokenRunner;
+	} = {},
+): Promise<string | undefined> {
+	return resolveGitHubToken(options);
+}
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -246,15 +285,16 @@ async function getReleaseBinaryAsset(
 	expectedVersion: string,
 	binaryName: string,
 	fetchImpl: Fetch = fetch,
-	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+	githubToken?: string,
 	allowPrerelease = false,
 ): Promise<ReleaseBinaryAsset> {
 	const tag = `v${expectedVersion}`;
+	const resolvedGitHubToken = githubToken ?? (await resolveGitHubToken());
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
-	if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+	if (resolvedGitHubToken) headers.Authorization = `Bearer ${resolvedGitHubToken}`;
 
 	let response: Response;
 	try {
@@ -269,7 +309,7 @@ async function getReleaseBinaryAsset(
 		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
-	if ((response.status === 403 && !githubToken) || response.status === 429) {
+	if ((response.status === 403 && !resolvedGitHubToken) || response.status === 429) {
 		throw new Error(
 			"GitHub API rate limit exceeded while fetching release metadata; retry later or set GITHUB_TOKEN or GH_TOKEN",
 		);
@@ -313,7 +353,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		throw new Error(`Download failed: ${response.statusText}`);
 	}
 
-	const hash = createHash("sha256");
+	const hash = new Bun.SHA256();
 	let size = 0;
 	const verifier = new Transform({
 		transform(chunk, _encoding, callback) {
@@ -766,33 +806,64 @@ const MAX_RENAME_HOPS = 3;
 
 async function fetchLatestManifest(
 	pkg: string,
+	registry: NpmRegistry,
 	timeoutMs: number,
 	channel: UpdateChannel,
 ): Promise<{ version: string; manifest: Record<string, unknown> }> {
-	let response: Response;
-	try {
-		response = await fetch(`${NPM_REGISTRY}${pkg}/${channel === "canary" ? "canary" : "latest"}`, {
-			signal: withTimeoutSignal(timeoutMs),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error(`Timed out fetching release info for ${pkg} after ${Math.round(timeoutMs / 1000)}s`, {
-				cause: err,
-			});
+	const tag = channel === "canary" ? "canary" : "latest";
+	const headers: Record<string, string> = { accept: "application/json" };
+	if (registry.authorization) headers.authorization = registry.authorization;
+	const origin = registry.url === DEFAULT_NPM_REGISTRY ? "" : ` from ${registry.url} (${registry.source})`;
+	const get = async (url: string): Promise<Response> => {
+		try {
+			return await fetch(url, { headers, signal: withTimeoutSignal(timeoutMs) });
+		} catch (err) {
+			if (isTimeoutError(err)) {
+				throw new Error(
+					`Timed out fetching release info for ${pkg}${origin} after ${Math.round(timeoutMs / 1000)}s`,
+					{ cause: err },
+				);
+			}
+			if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
+			throw err;
 		}
-		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
-		throw err;
+	};
+	const noCanary = () =>
+		new Error(`No canary release has been published for ${pkg} yet. Try \`${APP_NAME} update --stable\`.`);
+
+	let response = await get(npmRegistryPackageUrl(registry, pkg, tag));
+	let data: unknown;
+	if (!response.ok && origin && [400, 404, 405].includes(response.status)) {
+		// Not every registry implementation serves npmjs's `/<pkg>/<dist-tag>`
+		// shortcut; the full packument is the one endpoint all of them share.
+		response = await get(npmRegistryPackageUrl(registry, pkg));
+		if (response.ok) {
+			const packument: unknown = await response.json();
+			const distTags = isRecord(packument) ? packument["dist-tags"] : undefined;
+			const version = isRecord(distTags) ? distTags[tag] : undefined;
+			if (typeof version !== "string") {
+				if (channel === "canary") throw noCanary();
+				throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing dist-tags.${tag}`);
+			}
+			const versions = isRecord(packument) ? packument.versions : undefined;
+			data = isRecord(versions) ? versions[version] : undefined;
+			if (!isRecord(data)) {
+				throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing versions.${version}`);
+			}
+		}
 	}
 	if (!response.ok) {
-		if (response.status === 404 && channel === "canary") {
-			throw new Error(`No canary release has been published for ${pkg} yet. Try \`${APP_NAME} update --stable\`.`);
-		}
-		throw new Error(`Failed to fetch release info for ${pkg}: ${response.statusText}`);
+		if (response.status === 404 && channel === "canary") throw noCanary();
+		const authHint =
+			response.status === 401 || response.status === 403 ? "; check the registry credentials in your .npmrc" : "";
+		throw new Error(
+			`Failed to fetch release info for ${pkg}${origin}: ${response.status} ${response.statusText}${authHint}`,
+		);
 	}
 
-	const data: unknown = await response.json();
+	data ??= await response.json();
 	if (!isRecord(data) || typeof data.version !== "string") {
-		throw new Error(`Malformed npm registry response for ${pkg}: missing version`);
+		throw new Error(`Malformed npm registry response for ${pkg}${origin}: missing version`);
 	}
 	return { version: data.version, manifest: data };
 }
@@ -803,22 +874,29 @@ async function fetchLatestManifest(
  * npm name. Version, dist, and install names all come from the final manifest
  * in the chain. Uses npm instead of GitHub API to avoid unauthenticated rate
  * limiting.
+ *
+ * The registry comes from the user's npm/bun configuration
+ * ({@link loadNpmRegistryResolver}), so a configured feed is honored for every
+ * install method, including standalone binaries.
  */
 export async function getLatestRelease(
-	options: { timeoutMs?: number; channel?: UpdateChannel } = {},
+	options: { timeoutMs?: number; channel?: UpdateChannel; registries?: NpmRegistryResolver } = {},
 ): Promise<ReleaseInfo> {
 	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
 	const channel = options.channel ?? "stable";
+	const registries = options.registries ?? (await loadNpmRegistryResolver());
 	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
 	const visited = new Set([packages.pkg]);
-	let latest = await fetchLatestManifest(packages.pkg, timeoutMs, channel);
+	let registry = registries(packages.pkg);
+	let latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel);
 	for (let hop = 0; hop < MAX_RENAME_HOPS; hop++) {
 		const rename = resolveReleaseRename(latest.manifest);
 		if (!rename || visited.has(rename.pkg)) break;
 		visited.add(rename.pkg);
 		packages.pkg = rename.pkg;
 		if (rename.natives) packages.natives = rename.natives;
-		latest = await fetchLatestManifest(packages.pkg, timeoutMs, channel);
+		registry = registries(packages.pkg);
+		latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel);
 	}
 
 	return {
@@ -826,6 +904,7 @@ export async function getLatestRelease(
 		version: latest.version,
 		dist: resolveReleaseDist(latest.manifest),
 		packages,
+		registry: registry.url,
 	};
 }
 
@@ -1234,12 +1313,33 @@ async function unlinkIfExists(filePath: string): Promise<void> {
  *
  * On Windows the executable that was just moved aside is still mapped as the
  * running process image, so unlinking it fails with EPERM/EACCES until this
- * process exits (issue #845). The replacement and verification already
- * succeeded by the time we get here, so every error is swallowed; the leftover
- * is reclaimed by {@link sweepStaleUpdateArtifacts} on the next update once it
- * is no longer in use. Returns whether the file is gone.
+ * process exits (issue #845). On macOS the same unlink would instead succeed
+ * while breaking the live process's TCC permission attribution — macOS
+ * resolves grants against the executable's on-disk image path — so a `.bak`
+ * still mapped by any process is retained for a later sweep. The replacement
+ * and verification already succeeded by the time we get here, so every error
+ * is swallowed; the leftover is reclaimed by {@link sweepStaleUpdateArtifacts}
+ * on the next update once it is no longer in use. Returns whether the file is
+ * gone.
  */
 async function removeBackupBestEffort(filePath: string): Promise<boolean> {
+	// macOS only, `.bak` only: a `.new` temp file is a download in progress,
+	// never an installed image, and Windows/Linux locking is already handled by
+	// the swallow below — so both stay ungated.
+	if (process.platform === "darwin" && filePath.endsWith(".bak")) {
+		// `/usr/sbin/lsof -t` prints the PIDs holding the file; exit 1 with
+		// empty stdout and stderr is the only result that proves the file is
+		// unused. Live users, a missing lsof, or diagnostics on stderr all
+		// retain the file for a later sweep.
+		let provenUnused = false;
+		try {
+			const result = await $`/usr/sbin/lsof -t -- ${filePath}`.quiet().nothrow();
+			provenUnused = result.exitCode === 1 && result.stdout.length === 0 && result.stderr.length === 0;
+		} catch {
+			// lsof missing or failed to spawn — retain conservatively.
+		}
+		if (!provenUnused) return false;
+	}
 	try {
 		await fs.promises.unlink(filePath);
 		return true;
@@ -1255,8 +1355,12 @@ async function removeBackupBestEffort(filePath: string): Promise<boolean> {
  * previous executable to `<binary>.<timestamp>.<pid>.bak` before swapping the
  * new one in. On Windows a backup cannot be deleted while the updating process
  * is alive (it is the running process image), so it is left for a later run to
- * reclaim once its owning process has exited. A `.new` temp file only survives
- * a hard kill mid-download; it is reaped once older than the download window,
+ * reclaim once its owning process has exited. On macOS the sweep must also
+ * spare a backup that any process still maps as its executable image —
+ * unlinking it would break the live process's TCC permission attribution — so
+ * a live image survives until its process exits. A `.new` temp file only
+ * survives a hard kill mid-download; it is reaped once older than the download
+ * window,
  * which a live download cannot exceed without timing out and cleaning up after
  * itself — so a concurrent run's in-progress temp is never deleted. Legacy
  * fixed `<binary>.bak` / `<binary>.new` names (from before suffixes were made
@@ -1328,8 +1432,10 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 
 		backupReady = false;
 		// Swap done and verified. On Windows the backup is still the running
-		// process image and cannot be unlinked until this process exits, so a
-		// failure here must NOT fail an otherwise-successful update.
+		// process image and cannot be unlinked until this process exits, and on
+		// macOS unlinking the still-mapped backup would break the live image's
+		// TCC permission attribution, so either way a failure here must NOT fail
+		// an otherwise-successful update.
 		await removeBackupBestEffort(options.backupPath);
 		return verification;
 	} catch (err) {
@@ -1357,13 +1463,15 @@ function buildVersionedPackageInstallArgs(
 /**
  * Build the bun argv used to globally install a specific omp version.
  *
- * The version is selected by hitting {@link NPM_REGISTRY} directly in
- * {@link getLatestRelease}, so the install MUST observe the same catalog:
+ * The version is selected by querying the resolved registry in
+ * {@link getLatestRelease} ({@link ReleaseInfo.registry}), so the install
+ * MUST observe the same catalog:
  *
- * - `--registry=${NPM_REGISTRY}` pins the install to the official registry
- *   regardless of the user's bunfig/`.npmrc`. A mirror (corporate proxy,
- *   Taobao, …) that hasn't yet replicated the release would otherwise reject
- *   a version the upstream registry already advertises.
+ * - `--registry=<release registry>` pins the install to the registry the
+ *   check used. That is the user's configured feed when one is set, and
+ *   {@link DEFAULT_NPM_REGISTRY} otherwise, so a bun whose own resolution
+ *   differs (project bunfig, lagging mirror) cannot reject a version the
+ *   check already advertised.
  * - `--no-cache` tells bun to ignore its on-disk manifest snapshot so it
  *   re-fetches metadata from that registry on every invocation.
  *
@@ -1388,18 +1496,21 @@ export function buildBunInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
 	packages: ReleasePackages = CURRENT_PACKAGES,
+	options: { registry?: string } = {},
 ): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
-		`--registry=${NPM_REGISTRY}`,
+		`--registry=${options.registry ?? DEFAULT_NPM_REGISTRY}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
 
 /**
  * Build the npm argv used to update npm-managed global installs.
+ * Pins `--registry` to the checked registry for the same reason as
+ * {@link buildBunInstallArgs}.
  *
  * `force` is set only for rename migrations: npm refuses to write the `omp`
  * bin while the old package still owns it (`EEXIST`), and the migration
@@ -1410,13 +1521,13 @@ export function buildNpmInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
 	packages: ReleasePackages = CURRENT_PACKAGES,
-	flags: { force?: boolean } = {},
+	flags: { force?: boolean; registry?: string } = {},
 ): string[] {
 	return [
 		"install",
 		"-g",
 		...(flags.force ? ["--force"] : []),
-		`--registry=${NPM_REGISTRY}`,
+		`--registry=${flags.registry ?? DEFAULT_NPM_REGISTRY}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
@@ -1425,8 +1536,25 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
 }
 
-export function buildMiseUpgradeArgs(): string[] {
-	return ["upgrade", MISE_TOOL, "--bump"];
+/**
+ * Build the attended mise update command.
+ *
+ * `--before 0s` overrides global and per-tool release-age settings for this
+ * invocation. Unlike `MISE_MINIMUM_RELEASE_AGE`, the command option has the
+ * precedence required when the tool entry itself sets `minimum_release_age`.
+ * `--before` is accepted by mise releases with release-age filtering and is
+ * the hidden compatibility name for `--minimum-release-age` in current mise.
+ * Older mise releases predate the option and reject unknown flags, so callers
+ * omit it when the installed command help does not advertise either name.
+ */
+export function buildMiseUpgradeArgs(supportsReleaseAgeOverride = true): string[] {
+	return ["upgrade", MISE_TOOL, "--bump", ...(supportsReleaseAgeOverride ? ["--before", "0s"] : [])];
+}
+
+export function buildMiseUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+	return { ...base, MISE_MINIMUM_RELEASE_AGE: "0s" };
 }
 
 export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
@@ -1469,10 +1597,15 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
 	return {
 		async install() {
 			if (manager === "bun") {
-				const args = buildBunInstallArgs(release.version, nativeTag, release.packages);
+				const args = buildBunInstallArgs(release.version, nativeTag, release.packages, {
+					registry: release.registry,
+				});
 				return (await $`bun ${args}`.nothrow()).exitCode;
 			}
-			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, { force: true });
+			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
+				force: true,
+				registry: release.registry,
+			});
 			return (await $`npm ${args}`.nothrow()).exitCode;
 		},
 		async removeOld() {
@@ -1548,7 +1681,9 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 	if (release.packages.pkg !== PACKAGE) {
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release));
 	} else {
-		const args = buildBunInstallArgs(release.version, currentNativeTag(), release.packages);
+		const args = buildBunInstallArgs(release.version, currentNativeTag(), release.packages, {
+			registry: release.registry,
+		});
 		const result = await $`bun ${args}`.nothrow();
 		if (result.exitCode !== 0) {
 			throw new Error(`bun install failed with exit code ${result.exitCode}`);
@@ -1572,7 +1707,9 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release));
 		return undefined;
 	}
-	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages);
+	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
+		registry: release.registry,
+	});
 	const result = await $`npm ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
@@ -1700,15 +1837,18 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
 	console.log(chalk.dim("Updating via mise..."));
-	const args = buildMiseUpgradeArgs();
-	const result = await $`mise ${args}`.nothrow();
+	const env = buildMiseUpdateEnv();
+	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
+	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
+	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
+	const result = await $`mise ${args}`.env(env).nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.nothrow();
+		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
 		if (forceResult.exitCode !== 0) {
 			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
 		}

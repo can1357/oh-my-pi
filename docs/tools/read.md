@@ -61,7 +61,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - `resolvedPath`
    - `suffixResolution`
    - URL fields: `url`, `finalUrl`, `contentType`, `method`, `notes`
-   - `truncation`
+   - `truncation` (`ReadTruncationStats`: counters and flags only; no duplicate `content` field)
    - `displayContent` (unprefixed text + starting line for TUI rendering)
    - `summary` (`lines`, `elidedSpans`, `elidedLines`) for structural summaries
    - `conflictCount` for `<path>:conflicts`
@@ -69,6 +69,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - `meta` from `packages/coding-agent/src/tools/output-meta.ts`
 - `details.meta.source` is set to the backing path, URL, or internal URL.
 - `details.meta.truncation` carries shown range, total lines/bytes, next offset, and optional `artifactId` for cached URL output.
+- Read result bodies live in `content`; `details.displayContent` remains the unprefixed TUI representation. Extensions that previously read `details.truncation.content` must use those fields instead. Older session records containing the extra field still load and render without migration.
 - Directory/archive listings and SQLite table lists also set `details.meta.limits` when list limits trigger.
 
 ## Flow
@@ -226,8 +227,10 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Internal URLs
 
-- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
+- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
    - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
+   - `agent://<id>` reads a subagent's output; `agent://all` is write-only. Bare `history://` lists registered agents and persisted subagents; `history://<id>` reads a transcript.
+   - `proc://` lists caller-visible background jobs (including running agents without job rows) and project services; `proc://<id>` returns status and available output/logs without consuming async-result delivery. Service log files are searchable with `grep proc://<id>`.
    - `xd://` lists mounted tool devices; `xd://<name>` returns that device's input documentation. Writing JSON to the same URI dispatches the device through `write`.
    - `ssh://host/<path>` reads a remote UTF-8 file or directory; bare `ssh://` lists configured hosts. Remote paths are limited to 1 MiB and require a POSIX remote shell. Percent-encode literal `:`, `?`, or `#` in the path.
    - `history://current/full` exposes the caller's complete current branch when `compaction.experimentalContextManagement` is enabled. It includes original text, tool outputs, entry IDs, and compaction boundaries. Use shared line/raw selectors such as `history://current/full:raw:1-200`; queries, fragments, extra paths, and trailing slashes are rejected. It requires a matching live session owner and never falls back to registry or disk lookup. Bare `history://current` still names an ordinary agent called `current`. See [experimental context windows](../compaction.md#experimental-notes-backed-context-windows).

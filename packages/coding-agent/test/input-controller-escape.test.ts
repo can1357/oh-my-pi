@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
@@ -21,12 +22,8 @@ type FakeEditor = {
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
 	onLeftAtStart?: () => void;
-	onHistorySearch?: () => void;
 	onPasteImage?: () => void;
 	onCopyPrompt?: () => void;
-	onExpandTools?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
 	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	setText(text: string): void;
@@ -35,6 +32,7 @@ type FakeEditor = {
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
+	spaceHold: SpaceHoldGesture;
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 };
@@ -126,6 +124,7 @@ function createContext(): {
 		setActionKeys: vi.fn(),
 		setCustomKeyHandler: vi.fn(),
 		clearCustomKeyHandlers: vi.fn(),
+		spaceHold: new SpaceHoldGesture(() => {}),
 		pendingImages: [],
 		pendingImageLinks: [],
 	};
@@ -215,6 +214,7 @@ function createContext(): {
 		unfocusSession: vi.fn(async () => {}),
 		focusParentSession: vi.fn(async () => {}),
 		handleSTTToggle: vi.fn(),
+		dictationSpaceHold: vi.fn(),
 		handleBtwEscape,
 		handleBtwCommand,
 		hasActiveBtw,
@@ -376,7 +376,7 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
-	it("aborts a streaming loop iteration without pausing the loop", () => {
+	it("suspends a streaming loop iteration and pauses the loop", () => {
 		const { ctx, editor, spies } = createContext();
 		const pauseLoop = vi.fn();
 		ctx.loopModeEnabled = true;
@@ -387,9 +387,9 @@ describe("InputController escape behavior", () => {
 		controller.setupKeyHandlers();
 		editor.onEscape?.();
 
-		expect(pauseLoop).not.toHaveBeenCalled();
-		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
 	});
 
 	it("pauses an idle loop and cancels its pending submission", () => {

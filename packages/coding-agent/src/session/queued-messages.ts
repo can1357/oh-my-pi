@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { MAGIC_KEYWORDS } from "../modes/magic-keywords";
 import type { RestoredQueuedMessage } from "./agent-session-types";
 import { type CustomMessage, readQueueChipText } from "./messages";
 
@@ -62,12 +63,8 @@ export function isUserQueuedMessage(message: AgentMessage): boolean {
 	return message.role === "custom" && message.attribution === "user" && message.display !== false;
 }
 
-/** Hidden magic-keyword notices queued alongside a user prompt. */
-export const MAGIC_KEYWORD_NOTICE_TYPES: Record<string, true> = {
-	"ultrathink-notice": true,
-	"orchestrate-notice": true,
-	"workflow-notice": true,
-};
+/** Hidden magic-keyword notice types (`<id>-notice`) queued alongside a user prompt. */
+const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set(MAGIC_KEYWORDS.map(keyword => `${keyword.id}-notice`));
 
 /** Hidden companion carrying vision descriptions for a text-only model. */
 export const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
@@ -78,8 +75,7 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 		message.role === "custom" &&
 		message.attribution === "user" &&
 		message.display === false &&
-		(MAGIC_KEYWORD_NOTICE_TYPES[message.customType] === true ||
-			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
+		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) || message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
 	);
 }
 

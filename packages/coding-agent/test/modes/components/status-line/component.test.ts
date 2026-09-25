@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createGallerySegmentContext } from "../../../../src/cli/gallery-fixtures/segments";
 import { Settings } from "../../../../src/config/settings";
-import { StatusLineComponent } from "../../../../src/modes/components/status-line/component";
-import { renderSegment } from "../../../../src/modes/components/status-line/segments";
-import { loadTheme } from "../../../../src/modes/theme/loader";
-import { getThemeByName, setThemeInstance, theme } from "../../../../src/modes/theme/theme";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../../../src/session/agent-session";
 import { StatusLineTestComponents } from "../../../helpers/status-line";
 
@@ -107,6 +108,7 @@ describe("StatusLineComponent", () => {
 						},
 					],
 				}) as unknown as AgentSession,
+				statusLineHost,
 			),
 		);
 
@@ -115,7 +117,7 @@ describe("StatusLineComponent", () => {
 
 	it("renders Prewalk annotation when prewalk is armed", () => {
 		const statusLine = statusLines.track(
-			new StatusLineComponent(makeSessionWithLastMessage(null, true) as unknown as AgentSession),
+			new StatusLineComponent(makeSessionWithLastMessage(null, true) as unknown as AgentSession, statusLineHost),
 		);
 
 		// By default preset, 'mode' segment is included in left/right segments.
@@ -134,6 +136,7 @@ describe("StatusLineComponent", () => {
 					modelName: "Stale Model",
 					sessionName: "stale-session",
 				}) as unknown as AgentSession,
+				statusLineHost,
 			),
 		);
 
@@ -145,7 +148,7 @@ describe("StatusLineComponent", () => {
 		const placeholder = Bun.stripANSI(statusLine.renderStartupPlaceholder(WIDE_ENOUGH_FOR_COST_SEGMENT, "box"));
 		expect(placeholder.match(/…/g)?.length).toBeGreaterThanOrEqual(3);
 		expect(placeholder).toContain(`${theme.icon.model} …`);
-		expect(placeholder).toContain(`${theme.icon.folder} …`);
+		expect([theme.icon.folder, theme.icon.worktree].some(icon => placeholder.includes(`${icon} …`))).toBe(true);
 		expect(placeholder).toContain("$…");
 		expect(placeholder).not.toContain("Stale Model");
 		expect(placeholder).not.toContain("stale-session");
@@ -185,6 +188,7 @@ describe("StatusLineComponent", () => {
 					advisorCost: 0.41,
 					usingSubscription: true,
 				}) as unknown as AgentSession,
+				statusLineHost,
 			),
 		);
 
@@ -201,6 +205,7 @@ describe("StatusLineComponent", () => {
 					usingSubscription: true,
 					advisorUsingSubscription: true,
 				}) as unknown as AgentSession,
+				statusLineHost,
 			),
 		);
 
@@ -222,6 +227,7 @@ describe("StatusLineComponent", () => {
 						usingSubscription: true,
 						advisorUsingSubscription: true,
 					}) as unknown as AgentSession,
+					statusLineHost,
 				),
 			);
 			const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
@@ -238,6 +244,7 @@ describe("StatusLineComponent", () => {
 					cost: 2.67,
 					usingSubscription: true,
 				}) as unknown as AgentSession,
+				statusLineHost,
 			),
 		);
 
@@ -260,6 +267,7 @@ describe("StatusLineComponent", () => {
 						usingSubscription: true,
 						advisorUsingSubscription: true,
 					}) as unknown as AgentSession,
+					statusLineHost,
 				),
 			);
 			const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");

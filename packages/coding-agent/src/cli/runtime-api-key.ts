@@ -1,5 +1,5 @@
 import type { Args } from "./args";
-import { parseModelString } from "../config/model-resolver";
+import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 
 /**
  * AuthStorage keys runtime overrides by exact provider id (catalog spelling).

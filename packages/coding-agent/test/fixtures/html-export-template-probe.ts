@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getTemplate } from "../../src/export/html/index";
@@ -20,7 +19,7 @@ process.stdout.write(
 	JSON.stringify({
 		chars: first.length,
 		bytes: Buffer.byteLength(first),
-		sha256: createHash("sha256").update(first).digest("hex"),
+		sha256: Bun.SHA256.hash(first, "hex"),
 		stableCache: repeated === first,
 		assetsRemoved,
 	}),

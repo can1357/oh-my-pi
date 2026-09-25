@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
@@ -17,19 +16,12 @@ afterEach(() => {
 });
 
 describe("Yolo-Auto login wiring", () => {
-	test("registers Yolo-Auto in the login provider selector", () => {
-		const provider = getOAuthProviders().find(item => item.id === "yolo-auto");
-		expect(provider).toBeDefined();
-		expect(provider?.name).toBe("Yolo-Auto");
-		expect(provider?.available).toBe(true);
-	});
-
 	test("resolves YOLO_AUTO_API_KEY from environment", () => {
 		Bun.env.YOLO_AUTO_API_KEY = "yolo-env-key";
 		expect(getEnvApiKey("yolo-auto")).toBe("yolo-env-key");
 	});
 
-	test("AuthStorage.login('yolo-auto') validates against /v1/models and stores the pasted key", async () => {
+	test("AuthStorage.oauth.login('yolo-auto') validates against /v1/models and stores the pasted key", async () => {
 		const fetchCalls: Array<{ url: string; init: RequestInit | undefined }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			let url: string;
@@ -52,15 +44,15 @@ describe("Yolo-Auto login wiring", () => {
 
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
-		await storage.login("yolo-auto", {
+		await storage.oauth.login("yolo-auto", {
 			onAuth: () => {},
 			onPrompt: async () => "yolo-validated",
 			fetch: fetchMock,
 		});
 
-		const credential = await storage.get("yolo-auto");
+		const credential = await storage.credentials.get("yolo-auto");
 		expect(credential).toEqual({ type: "api_key", key: "yolo-validated", source: "login" });
 
 		const modelsCall = fetchCalls.find(call => call.url.endsWith("/v1/models"));
@@ -71,7 +63,7 @@ describe("Yolo-Auto login wiring", () => {
 		store.close();
 	});
 
-	test("AuthStorage.login('yolo-auto') rejects keys that fail /models validation", async () => {
+	test("AuthStorage.oauth.login('yolo-auto') rejects keys that fail /models validation", async () => {
 		const fetchMock: FetchImpl = vi.fn(
 			async () =>
 				new Response("Unauthorized", {
@@ -82,17 +74,17 @@ describe("Yolo-Auto login wiring", () => {
 
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);
-		await storage.reload();
+		await storage.credentials.reload();
 
 		await expect(
-			storage.login("yolo-auto", {
+			storage.oauth.login("yolo-auto", {
 				onAuth: () => {},
 				onPrompt: async () => "yolo-bogus",
 				fetch: fetchMock,
 			}),
 		).rejects.toThrow(/Yolo-Auto API key validation failed \(401\)/);
 
-		expect(await storage.get("yolo-auto")).toBeUndefined();
+		expect(await storage.credentials.get("yolo-auto")).toBeUndefined();
 		store.close();
 	});
 });

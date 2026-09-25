@@ -21,9 +21,11 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
+import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -149,12 +151,104 @@ describe("task spawn routing", () => {
 		await job!.promise;
 
 		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
+
+	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const manager = createManager();
+		const session = createSession({ manager });
+		const signals: Array<AbortSignal | undefined> = [];
+		session.emitBeforeSubagentSpawn = async (_event, signal) => {
+			signals.push(signal);
+			return { model: `openai/gpt-4.1-mini-${signals.length}`, note: `pool ${signals.length}` };
+		};
+		const tool = await TaskTool.create(session);
+
+		const result = await tool.execute("tc-route", { agent: "task", name: "Routed", task: "Do it." } as TaskParams);
+		await manager.getJob(result.details!.async!.jobId!)!.promise;
+
+		expect(signals).toHaveLength(1);
+		expect(signals[0]).toBeInstanceOf(AbortSignal);
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
+		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
+	});
+
+	for (const { label, runnerOverrides, expectRetained } of [
+		{
+			label: "tells the parent an isolated agent cannot be messaged instead of calling it idle",
+			runnerOverrides: {},
+			expectRetained: false,
+		},
+		{
+			// The runner keeps the workspace when captured changes could not be
+			// written; the follow-up hint must not contradict that recovery path,
+			// and a run that needs manual recovery must not be reported as a
+			// completed job.
+			label: "does not claim the worktree is gone when the runner retained it",
+			runnerOverrides: {
+				patchPath: undefined,
+				error: "Patch capture failed: EACCES. Isolation workspace retained at /wt/sandboxed/m — recover the changes from it; `omp worktree clear` reclaims it once this session has exited.",
+			},
+			expectRetained: true,
+		},
+	]) {
+		it(label, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+				projectAgentsDir: null,
+			});
+			const repoRoot = "/repo-root";
+			vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+				repoRoot,
+				baseline: {
+					root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+					nested: [],
+				},
+			});
+			vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => ({
+				...makeResult(opts.agentId),
+				isolated: true,
+				patchPath: `${opts.artifactsDir}/${opts.agentId}.patch`,
+				...runnerOverrides,
+			}));
+
+			const manager = createManager();
+			const tool = await TaskTool.create(
+				createSession({ manager, settings: { "task.isolation.enabled": true, "task.isolation.apply": false } }),
+			);
+
+			const result = await tool.execute("tc-isolated", {
+				agent: "task",
+				name: "Sandboxed",
+				task: "Do the thing.",
+				isolated: true,
+			} as TaskParams);
+			const job = manager.getJob(result.details?.async?.jobId ?? "");
+			await job!.promise;
+
+			const delivered = `${job!.resultText ?? ""}${job!.errorText ?? ""}`;
+			expect(delivered).toContain("Sandboxed ran isolated and cannot be resumed or messaged");
+			expect(delivered).toContain("history://Sandboxed");
+			expect(delivered).not.toContain("is now idle");
+			expect(delivered).not.toContain("message it via");
+			expect(delivered).not.toContain("removed");
+			if (expectRetained) {
+				expect(job!.status).toBe("failed");
+				expect(delivered).toContain("Isolation workspace retained at /wt/sandboxed/m");
+			} else {
+				expect(job!.status).toBe("completed");
+			}
+		});
+	}
 
 	for (const { label, liveAdvisor, settledAdvisor, expectedAdvisor } of [
 		{

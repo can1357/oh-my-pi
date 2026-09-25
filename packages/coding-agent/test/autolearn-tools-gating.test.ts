@@ -310,11 +310,13 @@ describe("learn execute", () => {
 		expect(queued).toEqual(["queued lesson"]);
 	});
 
-	it("fails the lesson and skips the skill when mnemopi returns no id", async () => {
+	it("fails the lesson with the write error and skips the skill when the mnemopi write fails", async () => {
 		const failingState = {
 			sessionId: "sess-2",
 			session: { sessionManager: { getCwd: () => "/tmp/work" } },
-			rememberScoped: () => undefined,
+			rememberScoped: () => {
+				throw new Error("database or disk is full");
+			},
 		};
 		const session = makeSession(
 			{ "autolearn.enabled": true, "memory.backend": "mnemopi" },
@@ -325,7 +327,7 @@ describe("learn execute", () => {
 				memory: "lesson",
 				skill: { action: "create", name: "should-not-exist", description: "d", body: "b" },
 			}),
-		).rejects.toThrow(/did not store/i);
+		).rejects.toThrow("Mnemopi did not store the lesson: database or disk is full");
 		// A failed lesson must not leave a minted skill behind.
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "should-not-exist", "SKILL.md")).exists()).toBe(false);
 	});

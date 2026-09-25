@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-coding-agent/modes/components/codex-reset-fireworks";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 async function flushMicrotasks(): Promise<void> {
@@ -122,7 +123,7 @@ function makeCodexSession(
 	session.model = { contextWindow: 200_000, provider: "openai-codex" };
 	session.modelRegistry = {
 		authStorage: {
-			getOAuthAccountIdentity: resolveActiveIdentity,
+			oauth: { identity: resolveActiveIdentity },
 		},
 	};
 	return session as unknown as AgentSession;
@@ -159,6 +160,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return [];
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -177,6 +179,7 @@ describe("StatusLineComponent usage refresh", () => {
 				signal = nextSignal;
 				return [];
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -193,6 +196,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return Promise.withResolvers<unknown>().promise;
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -215,7 +219,10 @@ describe("StatusLineComponent usage refresh", () => {
 
 	it("applies late usage reports that resolve after the startup timeout", async () => {
 		const late = Promise.withResolvers<unknown>();
-		const component = new StatusLineComponent(makeSession(() => late.promise));
+		const component = new StatusLineComponent(
+			makeSession(() => late.promise),
+			statusLineHost,
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["usage"],
@@ -237,6 +244,47 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(plain(component.getTopBorder(80).content)).toContain("5h 42%");
 	});
 
+	it("shows Claude's banked count, current availability, and expiry in the usage segment", async () => {
+		const expiresAt = new Date(Date.now() + 48 * 3_600_000).toISOString();
+		const reports = usageReport(25) as Array<Record<string, unknown>>;
+		reports[0]!.resetCredits = {
+			availableCount: 3,
+			redeemableCount: 0,
+			reason: "weekly cooldown",
+			credits: [
+				{
+					id: "cedar",
+					title: "Claude reset",
+					program: "cedar_ember",
+					remainingCount: 3,
+					usable: false,
+					requiresLimit: true,
+					clears: ["anthropic:5h", "anthropic:7d"],
+					blocking: [],
+					usedFractions: {},
+					expiresAt,
+				},
+			],
+		};
+		const component = new StatusLineComponent(
+			makeSession(async () => reports),
+			statusLineHost,
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		await refreshUsage(component);
+
+		const output = plain(component.getTopBorder(120).content);
+		expect(output).toContain("✦ 3 (0 usable)");
+		expect(output).toContain("exp 2d");
+		expect(output).toContain("weekly cooldown");
+	});
+
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {
 		let calls = 0;
 		let orgId = "org-team";
@@ -251,14 +299,16 @@ describe("StatusLineComponent usage refresh", () => {
 		};
 		base.modelRegistry = {
 			authStorage: {
-				getOAuthAccountIdentity: () => ({
-					email: "shared@example.com",
-					accountId: "account-shared",
-					orgId,
-				}),
+				oauth: {
+					identity: () => ({
+						email: "shared@example.com",
+						accountId: "account-shared",
+						orgId,
+					}),
+				},
 			},
 		};
-		const component = new StatusLineComponent(base as unknown as AgentSession);
+		const component = new StatusLineComponent(base as unknown as AgentSession, statusLineHost);
 
 		component.refreshUsageInBackground();
 		vi.advanceTimersByTime(0);
@@ -286,7 +336,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -311,7 +364,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -360,7 +416,10 @@ describe("StatusLineComponent usage refresh", () => {
 			tier: "spark",
 			plan: "pro",
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -404,6 +463,7 @@ describe("StatusLineComponent usage refresh", () => {
 				async () => reports,
 				() => ({ accountId: identityLookups.shift() ?? "account-a" }),
 			),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -445,6 +505,7 @@ describe("StatusLineComponent usage refresh", () => {
 					orgId: workspaceId,
 				}),
 			),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -465,7 +526,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -490,7 +554,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -513,7 +580,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -545,6 +615,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return calls === 1 ? stale.promise : codexUsageReport(current);
 			}),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));

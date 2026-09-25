@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { clearAgentPluginRootCache } from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
@@ -58,6 +59,63 @@ async function writeOmpPluginAgent(home: string): Promise<void> {
 	await fs.writeFile(path.join(pluginRoot, "agents", "loom-verify-spec.md"), OMP_PLUGIN_AGENT_MD);
 }
 
+function agentMd(name: string, model: string): string {
+	return ["---", `name: ${name}`, `description: ${name} probe.`, `model: ${model}`, "---", `body ${name}`].join("\n");
+}
+
+// Register an omp-installed marketplace plugin via the OMP plugin registry
+// (`~/.omp/plugins/installed_plugins.json`), the path listClaudePluginRoots
+// reads as origin "omp" — distinct from the node_modules path above. `manifest`
+// controls the declared plugin dialect: `.omp-plugin/plugin.json` (OMP-native),
+// `.claude-plugin/plugin.json` (Claude Code), `both` (OMP wins by precedence),
+// or `none` (bare directory).
+async function writeOmpMarketplacePlugin(
+	home: string,
+	options: {
+		agentName: string;
+		model: string;
+		manifest: "omp" | "claude" | "both" | "none";
+	},
+): Promise<void> {
+	const pluginRoot = path.join(home, "marketplace-cache", options.agentName);
+	await fs.mkdir(path.join(pluginRoot, "agents"), { recursive: true });
+	await fs.writeFile(
+		path.join(pluginRoot, "agents", `${options.agentName}.md`),
+		agentMd(options.agentName, options.model),
+	);
+
+	const wantsOmp = options.manifest === "omp" || options.manifest === "both";
+	const wantsClaude = options.manifest === "claude" || options.manifest === "both";
+	if (wantsOmp) {
+		await fs.mkdir(path.join(pluginRoot, ".omp-plugin"), { recursive: true });
+		await fs.writeFile(
+			path.join(pluginRoot, ".omp-plugin", "plugin.json"),
+			JSON.stringify({ name: options.agentName }),
+		);
+	}
+	if (wantsClaude) {
+		await fs.mkdir(path.join(pluginRoot, ".claude-plugin"), { recursive: true });
+		await fs.writeFile(
+			path.join(pluginRoot, ".claude-plugin", "plugin.json"),
+			JSON.stringify({ name: options.agentName }),
+		);
+	}
+
+	const registryDir = path.join(home, ".omp", "plugins");
+	await fs.mkdir(registryDir, { recursive: true });
+	await fs.writeFile(
+		path.join(registryDir, "installed_plugins.json"),
+		JSON.stringify({
+			version: 1,
+			plugins: {
+				[`${options.agentName}@my-marketplace`]: [
+					{ installPath: pluginRoot, version: "1.0.0", scope: "user", enabled: true },
+				],
+			},
+		}),
+	);
+}
+
 describe("discoverAgents", () => {
 	let tempHome: string;
 	let projectDir: string;
@@ -73,6 +131,7 @@ describe("discoverAgents", () => {
 		clearOmpExtensionCliRoots();
 		await injectPluginDirRoots(tempHome, []);
 		clearClaudePluginRootsCache();
+		clearAgentPluginRootCache();
 		clearFsCache();
 		await removeWithRetries(tempHome);
 	});
@@ -193,5 +252,57 @@ describe("discoverAgents", () => {
 		const names = agents.map(agent => agent.name);
 
 		expect(names).toContain("plugin-dir-agent");
+	});
+
+	test("honors model frontmatter of OMP-native omp-installed marketplace plugin agents (#12028)", async () => {
+		// omp-installed marketplace plugins ride the shared plugin registry as
+		// origin "omp" roots. An OMP-native package (no Claude manifest) uses OMP
+		// model selectors, so `model:` must survive discovery.
+		enableProvider("claude-plugins");
+		await writeOmpMarketplacePlugin(tempHome, {
+			agentName: "omp-probe",
+			model: '["@advisor", "@smol"]',
+			manifest: "none",
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "omp-probe");
+
+		expect(agent).toBeDefined();
+		expect(agent?.model).toEqual(["@advisor", "@smol"]);
+	});
+
+	test("drops model frontmatter of a Claude-format plugin installed via the OMP registry (#12031 review)", async () => {
+		// origin "omp" but a `.claude-plugin` package: its `model: sonnet` is a
+		// Claude alias, not an OMP selector, so it must still be stripped.
+		enableProvider("claude-plugins");
+		await writeOmpMarketplacePlugin(tempHome, {
+			agentName: "claude-probe",
+			model: "sonnet",
+			manifest: "claude",
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "claude-probe");
+
+		expect(agent).toBeDefined();
+		expect(agent?.model).toBeUndefined();
+	});
+
+	test("honors model frontmatter when a plugin declares both OMP and Claude manifests (#12031 review)", async () => {
+		// `.omp-plugin/plugin.json` wins over a sibling `.claude-plugin/plugin.json`,
+		// mirroring the MCP-config precedence, so OMP selectors survive.
+		enableProvider("claude-plugins");
+		await writeOmpMarketplacePlugin(tempHome, {
+			agentName: "hybrid-probe",
+			model: '["@advisor", "@smol"]',
+			manifest: "both",
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "hybrid-probe");
+
+		expect(agent).toBeDefined();
+		expect(agent?.model).toEqual(["@advisor", "@smol"]);
 	});
 });

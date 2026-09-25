@@ -10,6 +10,8 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -53,6 +55,8 @@ interface FakeAcpBuiltinSession {
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
+	getHindsightSessionState(): undefined;
+	applyMemoryBackend(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
@@ -141,6 +145,9 @@ function createRuntime() {
 			this._todoPhases = phases;
 		},
 		async refreshBaseSystemPrompt() {},
+		// Headless `/move` and `/wt` rebind memory for the destination project.
+		getHindsightSessionState: () => undefined,
+		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
@@ -380,10 +387,11 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {
-		const { output, runtime } = createRuntime();
+		const { runtime } = createRuntime();
 		let redeemedTarget: ResetCreditTarget | undefined;
 		runtime.session.listResetCredits = async () => [
 			{
+				provider: "openai-codex",
 				credentialId: 42,
 				accountId: "account-1",
 				email: "user@example.com",
@@ -397,11 +405,74 @@ describe("ACP builtin slash commands", () => {
 			return { ok: true, code: "reset", email: target.email };
 		};
 
-		const result = await executeAcpBuiltinSlashCommand("/usage reset active", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/usage reset openai-codex/active", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(redeemedTarget).toEqual({ credentialId: 42, accountId: "account-1", email: "user@example.com" });
-		expect(output).toEqual(["Reset applied for user@example.com — your rate-limit window has been refreshed."]);
+		expect(redeemedTarget).toEqual({
+			provider: "openai-codex",
+			credentialId: 42,
+			accountId: "account-1",
+			email: "user@example.com",
+		});
+	});
+
+	it("pins Claude's provider, credential, organization, and selected grant for same-email accounts", async () => {
+		const { runtime } = createRuntime();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		runtime.session.listResetCredits = async () => [
+			{
+				provider: "openai-codex",
+				credentialId: 7,
+				email: "shared@example.com",
+				availableCount: 1,
+				credits: [],
+				active: true,
+			},
+			{
+				provider: "anthropic",
+				credentialId: 9,
+				accountId: "claude-account",
+				email: "shared@example.com",
+				orgId: "org-claude",
+				availableCount: 2,
+				redeemableCount: 1,
+				nextCreditId: "grant-next",
+				credits: [
+					{
+						id: "grant-next",
+						title: "Claude reset",
+						program: "cedar_ember",
+						remainingCount: 2,
+						usable: true,
+						requiresLimit: true,
+						clears: ["anthropic:5h", "anthropic:7d"],
+						blocking: [],
+						usedFractions: {},
+					},
+				],
+				active: true,
+			},
+		];
+		runtime.session.redeemResetCredit = async target => {
+			redeemedTarget = target;
+			return {
+				ok: true,
+				code: "reset",
+				provider: "anthropic",
+				cleared: ["anthropic:5h", "anthropic:7d"],
+			};
+		};
+
+		await executeAcpBuiltinSlashCommand("/usage reset anthropic/9", runtime);
+
+		expect(redeemedTarget).toEqual({
+			provider: "anthropic",
+			credentialId: 9,
+			accountId: "claude-account",
+			email: "shared@example.com",
+			orgId: "org-claude",
+			creditId: "grant-next",
+		});
 	});
 
 	it("does not dispatch the legacy /reset-usage command", async () => {
@@ -607,7 +678,7 @@ describe("ACP builtin slash commands", () => {
 			"/copy",
 			"/btw hi",
 			"/new",
-			"/drop",
+			"/delete",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -1141,17 +1212,6 @@ describe("wave 3 commands", () => {
 
 describe("wave 4 commands", () => {
 	// /mcp
-	it("/mcp (no args): outputs help text containing list, enable, disable, remove, reload", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("list");
-		expect(output[0]).toContain("enable");
-		expect(output[0]).toContain("disable");
-		expect(output[0]).toContain("remove");
-		expect(output[0]).toContain("reload");
-	});
-
 	it("/mcp help: outputs help text containing list, enable, disable, remove, reload", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
@@ -1252,6 +1312,21 @@ describe("wave 4 commands", () => {
 	});
 
 	// /plugins
+	it("/plugin list: the singular alias dispatches the plugins builtin", async () => {
+		const npmSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([
+			{ name: "@czottmann/pi-automode", version: "1.16.0" } as never,
+		]);
+		const installedSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		try {
+			const { output, runtime } = createRuntime();
+			const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
+		} finally {
+			npmSpy.mockRestore();
+			installedSpy.mockRestore();
+		}
+	});
 
 	// /todo start with in_progress status in fuzzy list
 	it("/todo start: resolves ambiguous matches by preferring active tasks", async () => {

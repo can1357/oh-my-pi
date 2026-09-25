@@ -66,6 +66,12 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					const invokingTask = sendTask.then(started => {
 						if (!started) throw new Error("send did not invoke the agent");
 					});
+					// A send that starts no turn (idle steer superseded by a concurrent turn,
+					// plan-mode fold, deferred ACP turn) is a normal outcome, not a process error.
+					// `trackAgentInvokingMessage` only attaches a handler while a prompt scope is
+					// active (RpcExtensionUserMessageTracker); outside that window this rejection
+					// would otherwise be unobserved and fatal the process. Mark it handled up front.
+					invokingTask.catch(() => {});
 					if (trackAgentInvokingMessage) {
 						trackAgentInvokingMessage(invokingTask);
 					} else {
@@ -119,6 +125,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			shutdown,
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
+			runEphemeralTurn: args => session.runEphemeralTurn(args),
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")

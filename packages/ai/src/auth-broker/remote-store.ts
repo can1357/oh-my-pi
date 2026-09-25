@@ -9,16 +9,16 @@
  */
 import * as os from "node:os";
 import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
-	type AuthCredentialStore,
 	type DisabledCredentialSummary,
 	type OAuthCredential,
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
 	type StoredCredentialBlock,
-} from "../auth-storage";
+} from "../auth/types";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
@@ -175,8 +175,8 @@ function usageOverlayKey(
 	const accountId = ids.accountId?.trim().toLowerCase();
 	const email = ids.email?.trim().toLowerCase();
 	const projectId = ids.projectId?.trim().toLowerCase();
-	if (accountId) base = `account:${accountId}`;
-	else if (email) base = `email:${email}`;
+	if (email) base = `email:${email}`;
+	else if (accountId) base = `account:${accountId}`;
 	else if (projectId) base = `project:${projectId}`;
 	const orgId = ids.orgId?.trim().toLowerCase();
 	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
@@ -255,6 +255,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#snapshot: SnapshotResponse = emptySnapshot();
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
+	/**
+	 * Content fingerprint of the credential set in {@link #snapshot} (id +
+	 * provider + credential material), recomputed after every snapshot mutation.
+	 * Drives {@link #credentialRevision} independently of the broker's numeric
+	 * generation, which is an in-memory counter that resets when the broker
+	 * process restarts and so cannot be trusted for change detection.
+	 */
+	#credentialFingerprint = "";
+	/** Monotonic local counter bumped whenever {@link #credentialFingerprint} changes. */
+	#credentialRevision = 0;
+	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
+	#acknowledgedRevision = 0;
 	#usageOverlays: Map<string, UsageReport> = new Map();
 	#backgroundAbort = new AbortController();
 	readonly #backgroundIdleMs: number;
@@ -300,6 +312,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			? new Map([...opts.accountPool].map(([provider, identities]) => [provider, new Set(identities)]))
 			: undefined;
 		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
+		this.#acknowledgedRevision = this.#credentialRevision;
 		this.#onSnapshot = opts.onSnapshot;
 		void this.#runBackground();
 	}
@@ -325,6 +338,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...snapshot, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
+		this.#refreshCredentialRevision();
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
@@ -332,6 +346,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		} catch (error) {
 			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
 		}
+	}
+
+	/**
+	 * Recompute the credential-content fingerprint and bump
+	 * {@link #credentialRevision} when it changes. Called after every snapshot
+	 * mutation so {@link pollExternalChanges} detects add/remove/replace even
+	 * when the broker's numeric generation repeats (e.g. after a broker
+	 * restart resets its in-memory counter).
+	 */
+	#refreshCredentialRevision(): void {
+		const fingerprint = this.#computeCredentialFingerprint();
+		if (fingerprint === this.#credentialFingerprint) return;
+		this.#credentialFingerprint = fingerprint;
+		this.#credentialRevision += 1;
+	}
+
+	/**
+	 * Order-independent digest of the routable credential material — exactly the
+	 * fields {@link listAuthCredentials} exposes (id, provider, credential). A
+	 * token rotation or an add/remove changes it; credential blocks and usage
+	 * overlays do not.
+	 */
+	#computeCredentialFingerprint(): string {
+		const parts = this.#snapshot.credentials.map(
+			entry => `${entry.id}\u0000${entry.provider}\u0000${JSON.stringify(entry.credential)}`,
+		);
+		parts.sort();
+		return parts.join("\u0001");
 	}
 	#protectNewSnapshotBlocks(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[], nowMs: number): void {
 		const previousBlocksByKey = new Map<string, string>();
@@ -499,15 +541,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#applyStreamEvent(event: SnapshotStreamEvent): void {
 		switch (event.kind) {
 			case "snapshot": {
-				// Strip the discriminator so we store the wire-shape SnapshotResponse.
+				// The first frame of every SSE connection is a full authoritative
+				// snapshot. Always adopt it as the new generation baseline: the
+				// broker's in-memory generation counter resets on restart and may
+				// therefore be lower than the previous stream's last value.
+				// Subsequent entry/removal frames remain guarded against reordering
+				// relative to this new baseline below.
 				const { kind: _kind, ...snapshot } = event;
-				if (snapshot.generation < this.#generation) {
-					logger.debug("auth-broker stream snapshot older than local; ignoring", {
-						local: this.#generation,
-						incoming: snapshot.generation,
-					});
-					return;
-				}
 				this.#applySnapshot(snapshot, snapshot.generation);
 				return;
 			}
@@ -548,6 +588,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = Date.now();
+		this.#refreshCredentialRevision();
 	}
 
 	#removeStreamCredential(
@@ -564,6 +605,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = Date.now();
+		this.#refreshCredentialRevision();
 	}
 
 	/** Re-hydrate the in-memory snapshot from the broker. */
@@ -572,6 +614,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const result = await this.#client.fetchSnapshot();
 		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
 		return this.#snapshot;
+	}
+
+	/**
+	 * Stateful probe for broker-side credential changes, mirroring
+	 * {@link SqliteAuthCredentialStore.pollExternalChanges} so long-lived broker
+	 * clients (notably `auth-gateway serve`) pick up logins/logouts made by
+	 * another process without a restart.
+	 *
+	 * Compares a local content revision, not the broker's numeric generation:
+	 * generation is an in-memory counter that resets when the broker process
+	 * restarts, so a reconnecting stream can deliver a different credential set
+	 * under a repeated (or lower) generation. {@link #refreshCredentialRevision}
+	 * bumps the revision whenever the applied credential material actually
+	 * changes, catching those cases too. Records foreground activity first: a
+	 * low-traffic client's background sync parks after `#backgroundIdleMs`, and
+	 * without this wakeup it would never fetch the new snapshot to report in the
+	 * first place.
+	 */
+	pollExternalChanges(): boolean {
+		this.#noteActivity();
+		if (this.#credentialRevision === this.#acknowledgedRevision) return false;
+		this.#acknowledgedRevision = this.#credentialRevision;
+		return true;
 	}
 
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
@@ -707,16 +772,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	deleteAuthCredential(id: number, disabledCause: string): void {
-		this.#noteActivity();
-		this.#removeCredentialById(id);
-		// Fire-and-forget: tell the broker to persist the disable.
-		this.#client.disableCredential(id, disabledCause).catch(error => {
-			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
-		});
-	}
-
-	async deleteAuthCredentialRemote(id: number, disabledCause: string): Promise<boolean> {
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
 		if (!found) return false;
@@ -730,7 +786,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.find(entry => entry.id === id);
 		if (!found) return false;
-		this.deleteAuthCredential(id, disabledCause);
+		this.#removeCredentialById(id);
+		void this.#client.disableCredential(id, disabledCause).catch(error => {
+			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+		});
 		return true;
 	}
 
@@ -769,24 +828,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#maybeRefreshSnapshot("suspect credential refresh");
 	}
 
-	replaceAuthCredentialsForProvider(_provider: string, _credentials: AuthCredential[]): StoredAuthCredential[] {
-		throw new AIError.AuthBrokerError(
-			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
-		);
-	}
-
-	upsertAuthCredentialForProvider(_provider: string, _credential: AuthCredential): StoredAuthCredential[] {
-		throw new AIError.AuthBrokerError(
-			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
-		);
-	}
-
-	deleteAuthCredentialsForProvider(_provider: string, _disabledCause: string): void {
-		throw new AIError.AuthBrokerError(
-			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker logout <provider>` to mutate credentials.",
-		);
-	}
-
 	/**
 	 * Upsert a single credential through the broker. The broker server is the
 	 * canonical writer — see `POST /v1/credential`. The redacted snapshot
@@ -794,7 +835,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * snapshot, and the global snapshot is then refreshed in the background so
 	 * any concurrent peer (refresh, generation bump) stays in sync.
 	 */
-	async upsertAuthCredentialRemote(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
 		this.#noteActivity();
 		const { entries } = await this.#client.uploadCredential(provider, credential);
 		this.#applyProviderEntries(provider, entries);
@@ -807,10 +848,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * then upload each of the new credentials. Used by API-key login so a new
 	 * key clobbers any previously stored key for the same provider.
 	 */
-	async replaceAuthCredentialsRemote(
-		provider: string,
-		credentials: AuthCredential[],
-	): Promise<StoredAuthCredential[]> {
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
 		const existing = this.listAuthCredentials(provider);
 		for (const entry of existing) {
 			try {
@@ -839,7 +877,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * then drop them from the local snapshot. Refresh fetches the authoritative
 	 * post-state in the background.
 	 */
-	async deleteAuthCredentialsRemote(provider: string, disabledCause: string): Promise<void> {
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
 		const existing = this.listAuthCredentials(provider);
 		for (const entry of existing) {
 			try {
@@ -1063,7 +1101,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Store-level hook consumed by `AuthStorage.fetchUsageReports()` — proxies
+	 * Store-level hook consumed by `AuthStorage.usage.reports()` — proxies
 	 * to the broker's `/v1/usage` endpoint. The broker's egress IP isn't
 	 * rate-limited by Anthropic's per-IP `/usage` cap the way a heavy
 	 * residential laptop is, so all credentials surface every cycle.
@@ -1076,7 +1114,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Per-credential usage hook consumed by `AuthStorage.#getUsageReport`. Pulls
+	 * Per-credential usage hook consumed by `UsageService.report`. Pulls
 	 * the aggregate broker `/v1/usage` once and serves all callers from the
 	 * same response (coalesced + cached), then overlays any client-observed
 	 * header hints for the matching credential.
@@ -1491,16 +1529,16 @@ function reportMatchesIdentity(
 	projectId: string | undefined,
 ): boolean {
 	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
+	// Email identifies the member within shared Team workspace account/org ids.
+	// When both sides provide it, a mismatch is decisive.
+	if (email && metaEmail) return metaEmail === email;
 	if (accountId) {
 		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
 		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
 		for (const limit of report.limits) {
 			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
 		}
-	}
-	if (email) {
-		const metaEmail = readMetadataString(metadata, "email");
-		if (metaEmail && metaEmail.toLowerCase() === email) return true;
 	}
 	if (projectId) {
 		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");

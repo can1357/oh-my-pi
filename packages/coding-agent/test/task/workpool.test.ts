@@ -5,12 +5,13 @@ import subagentSystemPrompt from "../../src/prompts/system/subagent-system-promp
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
-import { HubTool } from "../../src/tools/hub";
+import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "../../src/task/types";
+import type { AgentDefinition } from "../../src/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -58,6 +59,7 @@ function makeSession(
 			"task.maxConcurrency": concurrency,
 			"task.maxRuntimeMs": 0,
 			"eval.workpool.freshAgents": freshAgents,
+			"launch.enabled": false,
 		}),
 		asyncJobManager: manager,
 		getAgentId: () => "Main",
@@ -301,9 +303,9 @@ describe("WorkPool dispatch", () => {
 		const poolJob = manager.getJob("waiter");
 		expect(poolJob?.id).toBe("waiter");
 		expect(poolJob?.label).toBe("waiter");
-		const polled = await new HubTool(session).execute("poll-workpool", { op: "wait", ids: [workpool.name] });
+		const polled = await new WaitTool(session).execute("wait-workpool", {});
 		const details = polled.details;
-		if (!details || !("jobs" in details)) throw new Error("Expected a background-job poll result");
+		if (!details?.jobs) throw new Error("Expected a background-job wait result");
 		expect(details.jobs?.map(job => job.id)).toEqual(["waiter"]);
 		expect(details.jobs?.map(job => job.status)).toEqual(["completed"]);
 		expect(workpool.peek().pending).toBe(0);

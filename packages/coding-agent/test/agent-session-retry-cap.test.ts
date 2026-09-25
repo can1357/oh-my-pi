@@ -1,10 +1,10 @@
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
-	ApiKeyResolveContext,
+	ApiKey,
 	AssistantMessage,
 	TextContent,
 	ThinkingContent,
@@ -15,7 +15,7 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
@@ -28,11 +28,14 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 
 const RETRY_CAP_MOCK_API_SOURCE = "agent-session-retry-cap-test";
+const CODEX_BODY_READ_ERROR =
+	"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body";
 const CYBER_POLICY_ERROR =
 	"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
 const CYBER_POLICY_FAILURE: MockResponse = {
@@ -49,14 +52,14 @@ function lastAssistant(session: AgentSession): AssistantMessage {
 	return message as AssistantMessage;
 }
 
-function resolveInitialApiKey(
-	apiKey: string | ((ctx: ApiKeyResolveContext) => string | Promise<string | undefined> | undefined) | undefined,
-): string {
+function resolveInitialApiKey(apiKey: ApiKey | undefined): string {
 	const resolved = typeof apiKey === "function" ? apiKey({ lastChance: false, error: undefined }) : apiKey;
-	if (typeof resolved !== "string") {
+	const bearer =
+		typeof resolved === "string" ? resolved : resolved && "apiKey" in resolved ? resolved.apiKey : undefined;
+	if (typeof bearer !== "string") {
 		throw new Error("Expected API key to be resolved before streaming");
 	}
-	return resolved;
+	return bearer;
 }
 
 /**
@@ -87,7 +90,7 @@ describe("AgentSession retry delay cap", () => {
 		// credentials, so neutralize env resolution (ignores every provider's ambient env key).
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
 		for (const provider of ["anthropic", "openai-codex"]) {
-			await authStorage.remove(provider);
+			await authStorage.credentials.remove(provider);
 		}
 		for (const provider of [
 			"anthropic",
@@ -96,11 +99,12 @@ describe("AgentSession retry delay cap", () => {
 			"opencode-go",
 			"openrouter",
 			"github-copilot",
+			"zai",
 			"cursor",
 		]) {
-			authStorage.removeRuntimeApiKey(provider);
+			authStorage.keys.removeRuntime(provider);
 		}
-		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		modelRegistry.clearSuppressedSelectors();
 	});
 
@@ -159,7 +163,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		// Spy after construction so the constructor's no-op work isn't intercepted.
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -193,20 +197,19 @@ describe("AgentSession retry delay cap", () => {
 
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
 		// Contract: with the opt-in set, a provider-stated usage-limit reset
-		// sleeps until the reset instead of failing fast. Uses the reported
-		// ZAI shape (Zhipu 5h 使用上限 with an absolute reset timestamp,
-		// single credential so no rotation can save it); the bypass keys off
-		// Flag.UsageLimit, so every provider whose exhaustion classifies as
-		// a usage limit is covered.
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		// sleeps until the reset instead of failing fast. Uses Z.AI's English
+		// code-1308 shape: a timezone-naive Beijing reset timestamp plus a
+		// shorter retry-after-ms, with one credential so rotation cannot save it.
+		const model = getBundledModel("zai", "glm-5.3");
 		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
+			throw new Error("Expected bundled Z.AI test model to exist");
 		}
+		authStorage.keys.setRuntime("zai", "zai-test-key");
 
-		// Reset two hours out, formatted like the provider timestamp (parsed
-		// as UTC, so toISOString stays exact); bounds below absorb test time.
-		const resetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
-		const usageLimitError = `429 已达到 5 小时的使用上限。您的限额将在 ${resetStamp} 重置。`;
+		// Reset two hours out, formatted as the Beijing wall clock Z.AI reports;
+		// the provider policy applies UTC+8 before longest-window selection.
+		const resetStamp = new Date(Date.now() + 7_200_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const usageLimitError = `429 code 1308, Usage limit reached for 5 hour. Your limit will reset at ${resetStamp} retry-after-ms=5000`;
 
 		const mock = createMockModel({
 			responses: [{ throw: usageLimitError }, { content: ["recovered after usage reset"], stopReason: "stop" }],
@@ -243,7 +246,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -259,6 +262,75 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents[0].delayMs).toBeGreaterThan(7_000_000);
 		expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(7_200_000);
 		expect(waitSpy.mock.calls.some(call => (call[0] as number) > 7_000_000)).toBe(true);
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
+	it("probes after the relative hint when a naive stamp conflicts, then recovers", async () => {
+		// Contract: a naive `reset at` wall stamp conflicting with the relative
+		// hint sleeps the relative signal only; the retry after that wait is
+		// the disambiguating probe — success proves the stamp was zone skew.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// Skewed wall: true ~30min wait plus an 8h zone-shaped inflation.
+		const skewedWall = new Date(Date.now() + 1_788_000 + 8 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+		const conflictError = `429 Usage limit reached for 5 hour. Your limit will reset at ${skewedWall} retry-after-ms=1788000`;
+
+		const mock = createMockModel({
+			responses: [{ throw: conflictError }, { content: ["recovered on probe"], stopReason: "stop" }],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger conflicting naive stamp with relative hint");
+		await session.waitForIdle();
+
+		// One probe wait on the relative schedule — never the inflated stamp.
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0].delayMs).toBe(1_788_000);
+		expect(waitSpy.mock.calls.some(call => (call[0] as number) > 3_000_000)).toBe(false);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
@@ -308,7 +380,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -375,7 +447,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -442,7 +514,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -515,7 +587,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -588,7 +660,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -601,7 +673,6 @@ describe("AgentSession retry delay cap", () => {
 
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0].delayMs).toBe(13 * 60_000);
-		expect(waitSpy.mock.calls.some(call => call[0] === 13 * 60_000)).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
@@ -649,8 +720,8 @@ describe("AgentSession retry delay cap", () => {
 					{ status: 200, headers: { "content-type": "application/json" } },
 				)) as unknown as typeof fetch,
 		});
-		await localStorage.reload();
-		await localStorage.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
+		await localStorage.credentials.reload();
+		await localStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
 		return localStorage;
 	}
 
@@ -710,7 +781,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -794,7 +865,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -876,7 +947,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -931,7 +1002,7 @@ describe("AgentSession retry delay cap", () => {
 			// real prior turn would have.
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 			await localRegistry.getApiKeyForProvider("opencode-go", "sibling-session");
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+			await localStorage.limits.markReached("opencode-go", "sibling-session", {
 				retryAfterMs: 7_200_000,
 				providerTimed: true,
 			});
@@ -974,7 +1045,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1026,7 +1097,7 @@ describe("AgentSession retry delay cap", () => {
 			// The sibling's 20-minute provider-stated block is shorter than
 			// the 30-minute heuristic this session's hintless error will
 			// contribute, so the merged deadline alone cannot distinguish it.
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+			await localStorage.limits.markReached("opencode-go", "sibling-session", {
 				retryAfterMs: 1_200_000,
 				providerTimed: true,
 			});
@@ -1069,7 +1140,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1119,7 +1190,7 @@ describe("AgentSession retry delay cap", () => {
 			await localRegistry.getApiKeyForProvider("opencode-go", "sibling-session");
 			// Hintless sibling error whose report was unavailable: the stored
 			// block is the 30-minute heuristic fallback, not provider timing.
-			await localStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+			await localStorage.limits.markReached("opencode-go", "sibling-session", {
 				retryAfterMs: 1_800_000,
 			});
 
@@ -1161,7 +1232,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1230,14 +1301,14 @@ describe("AgentSession retry delay cap", () => {
 		const priorStorage = new AuthStorage(store, usageOptions);
 		const restartedStorage = new AuthStorage(store, usageOptions);
 		try {
-			await priorStorage.reload();
-			await restartedStorage.reload();
-			await priorStorage.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
-			await restartedStorage.reload();
+			await priorStorage.credentials.reload();
+			await restartedStorage.credentials.reload();
+			await priorStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
+			await restartedStorage.credentials.reload();
 			// Pre-restart hintless sibling response with no report reset: the
 			// stored block is the 30-minute heuristic guess (no providerTimed).
-			await priorStorage.getApiKey("opencode-go", "sibling-session");
-			await priorStorage.markUsageLimitReached("opencode-go", "sibling-session", {
+			await priorStorage.keys.get("opencode-go", "sibling-session");
+			await priorStorage.limits.markReached("opencode-go", "sibling-session", {
 				retryAfterMs: 1_800_000,
 			});
 
@@ -1281,7 +1352,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1362,7 +1433,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1399,8 +1470,8 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled primary, OpenCode Go, and cross-provider fallback test models to exist");
 		}
 
-		authStorage.setRuntimeApiKey("opencode-go", "opencode-go-test-key");
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("opencode-go", "opencode-go-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -1458,7 +1529,7 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -1479,6 +1550,7 @@ describe("AgentSession retry delay cap", () => {
 			from: `${exhaustedModel.provider}/${exhaustedModel.id}`,
 			to: `${fallbackModel.provider}/${fallbackModel.id}`,
 			role: "default",
+			reason: expect.stringContaining("429 Weekly usage limit reached"),
 		});
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThan(300_000);
@@ -1495,17 +1567,17 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
 		}
 
-		await authStorage.set("opencode-go", [
+		await authStorage.credentials.set("opencode-go", [
 			{ type: "api_key", key: "opencode-go-key-1" },
 			{ type: "api_key", key: "opencode-go-key-2" },
 		]);
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 		await modelRegistry.getApiKeyForProvider("opencode-go", "other-session");
-		const blocked = await authStorage.markUsageLimitReached("opencode-go", "other-session", {
+		const blocked = await authStorage.limits.markReached("opencode-go", "other-session", {
 			retryAfterMs: 2_000,
 		});
 		expect(blocked.switched).toBe(true);
-		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached");
 
 		const mock = createMockModel();
 		const requestedModels: string[] = [];
@@ -1544,7 +1616,7 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -1606,7 +1678,7 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
@@ -1617,7 +1689,6 @@ describe("AgentSession retry delay cap", () => {
 
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0].delayMs).toBe(30_000);
-		expect(waitSpy.mock.calls.some(call => call[0] === 30_000)).toBe(true);
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
 			text: "recovered after rate-limit window",
@@ -1629,7 +1700,7 @@ describe("AgentSession retry delay cap", () => {
 		if (!model) {
 			throw new Error("Expected bundled OpenAI test model to exist");
 		}
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -1664,7 +1735,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -1723,7 +1794,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -1748,7 +1819,7 @@ describe("AgentSession retry delay cap", () => {
 		if (!model) {
 			throw new Error("Expected bundled OpenAI test model to exist");
 		}
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -1783,7 +1854,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -1808,7 +1879,7 @@ describe("AgentSession retry delay cap", () => {
 		if (!model) {
 			throw new Error("Expected bundled OpenAI test model to exist");
 		}
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 
 		const mock = createMockModel({
 			responses: [
@@ -1856,7 +1927,7 @@ describe("AgentSession retry delay cap", () => {
 			extensionRunner,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("Trigger stream read retry");
 		await session.waitForIdle();
@@ -1878,9 +1949,9 @@ describe("AgentSession retry delay cap", () => {
 		const providerSessionId = "retry-four-credential-session-3";
 
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
-		authStorage.removeRuntimeApiKey("anthropic");
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("anthropic", [
+		authStorage.keys.removeRuntime("anthropic");
+		authStorage.keys.setRuntime("openai", "openai-fallback-key");
+		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-A" },
 			{ type: "api_key", key: "anthropic-key-B" },
 			{ type: "api_key", key: "anthropic-key-C" },
@@ -1982,9 +2053,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled primary and fallback test models to exist");
 		}
 
-		authStorage.removeRuntimeApiKey("anthropic");
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("anthropic", [
+		authStorage.keys.removeRuntime("anthropic");
+		authStorage.keys.setRuntime("openai", "openai-fallback-key");
+		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
 			{ type: "api_key", key: "anthropic-key-2" },
 		]);
@@ -2033,7 +2104,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		await session.prompt("Trigger k12 usage limit");
 		await session.waitForIdle();
 
@@ -2056,8 +2127,8 @@ describe("AgentSession retry delay cap", () => {
 		const providerSessionId = "cyber-policy-account-rotation";
 
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("openai-codex", [
+		authStorage.keys.setRuntime("openai", "openai-fallback-key");
+		await authStorage.credentials.set("openai-codex", [
 			{ type: "api_key", key: "codex-key-A" },
 			{ type: "api_key", key: "codex-key-B" },
 			{ type: "api_key", key: "codex-key-C" },
@@ -2145,8 +2216,8 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("openai-codex", [
+		authStorage.keys.setRuntime("openai", "openai-fallback-key");
+		await authStorage.credentials.set("openai-codex", [
 			{ type: "api_key", key: "advisor-codex-key-A" },
 			{ type: "api_key", key: "advisor-codex-key-B" },
 			{ type: "api_key", key: "advisor-codex-key-C" },
@@ -2241,8 +2312,8 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		authStorage.removeRuntimeApiKey("anthropic");
-		await authStorage.set("anthropic", [
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
 			{ type: "api_key", key: "anthropic-key-2" },
 		]);
@@ -2250,7 +2321,7 @@ describe("AgentSession retry delay cap", () => {
 		// Another session holds one credential and parks it for 2s — the test
 		// session lands on the sibling.
 		await modelRegistry.getApiKeyForProvider("anthropic", "other-session");
-		const blocked = await authStorage.markUsageLimitReached("anthropic", "other-session", { retryAfterMs: 2_000 });
+		const blocked = await authStorage.limits.markReached("anthropic", "other-session", { retryAfterMs: 2_000 });
 		expect(blocked.switched).toBe(true);
 
 		const rateLimitError =
@@ -2287,7 +2358,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -2353,7 +2424,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -2373,45 +2444,82 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 	});
 
-	it("auto-retries a timeout after streaming a complete unexecuted write tool call", async () => {
+	it.each([
+		["a timeout after streaming a complete unexecuted write tool call", "The operation timed out.", ["complete"]],
+		["a Codex body-read error with incomplete args", CODEX_BODY_READ_ERROR, ["partial"]],
+		["a Codex body-read error with a completed unexecuted call", CODEX_BODY_READ_ERROR, ["complete"]],
+		["a Codex body-read error with toolcall_end after partial args", CODEX_BODY_READ_ERROR, ["partial-ended"]],
+		["a Codex body-read error with a complete+partial batch", CODEX_BODY_READ_ERROR, ["complete", "partial"]],
+	] as const)("auto-retries %s", async (_scenario, errorMessage, callStates) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
-		const toolCall: ToolCall = {
+		const oldCalls: ToolCall[] = callStates.map((state, index) => ({
 			type: "toolCall",
-			id: "tc-write",
+			id: `tc-old-${index}`,
 			name: "write",
-			arguments: { path: "doc/report.md", content: "large report chunk" },
+			arguments:
+				state === "complete" ? { path: "doc/report.md", content: "large report chunk" } : { path: "doc/report.md" },
+			...(state !== "complete" ? { [kStreamingPartialJson]: '{"path":"doc/report.md","content":' } : {}),
+		}));
+		const freshCall: ToolCall = {
+			type: "toolCall",
+			id: "tc-fresh",
+			name: "write",
+			arguments: { path: "doc/report.md", content: "complete recovered report" },
+		};
+		const executedIds: string[] = [];
+		const countingTool: AgentTool = {
+			name: "write",
+			label: "Count writes",
+			description: "Records invocations without writing files",
+			// Accept partial args so an unsafe execution cannot hide behind schema validation.
+			parameters: type({ "path?": "string", "content?": "string" }),
+			execute: async id => {
+				executedIds.push(id);
+				return { content: [{ type: "text", text: "Counted write" }] };
+			},
 		};
 		let streamCalls = 0;
-		let resumedWithSyntheticResult = false;
+		let resumedWithSafeHistory = false;
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [],
+				tools: [countingTool],
 				messages: [],
 			},
 			streamFn: (requestedModel, context, options) => {
 				streamCalls += 1;
 				if (streamCalls > 1) {
-					const matchingResult = context.messages.find(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					resumedWithSyntheticResult =
-						matchingResult?.role === "toolResult" &&
-						typeof matchingResult.details === "object" &&
-						matchingResult.details !== null &&
-						"executed" in matchingResult.details &&
-						matchingResult.details.executed === false;
+					if (streamCalls === 2) {
+						resumedWithSafeHistory = oldCalls.every((toolCall, index) => {
+							if (callStates[index] === "partial") {
+								return !context.messages.some(
+									message =>
+										message.role === "assistant" &&
+										message.content.some(block => block.type === "toolCall" && block.id === toolCall.id),
+								);
+							}
+							return context.messages.some(
+								message =>
+									message.role === "toolResult" &&
+									message.toolCallId === toolCall.id &&
+									typeof message.details === "object" &&
+									message.details !== null &&
+									"executed" in message.details &&
+									message.details.executed === false,
+							);
+						});
+					}
 					const recoveryModel = createMockModel({
 						id: requestedModel.id,
 						provider: requestedModel.provider,
 					});
-					recoveryModel.push({ content: ["Recovered after timeout"] });
+					recoveryModel.push({ content: streamCalls === 2 ? [freshCall] : ["Recovered after transport error"] });
 					return recoveryModel.stream(recoveryModel, context, options);
 				}
 
@@ -2434,23 +2542,27 @@ describe("AgentSession retry delay cap", () => {
 						stopReason: "stop",
 						timestamp: Date.now(),
 					};
-					partial.content.push(toolCall);
 					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					for (const [contentIndex, toolCall] of oldCalls.entries()) {
+						partial.content.push(toolCall);
+						stream.push({ type: "toolcall_start", contentIndex, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex,
+							delta: toolCall[kStreamingPartialJson] ?? JSON.stringify(toolCall.arguments),
+							partial,
+						});
+						if (callStates[contentIndex] !== "partial") {
+							stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
+						}
+					}
 					stream.push({
 						type: "error",
 						reason: "error",
 						error: {
 							...partial,
 							stopReason: "error",
-							errorMessage: "The operation timed out.",
+							errorMessage,
 							duration: 1000,
 						},
 					});
@@ -2483,13 +2595,14 @@ describe("AgentSession retry delay cap", () => {
 		await session.prompt("Write a large report");
 		await session.waitForIdle();
 
-		expect(streamCalls).toBe(2);
-		expect(resumedWithSyntheticResult).toBe(true);
+		expect(streamCalls).toBe(3);
+		expect(executedIds).toEqual([freshCall.id]);
+		expect(resumedWithSafeHistory).toBe(true);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
-			text: "Recovered after timeout",
+			text: "Recovered after transport error",
 		});
 	});
 
@@ -2520,7 +2633,7 @@ describe("AgentSession retry delay cap", () => {
 				id: "grok-4",
 				provider: "openrouter",
 			});
-			authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+			authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
 			const toolCall: ToolCall = {
 				type: "toolCall",
 				id: "grok-write-1",
@@ -2640,7 +2753,7 @@ describe("AgentSession retry delay cap", () => {
 			id: "composer-2.5",
 			provider: "cursor",
 		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		authStorage.keys.setRuntime("cursor", "cursor-test-key");
 		const toolCall = {
 			type: "toolCall" as const,
 			id: "cursor-shell-1",
@@ -2760,7 +2873,7 @@ describe("AgentSession retry delay cap", () => {
 			id: "composer-2.5",
 			provider: "cursor",
 		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		authStorage.keys.setRuntime("cursor", "cursor-test-key");
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: "cursor-mcp-1",
@@ -2882,7 +2995,7 @@ describe("AgentSession retry delay cap", () => {
 			id: "composer-2.5",
 			provider: "cursor",
 		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		authStorage.keys.setRuntime("cursor", "cursor-test-key");
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: "cursor-mcp-idle-1",
@@ -3003,7 +3116,7 @@ describe("AgentSession retry delay cap", () => {
 			id: "composer-2.5",
 			provider: "cursor",
 		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
+		authStorage.keys.setRuntime("cursor", "cursor-test-key");
 		// Cursor emits `todo` client-side without the server-execution marker; a
 		// reasonless abort after it must still recover (issue #6668 review).
 		const toolCall: ToolCall = {
@@ -3217,7 +3330,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3238,24 +3351,157 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after partial socket close" });
 	});
 
-	it("retries on Bun HTTP/2 stream reset errors", async () => {
-		// Regression: Bun's fetch surfaces HTTP/2 RST_STREAM as `Error: HTTP2StreamReset
-		// fetching "<url>". For more information, pass \`verbose: true\` ...`. The verbatim
-		// message contains no "503", "overloaded", or "network error" hooks, so without the
-		// dedicated HTTP2(StreamReset|RefusedStream|EnhanceYourCalm) carveout the assistant
-		// turn fails terminally even though the underlying condition is transient.
+	it.each([
+		["sub", 2],
+		["main", 1],
+	] as const)(
+		"a %s session treats partial text as replay-%s for the Anthropic envelope error",
+		async (agentKind, expectedStreamCalls) => {
+			// Production 2026-09-21: `scout` subagents whose stream died with
+			// "stream ended before message_stop" after streaming prose exited 1
+			// instead of retrying. A subagent's streamed text reaches no output
+			// sink (the parent only ever sees the yield), so it is replay-safe
+			// without the print-mode `setTextOutputCommitted(false)` dance; a
+			// main session keeps the veto because the text is already rendered.
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) {
+				throw new Error("Expected bundled Anthropic test model to exist");
+			}
+			const envelopeError = "Anthropic stream envelope error: stream ended before message_stop";
+
+			let streamCalls = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: requestedModel => {
+					streamCalls += 1;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const partial: AssistantMessage = {
+							role: "assistant",
+							content: [],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+
+						if (streamCalls === 1) {
+							const text = { type: "text" as const, text: "I'll systematically investigate the codebase" };
+							partial.content.push(text);
+							stream.push({ type: "start", partial });
+							stream.push({ type: "text_start", contentIndex: 0, partial });
+							stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial });
+							stream.push({
+								type: "error",
+								reason: "error",
+								error: { ...partial, stopReason: "error", errorMessage: envelopeError, duration: 1000 },
+							});
+							return;
+						}
+
+						const recovered = { type: "text" as const, text: "recovered after envelope retry" };
+						partial.content.push(recovered);
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_start", contentIndex: 0, partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: recovered.text, partial });
+						stream.push({ type: "text_end", contentIndex: 0, content: recovered.text, partial });
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: { ...partial, stopReason: "stop", duration: 1000 },
+						});
+					});
+					return stream;
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 5_000,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				agentKind,
+			});
+
+			mockSchedulerWaitWithClock();
+			const retryStartEvents: AutoRetryStartEvent[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			});
+
+			await session.prompt("Trigger envelope error after partial text");
+			await session.waitForIdle();
+
+			expect(streamCalls).toBe(expectedStreamCalls);
+			expect(retryStartEvents).toHaveLength(expectedStreamCalls - 1);
+			const last = lastAssistant(session);
+			if (agentKind === "sub") {
+				expect(last.stopReason).toBe("stop");
+				expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
+			} else {
+				expect(last.stopReason).toBe("error");
+				expect(last.errorMessage).toBe(envelopeError);
+			}
+		},
+	);
+
+	it.each([
+		[
+			"Bun HTTP/2",
+			{
+				throw: 'HTTP2StreamReset fetching "https://chatgpt.com/backend-api/codex/responses". For more information, pass `verbose: true` in the second argument to fetch()',
+			},
+		],
+		[
+			"proxied Python HTTP/2",
+			{
+				content: [{ type: "thinking", thinking: "Checking the request." }],
+				stopReason: "error",
+				errorMessage:
+					"Codex error event: <StreamReset stream_id:1283, error_code:2, remote_reset:True> (code=api_error)",
+			},
+		],
+		[
+			"proxied Python HTTP/1.1 chunked body",
+			{
+				content: [],
+				stopReason: "error",
+				errorMessage:
+					"Codex error event: peer closed connection without sending complete message body (incomplete chunked read) (code=api_error)",
+			},
+		],
+	] satisfies [string, MockResponse][])("retries on %s stream interruption errors", async (_label, failure) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
 		const mock = createMockModel({
-			responses: [
-				{
-					throw: 'HTTP2StreamReset fetching "https://chatgpt.com/backend-api/codex/responses". For more information, pass `verbose: true` in the second argument to fetch()',
-				},
-				{ content: ["recovered after stream reset"] },
-			],
+			responses: [failure, { content: ["recovered after stream reset"] }],
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -3282,7 +3528,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3290,7 +3536,7 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger HTTP/2 stream reset");
+		await session.prompt("Trigger stream interruption");
 		await session.waitForIdle();
 
 		expect(retryStartEvents).toHaveLength(1);
@@ -3337,7 +3583,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3395,7 +3641,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
@@ -3452,7 +3698,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
@@ -3501,7 +3747,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
@@ -3560,7 +3806,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
@@ -3584,7 +3830,7 @@ describe("AgentSession retry delay cap", () => {
 		errorMessage: string;
 		prompt: string;
 	}): Promise<void> {
-		authStorage.setRuntimeApiKey(options.model.provider, `${options.model.provider}-test-key`);
+		authStorage.keys.setRuntime(options.model.provider, `${options.model.provider}-test-key`);
 		let calls = 0;
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -3664,7 +3910,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3746,7 +3992,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 
 		vi.spyOn(Math, "random").mockReturnValue(0);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {

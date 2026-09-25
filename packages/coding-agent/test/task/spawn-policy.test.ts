@@ -57,8 +57,8 @@ describe("task spawn policy surfaces", () => {
 		const tool = await TaskTool.create(makeSession("fact-finder"));
 		const description = tool.description;
 
-		expect(description).toContain("### fact-finder");
-		expect(description).not.toContain("### oracle");
+		expect(description).toContain("- `fact-finder`: Find facts.");
+		expect(description).not.toContain("- `oracle`:");
 	});
 });
 
@@ -127,6 +127,6 @@ describe("task tool description scout gating", () => {
 		// The read-only agent remains listed as an available agent (the spawn
 		// policy only filters disabledAgents, so reviewer stays); only the
 		// hard-coded scout guidance is dropped.
-		expect(description).toContain("### reviewer");
+		expect(description).toContain("- `reviewer`: Reviewer.");
 	});
 });

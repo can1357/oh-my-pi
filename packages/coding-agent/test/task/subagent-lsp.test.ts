@@ -12,7 +12,8 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import type { AgentDefinition, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { IsolationHandle, WorktreeBaseline } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -281,7 +282,6 @@ describe("subagent LSP availability", () => {
 		expect(options?.restrictToolNames).toBe(true);
 		expect(options?.toolNames).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(options?.toolNames).not.toContain("lsp");
-		expect(options?.toolNames).not.toContain("hub");
 		expect(options?.toolNames).not.toContain("bash");
 		expect(options?.toolNames).not.toContain("memory_edit");
 		expect(options?.toolNames).not.toContain("retain");

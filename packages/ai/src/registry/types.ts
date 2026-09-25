@@ -50,7 +50,7 @@ export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConf
  * - `envKeys` present ⇒ env-var fallback in `getEnvApiKey`, overriding the
  *   catalog table's `envVars` for that provider.
  * - `login` present ⇒ member of `OAuthProvider`, shown in the `/login` list
- *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.login`.
+ *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.oauth.login`.
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *
@@ -68,6 +68,8 @@ export interface ProviderDefinition {
 	readonly envKeys?: KeyResolver;
 	/** Provider transport can authenticate without a resolved API-key string. */
 	readonly allowsMissingApiKey?: boolean;
+	/** APIs whose provider transport resolves credentials without a stored account. */
+	readonly nativeAuthApis?: readonly string[];
 	/** Provider-owned model normalization that must run before API-specific option mapping. */
 	readonly prepareModel?: ProviderModelPreparer;
 	/** Provider-owned request shaping applied before generic API dispatch. */

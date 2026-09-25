@@ -22,7 +22,7 @@ import { generateEnumExports } from "./gen-enums";
 process.env.PCRE2_SYS_STATIC ??= "1";
 
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
-// registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —
+// registry, but the cmake crate (opusic-sys' bundled Opus) needs cmake —
 // and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
 // without exposing them, so outside a vcvars prompt the build dies on
 // "cmake not found". Resolve the VS install via vswhere and append its

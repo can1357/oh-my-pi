@@ -49,6 +49,16 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
+## Recover a cleared prompt
+
+Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.
+
+Cleared drafts preserve whitespace, collapsed pastes, and image attachments in the current editor's bounded history (100 entries). They are not written to persistent prompt history and do not appear in `Ctrl+R` search. Closing the process discards these canceled drafts; the separate save-on-exit behavior still applies to text currently in the composer. This is not a per-agent stash: history follows the editor, including when Agent Hub changes focus.
+
+The existing double-`Ctrl+C` exit behavior is unchanged. Empty clears do not add history entries.
+
+Recovery is on by default. Turn off **Recall Cleared Drafts** in `/settings` under Interaction > Input, or set `composer.recallClearedDrafts: false`. This takes effect on the next clear without restarting; previously retained drafts remain in history until evicted or the editor closes.
+
 On Windows Terminal, `Ctrl+V` may be handled by the terminal paste command before `omp` sees it; use the `Alt+V` fallback when clipboard image paste appears to do nothing. When the clipboard holds no image, `app.clipboard.pasteImage` pastes the clipboard text instead, so hosts that deliver only this chord (VS Code's integrated terminal when configured to forward `Ctrl+V`, Windows clipboard history via `Win+V`) work for both payload kinds. Windows Terminal also swallows `Ctrl+Enter`, so the `app.message.followUp` chord also binds `Ctrl+Q` — the same chord GitHub Copilot CLI uses — and the same chord submits the agent dashboard's new-agent description and hook-editor prompts. If your existing `keybindings.yml` already assigns `Ctrl+Q` to another action, that user remap wins and follow-up keeps `Ctrl+Enter` unless you explicitly bind `app.message.followUp`.
 
 Terminals that implement OSC 5522 enhanced paste can send clipboard MIME data directly to `omp`; image pastes are attached as `[Image #N]`, while text/plain paste events keep normal paste behavior. When OSC 5522 is unavailable, bracketed paste still handles text, and a pasted single image-file path is loaded as an image when the file is readable from the `omp` host.

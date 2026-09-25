@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -10,6 +9,7 @@ import {
 	buildBunInstallArgs,
 	buildHomebrewUpdateArgs,
 	buildMiseForceInstallArgs,
+	buildMiseUpdateEnv,
 	buildMiseUpgradeArgs,
 	buildNpmInstallArgs,
 	buildRenameCleanupPackages,
@@ -28,6 +28,7 @@ import {
 	resolveReleaseBinaryAsset,
 	resolveReleaseDist,
 	resolveReleaseRename,
+	resolveGitHubTokenForTest,
 	resolveUpdateMethodForTest,
 	resolveUpdateTargetFromPath,
 	shouldForceBinaryUpdate,
@@ -37,9 +38,11 @@ import {
 	updateViaShimTakeover,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
-import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+
+const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 
 const tempDirs: string[] = [];
 
@@ -119,6 +122,50 @@ describe("parseUpdateArgs", () => {
 		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
 			"--canary and --stable are mutually exclusive",
 		);
+	});
+});
+describe("GitHub update credentials", () => {
+	it("prefers an explicit environment token over gh auth", async () => {
+		let calls = 0;
+		const token = await resolveGitHubTokenForTest({
+			envToken: "env-token",
+			ghPath: "gh",
+			runGhAuthToken: async () => {
+				calls += 1;
+				return "keyring-token";
+			},
+		});
+		expect(token).toBe("env-token");
+		expect(calls).toBe(0);
+	});
+
+	it("uses gh auth when no environment token is configured", async () => {
+		const token = await resolveGitHubTokenForTest({
+			envToken: "",
+			ghPath: "gh",
+			runGhAuthToken: async path => path + "-token  ",
+		});
+		expect(token).toBe("gh-token");
+	});
+
+	it("falls back to GH_TOKEN when GITHUB_TOKEN is empty", async () => {
+		const previousGitHubToken = Bun.env.GITHUB_TOKEN;
+		const previousGhToken = Bun.env.GH_TOKEN;
+		Bun.env.GITHUB_TOKEN = "";
+		Bun.env.GH_TOKEN = "gh-env-token";
+		try {
+			expect(await resolveGitHubTokenForTest({ ghPath: null })).toBe("gh-env-token");
+		} finally {
+			if (previousGitHubToken === undefined) delete Bun.env.GITHUB_TOKEN;
+			else Bun.env.GITHUB_TOKEN = previousGitHubToken;
+			if (previousGhToken === undefined) delete Bun.env.GH_TOKEN;
+			else Bun.env.GH_TOKEN = previousGhToken;
+		}
+	});
+
+	it("keeps anonymous fallback when gh is unavailable", async () => {
+		const token = await resolveGitHubTokenForTest({ envToken: "", ghPath: null });
+		expect(token).toBeUndefined();
 	});
 });
 
@@ -507,9 +554,76 @@ describe("update-cli package manager commands", () => {
 		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
 	});
 
-	it("targets the mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
-		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump"]);
+	it("targets the mise GitHub backend and overrides release-age settings for attended updates", () => {
+		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump", "--before", "0s"]);
+		expect(buildMiseUpgradeArgs(false)).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump"]);
+		expect(buildMiseUpdateEnv({ PATH: "/bin", MISE_MINIMUM_RELEASE_AGE: "24h" })).toEqual({
+			PATH: "/bin",
+			MISE_MINIMUM_RELEASE_AGE: "0s",
+		});
 		expect(buildMiseForceInstallArgs("15.10.5")).toEqual(["install", "--force", "github:can1357/oh-my-pi@15.10.5"]);
+	});
+
+	it.skipIf(!miseBinary)("overrides per-tool release age during actual mise upgrade resolution", async () => {
+		if (!miseBinary) throw new Error("mise binary unavailable");
+		const root = await makeTempDir();
+		const releases = [
+			{ tag_name: "v2.0.0", draft: false, prerelease: false, created_at: "2026-09-09T00:00:00Z", assets: [] },
+			{ tag_name: "v1.0.0", draft: false, prerelease: false, created_at: "2020-01-01T00:00:00Z", assets: [] },
+		];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				const pathname = new URL(request.url).pathname;
+				if (pathname.endsWith("/releases/latest")) return Response.json(releases[0]);
+				if (pathname.endsWith("/releases")) return Response.json(releases);
+				return new Response("not found", { status: 404 });
+			},
+		});
+		try {
+			await Bun.write(
+				path.join(root, "mise.toml"),
+				`[tools]
+"github:can1357/oh-my-pi" = { version = "1", minimum_release_age = "999y", api_url = "${server.url}" }
+`,
+			);
+			const env = {
+				...process.env,
+				HOME: path.join(root, "home"),
+				MISE_CACHE_DIR: path.join(root, "cache"),
+				MISE_CONFIG_DIR: path.join(root, "config"),
+				MISE_DATA_DIR: path.join(root, "data"),
+				MISE_STATE_DIR: path.join(root, "state"),
+				HTTP_PROXY: "http://127.0.0.1:9",
+				HTTPS_PROXY: "http://127.0.0.1:9",
+				ALL_PROXY: "http://127.0.0.1:9",
+				NO_PROXY: "127.0.0.1,localhost",
+			};
+			const run = async (args: string[]): Promise<string> => {
+				const process = Bun.spawn([miseBinary, "-C", root, ...args], {
+					env,
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(process.stdout).text(),
+					new Response(process.stderr).text(),
+					process.exited,
+				]);
+				if (exitCode !== 0) throw new Error(`mise upgrade failed: ${stdout}${stderr}`);
+				return stdout + stderr;
+			};
+
+			const blocked = await run(["upgrade", "github:can1357/oh-my-pi", "--bump", "--dry-run"]);
+			expect(blocked).not.toContain("Would install github:can1357/oh-my-pi@2.0.0");
+
+			const allowed = await run([...buildMiseUpgradeArgs(), "--dry-run"]);
+			expect(allowed).toContain("Would install github:can1357/oh-my-pi@2.0.0");
+		} finally {
+			server.stop(true);
+		}
 	});
 
 	it("pins npm package installs to the official registry and the checked native package versions", () => {
@@ -582,6 +696,7 @@ describe("migrateRenamedInstall transaction", () => {
 		tag: "v999.1.0",
 		version: "999.1.0",
 		packages: { pkg: "@new/omp", natives: "@new/natives" },
+		registry: "https://registry.npmjs.org/",
 	};
 
 	function scriptedSteps(script: { install: number[]; removeOld?: number; verify: boolean[] }): {
@@ -853,7 +968,7 @@ describe("update-cli release binary integrity", () => {
 	const binaryName = "omp-linux-x64";
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/${tag}/${binaryName}`;
 	const content = "verified binary";
-	const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+	const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
 
 	function releaseAsset(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 		return {
@@ -1016,7 +1131,7 @@ describe("update-cli release binary integrity", () => {
 				url,
 				targetPath,
 				expectedSize: Buffer.byteLength(content),
-				expectedDigest: `sha256:${createHash("sha256").update("different binary").digest("hex")}`,
+				expectedDigest: `sha256:${Bun.SHA256.hash("different binary", "hex")}`,
 				fetchImpl,
 			}),
 		).rejects.toThrow("digest mismatch");
@@ -1028,9 +1143,7 @@ describe("update-cli release binary integrity", () => {
 		const targetPath = path.join(dir, binaryName);
 		const installed = "#!/bin/sh\necho omp/17.0.8\n";
 		const altered = "#!/bin/sh\necho omp/17.1.2\n";
-		const expectedDigest = `sha256:${createHash("sha256")
-			.update("x".repeat(Buffer.byteLength(altered)))
-			.digest("hex")}`;
+		const expectedDigest = `sha256:${Bun.SHA256.hash("x".repeat(Buffer.byteLength(altered)), "hex")}`;
 		await Bun.write(targetPath, installed);
 		await fs.chmod(targetPath, 0o755);
 
@@ -1236,6 +1349,72 @@ describe("update-cli stale update artifact sweep", () => {
 	});
 });
 
+describe.skipIf(process.platform !== "darwin")("update-cli macOS live backup images", () => {
+	// Regression for the macOS TCC image-path requirement: a `.bak` is the
+	// previous executable and another process may still be running it, so it
+	// must survive both the immediate post-swap cleanup and later sweeps until
+	// its image exits, then be reclaimable. `process.execPath` under `bun
+	// test` is the bun runtime — a real Mach-O whose copy can be held live.
+	// (Copies of Apple trust-cache binaries like /bin/sleep are SIGKILLed by
+	// macOS when executed from a new path, so they cannot serve here.)
+	it("retains a backup whose image a live process runs across cleanup and sweep, then reclaims it after the process exits", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, "omp");
+		await fs.copyFile(process.execPath, targetPath);
+		const live = Bun.spawn([targetPath, "-e", "await Bun.sleep(30000)"], { stdout: "ignore", stderr: "ignore" });
+		try {
+			// Real-time waits, not fake timers: these wait on genuine kernel and
+			// process state (lsof visibility of the live image, vnode release
+			// after exit) that no in-test clock controls.
+			// The image must actually be live and visible to lsof, or the
+			// retention assertions below would pass for the wrong reason.
+			let liveImageVisible = false;
+			for (let i = 0; i < 20 && !liveImageVisible; i++) {
+				const seen = Bun.spawnSync(["/usr/sbin/lsof", "-t", "--", targetPath]);
+				liveImageVisible = seen.exitCode === 0 && seen.stdout.toString().includes(String(live.pid));
+				if (!liveImageVisible) await Bun.sleep(100);
+			}
+			expect(liveImageVisible).toBe(true);
+
+			const attempt = "1700000000000.4242";
+			const tempPath = `${targetPath}.${attempt}.new`;
+			const backupPath = `${targetPath}.${attempt}.bak`;
+			await Bun.write(tempPath, "new binary");
+
+			const result = await replaceBinaryForUpdate({
+				targetPath,
+				tempPath,
+				backupPath,
+				expectedVersion: "15.1.8",
+				verifyInstalledVersion: async () => ({ ok: true, actual: "15.1.8", path: targetPath }),
+			});
+			expect(result.ok).toBe(true);
+			// The swap landed and the temp was consumed, but the live image's
+			// backup must remain on disk.
+			expect(await Bun.file(targetPath).text()).toBe("new binary");
+			expect(await Bun.file(tempPath).exists()).toBe(false);
+			expect(await Bun.file(backupPath).exists()).toBe(true);
+
+			// A later sweep must spare it too.
+			await sweepStaleUpdateArtifacts(targetPath);
+			expect(await Bun.file(backupPath).exists()).toBe(true);
+
+			live.kill();
+			await live.exited;
+
+			// Once the image is gone, the backup is reclaimable.
+			for (let i = 0; i < 20 && (await Bun.file(backupPath).exists()); i++) {
+				await sweepStaleUpdateArtifacts(targetPath);
+				await Bun.sleep(100);
+			}
+			expect(await Bun.file(backupPath).exists()).toBe(false);
+		} finally {
+			live.kill();
+			await live.exited;
+		}
+	});
+});
+
 describe("update-cli binary-only release gating", () => {
 	it("honors an explicit omp.dist field from the registry manifest", () => {
 		expect(resolveReleaseDist({ omp: { dist: "binary" } })).toBe("binary");
@@ -1277,7 +1456,7 @@ describe("update-cli script-shim takeover", () => {
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
 
 	function makeFetch(content: string, prerelease = false): (input: string | URL | Request) => Promise<Response> {
-		const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+		const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
 		return async (input: string | URL | Request): Promise<Response> => {
 			const requestUrl = String(input);
 			if (requestUrl.startsWith("https://api.github.com/")) {
@@ -1491,7 +1670,7 @@ describe("update-cli concurrent binary updates", () => {
 	const binaryName = "omp-linux-x64";
 	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
 	const payload = Buffer.alloc(2048, 0x41);
-	const digest = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
+	const digest = `sha256:${Bun.SHA256.hash(payload, "hex")}`;
 
 	function metadata(): Response {
 		return Response.json({
@@ -1611,6 +1790,7 @@ describe("update-cli manager update recovery", () => {
 		tag: "v18.0.1",
 		version: "18.0.1",
 		packages: { pkg: "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives" },
+		registry: "https://registry.npmjs.org/",
 	};
 	const launcherPath = "C:/Users/test/AppData/Roaming/npm/omp.cmd";
 

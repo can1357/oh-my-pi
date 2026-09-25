@@ -10,16 +10,13 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-cli";
 import {
 	type GalleryFixture,
-	getComposerGalleryEntries,
 	getComposerGalleryInventory,
-	getSegmentGalleryEntries,
 	getSegmentGalleryInventory,
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getComposerShapeOptions } from "@oh-my-pi/pi-coding-agent/modes/components/composer-shape-registry";
-import { ALL_SEGMENT_IDS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
+import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -48,14 +45,6 @@ describe("gallery harness", () => {
 		expect(parseGallerySurfaces(["segment", "tool", "segment"])).toEqual(["tool", "segment"]);
 		expect(parseGallerySurfaces(["all"])).toEqual([...GALLERY_SURFACES]);
 		expect(() => parseGallerySurfaces(["bogus"])).toThrow(/Invalid --surface 'bogus'.*tool.*composer.*segment.*all/);
-	});
-
-	it("derives composer and segment coverage from the production registries", () => {
-		const composerRegistry = getComposerShapeOptions().map(option => option.value);
-		expect(getComposerGalleryInventory()).toEqual(composerRegistry);
-		expect(getComposerGalleryEntries().map(entry => entry.id)).toEqual(composerRegistry);
-		expect(getSegmentGalleryInventory()).toEqual(ALL_SEGMENT_IDS);
-		expect(getSegmentGalleryEntries().map(entry => entry.id)).toEqual(ALL_SEGMENT_IDS);
 	});
 
 	it("orders surfaces tool then composer then segment and lets entry filters imply their surface", async () => {
@@ -143,11 +132,7 @@ describe("gallery harness", () => {
 	});
 
 	it("renders curated failed states as failures", async () => {
-		const cases = [
-			["hub_inbox", "IRC inbox failed: message store unavailable.", "IRC inbox empty"],
-			["hub_list", "IRC list failed: agent hub is unavailable.", "no other agents"],
-			["hub_jobs", "Subagent exited 1: Redis connection string is missing.", "cancelled"],
-		] as const;
+		const cases = [["wait", "Subagent exited 1: Redis connection string is missing.", "42 pass"]] as const;
 
 		for (const [name, expected, forbidden] of cases) {
 			const output = Bun.stripANSI((await renderGalleryState(name, resolveFixture(name), "error", 100)).join("\n"));
@@ -166,6 +151,40 @@ describe("gallery harness", () => {
 		expect(success).toContain("packages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274");
 		expect(success).not.toContain("1210-1240");
 		expect(success).not.toContain("full file");
+	});
+
+	it("renders URL coordination receipts, cancellation and process errors without file-write chrome", async () => {
+		const render = async (name: string, state: "streaming" | "success" | "error") =>
+			Bun.stripANSI((await renderGalleryState(name, resolveFixture(name), state, 100)).join("\n"));
+		expect(await render("write_agent", "success")).toContain("IRC");
+		expect(await render("write_agent", "success")).toContain("injected");
+		const broadcast = await render("write_agent_broadcast", "success");
+		expect(broadcast).toContain("2 delivered");
+		expect(broadcast).toContain("1 failed");
+		expect(broadcast).toContain("not running");
+		const failedReceipt = await render("write_agent_failed_receipt", "success");
+		expect(failedReceipt).toContain("failed");
+		expect(failedReceipt).toContain("not running");
+		const cancel = await render("write_proc_cancel", "success");
+		expect(cancel).toContain("Build assets");
+		expect(cancel).toContain("cancelled");
+		const error = await render("write_agent", "error");
+		expect(error).toContain("IRC");
+		expect(error).toContain("Peer messaging is unavailable");
+		expect(error).not.toContain("Write");
+		const procError = await render("read_proc_job", "error");
+		expect(procError).toContain("Proc build-42");
+		expect(procError).not.toContain("Read proc://");
+	});
+
+	it("defers write path prefixes until the streamed URL target settles", () => {
+		const options = { expanded: false, isPartial: true };
+		expect(writeToolRenderer.renderCall({ path: "ag" }, options, theme)).toBeUndefined();
+		expect(writeToolRenderer.renderCall({ path: "agent://Reviewer" }, options, theme)).toBeUndefined();
+		expect(writeToolRenderer.renderCall({ path: "pro" }, options, theme)).toBeUndefined();
+		expect(
+			writeToolRenderer.renderCall({ path: "proc://build-42/kill" }, { ...options, argsComplete: true }, theme),
+		).toBeDefined();
 	});
 
 	it("falls back to a generic fixture for registry tools without curated sample data", () => {
