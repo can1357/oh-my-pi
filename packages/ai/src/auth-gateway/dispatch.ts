@@ -103,6 +103,8 @@ export async function resolveGatewayApiKey(
 		status: 401,
 		type: "authentication_error",
 		message: `No credential available for provider ${model.provider}`,
+		owner: "credential",
+		disposition: "credential_permanent",
 	};
 }
 
