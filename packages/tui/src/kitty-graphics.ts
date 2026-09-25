@@ -59,6 +59,27 @@ export interface KittyGraphicsFeatures {
 	unicodePlaceholders: boolean;
 }
 
+const PLACEHOLDER_TRUTHY: Record<string, true> = { "1": true, true: true, on: true, yes: true, y: true };
+const PLACEHOLDER_FALSY: Record<string, true> = { "0": true, false: true, off: true, no: true, n: true };
+
+/**
+ * The explicit Unicode-placeholder override: `false` for either hard opt-out
+ * (`PI_NO_KITTY_PLACEHOLDERS` truthy or `PI_KITTY_PLACEHOLDERS` falsy), `true`
+ * for an explicit opt-in, `undefined` when no override is set and detection or
+ * a runtime capability probe should decide.
+ */
+export function resolveKittyPlaceholderOverride(env: NodeJS.ProcessEnv = Bun.env): boolean | undefined {
+	// Object.hasOwn, not truthiness: plain-object lookups match inherited
+	// Object.prototype keys (`constructor`, `__proto__`) and would let those
+	// spellings override detection.
+	const offRaw = env.PI_NO_KITTY_PLACEHOLDERS?.trim().toLowerCase();
+	if (offRaw !== undefined && Object.hasOwn(PLACEHOLDER_TRUTHY, offRaw)) return false;
+	const force = env.PI_KITTY_PLACEHOLDERS?.trim().toLowerCase();
+	if (force !== undefined && Object.hasOwn(PLACEHOLDER_TRUTHY, force)) return true;
+	if (force !== undefined && Object.hasOwn(PLACEHOLDER_FALSY, force)) return false;
+	return undefined;
+}
+
 /**
  * Whether the detected terminal renders Kitty Unicode placeholders (`U=1` +
  * U+10EEEE with row/column diacritics).
@@ -74,11 +95,8 @@ export interface KittyGraphicsFeatures {
  * opt-outs; `PI_KITTY_PLACEHOLDERS=1` explicitly opts in anywhere else.
  */
 export function detectKittyUnicodePlaceholdersSupport(terminalId: string, env: NodeJS.ProcessEnv = Bun.env): boolean {
-	const offRaw = env.PI_NO_KITTY_PLACEHOLDERS?.trim().toLowerCase();
-	if (offRaw === "1" || offRaw === "true" || offRaw === "on" || offRaw === "yes" || offRaw === "y") return false;
-	const force = env.PI_KITTY_PLACEHOLDERS?.trim().toLowerCase();
-	if (force === "1" || force === "true" || force === "on" || force === "yes" || force === "y") return true;
-	if (force === "0" || force === "false" || force === "off" || force === "no" || force === "n") return false;
+	const override = resolveKittyPlaceholderOverride(env);
+	if (override !== undefined) return override;
 	const insideMultiplexer = isInsideTerminalMultiplexer(env);
 	if (insideMultiplexer && env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase() === "kitty") return true;
 	if (isInsideHerdr(env)) return false;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Inline images now auto-enable inside Herdr panes: a startup Kitty graphics-protocol query (`a=q`) upgrades the image protocol when the pane's rendering terminal answers `OK` (Herdr 0.9.0+ with its graphics API on), instead of always degrading to the `[Image: …]` text card; panes that never reply fall back to the previous detection path (text card or Sixel), and `PI_FORCE_IMAGE_PROTOCOL` still wins. ([#13329](https://github.com/can1357/oh-my-pi/pull/13329) by [@brunowowk](https://github.com/brunowowk))
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

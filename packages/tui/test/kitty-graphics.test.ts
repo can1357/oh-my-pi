@@ -163,6 +163,21 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env({ PI_KITTY_PLACEHOLDERS: "off" }))).toBe(false);
 	});
 
+	it("ignores unrecognized override values and prototype keys, falling back to detection", () => {
+		// Unrecognized spellings must not override: detection decides.
+		expect(detectKittyUnicodePlaceholdersSupport("wezterm", env({ PI_KITTY_PLACEHOLDERS: "maybe" }))).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("kitty", env({ PI_NO_KITTY_PLACEHOLDERS: "maybe" }))).toBe(true);
+		// Object.prototype keys must not match the allowlists via inherited
+		// property lookup (`constructor`/`__proto__` are truthy on any object).
+		expect(detectKittyUnicodePlaceholdersSupport("wezterm", env({ PI_KITTY_PLACEHOLDERS: "constructor" }))).toBe(
+			false,
+		);
+		expect(detectKittyUnicodePlaceholdersSupport("kitty", env({ PI_NO_KITTY_PLACEHOLDERS: "constructor" }))).toBe(
+			true,
+		);
+		expect(detectKittyUnicodePlaceholdersSupport("kitty", env({ PI_NO_KITTY_PLACEHOLDERS: "__proto__" }))).toBe(true);
+	});
+
 	it("placeholder opt-out beats forced Kitty under tmux", () => {
 		const forcedOff = env({
 			TMUX: "/tmp/tmux-1000/default,1,0",

@@ -21,9 +21,10 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
-import { KITTY_PLACEHOLDER } from "./kitty-graphics";
+import { KITTY_PLACEHOLDER, resolveKittyPlaceholderOverride, setKittyGraphics } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
+import { wrapTmuxPassthroughIfNeeded } from "./tmux";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
@@ -61,6 +62,8 @@ export const SEGMENT_RESET = "\x1b[0m";
  * bytes are deterministic write framing, not content.
  */
 const LINE_TERMINATOR = "\x1b[0m\x1b]8;;\x07";
+const KITTY_RESPONSE_INTRODUCER = "\x1b_G";
+const KITTY_RESPONSE_TERMINATOR = "\x1b\\";
 const ERASE_LINE = "\x1b[2K";
 const ERASE_TO_END_OF_LINE = "\x1b[K";
 // Keep the common short-row path out of native width/truncation. Longer rows
@@ -846,8 +849,15 @@ export class TUI extends Container {
 	// settle window, leaving only Unicode placeholder cells. Hold the first image
 	// paint until that window has passed; later images render normally.
 	static readonly #GHOSTTY_INITIAL_IMAGE_DELAY_MS = 100;
+	// Graphics-protocol query hosts reply immediately (the VTE answers inline);
+	// the timeout only bounds hosts that swallow the APC silently.
+	static readonly #KITTY_PROBE_TIMEOUT_MS = 250;
 	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	#hardwareCursorState: HardwareCursorState | null = null;
+	#kittyProbePending = false;
+	#kittyProbeBuffer = "";
+	#kittyProbeTimeout?: NodeJS.Timeout;
+	#kittyProbeUnsubscribe?: () => void;
 	#sixelProbePendingGraphics = false;
 	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
@@ -1341,6 +1351,7 @@ export class TUI extends Container {
 		this.terminal.hideCursor();
 		this.#recordHardwareCursorHidden();
 		if (!this.#inputDeferred) {
+			this.#queryKittyGraphicsSupport();
 			this.#querySixelSupport();
 			this.#queryCellSize();
 		}
@@ -1776,6 +1787,7 @@ export class TUI extends Container {
 		if (!this.#inputDeferred || this.#stopped) return;
 		this.#inputDeferred = false;
 		this.terminal.enableInput?.();
+		this.#queryKittyGraphicsSupport();
 		this.#querySixelSupport();
 		this.#queryCellSize();
 	}
@@ -1798,7 +1810,143 @@ export class TUI extends Container {
 		this.#inputListeners.delete(listener);
 	}
 
+	#queryKittyGraphicsSupport(): void {
+		// Herdr owns the pane grid, and outer-terminal identity variables leak
+		// into pane env, so static detection deliberately suppresses Kitty there
+		// (#10356). But the pane VTE itself is libghostty and implements the
+		// graphics protocol whenever its `terminal.kitty_graphics` setting is on
+		// — the 0.9.0 default. Ask the actual host: the graphics-protocol query
+		// action (`a=q`) makes a protocol-speaking VTE reply immediately and
+		// makes every other host swallow the APC silently, which the timeout
+		// resolves as unsupported. That upgrades Herdr 0.9.0+ panes without
+		// version sniffing while keeping the #10356 suppression as the no-reply
+		// fallback (#9550 deferred auto-detection until capability probing).
+		if (!isInsideHerdr()) return;
+		// Same precedence as the sixel probe: a statically resolved protocol or
+		// an explicit PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill
+		// switch — wins over the probe.
+		if (TERMINAL.imageProtocol) return;
+		if (isImageProtocolForced()) return;
+		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+		this.#clearKittyProbeState();
+		this.#kittyProbePending = true;
+		this.#kittyProbeUnsubscribe = this.addInputListener(data => this.#handleKittyProbeInput(data));
+		// The spec's protocol-support query: one sRGB pixel inline (`AAAA` is the
+		// base64 of three zero bytes — one 24-bit RGB pixel, so the `f=24`
+		// payload is exactly 3·s·v bytes), query action `a=q` — the terminal
+		// tries to load it, answers without storing or displaying anything.
+		// `i=31` is the id the reply echoes. Wrapped for tmux so a Herdr pane
+		// hosting tmux still reaches the pane's rendering VTE.
+		this.terminal.write(wrapTmuxPassthroughIfNeeded("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"));
+		this.#kittyProbeTimeout = setTimeout(() => {
+			this.#finishKittyProbe(false);
+		}, TUI.#KITTY_PROBE_TIMEOUT_MS);
+	}
+
+	#handleKittyProbeInput(data: string): InputListenerResult {
+		if (!this.#kittyProbePending) {
+			return undefined;
+		}
+
+		this.#kittyProbeBuffer += data;
+		let passthrough = "";
+		let probeOutcome: boolean | null = null;
+
+		while (this.#kittyProbeBuffer.length > 0) {
+			const responseMatch = this.#kittyProbeBuffer.match(/\x1b_Gi=31;([^\x1b]*)\x1b\\/u);
+			if (!responseMatch || responseMatch.index === undefined) break;
+
+			passthrough += this.#kittyProbeBuffer.slice(0, responseMatch.index);
+			this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(responseMatch.index + responseMatch[0].length);
+
+			if (this.#kittyProbePending) {
+				this.#kittyProbePending = false;
+				// The query action replies `OK` on success or an ASCII error
+				// message; anything but a clean `OK` stays suppressed — a host
+				// that parses graphics but cannot load the payload must not
+				// select the protocol.
+				probeOutcome = responseMatch[1]?.trim() === "OK";
+			}
+		}
+
+		if (this.#kittyProbePending) {
+			const pendingStart = this.#getKittyProbePartialStart(this.#kittyProbeBuffer);
+			if (pendingStart >= 0) {
+				passthrough += this.#kittyProbeBuffer.slice(0, pendingStart);
+				this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(pendingStart);
+			} else {
+				passthrough += this.#kittyProbeBuffer;
+				this.#kittyProbeBuffer = "";
+			}
+		} else {
+			passthrough += this.#kittyProbeBuffer;
+			this.#kittyProbeBuffer = "";
+		}
+
+		if (probeOutcome !== null) {
+			this.#finishKittyProbe(probeOutcome);
+		}
+
+		if (passthrough.length === 0) {
+			return { consume: true };
+		}
+
+		return { data: passthrough };
+	}
+
+	/** Offset of an unterminated Kitty APC response, after any unrelated input. */
+	#getKittyProbePartialStart(buffer: string): number {
+		const start = buffer.lastIndexOf(KITTY_RESPONSE_INTRODUCER);
+		if (start < 0) return -1;
+		const bodyStart = start + KITTY_RESPONSE_INTRODUCER.length;
+		return buffer.includes(KITTY_RESPONSE_TERMINATOR, bodyStart) ? -1 : start;
+	}
+
+	#clearKittyProbeState(): void {
+		if (this.#kittyProbeTimeout) {
+			clearTimeout(this.#kittyProbeTimeout);
+			this.#kittyProbeTimeout = undefined;
+		}
+		if (this.#kittyProbeUnsubscribe) {
+			this.#kittyProbeUnsubscribe();
+			this.#kittyProbeUnsubscribe = undefined;
+		}
+		this.#kittyProbePending = false;
+		this.#kittyProbeBuffer = "";
+	}
+
+	#finishKittyProbe(supported: boolean): void {
+		this.#clearKittyProbeState();
+		if (!supported) {
+			// The startup path deferred the Sixel probe while this probe owned
+			// the input stream; a negative result hands the decision back so a
+			// pane without Kitty graphics can still pass the XTSMGRAPHICS probe.
+			this.#querySixelSupport();
+			return;
+		}
+		if (TERMINAL.imageProtocol) return;
+
+		// The pane VTE is libghostty: it renders the graphics protocol with
+		// Unicode placeholders, and under a nested tmux only placeholder cells
+		// can carry images at all. Mirrors the verified
+		// PI_FORCE_IMAGE_PROTOCOL=kitty + PI_KITTY_PLACEHOLDERS=1 path (#9550).
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		// The probe only proves the protocol; an explicit placeholder opt-out
+		// (PI_NO_KITTY_PLACEHOLDERS / PI_KITTY_PLACEHOLDERS=0) stays
+		// authoritative and keeps rendering off, matching forced-Kitty behavior.
+		setKittyGraphics({ unicodePlaceholders: resolveKittyPlaceholderOverride() ?? true });
+		this.#queryCellSize();
+		this.invalidate();
+		this.requestRender(true);
+	}
+
 	#querySixelSupport(): void {
+		// A pending Kitty-graphics probe owns the decision: sixel must not race
+		// it on the same input stream, and the Kitty protocol outranks Sixel.
+		// A deferred probe is re-armed from #finishKittyProbe once the Kitty
+		// query resolves negatively.
+		if (this.#kittyProbePending) return;
 		// A statically known protocol (Kitty/iTerm2 terminals) or an explicit
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
 		// over the probe.
@@ -2022,6 +2170,7 @@ export class TUI extends Container {
 		// the instant the session exits. The terminal enforces its own store quota
 		// (and live-session ghosts are already bounded by the inline-image budget).
 		this.#clearSixelProbeState();
+		this.#clearKittyProbeState();
 		this.#stopped = true;
 		this.#watchdog.stop();
 		if (this.#renderTimer) {
