@@ -527,7 +527,8 @@ describe("TanCommandController", () => {
 		// accept a nested spawn that the parent's session must reject.
 		const harness = createContext({ isIsolated: true });
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
-		const { clone } = createCloneStub();
+		const appendSessionInit = vi.fn();
+		const { clone } = createCloneStub({ sessionManager: { appendSessionInit } });
 		const createAgentSessionSpy = vi
 			.spyOn(sdkModule, "createAgentSession")
 			.mockResolvedValue({ session: clone } as unknown as CreateAgentSessionResult);
@@ -538,6 +539,9 @@ describe("TanCommandController", () => {
 		await capturedRun({ jobId: "job-1", signal: new AbortController().signal, reportProgress: async () => {} });
 
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.isIsolated).toBe(true);
+		// The parked clone cold-revives from this entry: without isIsolated the
+		// revived clone would offer nested isolation inside the worktree.
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ isIsolated: true }));
 	});
 
 	it("pins the parent's effective cache key when the parent itself carries a pinned promptCacheKey", async () => {
@@ -589,6 +593,7 @@ describe("TanCommandController", () => {
 			systemPrompt: "system prompt",
 			task: "park me",
 			tools: ["read", "bash"],
+			isIsolated: false,
 		});
 		// Parked (not unregistered) before dispose, then the disposed session is nulled
 		// out — the hub keeps the ref and reads its transcript from the session file.

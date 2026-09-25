@@ -188,6 +188,10 @@ export class TanCommandController {
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
 							tools: clone.getEnabledToolNames(),
+							// Keep the nested-isolation gate marker with the clone: a
+							// parked tan clone cold-revives from this entry, and without
+							// isIsolated the revived clone would offer nested isolation.
+							isIsolated: session.isIsolated === true,
 						});
 						const abortClone = () => {
 							void clone?.abort();
