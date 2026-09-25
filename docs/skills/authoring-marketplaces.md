@@ -89,7 +89,7 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
     "email": "plugins@acme.example"
   },
   "metadata": {
-    "description": "Official Acme plugins for oh-my-pi"
+    "description": "Official Acme plugins for omp"
   },
   "plugins": [
     {
@@ -230,7 +230,7 @@ omp plugin install name@marketplace-name
 
 Scope behavior:
 
-- **user** (default) — installed in the user plugins data root's `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default), available in all projects. On Linux and macOS, `omp config init-xdg` creates (but does not migrate data into) the XDG roots; once the relevant roots exist and the XDG variables are set, new user state uses `$XDG_DATA_HOME/omp/plugins/installed_plugins.json`.
+- **user** (default) — installed in the user plugins data root's `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default), available in all projects. On Linux and macOS, `omp config init-xdg` initializes (but does not migrate data into) the XDG roots; with the XDG variables set, initialized roots store new user state in `$XDG_DATA_HOME/omp/plugins/installed_plugins.json`.
 - **project** — installed in `<project>/.omp/plugins/installed_plugins.json`, available only in that project
 
 An enabled project-scoped install shadows an enabled user-scoped install of the same `name@marketplace` ID. A disabled project copy leaves the user copy active.

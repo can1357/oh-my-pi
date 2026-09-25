@@ -89,7 +89,7 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 

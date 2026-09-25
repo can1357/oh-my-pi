@@ -1,25 +1,42 @@
-import { describe, expect, it } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { afterAll, describe, expect, it, vi } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchMojeek } from "@oh-my-pi/pi-coding-agent/web/search/providers/mojeek";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
-const fakeAuthStorage = {
-	async getApiKey() {
-		throw new Error("Mojeek search must not request API keys");
-	},
-	resolver() {
-		throw new Error("Mojeek search must not request credential resolvers");
-	},
-	hasAuth() {
-		throw new Error("Mojeek search must not check auth");
-	},
-} as unknown as AuthStorage;
+const authStorage = createInMemoryAuthStorage();
+const { modelRegistry, model: mojeekModel } = (() => {
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = modelRegistry.find("web", "mojeek");
+	if (!model) throw new Error("Expected bundled web/mojeek model");
+	return { modelRegistry, model };
+})();
+
+const getApiKeySpy = vi.spyOn(authStorage.keys, "get").mockImplementation(() => {
+	throw new Error("Mojeek search must not request API keys");
+});
+const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation(() => {
+	throw new Error("Mojeek search must not request credential resolvers");
+});
+const sourceSpy = vi.spyOn(authStorage.keys, "source").mockImplementation(() => {
+	throw new Error("Mojeek search must not check auth");
+});
+
+afterAll(() => {
+	getApiKeySpy.mockRestore();
+	resolverSpy.mockRestore();
+	sourceSpy.mockRestore();
+	authStorage.close();
+});
 
 function makeParams(query: string, fetch: FetchImpl): SearchParams {
 	return {
 		query,
-		authStorage: fakeAuthStorage,
+		authStorage,
+		model: mojeekModel,
+		modelRegistry,
 		systemPrompt: "Mojeek search test prompt",
 		fetch,
 	};

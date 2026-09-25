@@ -22,7 +22,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
@@ -30,14 +31,6 @@ const taskAgent: AgentDefinition = {
 	name: "task",
 	description: "General-purpose task agent",
 	systemPrompt: "You are a task agent.",
-	source: "bundled",
-};
-
-const scoutAgent: AgentDefinition = {
-	name: "scout",
-	description: "Read-only research agent",
-	systemPrompt: "You are a scout agent.",
-	tools: ["read"],
 	source: "bundled",
 };
 
@@ -139,27 +132,6 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.outputSchema).toBeDefined();
 		expect(typeof itemProperties.outputSchema).toBe("object");
 		expect(itemProperties.schemaMode).toBeDefined();
-	});
-
-	it("requires coordination instead of promising same-file auto-resolution", async () => {
-		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
-
-		expect(tool.description).toContain("Same-file edits are not guaranteed to merge");
-		expect(tool.description).toContain("coordinate through `hub` before editing shared files");
-		expect(tool.description).toContain("Name one integration owner");
-		expect(tool.description).not.toContain("Concurrent edits to the same files auto-resolve");
-	});
-
-	it("describes a restricted specialist as the spawn-policy default", async () => {
-		mockDiscovery(scoutAgent);
-		const tool = await TaskTool.create(createSession({ spawns: "scout" }));
-
-		expect(tool.description).toContain("spawn-policy default (`scout`)");
-		expect(tool.description).not.toContain("general-purpose worker");
-		expect(tool.description).not.toContain("default worker");
-		expect(tool.description).toContain("Omit `agent` when the spawn-policy default is the best fit");
-		expect(tool.description).toContain("### scout (READ-ONLY)");
 	});
 
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {

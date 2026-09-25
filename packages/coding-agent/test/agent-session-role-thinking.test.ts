@@ -10,11 +10,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	AUTO_THINKING,
-	clampAutoThinkingEffort,
-	resolveProvisionalAutoLevel,
-} from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -29,8 +25,8 @@ describe("AgentSession role model thinking behavior", () => {
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-role-thinking-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
@@ -73,10 +69,10 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: options.initialThinkingLevel,
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const runtimeApiKeys = options.runtimeApiKeys ?? {};
 		for (const provider in runtimeApiKeys) {
-			authStorage.setRuntimeApiKey(provider, runtimeApiKeys[provider]);
+			authStorage.keys.setRuntime(provider, runtimeApiKeys[provider]);
 		}
 
 		sessionSettings = Settings.isolated();
@@ -230,7 +226,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: undefined,
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 
 		sessionSettings = Settings.isolated();
 		session = new AgentSession({
@@ -257,7 +253,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: undefined,
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 
 		sessionSettings = Settings.isolated();
 		session = new AgentSession({
@@ -284,7 +280,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: Effort.High,
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 
 		sessionSettings = Settings.isolated();
 		session = new AgentSession({
@@ -331,7 +327,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: Effort.XHigh,
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 
 		sessionSettings = Settings.isolated();
 		session = new AgentSession({
@@ -485,7 +481,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: resolveProvisionalAutoLevel(model),
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
 		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
@@ -528,7 +524,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: resolveProvisionalAutoLevel(model),
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
 		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
@@ -571,7 +567,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: resolveProvisionalAutoLevel(model),
 			},
 		});
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
 		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
@@ -728,7 +724,7 @@ describe("AgentSession role model thinking behavior", () => {
 				thinkingLevel: undefined,
 			},
 		});
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		sessionSettings = Settings.isolated();
 		sessionSettings.set("defaultThinkingLevel", AUTO_THINKING);
 		session = new AgentSession({

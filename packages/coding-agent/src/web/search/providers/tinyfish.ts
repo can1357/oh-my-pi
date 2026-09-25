@@ -5,13 +5,13 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
 
 const TINYFISH_SEARCH_URL = "https://api.search.tinyfish.ai";
 const DEFAULT_NUM_RESULTS = 10;
@@ -63,7 +63,7 @@ export function findApiKey(
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	return authStorage.getApiKey("tinyfish", sessionId, { signal });
+	return authStorage.keys.get("tinyfish", sessionId, { signal });
 }
 
 async function callTinyFishSearch(apiKey: string, params: TinyFishSearchParams): Promise<TinyFishSearchResponse> {
@@ -127,7 +127,7 @@ function appendTinyFishSources(
 		sources.push({
 			title: result.title?.trim() || siteName || url,
 			url,
-			snippet: result.snippet?.replace(/\s+/g, " ").trim() || undefined,
+			snippet: normalizeSearchText(result.snippet),
 			author: siteName || undefined,
 		});
 	}
@@ -178,7 +178,7 @@ export async function searchTinyFish(params: SearchParams): Promise<SearchRespon
 	const { location, language } = tinyFishLocale(parsed.lang);
 	if (location) tinyFishParams.location = location;
 	if (language) tinyFishParams.language = language;
-	const keyOrResolver: ApiKey = params.authStorage.resolver("tinyfish", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("tinyfish", {
 		sessionId: params.sessionId,
 	});
 	const sources = await withAuth(
@@ -217,7 +217,7 @@ export class TinyFishProvider extends SearchProvider {
 	readonly label = "TinyFish";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("tinyfish") || !!getEnvApiKey("tinyfish");
+		return authStorage.keys.source("tinyfish") !== undefined || !!getEnvApiKey("tinyfish");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

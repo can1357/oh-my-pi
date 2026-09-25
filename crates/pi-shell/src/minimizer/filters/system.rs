@@ -323,8 +323,9 @@ pub(super) fn compact_log_lines(
 
 	for (idx, line) in input.lines().enumerate() {
 		let key = if line.trim().is_empty() {
-			// Blank lines are section separators; do not globally deduplicate them.
-			// drop_repeated_blank_lines already collapsed consecutive blanks.
+			// Blank lines are section separators; do not globally deduplicate
+			// them. drop_repeated_blank_lines already collapsed consecutive
+			// blanks.
 			format!("<blank-{idx}>")
 		} else {
 			let key = key_fn(line);

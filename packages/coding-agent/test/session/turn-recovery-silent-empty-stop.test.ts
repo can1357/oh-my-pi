@@ -8,8 +8,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
-import { concreteThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
+import { concreteThinkingLevel, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -89,7 +89,11 @@ function createHost(model: Model, modelRegistry: ModelRegistry): TurnRecoveryHos
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => false,
+		promptSequence: () => 0,
+		resolveActiveEditMode: (): EditMode => "replace",
+		syncAfterModelChange: async () => {},
+		shakeForRequestBodyReadTimeout: async () => false,
 		runAutoCompaction: async () => ({ deferredHandoff: false, continuationScheduled: false }) as never,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 		sessionManager: {
@@ -114,8 +118,8 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-silent-empty-");
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	});
 

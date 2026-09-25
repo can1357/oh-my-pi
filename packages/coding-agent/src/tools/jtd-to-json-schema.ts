@@ -147,6 +147,68 @@ const jtdOnlyPrimitiveTypes: Record<string, true> = {
 	uint32: true,
 };
 
+/** Every keyword RFC 8927 defines. A member outside this set proves the document is JSON Schema. */
+const jtdKeywords: Record<string, true> = {
+	definitions: true,
+	metadata: true,
+	nullable: true,
+	ref: true,
+	type: true,
+	enum: true,
+	elements: true,
+	properties: true,
+	optionalProperties: true,
+	additionalProperties: true,
+	values: true,
+	discriminator: true,
+	mapping: true,
+};
+
+/** JTD sub-schema maps, recursed by {@link isJTDDocument}. `metadata` stays opaque: it holds arbitrary user data. */
+const jtdSchemaMaps = ["properties", "optionalProperties", "definitions", "mapping"] as const;
+
+/**
+ * Check that `schema` and every sub-schema it reaches stay inside the JTD grammar
+ * (RFC 8927 §2): known keywords only, `type` limited to the JTD primitives, and the
+ * scalar keywords carrying their declared value types.
+ *
+ * Used to resolve documents whose root parses as both formats. JSON Schema reaches
+ * here through keywords JTD never defines (`items`, `required`, `$ref`, `anyOf`, …)
+ * or through `type` values JTD never allows (`"object"`, `"array"`, `"integer"`), so
+ * one such node rules the whole document out.
+ */
+function isJTDDocument(schema: unknown): boolean {
+	if (!isRecord(schema)) return false;
+
+	for (const key in schema) {
+		if (!Object.hasOwn(schema, key)) continue;
+		if (!Object.hasOwn(jtdKeywords, key)) return false;
+	}
+
+	if ("type" in schema && !(typeof schema.type === "string" && Object.hasOwn(primitiveMap, schema.type))) return false;
+	if ("enum" in schema && !(Array.isArray(schema.enum) && schema.enum.every(value => typeof value === "string"))) {
+		return false;
+	}
+	if ("ref" in schema && typeof schema.ref !== "string") return false;
+	if ("discriminator" in schema && typeof schema.discriminator !== "string") return false;
+	if ("nullable" in schema && typeof schema.nullable !== "boolean") return false;
+	if ("additionalProperties" in schema && typeof schema.additionalProperties !== "boolean") return false;
+	if ("elements" in schema && !isJTDDocument(schema.elements)) return false;
+	if ("values" in schema && !isJTDDocument(schema.values)) return false;
+
+	for (const mapKeyword of jtdSchemaMaps) {
+		const map = schema[mapKeyword];
+		if (map === undefined) continue;
+		if (!isRecord(map)) return false;
+		for (const name in map) {
+			if (!Object.hasOwn(map, name)) continue;
+			if (!isJTDDocument(map[name])) return false;
+		}
+	}
+
+	return true;
+}
+
 /**
  * Detect if a schema is JTD format (vs JSON Schema).
  *
@@ -172,9 +234,11 @@ export function isJTDSchema(schema: unknown): boolean {
 		return true;
 	}
 
-	// JTD properties form without type: "object" (JSON Schema requires it)
+	// `properties` without `type` parses as both JTD and JSON Schema. Only the whole
+	// document separates them, because the JTD reading is destructive: `convertSchema`
+	// rebuilds the node from JTD keywords alone and drops everything else (#12893).
 	if ("properties" in obj && !("type" in obj)) {
-		return true;
+		return isJTDDocument(obj);
 	}
 
 	return false;
