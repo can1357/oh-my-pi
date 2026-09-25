@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added editor redo with configurable `tui.editor.redo` keybindings ([#9925](https://github.com/can1357/oh-my-pi/pull/9925) by [@Hunter-124](https://github.com/Hunter-124)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

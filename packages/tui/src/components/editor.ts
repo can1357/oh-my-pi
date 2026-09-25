@@ -623,7 +623,11 @@ export class Editor implements Component, Focusable {
 
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
+	/** States undone off {@link #undoStack}, replayable until the next fresh edit. */
+	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
+	/** Most recent pre-edit snapshot, finalized once buffer mutation is observable. */
+	#pendingUndoState: EditorState | undefined;
 
 	// Debounce timer for autocomplete updates
 	#autocompleteTimeout?: NodeJS.Timeout;
@@ -958,6 +962,8 @@ export class Editor implements Component, Focusable {
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
+		this.#pendingUndoState = undefined;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
 		// A single-row entry's top and bottom are the same row, so the directional
@@ -1588,6 +1594,12 @@ export class Editor implements Component, Focusable {
 		// Undo
 		if (kb.matchesCanonical(canonical, "tui.editor.undo")) {
 			this.#applyUndo();
+			return;
+		}
+
+		// Redo
+		if (kb.matchesCanonical(canonical, "tui.editor.redo")) {
+			this.#applyRedo();
 			return;
 		}
 
@@ -2548,6 +2560,8 @@ export class Editor implements Component, Focusable {
 	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.
 	 */
 	undoPastTransientText(transientText: string): void {
+		this.clearVolatileText();
+		this.#commitRecordedUndoState();
 		if (transientText.length === 0) {
 			this.#applyUndo();
 			return;
@@ -3006,6 +3020,8 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
+		this.#pendingUndoState = undefined;
 
 		this.#notifyChange("");
 		if (this.onSubmit) this.onSubmit(result);
@@ -3273,23 +3289,77 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
-		// EditorState holds only primitives plus an array of immutable strings:
-		// a shallow array copy is a complete snapshot. structuredClone pays for
-		// general-case dispatch per element on every edit keystroke.
-		this.#undoStack.push({
-			lines: this.#state.lines.slice(),
-			cursorLine: this.#state.cursorLine,
-			cursorCol: this.#state.cursorCol,
-		});
+		this.#commitRecordedUndoState();
+		const snapshot = this.#snapshotState();
+		this.#undoStack.push(snapshot);
+		this.#pendingUndoState = snapshot;
 		if (this.#undoStack.length > MAX_UNDO_STACK) {
 			this.#undoStack.shift();
 		}
 	}
 
+	/** Finalize the preceding undo candidate after its command has run. No-op
+	 *  commands drop their duplicate snapshot and, crucially, preserve redo. */
+	#commitRecordedUndoState(): void {
+		const snapshot = this.#pendingUndoState;
+		if (!snapshot) return;
+		this.#pendingUndoState = undefined;
+
+		let changed = snapshot.lines.length !== this.#state.lines.length;
+		for (let i = 0; !changed && i < snapshot.lines.length; i++) {
+			changed = snapshot.lines[i] !== this.#state.lines[i];
+		}
+
+		if (changed) {
+			// A fresh edit forks history: whatever was undone is no longer reachable forward.
+			this.#redoStack.length = 0;
+		} else if (this.#undoStack.at(-1) === snapshot) {
+			this.#undoStack.pop();
+		}
+	}
+
 	#applyUndo(): void {
+		// A volatile STT preview is not a committed edit and must never enter history snapshots.
+		this.clearVolatileText();
+		this.#commitRecordedUndoState();
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return;
+		this.#pushBounded(this.#redoStack);
+		this.#restoreState(snapshot);
+	}
 
+	#applyRedo(): void {
+		// Keep redo symmetric with undo if a new volatile preview arrived after an undo.
+		this.clearVolatileText();
+		this.#commitRecordedUndoState();
+		const snapshot = this.#redoStack.pop();
+		if (!snapshot) return;
+		this.#pushBounded(this.#undoStack);
+		this.#restoreState(snapshot);
+	}
+
+	/** EditorState holds only primitives plus an array of immutable strings:
+	 *  a shallow array copy is a complete snapshot. structuredClone pays for
+	 *  general-case dispatch per element on every edit keystroke. */
+	#snapshotState(): EditorState {
+		return {
+			lines: this.#state.lines.slice(),
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+		};
+	}
+
+	/** Snapshot the live state onto `stack`, trimming the oldest entry past the cap.
+	 *  Bypasses {@link #recordUndoState} on purpose: moving between the undo and redo
+	 *  stacks must not clear the opposite stack the way a fresh edit does. */
+	#pushBounded(stack: EditorState[]): void {
+		stack.push(this.#snapshotState());
+		if (stack.length > MAX_UNDO_STACK) {
+			stack.shift();
+		}
+	}
+
+	#restoreState(snapshot: EditorState): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#preferredVisualCol = null;

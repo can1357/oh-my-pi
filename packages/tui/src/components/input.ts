@@ -77,6 +77,8 @@ export class Input implements Component, Focusable {
 
 	// Undo support
 	#undoStack: InputState[] = [];
+	/** States undone off {@link #undoStack}, replayable until the next fresh edit. */
+	#redoStack: InputState[] = [];
 
 	/** Code units of the current volatile speech-to-text preview (see {@link setVolatileText}). */
 	#volatileTextLen = 0;
@@ -102,6 +104,9 @@ export class Input implements Component, Focusable {
 		this.#value = value;
 		// Callers seed or replace the value wholesale; typing continues at the end.
 		this.#cursor = value.length;
+		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
+		this.#lastAction = null;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -145,6 +150,12 @@ export class Input implements Component, Focusable {
 		// Undo
 		if (kb.matches(data, "tui.editor.undo")) {
 			this.#undo();
+			return;
+		}
+
+		// Redo
+		if (kb.matches(data, "tui.editor.redo")) {
+			this.#redo();
 			return;
 		}
 
@@ -446,13 +457,31 @@ export class Input implements Component, Focusable {
 
 	#pushUndo(): void {
 		this.#undoStack.push({ value: this.#value, cursor: this.#cursor });
+		// A fresh edit forks history: whatever was undone is no longer reachable forward.
+		this.#redoStack.length = 0;
 	}
 
 	#undo(): void {
+		// A volatile STT preview is not a committed edit and must never enter history snapshots.
+		this.clearVolatileText();
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) {
 			return;
 		}
+		this.#redoStack.push({ value: this.#value, cursor: this.#cursor });
+		this.#value = snapshot.value;
+		this.#cursor = snapshot.cursor;
+		this.#lastAction = null;
+	}
+
+	#redo(): void {
+		// Keep redo symmetric with undo if a new volatile preview arrived after an undo.
+		this.clearVolatileText();
+		const snapshot = this.#redoStack.pop();
+		if (!snapshot) {
+			return;
+		}
+		this.#undoStack.push({ value: this.#value, cursor: this.#cursor });
 		this.#value = snapshot.value;
 		this.#cursor = snapshot.cursor;
 		this.#lastAction = null;
@@ -475,9 +504,15 @@ export class Input implements Component, Focusable {
 	}
 
 	#handlePaste(pastedText: string): void {
+		const cleanText = toSingleLine(pastedText);
+		// A payload that sanitizes to nothing (e.g. a lone newline, or only control bytes) is
+		// not an edit. Recording undo before this point forked history and erased the redo
+		// branch for a paste that changed nothing — the same class of bug as the no-op delete
+		// commands, so the snapshot is taken only once an actual mutation is certain.
+		if (cleanText.length === 0) return;
 		this.#lastAction = null;
 		this.#pushUndo();
-		this.#replaceBeforeCursor(0, toSingleLine(pastedText));
+		this.#replaceBeforeCursor(0, cleanText);
 	}
 
 	invalidate(): void {
