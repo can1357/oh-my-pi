@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-wire",
-  "version": "18.3.0",
+  "version": "18.3.1",
   "description": "Shared wire protocol types for omp packages",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },

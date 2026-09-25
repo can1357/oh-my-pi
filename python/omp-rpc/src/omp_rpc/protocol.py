@@ -19,6 +19,7 @@ StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
+PromptStatus: TypeAlias = Literal["completed", "aborted", "error"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
 TodoStatus: TypeAlias = Literal[
@@ -74,6 +75,9 @@ _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
+)
+_PROMPT_STATUS_VALUES: Final[frozenset[str]] = frozenset(
+    {"completed", "aborted", "error"}
 )
 _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "error"})
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset(
@@ -852,6 +856,10 @@ class SessionState:
     fast_mode_active: bool = False
     tokens_per_second: float | None = None
     context_usage: ContextUsage | None = None
+    has_pending_async_work: bool = False
+    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    is_settled: bool = False
+    """Idle with nothing queued or pending; same predicate as `session_settled`."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -898,6 +906,16 @@ class ThinkingLevelCycleResult:
 @dataclass(slots=True, frozen=True)
 class CancellationResult:
     cancelled: bool
+
+
+@dataclass(slots=True, frozen=True)
+class OpenSessionResult:
+    """`open_session` outcome; `resumed` is False when a fresh session was started."""
+
+    cancelled: bool
+    resumed: bool
+    session_id: str
+    session_file: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1008,6 +1026,10 @@ class AgentEndEvent:
     type: Literal["agent_end"] = "agent_end"
     message_count: int | None = field(default=None, kw_only=True)
     is_terminal: bool | None = field(default=None, kw_only=True)
+    yielded: bool | None = field(default=None, kw_only=True)
+    """True when the agent finished its turn (it resumes only for queued input or
+    background-job results); False while it continues its own work (retry,
+    compaction, stop-time reminders). None from older servers: use `is_terminal`."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -1026,6 +1048,8 @@ class TurnEndEvent:
 class MessageStartEvent:
     message: AgentMessage
     type: Literal["message_start"] = "message_start"
+    message_id: str | None = field(default=None, kw_only=True)
+    """Shared by the start, updates, and end of one message; unique per process."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -1033,12 +1057,14 @@ class MessageUpdateEvent:
     message: AgentMessage
     assistant_message_event: AssistantMessageEvent
     type: Literal["message_update"] = "message_update"
+    message_id: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True, frozen=True)
 class MessageEndEvent:
     message: AgentMessage
     type: Literal["message_end"] = "message_end"
+    message_id: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1138,6 +1164,46 @@ class TodoAutoClearEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class PromptError:
+    """Failure detail of a `prompt_result` with `status == "error"`."""
+
+    message: str
+    retryable: bool
+    """The failure is transient: resubmitting later may succeed (omp's own retries are exhausted)."""
+    provider: str | None = None
+    model: str | None = None
+    http_status: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PromptResultEvent:
+    """Outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`.
+
+    Emitted after the command's response, once the agent yielded. `agent_invoked`
+    is False when the prompt completed locally or failed before reaching the agent.
+    `session_settled` is False when queued messages or background jobs can still
+    wake the session; a `SessionSettledEvent` follows once they drain.
+    """
+
+    id: str | None
+    agent_invoked: bool
+    status: PromptStatus
+    error: PromptError | None = None
+    type: Literal["prompt_result"] = "prompt_result"
+    session_settled: bool = field(kw_only=True)
+
+
+@dataclass(slots=True, frozen=True)
+class SessionSettledEvent:
+    """The session went quiet: the last run yielded and no background work can wake it.
+
+    Distinct from a terminal `agent_end`, which only means one run yielded.
+    """
+
+    type: Literal["session_settled"] = "session_settled"
+
+
+@dataclass(slots=True, frozen=True)
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
@@ -1170,6 +1236,8 @@ RpcNotification: TypeAlias = (
     ReadyEvent
     | ExtensionUiRequest
     | ExtensionError
+    | PromptResultEvent
+    | SessionSettledEvent
     | RpcAgentEvent
     | UnknownNotification
 )
@@ -1441,6 +1509,8 @@ def parse_session_state(payload: JsonObject) -> SessionState:
                 payload.get("contextUsage"), field="sessionState.contextUsage"
             )
         ),
+        has_pending_async_work=bool(payload.get("hasPendingAsyncWork", False)),
+        is_settled=bool(payload.get("isSettled", False)),
     )
 
 
@@ -1503,6 +1573,15 @@ def parse_thinking_level_cycle_result(
 
 def parse_cancellation_result(payload: JsonObject | None) -> CancellationResult:
     return CancellationResult(cancelled=bool((payload or {}).get("cancelled", False)))
+
+
+def parse_open_session_result(payload: JsonObject) -> OpenSessionResult:
+    return OpenSessionResult(
+        cancelled=_require_bool(payload, "cancelled"),
+        resumed=_require_bool(payload, "resumed"),
+        session_id=_require_str(payload, "sessionId"),
+        session_file=_optional_str(payload, "sessionFile"),
+    )
 
 
 def parse_branch_result(payload: JsonObject | None) -> BranchResult:
@@ -1623,6 +1702,36 @@ def parse_extension_error(payload: JsonObject) -> ExtensionError:
     )
 
 
+def parse_prompt_result(payload: JsonObject) -> PromptResultEvent:
+    error_payload = _optional_json_object(
+        payload.get("error"), field="prompt_result.error"
+    )
+    return PromptResultEvent(
+        id=_optional_str(payload, "id"),
+        agent_invoked=_require_bool(payload, "agentInvoked"),
+        status=cast(
+            PromptStatus,
+            _require_literal(
+                payload.get("status"),
+                _PROMPT_STATUS_VALUES,
+                field="prompt_result.status",
+            ),
+        ),
+        error=(
+            PromptError(
+                message=_require_str(error_payload, "message"),
+                retryable=_require_bool(error_payload, "retryable"),
+                provider=_optional_str(error_payload, "provider"),
+                model=_optional_str(error_payload, "model"),
+                http_status=_optional_int(error_payload, "httpStatus"),
+            )
+            if error_payload is not None
+            else None
+        ),
+        session_settled=_require_bool(payload, "sessionSettled"),
+    )
+
+
 def parse_notification(payload: JsonObject) -> RpcNotification:
     event_type = payload.get("type")
     if event_type == "ready":
@@ -1647,6 +1756,10 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return parse_extension_ui_request(payload)
     if event_type == "extension_error":
         return parse_extension_error(payload)
+    if event_type == "prompt_result":
+        return parse_prompt_result(payload)
+    if event_type == "session_settled":
+        return SessionSettledEvent()
     if event_type == "agent_start":
         return AgentStartEvent()
     if event_type == "agent_end":
@@ -1656,6 +1769,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             ),
             message_count=_optional_int(payload, "messageCount"),
             is_terminal=_optional_bool(payload, "isTerminal"),
+            yielded=_optional_bool(payload, "yielded"),
         )
     if event_type == "turn_start":
         return TurnStartEvent()
@@ -1680,7 +1794,8 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                     payload.get("message"), field="message_start.message"
                 ),
                 field="message_start.message",
-            )
+            ),
+            message_id=_optional_str(payload, "messageId"),
         )
     if event_type == "message_update":
         return MessageUpdateEvent(
@@ -1696,13 +1811,15 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                     field="message_update.assistantMessageEvent",
                 )
             ),
+            message_id=_optional_str(payload, "messageId"),
         )
     if event_type == "message_end":
         return MessageEndEvent(
             message=_parse_agent_message(
                 _clone_json_object(payload.get("message"), field="message_end.message"),
                 field="message_end.message",
-            )
+            ),
+            message_id=_optional_str(payload, "messageId"),
         )
     if event_type == "tool_execution_start":
         return ToolExecutionStartEvent(

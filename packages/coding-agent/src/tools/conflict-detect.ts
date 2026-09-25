@@ -222,19 +222,28 @@ export interface ParsedConflictUri {
 	/** `"*"` selects every currently-registered conflict (bulk write only). */
 	id: number | "*";
 	scope?: ConflictScope;
-	/**
-	 * When `raw` was a malformed `<file-prefix>:conflict://…` path, the
-	 * stripped prefix is preserved here so callers can surface a gentle
-	 * "you don't need the file path" note. `undefined` for clean URIs.
-	 */
-	recoveredPrefix?: string;
 }
 
-// Accept an optional `<prefix>:` before the scheme so paths like
-// `path/to/file.ts:conflict://3` (where the agent mixed the `:conflicts`
-// read selector with the `conflict://` scheme) still resolve. The prefix
-// is greedy so the LAST `:conflict://` wins for multi-colon inputs.
-const CONFLICT_URI_RE = /^(?:(.+):)?conflict:\/\/(.+)$/;
+const CONFLICT_URI_RE = /^conflict:\/\/(.+)$/;
+// `path/to/file.ts:conflict://3`: the agent mixed the `:conflicts` read
+// selector with the `conflict://` scheme. The prefix is greedy so the LAST
+// `:conflict://` wins for multi-colon inputs.
+const PREFIXED_CONFLICT_URI_RE = /^(.+):(conflict:\/\/.+)$/;
+
+/**
+ * Tool-entry normalization for a `<file>:conflict://…` target, which is not a
+ * URL the router can route. Returns the bare `conflict://…` URL plus a note for
+ * the model; any other input passes through unchanged without a note.
+ */
+export function recoverConflictUriPrefix(raw: string): { path: string; note?: string } {
+	const match = raw.match(PREFIXED_CONFLICT_URI_RE);
+	if (!match) return { path: raw };
+	const [, prefix, url] = match;
+	return {
+		path: url,
+		note: `Note: stripped erroneous '${prefix}:' prefix from path; conflict URIs are global (use \`${url}\`, not \`<file>:${url}\`).`,
+	};
+}
 
 /**
  * Parse a `conflict://<N>`, `conflict://<N>/<scope>`, or `conflict://*` URI.
@@ -251,8 +260,7 @@ const CONFLICT_URI_RE = /^(?:(.+):)?conflict:\/\/(.+)$/;
 export function parseConflictUri(raw: string): ParsedConflictUri | null {
 	const match = raw.match(CONFLICT_URI_RE);
 	if (!match) return null;
-	const recoveredPrefix = match[1];
-	const tail = match[2];
+	const tail = match[1];
 	const slashIdx = tail.indexOf("/");
 	const idPart = slashIdx === -1 ? tail : tail.slice(0, slashIdx);
 	const scopePart = slashIdx === -1 ? undefined : tail.slice(slashIdx + 1);
@@ -263,7 +271,7 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 				`Invalid conflict URI '${raw}': wildcard 'conflict://*' does not accept a scope segment. Drop '/${scopePart}' or use a numeric id.`,
 			);
 		}
-		return recoveredPrefix !== undefined ? { id: "*", recoveredPrefix } : { id: "*" };
+		return { id: "*" };
 	}
 
 	if (!/^\d+$/.test(idPart)) {
@@ -286,7 +294,7 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 		scope = scopePart as ConflictScope;
 	}
 
-	return recoveredPrefix !== undefined ? { id, scope, recoveredPrefix } : { id, scope };
+	return { id, scope };
 }
 
 /** Result of {@link spliceConflict}: the new file text plus any boundary-echo repair applied. */

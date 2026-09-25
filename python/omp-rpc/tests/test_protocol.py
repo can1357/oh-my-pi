@@ -7,7 +7,12 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    MessageEndEvent,
+    MessageStartEvent,
     MessageUpdateEvent,
+    PromptError,
+    PromptResultEvent,
+    SessionSettledEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -50,6 +55,84 @@ class ProtocolParsingTests(unittest.TestCase):
                 assert isinstance(parsed, MessageUpdateEvent)
                 self.assertEqual(parsed.assistant_message_event["type"], event_type)
 
+    def test_parse_message_lifecycle_events_carry_message_id(self) -> None:
+        assistant = {"role": "assistant"}
+        update = {
+            "type": "message_update",
+            "message": assistant,
+            "messageId": "m-7",
+            "assistantMessageEvent": {"type": "start", "partial": assistant},
+        }
+        events = [
+            parse_notification(
+                {"type": "message_start", "message": assistant, "messageId": "m-7"}
+            ),
+            parse_notification(update),
+            parse_notification(
+                {"type": "message_end", "message": assistant, "messageId": "m-7"}
+            ),
+        ]
+
+        self.assertIsInstance(events[0], MessageStartEvent)
+        self.assertIsInstance(events[2], MessageEndEvent)
+        self.assertEqual(
+            [getattr(event, "message_id") for event in events], ["m-7"] * 3
+        )
+        legacy = parse_notification({"type": "message_end", "message": assistant})
+        assert isinstance(legacy, MessageEndEvent)
+        self.assertIsNone(legacy.message_id)
+
+    def test_parse_prompt_result_with_error(self) -> None:
+        parsed = parse_notification(
+            {
+                "type": "prompt_result",
+                "id": "req_3",
+                "agentInvoked": True,
+                "sessionSettled": False,
+                "status": "error",
+                "error": {
+                    "message": "overloaded",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5",
+                    "httpStatus": 529,
+                    "retryable": True,
+                },
+            }
+        )
+
+        self.assertEqual(
+            parsed,
+            PromptResultEvent(
+                id="req_3",
+                agent_invoked=True,
+                status="error",
+                error=PromptError(
+                    message="overloaded",
+                    retryable=True,
+                    provider="anthropic",
+                    model="claude-sonnet-4-5",
+                    http_status=529,
+                ),
+                session_settled=False,
+            ),
+        )
+
+    def test_parse_session_settled_notification(self) -> None:
+        self.assertEqual(
+            parse_notification({"type": "session_settled"}), SessionSettledEvent()
+        )
+
+    def test_parse_prompt_result_rejects_unknown_status(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_notification(
+                {
+                    "type": "prompt_result",
+                    "agentInvoked": True,
+                    "sessionSettled": True,
+                    "status": "later",
+                }
+            )
+
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
             {
@@ -80,6 +163,8 @@ class ProtocolParsingTests(unittest.TestCase):
                 "thinkingLevel": "medium",
                 "isStreaming": False,
                 "isCompacting": False,
+                "hasPendingAsyncWork": True,
+                "isSettled": False,
                 "steeringMode": "one-at-a-time",
                 "followUpMode": "all",
                 "interruptMode": "immediate",
@@ -145,6 +230,8 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertFalse(state.fast_mode_enabled)
         self.assertTrue(state.fast_mode_active)
         self.assertEqual(state.tokens_per_second, 12.5)
+        self.assertTrue(state.has_pending_async_work)
+        self.assertFalse(state.is_settled)
 
     def test_parse_session_state_defaults_missing_fast_mode_and_throughput(
         self,
@@ -218,6 +305,16 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(legacy.type, "agent_end")
         self.assertIsNone(legacy.message_count)
         self.assertIsNone(legacy.is_terminal)
+
+    def test_parse_agent_end_yielded(self) -> None:
+        for raw, expected in ((True, True), (False, False), (None, None)):
+            with self.subTest(yielded=raw):
+                payload = {"type": "agent_end", "messages": [], "isTerminal": False}
+                if raw is not None:
+                    payload["yielded"] = raw
+                notification = parse_notification(payload)
+                assert isinstance(notification, AgentEndEvent)
+                self.assertEqual(notification.yielded, expected)
 
     def test_parse_current_compaction_variants(self) -> None:
         start = parse_notification(

@@ -42,11 +42,14 @@ from .protocol import (
     MessageUpdateEvent,
     ModelCycleResult,
     ModelInfo,
+    OpenSessionResult,
+    PromptResultEvent,
     ReadyEvent,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
     RpcNotification,
+    SessionSettledEvent,
     SessionState,
     SessionStats,
     SteeringMode,
@@ -76,6 +79,7 @@ from .protocol import (
     parse_model_cycle_result,
     parse_model_info,
     parse_notification,
+    parse_open_session_result,
     parse_session_state,
     parse_session_stats,
     parse_thinking_level_cycle_result,
@@ -86,6 +90,8 @@ AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
+PromptResultListener = Callable[[PromptResultEvent], None]
+SessionSettledListener = Callable[[SessionSettledEvent], None]
 ReadyListener = Callable[[ReadyEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
@@ -367,6 +373,9 @@ class PromptTurn:
     messages: tuple[AgentMessage, ...]
     assistant_message: AssistantMessage | None
     assistant_text: str | None
+    result: PromptResultEvent | None = None
+    """The prompt's own `prompt_result`; None when the server handled the prompt
+    locally and answered `agentInvoked: false` without emitting one."""
 
     def require_assistant_text(self) -> str:
         if self.assistant_text is None:
@@ -464,6 +473,7 @@ class RpcClient:
         no_skills: bool = False,
         no_rules: bool = False,
         no_title: bool | None = None,
+        no_ui: bool = False,
         rpc_defaults: bool = True,
         extra_args: Sequence[str] = (),
         startup_timeout: float = 30.0,
@@ -491,6 +501,7 @@ class RpcClient:
         self._no_skills = no_skills
         self._no_rules = no_rules
         self._no_title = no_title
+        self._no_ui = no_ui
         self._rpc_defaults = rpc_defaults
         self._extra_args = tuple(extra_args)
         self._startup_timeout = startup_timeout
@@ -519,9 +530,14 @@ class RpcClient:
         self._async_errors = _BoundedHistory[BaseException](
             _DEFAULT_ERROR_HISTORY_LIMIT
         )
-        self._scheduled_agent_runs = 0
-        self._completed_agent_runs = 0
+        # Accepted prompt request ids still awaiting their `prompt_result`.
+        self._pending_prompt_ids: set[str] = set()
+        # `prompt_and_wait` slots keyed by request id: the prompt's result and
+        # the event-history index at which it arrived, once received.
+        self._prompt_results: dict[str, tuple[PromptResultEvent, int] | None] = {}
         self._last_schedule_async_error_index = 0
+        # Number of `session_settled` frames received; `wait_for_settled` waits for it to advance.
+        self._session_settled_count = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
         self._closed_error: BaseException | None = None
@@ -546,6 +562,8 @@ class RpcClient:
         self._unknown_notification_listeners: list[UnknownNotificationListener] = []
         self._ui_request_listeners: list[UiRequestListener] = []
         self._extension_error_listeners: list[ExtensionErrorListener] = []
+        self._prompt_result_listeners: list[PromptResultListener] = []
+        self._session_settled_listeners: list[SessionSettledListener] = []
         self._protocol_error_listeners: list[ProtocolErrorListener] = []
         self._listener_error_listeners: list[ListenerErrorListener] = []
 
@@ -588,9 +606,9 @@ class RpcClient:
         self._frame_decoder = _RpcFrameDecoder()
         self._events.clear()
         self._async_errors.clear()
-        self._scheduled_agent_runs = 0
-        self._completed_agent_runs = 0
+        self._pending_prompt_ids.clear()
         self._last_schedule_async_error_index = 0
+        self._session_settled_count = 0
         self._ui_requests = queue.Queue()
         with self._state_lock:
             self._stderr_chunks.clear()
@@ -701,8 +719,8 @@ class RpcClient:
                     process.stderr.close()
                 except OSError:
                     pass
-            # Mark the client closed so any thread blocked in
-            # `_wait_for_agent_end` raises `RpcProcessExitError` instead of
+            # Mark the client closed so any thread blocked in a lifecycle
+            # wait raises `RpcProcessExitError` instead of
             # waiting for its request timeout. The stdout reader loop would
             # normally do this when it observes the closed pipe, but it
             # guards on `if not self._stopping:` — which is True by the time
@@ -816,6 +834,23 @@ class RpcClient:
     ) -> Callable[[], None]:
         self._extension_error_listeners.append(listener)
         return lambda: self._remove_listener(self._extension_error_listeners, listener)
+
+    def on_prompt_result(self, listener: PromptResultListener) -> Callable[[], None]:
+        """Subscribe to `prompt_result` frames: each prompt's terminal outcome, keyed by request id."""
+        self._prompt_result_listeners.append(listener)
+        return lambda: self._remove_listener(self._prompt_result_listeners, listener)
+
+    def on_session_settled(
+        self, listener: SessionSettledListener
+    ) -> Callable[[], None]:
+        """Subscribe to `session_settled`: the session is done, not merely yielded.
+
+        Fires once per stretch of agent activity, after the last run yielded and
+        background work that could wake the session (async bash/task/eval jobs,
+        queued messages) has drained.
+        """
+        self._session_settled_listeners.append(listener)
+        return lambda: self._remove_listener(self._session_settled_listeners, listener)
 
     def on_protocol_error(self, listener: ProtocolErrorListener) -> Callable[[], None]:
         self._protocol_error_listeners.append(listener)
@@ -989,6 +1024,36 @@ class RpcClient:
             self._request("new_session", parentSession=parent_session)
         )
 
+    def open_session(self, session_dir: str | Path) -> OpenSessionResult:
+        """Continue the newest non-empty session in `session_dir`, or start a fresh one there."""
+        return parse_open_session_result(
+            self._request("open_session", sessionDir=str(session_dir))
+        )
+
+    def set_event_filter(
+        self, events: Sequence[str] | None
+    ) -> tuple[str, ...] | None:
+        """Forward only the listed session event types; `None` forwards all.
+
+        Responses, `prompt_result`, and UI/host frames are never filtered. Returns
+        the filter the server applied.
+        """
+        # `events: null` clears the filter, so it must reach the wire explicitly.
+        payload = self._request_with_id(
+            "set_event_filter",
+            self._next_request_id(),
+            {"events": cast(JsonValue, list(events) if events is not None else None)},
+            drop_none=False,
+        )
+        applied = payload.get("events")
+        if applied is None:
+            return None
+        if not isinstance(applied, list) or not all(
+            isinstance(event, str) for event in applied
+        ):
+            raise RpcError("set_event_filter response has an invalid events list")
+        return tuple(cast(list[str], applied))
+
     def switch_session(self, session_path: str | Path) -> CancellationResult:
         return parse_cancellation_result(
             self._request("switch_session", sessionPath=str(session_path))
@@ -1142,14 +1207,20 @@ class RpcClient:
         *,
         images: Sequence[ImageContent] | None = None,
         streaming_behavior: StreamingBehavior | None = None,
-    ) -> None:
-        self._request(
+    ) -> str:
+        """Submit a prompt and return its request id once accepted.
+
+        The prompt's `prompt_result` (see `on_prompt_result`) carries the same id.
+        """
+        request_id = self._next_request_id()
+        self._submit_prompt(
             "prompt",
+            request_id,
             message=message,
-            images=list(images) if images is not None else None,
+            images=cast(JsonValue, list(images)) if images is not None else None,
             streamingBehavior=streaming_behavior,
         )
-        self._mark_agent_run_scheduled()
+        return request_id
 
     def steer(
         self, message: str, *, images: Sequence[ImageContent] | None = None
@@ -1174,13 +1245,16 @@ class RpcClient:
 
     def abort_and_prompt(
         self, message: str, *, images: Sequence[ImageContent] | None = None
-    ) -> None:
-        self._request(
+    ) -> str:
+        """Abort the current run and submit a prompt; returns its request id."""
+        request_id = self._next_request_id()
+        self._submit_prompt(
             "abort_and_prompt",
+            request_id,
             message=message,
-            images=list(images) if images is not None else None,
+            images=cast(JsonValue, list(images)) if images is not None else None,
         )
-        self._mark_agent_run_scheduled()
+        return request_id
 
     def prompt_and_wait(
         self,
@@ -1190,33 +1264,94 @@ class RpcClient:
         streaming_behavior: StreamingBehavior | None = None,
         timeout: float | None = None,
     ) -> PromptTurn:
+        """Submit a prompt and wait for its own `prompt_result`, i.e. the agent's yield.
+
+        Returns every agent event streamed from submission until that result. A
+        terminal `agent_end` belonging to an earlier run does not end the wait.
+        Background jobs may still wake the session afterwards
+        (`turn.result.session_settled` is False); use `wait_for_settled()` to
+        wait until the session is done.
+        """
         operation = "prompt_and_wait"
         self._prompt_lifecycle.acquire(operation)
+        request_id = self._next_request_id()
+        with self._event_condition:
+            self._prompt_results[request_id] = None
         try:
             start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
-            self.prompt(message, images=images, streaming_behavior=streaming_behavior)
-            events = self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
+            agent_invoked = self._submit_prompt(
+                "prompt",
+                request_id,
+                message=message,
+                images=cast(JsonValue, list(images)) if images is not None else None,
+                streamingBehavior=streaming_behavior,
             )
-            return self._build_prompt_turn(events)
+            if not agent_invoked:
+                with self._event_condition:
+                    events = self._event_slice(
+                        start_index, self._events.current_index()
+                    )
+                return self._build_prompt_turn(events, None)
+            result, events = self._wait_for_prompt_result(
+                request_id, start_index, start_async_error_index, timeout=timeout
+            )
+            return self._build_prompt_turn(events, result)
         finally:
+            with self._event_condition:
+                self._prompt_results.pop(request_id, None)
             self._prompt_lifecycle.release(operation)
 
     def wait_for_idle(self, timeout: float | None = None) -> None:
+        """Wait until every prompt this client submitted has received its `prompt_result`."""
         operation = "wait_for_idle"
         self._prompt_lifecycle.acquire(operation)
         try:
-            if self._is_agent_idle():
-                self._check_async_errors()
-                return
-            start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
-            self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
-            )
+            deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+            with self._event_condition:
+                while True:
+                    if self._closed_error is not None:
+                        raise RpcProcessExitError(str(self._closed_error))
+                    self._raise_async_errors_since(start_async_error_index)
+                    if not self._pending_prompt_ids:
+                        self._raise_async_errors_since(
+                            self._last_schedule_async_error_index
+                        )
+                        return
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RpcTimeoutError(
+                            f"Timed out waiting for prompt_result. Stderr: {self.stderr}"
+                        )
+                    self._event_condition.wait(remaining)
         finally:
             self._prompt_lifecycle.release(operation)
+
+    def wait_for_settled(self, timeout: float | None = None) -> None:
+        """Wait until the session is done: no live run, nothing queued, no background work.
+
+        Returns at once when `get_state()` reports the session settled; otherwise
+        blocks until the next `session_settled` frame. Unlike `prompt_and_wait()`,
+        which returns when the agent yields, this also waits out follow-up runs
+        triggered by async job results.
+        """
+        deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+        # Snapshot before querying state: a frame arriving in between still counts.
+        with self._event_condition:
+            start_count = self._session_settled_count
+        if self.get_state().is_settled:
+            return
+        with self._event_condition:
+            while self._session_settled_count == start_count:
+                if self._closed_error is not None:
+                    raise RpcProcessExitError(str(self._closed_error))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RpcTimeoutError(
+                        f"Timed out waiting for session_settled. Stderr: {self.stderr}"
+                    )
+                self._event_condition.wait(remaining)
 
     def collect_events(self, timeout: float | None = None) -> tuple[RpcAgentEvent, ...]:
         operation = "collect_events"
@@ -1241,29 +1376,102 @@ class RpcClient:
         with self._event_condition:
             return self._async_errors.current_index()
 
-    def _mark_agent_run_scheduled(self) -> None:
-        with self._event_condition:
-            self._scheduled_agent_runs += 1
-            self._last_schedule_async_error_index = self._async_errors.current_index()
+    def _submit_prompt(
+        self, command_type: str, request_id: str, **payload: JsonValue
+    ) -> bool:
+        """Send a prompt command, tracking it until its `prompt_result`.
 
-    def _mark_agent_run_completed(self) -> None:
+        Returns False when the server handled it locally (`agentInvoked: false`),
+        in which case no `prompt_result` follows.
+        """
+        # Registered before sending: the result may arrive before the response
+        # has been handed back to this thread.
         with self._event_condition:
-            self._completed_agent_runs += 1
+            self._pending_prompt_ids.add(request_id)
+            self._last_schedule_async_error_index = self._async_errors.current_index()
+        try:
+            data = self._request_with_id(command_type, request_id, payload)
+        except BaseException:
+            self._settle_prompt(request_id)
+            raise
+        if data.get("agentInvoked") is False:
+            self._settle_prompt(request_id)
+            return False
+        return True
+
+    def _settle_prompt(self, request_id: str) -> None:
+        with self._event_condition:
+            self._pending_prompt_ids.discard(request_id)
             self._event_condition.notify_all()
 
-    def _is_agent_idle(self) -> bool:
-        with self._event_condition:
-            return self._scheduled_agent_runs == self._completed_agent_runs
-
-    def _check_async_errors(self) -> None:
-        with self._event_condition:
-            errors = self._async_errors.snapshot_from(
-                self._last_schedule_async_error_index
+    def _raise_async_errors_since(self, start_async_error_index: int) -> None:
+        """Raise the first async error recorded since the index; caller holds `_event_condition`."""
+        if start_async_error_index < self._async_errors.offset:
+            raise RpcError(
+                "Async error history limit was exceeded while waiting for the agent. "
+                "Increase max_event_history if your host needs to retain more background failures."
             )
+        errors = self._async_errors.snapshot_from(start_async_error_index)
         if errors:
             raise errors[0]
 
-    def _build_prompt_turn(self, events: tuple[RpcAgentEvent, ...]) -> PromptTurn:
+    def _check_event_history(self, start_index: int) -> None:
+        """Fail once events since `start_index` were evicted; caller holds `_event_condition`."""
+        if start_index < self._events.offset:
+            raise RpcError(
+                "Event history limit was exceeded while waiting for the agent. "
+                "Increase max_event_history to retain more streamed events."
+            )
+
+    def _event_slice(
+        self, start_index: int, end_index: int
+    ) -> tuple[RpcAgentEvent, ...]:
+        """Parse retained events in `[start_index, end_index)`; caller holds `_event_condition`."""
+        self._check_event_history(start_index)
+        payloads = self._events.snapshot_from(start_index)[: end_index - start_index]
+        return tuple(cast(RpcAgentEvent, parse_notification(p)) for p in payloads)
+
+    def _wait_for_prompt_result(
+        self,
+        request_id: str,
+        start_index: int,
+        start_async_error_index: int,
+        timeout: float | None = None,
+    ) -> tuple[PromptResultEvent, tuple[RpcAgentEvent, ...]]:
+        deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+        with self._event_condition:
+            while True:
+                if self._closed_error is not None:
+                    raise RpcProcessExitError(str(self._closed_error))
+                self._check_event_history(start_index)
+                self._raise_async_errors_since(start_async_error_index)
+                slot = self._prompt_results.get(request_id)
+                if slot is not None:
+                    result, end_index = slot
+                    return result, self._event_slice(start_index, end_index)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RpcTimeoutError(
+                        f"Timed out waiting for prompt_result. Stderr: {self.stderr}"
+                    )
+                self._event_condition.wait(remaining)
+
+    def _record_prompt_result(self, result: PromptResultEvent) -> None:
+        with self._event_condition:
+            if result.id is not None:
+                self._pending_prompt_ids.discard(result.id)
+                if result.id in self._prompt_results:
+                    self._prompt_results[result.id] = (
+                        result,
+                        self._events.current_index(),
+                    )
+            self._event_condition.notify_all()
+
+    def _build_prompt_turn(
+        self,
+        events: tuple[RpcAgentEvent, ...],
+        result: PromptResultEvent | None,
+    ) -> PromptTurn:
         final_messages: tuple[AgentMessage, ...] = ()
         for event_index in range(len(events) - 1, -1, -1):
             event = events[event_index]
@@ -1294,6 +1502,7 @@ class RpcClient:
             assistant_text=assistant_text(assistant_message)
             if assistant_message is not None
             else None,
+            result=result,
         )
 
     @staticmethod
@@ -1336,34 +1545,16 @@ class RpcClient:
             while True:
                 if self._closed_error is not None:
                     raise RpcProcessExitError(str(self._closed_error))
+                self._check_event_history(start_index)
+                self._raise_async_errors_since(start_async_error_index)
 
-                if start_index < self._events.offset:
-                    raise RpcError(
-                        "Event history limit was exceeded while waiting for agent_end. "
-                        "Increase max_event_history to retain more streamed events."
-                    )
-
-                if start_async_error_index < self._async_errors.offset:
-                    raise RpcError(
-                        "Async error history limit was exceeded while waiting for agent_end. "
-                        "Increase max_event_history if your host needs to retain more background failures."
-                    )
-
-                async_errors = self._async_errors.snapshot_from(start_async_error_index)
-                if len(async_errors) > 0:
-                    raise async_errors[0]
-
-                event_payloads = self._events.snapshot_from(start_index)
+                end_index = self._events.current_index()
                 if any(
                     payload.get("type") == "agent_end"
                     and payload.get("isTerminal") is not False
-                    for payload in event_payloads
+                    for payload in self._events.snapshot_from(start_index)
                 ):
-                    events = tuple(
-                        cast(RpcAgentEvent, parse_notification(payload))
-                        for payload in event_payloads
-                    )
-                    return events
+                    return self._event_slice(start_index, end_index)
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1373,11 +1564,20 @@ class RpcClient:
                 self._event_condition.wait(remaining)
 
     def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+        return self._request_with_id(command_type, self._next_request_id(), payload)
+
+    def _request_with_id(
+        self,
+        command_type: str,
+        request_id: str,
+        payload: Mapping[str, JsonValue],
+        *,
+        drop_none: bool = True,
+    ) -> JsonObject:
         process = self._require_process()
-        request_id = self._next_request_id()
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
-            if value is not None:
+            if value is not None or not drop_none:
                 envelope[key] = value
 
         response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(maxsize=1)
@@ -1829,6 +2029,8 @@ class RpcClient:
         )
         if emit_no_title:
             command.append("--no-title")
+        if self._no_ui:
+            command.append("--no-ui")
         command.extend(self._extra_args)
         return tuple(command)
 
@@ -1921,7 +2123,13 @@ class RpcClient:
                         self._append_async_error(
                             RpcError(f"Failed to parse terminal agent_end: {exc}")
                         )
-                        self._mark_agent_run_completed()
+                    elif payload_type == "prompt_result":
+                        self._append_async_error(
+                            RpcError(f"Failed to parse prompt_result: {exc}")
+                        )
+                        prompt_id = payload.get("id")
+                        if isinstance(prompt_id, str):
+                            self._settle_prompt(prompt_id)
                 self._dispatch_listeners(
                     "notification",
                     notification.type,
@@ -1960,6 +2168,28 @@ class RpcClient:
                     )
                     continue
 
+                if isinstance(notification, PromptResultEvent):
+                    self._record_prompt_result(notification)
+                    self._dispatch_listeners(
+                        "prompt_result",
+                        notification.type,
+                        self._prompt_result_listeners,
+                        notification,
+                    )
+                    continue
+
+                if isinstance(notification, SessionSettledEvent):
+                    with self._event_condition:
+                        self._session_settled_count += 1
+                        self._event_condition.notify_all()
+                    self._dispatch_listeners(
+                        "session_settled",
+                        notification.type,
+                        self._session_settled_listeners,
+                        notification,
+                    )
+                    continue
+
                 if isinstance(notification, UnknownNotification):
                     self._dispatch_listeners(
                         "unknown_notification",
@@ -1971,11 +2201,6 @@ class RpcClient:
 
                 event = cast(RpcAgentEvent, notification)
                 self._append_event(payload)
-                if (
-                    isinstance(event, AgentEndEvent)
-                    and event.is_terminal is not False
-                ):
-                    self._mark_agent_run_completed()
                 self._dispatch_listeners(
                     "event", event.type, self._event_listeners, event
                 )
@@ -2057,7 +2282,6 @@ class RpcClient:
             self._append_async_error(
                 RpcCommandError(protocol_error.command, protocol_error.remote_error)
             )
-            self._mark_agent_run_completed()
 
         self._record_protocol_error(protocol_error)
 

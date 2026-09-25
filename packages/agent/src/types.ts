@@ -433,6 +433,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	dialect?: Dialect;
 	/**
+	 * Per-call owned-dialect resolver, read once per LLM call with the model
+	 * being requested. Authoritative when set: its return value (including
+	 * `undefined` = native tool calling) replaces the static {@link dialect}.
+	 */
+	getDialect?: (model: Model) => Dialect | undefined;
+	/**
 	 * When owned (in-band) tool calling is active and the model starts
 	 * fabricating a tool result inside its own turn, control how the loop reacts:
 	 * - `true` (default): abort the provider request immediately so it stops
