@@ -106,29 +106,33 @@ describe("cost status-line segment", () => {
 		expect(renderSegment("cost", ctx).visible).toBe(false);
 	});
 
-	it("keeps the tariff adjacent to primary spend before credits and advisor billing", () => {
+	it("keeps subscription and tariff indicators alongside AIU and advisor billing", () => {
 		const ctx = costCtx({
 			cost: 1.25,
 			advisorCost: 0.5,
 			premiumRequests: 2,
+			aiu: 1.7114,
 			usingSubscription: true,
 			model: getBundledModel("deepseek", "deepseek-v4-flash"),
 			now: new Date("2026-09-10T02:00:00Z"),
 			onAdvisorSubscriptionProbe: () => {},
 		});
 		const rendered = stripVTControlCharacters(renderSegment("cost", ctx).content);
-		expect(rendered).toMatch(/1\.25.*↑ ★ 2 \+ .*0\.50/);
+		const subscriptionPrefix =
+			theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? `${theme.icon.subscription} ` : "S";
+		expect(rendered).toStartWith(`${subscriptionPrefix}1.25 ↑ ★ 2 1.71 AIU + `);
+		expect(rendered).toContain("0.50");
 		expect(rendered).not.toContain("↓");
 	});
 
-	it("shows only server-reported Copilot AIU in the compact billing summary", () => {
+	it("keeps dollar spend and premium requests visible in sessions with AIU", () => {
 		const ctx = costCtx({
 			cost: 0.01,
 			premiumRequests: 2,
 			aiu: 1.7114,
 			onAdvisorSubscriptionProbe: () => {},
 		});
-		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("1.71 AIU");
+		expect(stripVTControlCharacters(renderSegment("cost", ctx).content)).toBe("$0.01 ★ 2 1.71 AIU");
 	});
 
 	it("formats small AIU consistently without exponential notation", () => {

@@ -79,23 +79,20 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 
 	const placeholder = options.startupPlaceholder === true;
 	const parts: string[] = [];
-	if (hasAiu) {
-		parts.push(`${placeholder ? "…" : formatAiu(options.aiu)} AIU`);
-	} else {
-		if (options.cost || options.pricingPeriod) {
-			parts.push(
-				placeholder
-					? formatSpendPlaceholder(options.usingSubscription, uiTheme)
-					: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
-			);
-		} else if (options.usingSubscription) {
-			parts.push(
-				uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
-			);
-		}
-		if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
-		if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
+	if (options.cost || options.pricingPeriod) {
+		parts.push(
+			placeholder
+				? formatSpendPlaceholder(options.usingSubscription, uiTheme)
+				: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
+		);
+	} else if (options.usingSubscription) {
+		parts.push(
+			uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
+		);
 	}
+	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
+	if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
+	if (hasAiu) parts.push(`${placeholder ? "…" : formatAiu(options.aiu)} AIU`);
 	if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
 		parts.push(
