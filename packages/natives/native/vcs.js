@@ -108,17 +108,51 @@ export function validateHunkSelections(rawDiff, selections) {
 /** Stat-poll interval for {@link watch}. */
 export const HEAD_WATCH_INTERVAL_MS = 1000;
 
+function readWatchStat(target) {
+	try {
+		return fs.statSync(target);
+	} catch {
+		return null;
+	}
+}
+
+function watchStatChanged(prev, curr) {
+	if (prev == null || curr == null) return prev !== curr;
+	return prev.mtimeMs !== curr.mtimeMs || prev.ino !== curr.ino || prev.size !== curr.size;
+}
+
 /**
  * Watch a repository for head changes; returns a disposer.
  *
- * Stat-polls via `fs.watchFile` instead of `fs.watch`: backends may atomically
- * replace the watched entry, permanently silencing inotify-backed watchers.
+ * Stat-polls the head path instead of `fs.watch`: backends atomically replace
+ * the watched entry, which permanently silences inotify-backed watchers.
+ *
+ * Take the baseline before returning: `fs.watchFile` initializes its baseline
+ * asynchronously and can swallow a HEAD replacement during watcher startup.
  */
 export function watch(repo, onChange, intervalMs = HEAD_WATCH_INTERVAL_MS) {
 	const target = repo.watchTarget();
-	const listener = (curr, prev) => {
-		if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino || curr.size !== prev.size) onChange();
+	let baseline = readWatchStat(target);
+	let disposed = false;
+	let pending = false;
+	const poll = setInterval(async () => {
+		if (pending) return;
+		pending = true;
+		let curr;
+		try {
+			curr = await fs.promises.stat(target);
+		} catch {
+			curr = null;
+		} finally {
+			pending = false;
+		}
+		if (disposed || !watchStatChanged(baseline, curr)) return;
+		baseline = curr;
+		onChange();
+	}, intervalMs);
+	poll.unref();
+	return () => {
+		disposed = true;
+		clearInterval(poll);
 	};
-	fs.watchFile(target, { interval: intervalMs }, listener).unref();
-	return () => fs.unwatchFile(target, listener);
 }

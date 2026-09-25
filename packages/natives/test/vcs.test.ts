@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +40,32 @@ async function repository() {
 }
 
 describe("in-process VCS bindings", () => {
+	test("does not notify after disposal while a HEAD stat is in flight", async () => {
+		const root = await repository();
+		const repo = vcs.require(root);
+		const target = repo.watchTarget();
+		const pending = Promise.withResolvers<fs.Stats>();
+		const statSpy = vi.spyOn(fs.promises, "stat").mockReturnValueOnce(pending.promise);
+		vi.useFakeTimers();
+		const onChange = vi.fn();
+		const stop = vcs.watch(repo, onChange, 1);
+		try {
+			vi.advanceTimersByTime(1);
+			stop();
+			// Return a genuinely changed file after disposal, not the old baseline.
+			fs.writeFileSync(`${target}.lock`, "ref: refs/heads/after-dispose\n");
+			fs.renameSync(`${target}.lock`, target);
+			pending.resolve(fs.statSync(target));
+			await pending.promise;
+			expect(onChange).not.toHaveBeenCalled();
+		} finally {
+			stop();
+			pending.resolve(fs.statSync(target));
+			statSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	test("detects staged, unstaged, and untracked working-tree changes", async () => {
 		const root = await repository();
 		const repo = vcsGitDiscover(root)!;
