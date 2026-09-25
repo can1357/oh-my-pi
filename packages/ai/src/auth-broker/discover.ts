@@ -397,7 +397,10 @@ export async function resolveAuthBrokerConfig(
 	return { url, token };
 }
 
-export interface OpenAuthCredentialStoreOptions {
+export interface OpenAuthCredentialStoreOptions extends Pick<
+	DiscoverAuthStorageOptions,
+	"fetch" | "revalidationSignal"
+> {
 	/** Broker to connect to; `null` opens the local SQLite store under `agentDir`. */
 	brokerConfig: AuthBrokerClientConfig | null;
 	agentDir?: string;
@@ -522,6 +525,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		cachePath: options.cachePath,
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
+		fetch: options.fetch,
+		revalidationSignal: options.revalidationSignal,
 	});
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
