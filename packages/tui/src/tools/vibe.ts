@@ -23,6 +23,8 @@ export interface VibeToolDetails {
 	op: VibeOp;
 	/** Live TV-wall snapshot of the owner's worker sessions at (or during) the call. */
 	screens: VibeScreenSnapshot[];
+	/** Sessions the director killed, left off `screens`; shown as a count. */
+	hiddenKilled?: string[];
 	spawned?: { id: string; cli: VibeCli; jobId: string };
 	send?: VibeSendOutcome;
 	wait?: {
@@ -46,6 +48,8 @@ export interface VibeScreenSnapshot {
 	id: string;
 	cli: VibeCli;
 	state: VibeSessionState;
+	/** Terminated by the director (`vibe_kill`) or mode teardown; unset for workers that died on their own. */
+	killed?: boolean;
 	model?: string;
 	turns: number;
 	queued: number;
@@ -373,13 +377,21 @@ export function createVibeToolRenderer(op: VibeOp) {
 				return new Text(header, 0, 0);
 			}
 
-			// wait/list: the TV wall.
+			// wait/list: the TV wall. Director-killed sessions arrive pre-filtered
+			// (see `hiddenKilled`) so a long-running director's wall stays legible.
 			const screens = details.screens;
+			const hiddenKilled = details.hiddenKilled?.length ?? 0;
+			const killedMeta = hiddenKilled > 0 ? [uiTheme.fg("dim", `${hiddenKilled} killed hidden`)] : [];
 			if (screens.length === 0) {
 				const fallback = result.content.find(part => part.type === "text")?.text ?? "no sessions";
+				const gist = hiddenKilled > 0 ? "no live sessions" : fallback;
 				return new Text(
 					renderStatusLine(
-						{ icon: "warning", title: `vibe ${op}`, meta: [uiTheme.fg("dim", frameText(fallback, 60))] },
+						{
+							icon: "warning",
+							title: `vibe ${op}`,
+							meta: [uiTheme.fg("dim", frameText(gist, 60)), ...killedMeta],
+						},
 						uiTheme,
 					),
 					0,
@@ -394,6 +406,7 @@ export function createVibeToolRenderer(op: VibeOp) {
 				if (running > 0) meta.push(uiTheme.fg("accent", `${running} on air`));
 				if (settledById.size > 0) meta.push(uiTheme.fg("success", `${settledById.size} settled`));
 				if (details.wait?.timedOut) meta.push(uiTheme.fg("warning", "timed out"));
+				meta.push(...killedMeta);
 				const title =
 					op === "wait"
 						? waiting
