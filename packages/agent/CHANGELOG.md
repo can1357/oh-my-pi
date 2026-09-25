@@ -5,10 +5,17 @@
 ### Fixed
 
 - Agent loop forwards `routed_model` stream events to `onAssistantMessageEvent` / `message_update` subscribers.
+## [18.3.1] - 2026-09-25
+
 ### Added
 
-- Added passive tool-call context support, allowing hooks and tools to provide additional context that is included with tool results for subsequent model processing.
-- Added automatic output-token limit adjustment so requests fit within the model’s context window.
+- Added live steering support for Codex WebSocket transports, allowing users to provide input while a response is in progress.
+- Added passive tool-call context support, allowing hooks and tools to supply additional context for subsequent model processing.
+- Improved context-window handling by automatically adjusting output-token limits and supporting models that truncate output at the context-window limit.
+
+### Changed
+
+- Improved prompt token counting for requests with anchored prefixes by using provider-reported usage and limiting local estimation to new message content.
 
 ## [18.3.0] - 2026-09-24
 

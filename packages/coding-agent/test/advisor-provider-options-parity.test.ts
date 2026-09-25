@@ -23,6 +23,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+import { cfgProvidersOpenaiWebsockets } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
  *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
  *  labels stay local-only (telemetry, transcripts). */
@@ -92,7 +94,6 @@ describe("AgentSession advisor provider-options parity", () => {
 			modelRegistry,
 			advisorTools: [],
 			advisorStreamFn,
-			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -146,7 +147,6 @@ describe("AgentSession advisor provider-options parity", () => {
 			onResponse,
 			onSseEvent,
 			transformProviderContext,
-			preferWebsockets: true,
 		});
 		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -154,6 +154,8 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
+		// Flipped after the advisor exists: the websocket hint is read per request.
+		cfgProvidersOpenaiWebsockets.set(session.settings, "on");
 		await advisor.prompt("ping").catch(() => {});
 
 		expect(capturedStreamOptions.length).toBeGreaterThan(0);

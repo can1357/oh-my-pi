@@ -13,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const noopSchema = type({});
@@ -240,7 +241,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 				isSplitTurn: false,
 				tokensBefore: 190_000,
 				fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-				settings: session.settings.getGroup("compaction"),
+				settings: cfgCompaction.get(session.settings),
 			};
 		});
 
