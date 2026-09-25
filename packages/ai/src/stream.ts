@@ -53,7 +53,7 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
-import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
+import { getProviderDefinition, PROVIDER_REGISTRY, prepareProviderRequest } from "./registry";
 import type {
 	Api,
 	AssistantMessage,
@@ -977,11 +977,9 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
-	const providerDefinition = getProviderDefinition(model.provider);
-	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
-	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? requestModel;
-	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
+	const prepared = prepareProviderRequest(model, requestOptions as StreamOptions);
+	const providerModel = prepared.model;
+	const preparedOptions = prepared.options;
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);

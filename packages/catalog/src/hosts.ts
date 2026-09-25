@@ -169,6 +169,28 @@ export function isAzureDeploymentsUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/deployments/");
 }
 
+/**
+ * Amazon Bedrock's OpenAI-compatible routes: `/openai/…` on
+ * `bedrock-runtime.<region>.amazonaws.com` or `bedrock-mantle.<region>.api.aws`
+ * (including the catalog's unresolved `{region}` template). Hostnames are
+ * parsed strictly so proxies that embed these hosts in a path do not match.
+ */
+export function isBedrockOpenAIUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		return false;
+	}
+	if (url.protocol !== "https:") return false;
+	if (url.pathname !== "/openai" && !url.pathname.startsWith("/openai/")) return false;
+	return (
+		/^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) ||
+		/^bedrock-mantle\.(?:[a-z0-9-]+|\{region\})\.api\.aws$/.test(url.hostname)
+	);
+}
+
 /** Alibaba DashScope consumer `compatible-mode` endpoint (rejects multimodal arrays for some text-only SKUs). */
 export function isDashscopeCompatibleModeUrl(baseUrl: string): boolean {
 	const normalized = baseUrl.toLowerCase();

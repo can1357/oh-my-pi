@@ -22,7 +22,9 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
@@ -36,6 +38,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -2593,5 +2596,304 @@ describe("compact() remote compaction failure handling", () => {
 			}),
 		).rejects.toThrow("Remote compaction failed");
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("Amazon Bedrock OpenAI routes", () => {
+	const AWS_ENV_KEYS = [
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
+		"AWS_BEARER_TOKEN_BEDROCK",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"AWS_CONFIG_FILE",
+		"AWS_SHARED_CREDENTIALS_FILE",
+		"AWS_EC2_METADATA_DISABLED",
+	] as const;
+
+	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
+		const previous = new Map(AWS_ENV_KEYS.map(key => [key, Bun.env[key]]));
+		try {
+			for (const key of AWS_ENV_KEYS) {
+				const value = env[key];
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+			return await run();
+		} finally {
+			for (const [key, value] of previous) {
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+		}
+	}
+
+	function makeBedrockModel(
+		baseUrl: string,
+		overrides: Partial<ModelSpec<"openai-responses">> = {},
+	): Model<"openai-responses"> {
+		return makeOpenAiModel({ id: "us.openai.gpt-6-astra", provider: "bedrock-openai", baseUrl, ...overrides });
+	}
+
+	test.each([
+		["bedrock-runtime", "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", true],
+		["templated bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/openai/v1", true],
+		["non-Bedrock custom host", "https://llm.example.com/openai/v1", false],
+		[
+			"proxy embedding the Bedrock host",
+			"https://proxy.example.com/bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			false,
+		],
+		["Bedrock Anthropic route", "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic", false],
+		["Bedrock root", "https://bedrock-runtime.us-east-1.amazonaws.com", false],
+	] as const)(
+		"enables native V1 and V2 compaction without opt-in only on OpenAI routes: %s",
+		(_route, baseUrl, expected) => {
+			const model = makeBedrockModel(baseUrl);
+			expect(shouldUseOpenAiRemoteCompaction(model)).toBe(expected);
+			expect(shouldUseCompactionV2Streaming(model)).toBe(expected);
+		},
+	);
+
+	test("does not enable the Chat Completions API on Bedrock's OpenAI route", () => {
+		const model = buildModel({
+			id: "chat-model",
+			name: "Chat model",
+			api: "openai-completions",
+			provider: "bedrock-openai",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 32000,
+		});
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(model)).toBe(false);
+	});
+
+	test("lets explicit disables win over the Bedrock default", () => {
+		const url = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
+		const disabled = makeBedrockModel(url, { remoteCompaction: { enabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(disabled)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(disabled)).toBe(false);
+
+		const v1Only = makeBedrockModel(url, { remoteCompaction: { v2StreamingEnabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(v1Only)).toBe(true);
+		expect(shouldUseCompactionV2Streaming(v1Only)).toBe(false);
+	});
+
+	function makeMantleModel(): Model<"openai-responses"> {
+		return makeOpenAiModel({
+			id: "openai.gpt-6-sol",
+			provider: "bedrock-mantle",
+			baseUrl: "https://bedrock-mantle.{region}.api.aws/openai/v1",
+		});
+	}
+
+	test("sends V1 compaction for a templated Mantle model to the regional endpoint with the bearer token", async () => {
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+		};
+
+		await withAwsEnv({ AWS_REGION: "eu-west-2" }, () =>
+			requestOpenAiRemoteCompaction(
+				makeMantleModel(),
+				"mantle-token",
+				[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+				"instructions",
+				undefined,
+				{ fetch: fetchMock },
+			),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.eu-west-2.api.aws/openai/v1/responses/compact");
+		expect(authorization).toBe("Bearer mantle-token");
+	});
+
+	test("signs V2 compaction for a templated Mantle model with SigV4 when no bearer token exists", async () => {
+		const model = makeMantleModel();
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			"instructions",
+		);
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed" },
+			]);
+		};
+
+		await withAwsEnv(
+			{
+				AWS_REGION: "us-west-2",
+				AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+				AWS_SECRET_ACCESS_KEY: "secret",
+				AWS_CONFIG_FILE: "/nonexistent/aws-config",
+				AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/aws-credentials",
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			() => requestCompactionV2Streaming(model, NO_AUTH_SENTINEL, request, undefined, { fetch: fetchMock }),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1/responses");
+		expect(authorization).toContain("/us-west-2/bedrock-mantle/aws4_request");
+	});
+});
+
+describe("compaction request preparation", () => {
+	const nativeInput = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+
+	function compactionResponse(): Response {
+		return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+	}
+
+	function v2Response(): Response {
+		return sseResponse([
+			{ type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "enc" } },
+			{ type: "response.completed" },
+		]);
+	}
+
+	test("sends lazily resolved configured headers instead of a keyless bearer", async () => {
+		const model: Model<"openai-responses"> = {
+			...makeOpenAiModel({
+				provider: "lazy-headers",
+				baseUrl: "https://compact.example.test/v1",
+				remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+			}),
+			resolveHeaders: async () => ({ Authorization: "Bearer lazy-token" }),
+		};
+		const authorizations: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			authorizations.push(new Headers(init?.headers).get("authorization"));
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+
+		await requestOpenAiRemoteCompaction(model, NO_AUTH_SENTINEL, nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			NO_AUTH_SENTINEL,
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(authorizations).toEqual(["Bearer lazy-token", "Bearer lazy-token"]);
+	});
+
+	test("routes compaction through the provider proxy", async () => {
+		const model = makeOpenAiModel({
+			provider: "compaction-proxy-test",
+			baseUrl: "https://compact.example.test/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const previous = Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+		Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = "http://proxy.example.test:8080";
+		__resetProxyCache();
+		const proxies: unknown[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			proxies.push((init as { proxy?: unknown } | undefined)?.proxy);
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+		try {
+			await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
+				fetch: fetchMock,
+			});
+			await requestCompactionV2Streaming(
+				model,
+				"test-key",
+				buildCompactionV2Request(model, nativeInput, "instructions"),
+				undefined,
+				{ fetch: fetchMock },
+			);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+			else Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = previous;
+			__resetProxyCache();
+		}
+
+		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
+	});
+
+	test.each([
+		[
+			"repeated trailing slashes",
+			"https://compact.example.test/openai/v1//",
+			"https://compact.example.test/openai/v1/responses/compact",
+		],
+		[
+			"a /responses base",
+			"https://compact.example.test/openai/v1/responses",
+			"https://compact.example.test/openai/v1/responses/compact",
+		],
+	] as const)("derives the V1 compact endpoint from %s", async (_shape, baseUrl, expected) => {
+		let url: string | undefined;
+		const fetchMock: FetchImpl = async input => {
+			url = String(input);
+			return compactionResponse();
+		};
+
+		await requestOpenAiRemoteCompaction(
+			makeOpenAiModel({ provider: "custom-compact", baseUrl, remoteCompaction: { enabled: true } }),
+			"test-key",
+			nativeInput,
+			"instructions",
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(url).toBe(expected);
+	});
+
+	test("sends the provider-prepared request model id in the V2 body", async () => {
+		const model = makeOpenAiModel({
+			id: "openai/gpt-5.4",
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acct/gw/openai",
+			remoteCompaction: {
+				enabled: true,
+				api: "openai-responses",
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://gateway.ai.cloudflare.com/v1/acct/gw/openai/responses",
+			},
+		});
+		let body: { model?: string } | undefined;
+		let gatewayAuthorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			body = JSON.parse(String(init?.body)) as { model?: string };
+			gatewayAuthorization = new Headers(init?.headers).get("cf-aig-authorization");
+			return v2Response();
+		};
+
+		await requestCompactionV2Streaming(
+			model,
+			"cf-token",
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(body?.model).toBe("gpt-5.4");
+		expect(gatewayAuthorization).toBe("Bearer cf-token");
 	});
 });

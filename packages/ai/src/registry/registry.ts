@@ -1,12 +1,13 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { AuthProviderId, LoginProviderId } from "@oh-my-pi/pi-catalog/compat/auth-ids";
+import type { Api, Model, StreamOptions } from "../types";
 import { amazonBedrockTransport } from "./amazon-bedrock";
 import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
 import { cloudflareAiGatewayTransport } from "./cloudflare-ai-gateway";
 import { museCodeTransport } from "./muse-code";
-import type { ProviderDefinition } from "./types";
+import type { PreparedProviderRequest, ProviderDefinition } from "./types";
 
 /**
  * TypeScript-side request/model shaping for providers whose transport needs
@@ -36,6 +37,13 @@ const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_RE
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
 	return BY_ID[id];
+}
+
+/** Apply provider model and request hooks in dispatch order. */
+export function prepareProviderRequest(model: Model<Api>, options: StreamOptions): PreparedProviderRequest {
+	const provider = BY_ID[model.provider];
+	const requestModel = provider?.prepareModel?.(model) ?? model;
+	return provider?.prepareRequest?.(requestModel, options) ?? { model: requestModel, options };
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have an auth policy. */
