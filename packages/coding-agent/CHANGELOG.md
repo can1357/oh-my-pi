@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- Failed file renames restore reference edits even when a later reference read or write fails. ([#12285](https://github.com/can1357/oh-my-pi/pull/12285) by [@iliaal](https://github.com/iliaal))
 - Fixed concurrent project access by enforcing file locking across processes.
 - Fixed Windows file reads with line selectors such as `:1-40`.
 - Fixed `omp update` and startup update checks to honor configured npm registries, including scoped registries and authentication tokens.
