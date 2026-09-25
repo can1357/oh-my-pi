@@ -3,6 +3,7 @@ import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
+import { WidthAwareText } from "../render/index";
 import { getLanguageFromPath, theme, type ThemeColor } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
@@ -27,7 +28,7 @@ import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import { SpotlightNotices } from "./spotlight";
-import type { ToolExecutionHandle } from "./tool-execution";
+import { renderToolAdditionalContext, type ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
@@ -405,6 +406,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#presented: boolean;
 	#expanded = false;
 	#toolActivityVisible = true;
+	#additionalContext: string | undefined;
 	#showContentPreview: boolean;
 	// A read group accretes entries across multiple assistant completions for as
 	// long as the run of reads is uninterrupted. It remains active while its
@@ -688,6 +690,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (this.#expanded !== expanded || entries.some(entry => entry.expanded !== expanded)) this.#blockVersion++;
 		this.#expanded = expanded;
 		for (const entry of entries) entry.expanded = expanded;
+		this.#updateDisplay();
+	}
+
+	setAdditionalContext(context: string): void {
+		if (context === this.#additionalContext) return;
+		this.#additionalContext = context;
+		this.#blockVersion++;
 		this.#updateDisplay();
 	}
 
@@ -1087,6 +1096,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 0) {
 			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
 			this.addChild(this.#text);
+			this.#appendAdditionalContext();
 			return;
 		}
 
@@ -1105,6 +1115,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				this.#addContentPreview(entry);
 				this.#addPreviewUsage(entry);
 			}
+			this.#appendAdditionalContext();
 			return;
 		}
 
@@ -1127,6 +1138,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				this.#addPreviewUsage(entry);
 			}
 		}
+		this.#appendAdditionalContext();
+	}
+
+	#appendAdditionalContext(): void {
+		if (this.#additionalContext === undefined) return;
+		this.addChild(
+			new WidthAwareText(width => renderToolAdditionalContext(this.#additionalContext ?? "", width), 1, 0),
+		);
 	}
 
 	#displayTargetsForEntries(entries: readonly ReadEntry[]): ReadDisplayTarget[] {
