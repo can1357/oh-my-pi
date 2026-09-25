@@ -18,6 +18,7 @@ import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-c
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgTuiShowLinkUrl } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -283,6 +284,45 @@ describe("ACP builtin slash commands", () => {
 			"Extended context disabled.",
 			"Extended context is off.",
 		]);
+	});
+
+	it("toggles link URLs with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/link-url status", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/link-url off", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/link-url off", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/link-url toggle", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/link-url on", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(output).toEqual([
+			"Link URLs are on.",
+			"Link URLs disabled.",
+			"Link URLs disabled.",
+			"Link URLs enabled.",
+			"Link URLs enabled.",
+		]);
+	});
+
+	it("reports link URLs status when off and normalizes case, whitespace, and unknown args", async () => {
+		const { output, runtime } = createRuntime();
+		cfgTuiShowLinkUrl.set(runtime.settings, false);
+
+		expect(await executeAcpBuiltinSlashCommand("/link-url status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual(["Link URLs are off."]);
+		expect(await executeAcpBuiltinSlashCommand("/link-url ON", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/link-url", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/link-url   ", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/link-url on off", runtime)).toEqual({ consumed: true });
+		expect(cfgTuiShowLinkUrl.get(runtime.settings)).toBe(true);
+		expect(output[output.length - 1]).toBe("Usage: /link-url [on|off|status]");
 	});
 
 	it("forces a tool and returns remaining prompt text", async () => {

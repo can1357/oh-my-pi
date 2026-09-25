@@ -95,7 +95,9 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 	block.addChild(new DynamicBorder());
 	block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
 	block.addChild(new Spacer(1));
-	block.addChild(new Markdown(markdown.trim(), 1, 1, getMarkdownTheme()));
+	const commandMarkdown = new Markdown(markdown.trim(), 1, 1, getMarkdownTheme());
+	commandMarkdown.linkUrls = ctx.linkUrls;
+	block.addChild(commandMarkdown);
 	block.addChild(new DynamicBorder());
 	ctx.presentCommandOutput(block);
 }
@@ -684,7 +686,9 @@ export class CommandController {
 		block.addChild(new DynamicBorder());
 		block.addChild(new Text(theme.bold(theme.fg("accent", title)), 1, 0));
 		block.addChild(new Spacer(1));
-		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
+		const changelogMarkdownComponent = new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme());
+		changelogMarkdownComponent.linkUrls = this.ctx.linkUrls;
+		block.addChild(changelogMarkdownComponent);
 		block.addChild(new DynamicBorder());
 		this.ctx.presentCommandOutput(block);
 	}
@@ -734,7 +738,9 @@ export class CommandController {
 			block.addChild(new DynamicBorder());
 			block.addChild(new Text(theme.bold(theme.fg("accent", "Memory Injection Payload")), 1, 0));
 			block.addChild(new Spacer(1));
-			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
+			const payloadMarkdown = new Markdown(payload, 1, 1, getMarkdownTheme());
+			payloadMarkdown.linkUrls = this.ctx.linkUrls;
+			block.addChild(payloadMarkdown);
 			block.addChild(new DynamicBorder());
 			this.ctx.presentCommandOutput(block);
 			return;

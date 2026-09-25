@@ -16,6 +16,7 @@ export interface AssistantMessageHost {
 	readonly viewSession: AssistantMessageSession;
 	readonly effectiveHideThinkingBlock: boolean;
 	readonly proseOnlyThinking: boolean;
+	readonly linkUrls: boolean;
 	readonly assistantImagesVisible: boolean;
 	readonly hideToolActivity: boolean;
 	readonly toolOutputExpanded: boolean;
@@ -112,8 +113,10 @@ export function createAssistantMessageComponent(
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
 		linkTargets,
+		ctx.linkUrls,
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);
+	component.linkUrls = ctx.linkUrls;
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
 	component.setExpanded(ctx.toolOutputExpanded);
 	// A wire the `stream-revision` axis marks `possible` can rewrite text it has
