@@ -294,7 +294,7 @@ describe("worktree isolation helpers", () => {
 				runGit(repo, ["stash", "list"]),
 				runGit(repo, ["status", "--porcelain=v1"]),
 			]);
-			expect(result).toEqual({ failed: [], merged: [] });
+			expect(result).toEqual({ failed: [], merged: [], processed: [] });
 			const stashEntries = stashList.split("\n").filter(Boolean);
 			expect(stashEntries).toHaveLength(1);
 			expect(stashEntries[0]).toContain("preexisting-user-stash");
@@ -323,7 +323,7 @@ describe("worktree isolation helpers", () => {
 					runGit(repo, ["diff", "--cached", "--", "staged.txt"]),
 					runGit(repo, ["stash", "list"]),
 				]);
-				expect(result).toEqual({ failed: [], merged: [TASK_BRANCH] });
+				expect(result).toEqual({ failed: [], merged: [TASK_BRANCH], processed: [TASK_BRANCH] });
 				expect(mergedContent).toBe("task branch change\n");
 				expect(status).toBe("M  staged.txt");
 				expect(cached).toContain("+local staged change");
@@ -463,7 +463,7 @@ describe("worktree isolation helpers", () => {
 					const mergeResult = await mergeTaskBranches(repo, [{ branchName, taskId }]);
 					const finalContent = await fs.readFile(fixturePath, "utf8");
 
-					expect(mergeResult).toEqual({ failed: [], merged: [branchName] });
+					expect(mergeResult).toEqual({ failed: [], merged: [branchName], processed: [branchName] });
 					expect(finalContent).toBe(`${isolatedLines.join("\n")}\n`);
 				} finally {
 					await cleanupTaskBranches(repo, [branchName]);
@@ -532,7 +532,7 @@ describe("worktree isolation helpers", () => {
 						runGit(repo, ["log", "--pretty=%s", `${initialSha}..HEAD`]),
 					]);
 
-					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH, REDUNDANT_BRANCH] });
+					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH, REDUNDANT_BRANCH], processed: [TASK_BRANCH, REDUNDANT_BRANCH] });
 					// No cherry-pick sequencer state, no unmerged entries: the
 					// skip advanced cleanly.
 					expect(status).toBe("");
@@ -1047,9 +1047,10 @@ describe("applyNestedPatches", () => {
 			"+v2\n";
 		const warnings = await applyNestedPatches(parentRepo, [{ relativePath: nestedRel, patch }]);
 
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toContain("could not be auto-restored");
-		expect(warnings[0]).toContain(nestedRel);
+		expect(warnings.warnings).toHaveLength(1);
+		expect(warnings.warnings[0]).toContain("could not be auto-restored");
+		expect(warnings.warnings[0]).toContain(nestedRel);
+		expect(warnings.applied).toBe(true);
 
 		// Commit landed and the stash entry is preserved for manual recovery.
 		const [committedFiles, stashList] = await Promise.all([
@@ -1158,7 +1159,7 @@ describe("commitToBranch preserves agent commits", () => {
 		const merge = await mergeTaskBranches(parent, [
 			{ branchName: result!.branchName!, taskId: "multi", baseSha: result!.baseSha! },
 		]);
-		expect(merge).toEqual({ failed: [], merged: ["omp/task/multi"] });
+		expect(merge).toEqual({ failed: [], merged: ["omp/task/multi"], processed: ["omp/task/multi"] });
 
 		const subjects = (await runGit(parent, ["log", "-2", "--pretty=%s"])).split("\n");
 		expect(subjects).toEqual(["test: add beta coverage", "feat: add alpha file"]);
@@ -1213,7 +1214,7 @@ describe("commitToBranch preserves agent commits", () => {
 		const merge = await mergeTaskBranches(parent, [
 			{ branchName: result!.branchName!, taskId: "dirty-baseline", baseSha: result!.baseSha! },
 		]);
-		expect(merge).toEqual({ failed: [], merged: ["omp/task/dirty-baseline"] });
+		expect(merge).toEqual({ failed: [], merged: ["omp/task/dirty-baseline"], processed: ["omp/task/dirty-baseline"] });
 
 		const [headSubject, status, fixture] = await Promise.all([
 			runGit(parent, ["log", "-1", "--pretty=%s"]),
@@ -1256,7 +1257,7 @@ describe("commitToBranch preserves agent commits", () => {
 		const merge = await mergeTaskBranches(parent, [
 			{ branchName: result!.branchName!, taskId, baseSha: result!.baseSha! },
 		]);
-		expect(merge).toEqual({ failed: [], merged: [result!.branchName!] });
+		expect(merge).toEqual({ failed: [], merged: [result!.branchName!], processed: [result!.branchName!] });
 		expect(await fs.readFile(path.join(parent, "EXP_CLEAN_COMMIT.txt"), "utf8")).toBe(agentLines.join("\n"));
 	});
 

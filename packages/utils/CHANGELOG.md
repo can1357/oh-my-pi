@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- `checkpointWal` ignores already-closed databases and benign temp-unlink I/O codes (`SQLITE_IOERR_VNODE` / `DELETE*`), while still propagating real durability failures such as `SQLITE_IOERR_WRITE` / `ACCESS`.
+- Fixed rotating log files being assigned to the wrong date near local-day boundaries by ensuring dated log paths match the local day used to name the files.
 - Fixed log rotation near local-day boundaries so dated log files are consistently assigned to the correct local date.
 
 ## [18.2.7] - 2026-09-21
@@ -182,6 +184,8 @@
 ### Fixed
 
 - Fixed runtime installation getting stuck for up to 60 seconds after an installer crash or forced termination, allowing subsequent installation attempts to proceed normally.
+### Fixed
+
 
 ## [18.0.10] - 2026-08-28
 

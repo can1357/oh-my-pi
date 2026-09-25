@@ -28,6 +28,12 @@ export interface TodoItem {
 	status: TodoStatus;
 	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
 	blocker?: string;
+	/**
+	 * Set when the user abandoned this task via `/todo drop` (interactive or ACP).
+	 * Settle treats model-authored `abandoned` as incomplete work that should
+	 * continue, but a user-authored drop is an explicit cancel and must not.
+	 */
+	droppedBy?: "user";
 	details?: string;
 	notes?: string[];
 }

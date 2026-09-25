@@ -88,6 +88,7 @@ import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-m
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	$env,
 	escapeXmlText,
@@ -400,10 +401,14 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { UnverifiedMergeLatch } from "./settle-gates";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
+import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
+import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { ToolChoiceQueue } from "./tool-choice-queue";
+import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
@@ -413,10 +418,6 @@ export * from "./agent-session-types";
 export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
-
-import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
-import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
@@ -483,6 +484,7 @@ const cfgWorkspacePromptInputs = combine({
 	autoqa: cfgDevAutoqa,
 	autoqaConsent: cfgDevAutoqaConsent,
 });
+
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
@@ -755,6 +757,7 @@ export class AgentSession implements SettingsScope {
 	readonly #todo: TodoTracker;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
+	readonly #unverifiedMergeLatch = new UnverifiedMergeLatch();
 	/** Item set matching the last successfully rebuilt provider prompt. The base
 	 *  prompt starts consistent with the empty set; every later value is a
 	 *  snapshot taken after a prompt rebuild resolves. Rollback restores this —
@@ -1480,6 +1483,8 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			model: () => this.model,
 			agentKind: () => this.#agentKind,
+			cwd: () => this.sessionManager.getCwd(),
+			repoRoot: () => vcs.git(this.sessionManager.getCwd())?.info().repoRoot,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
@@ -1490,6 +1495,10 @@ export class AgentSession implements SettingsScope {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			hasUnverifiedMerge: () => this.#unverifiedMergeLatch.latched,
+			unverifiedMergeGeneration: () => this.#unverifiedMergeLatch.generation,
+			clearUnverifiedMergeIfGeneration: (generationAtStart: number) =>
+				this.#unverifiedMergeLatch.clearIfGeneration(generationAtStart),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#modelMentions = new ModelMentionRegistry({
@@ -2071,6 +2080,8 @@ export class AgentSession implements SettingsScope {
 				this.#todo.syncFromBranch();
 				this.#modelMentions.syncFromBranch();
 			},
+			incompleteTodosCompactionContext: () => this.#todo.buildIncompleteTodosCompactionContext(),
+			appendIncompleteTodosToCompactionSummary: summary => this.#todo.appendIncompleteTodosToSummary(summary),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
@@ -2325,6 +2336,18 @@ export class AgentSession implements SettingsScope {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	markUnverifiedMerge(): void {
+		this.#unverifiedMergeLatch.mark();
+	}
+
+	observeAsyncJobTerminal(
+		jobId: string,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	): void {
+		this.#todo.onAsyncJobTerminal(jobId, jobType, status);
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -2659,6 +2682,10 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
 		if (this.#isDisposed) return;
+		// Observe terminal status before delivery gates: hub `consumeJobResults`
+		// suppresses auto-delivery, but a successful bash/eval verify must still
+		// clear the unverified-merge latch.
+		this.#todo.onAsyncJobTerminal(jobId, job?.type, job?.status);
 		if (manager.isDeliverySuppressed(jobId)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
@@ -3342,7 +3369,8 @@ export class AgentSession implements SettingsScope {
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			const details = isRecord(event.message.details) ? event.message.details : undefined;
+			this.#todo.onToolResult(event.message.toolName, event.message.isError, details, event.message.toolCallId);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -3472,6 +3500,7 @@ export class AgentSession implements SettingsScope {
 
 		if (event.type === "tool_execution_start") {
 			this.#recordToolExecutionStart(event);
+			this.#todo.onToolExecutionStart(event.toolName, event.toolCallId, event.args);
 		}
 
 		// Both buffer resets run before the awaited fan-out: event handlers run
@@ -4706,6 +4735,7 @@ export class AgentSession implements SettingsScope {
 				todos: event.todos,
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
+				...(event.unverifiedMerge ? { unverifiedMerge: true } : {}),
 			});
 		} else if (event.type === "goal_updated") {
 			await this.#extensionRunner.emit({
@@ -6203,6 +6233,11 @@ export class AgentSession implements SettingsScope {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		// Isolated merges arm this latch against the current workspace/session; a
+		// switch or new session must not inherit an unverified merge from another
+		// cwd/transcript.
+		this.#unverifiedMergeLatch.clear();
+		this.#todo.resetVerifyState();
 	}
 
 	/**
@@ -6489,12 +6524,15 @@ export class AgentSession implements SettingsScope {
 		let total = 0;
 		let closed = 0;
 		let open = 0;
+		let dropped = 0;
 		const promptPhases = phases.map(phase => ({
 			name: this.#sanitizeGoalTodoText(phase.name),
 			tasks: phase.tasks.map(task => {
 				total++;
-				if (task.status === "completed" || task.status === "abandoned") {
+				if (task.status === "completed") {
 					closed++;
+				} else if (task.status === "abandoned") {
+					dropped++;
 				} else {
 					open++;
 				}
@@ -6502,9 +6540,12 @@ export class AgentSession implements SettingsScope {
 			}),
 		}));
 
+		// Matches the `todo` tool summary's Overall line so the every-turn goal
+		// context and the settle-time reminder agree that dropped ≠ done.
 		return prompt.render(goalTodoContextPrompt, {
 			canCallTodoTool,
 			closed: String(closed),
+			dropped: dropped > 0 ? String(dropped) : "",
 			open: String(open),
 			phases: promptPhases,
 			total: String(total),

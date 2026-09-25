@@ -300,6 +300,8 @@ export interface TodoReminderEvent {
 	todos: TodoItem[];
 	attempt: number;
 	maxAttempts: number;
+	/** True when the reminder is (also) gating an unverified isolated merge. */
+	unverifiedMerge?: boolean;
 }
 
 // ============================================================================

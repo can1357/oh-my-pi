@@ -41,6 +41,8 @@ export interface BashToolDetails {
 	timedOut?: boolean;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
+	/** Absolute working directory the command ran in. */
+	cwd?: string;
 	service?: {
 		name: string;
 		state: string;

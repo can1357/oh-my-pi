@@ -13,6 +13,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { hasIncompleteTodosSection, parseIncompleteTodosFromSummary } from "../session/incomplete-todos";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -91,9 +92,10 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	return task.blocker !== undefined
-		? { content: task.content, status: task.status, blocker: task.blocker }
-		: { content: task.content, status: task.status };
+	const cloned: TodoItem = { content: task.content, status: task.status };
+	if (task.blocker !== undefined) cloned.blocker = task.blocker;
+	if (task.droppedBy === "user") cloned.droppedBy = "user";
+	return cloned;
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -250,11 +252,65 @@ export function createTodoHudStateData(
 }
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+	// A compaction entry carrying an incomplete-todos section is itself an
+	// authoritative snapshot (post-feature compacts, including `(none)` after
+	// RPC clear). Once one compaction has been seen, leftover sections in older
+	// compactions are stale and must not resurrect dropped tasks.
+	let skipCompactionSections = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
-		const phases = canonicalTodoPhases(entries[i]);
+		const entry = entries[i];
+		if (entry.type === "compaction") {
+			if (skipCompactionSections) continue;
+			if (hasIncompleteTodosSection(entry.summary)) {
+				return clonePhases(parseIncompleteTodosFromSummary(entry.summary));
+			}
+			skipCompactionSections = true;
+			continue;
+		}
+		const phases = canonicalTodoPhases(entry);
 		if (phases) return clonePhases(phases);
 	}
 	return [];
+}
+
+/**
+ * Authoritative todo list for user `/todo` mutations (slash + TUI).
+ * Always returns the live session cache — including an explicit empty list after
+ * RPC `set_todos([])` — so a host clear is not resurrected from a stale branch
+ * snapshot. {@link AgentSession} initializes the cache from the branch on load.
+ */
+export function selectAuthoritativeTodoPhases(live: TodoPhase[]): TodoPhase[] {
+	return live;
+}
+
+/** HUD "done": completed only. Abandoned is a handoff, not progress. */
+export function isCompletedTodo<T extends { status: TodoStatus }>(task: T): boolean {
+	return task.status === "completed";
+}
+
+/** HUD auto-clear settle: completed, or abandoned with an explicit user cancel. */
+export function isHudSettledTodo<T extends { status: TodoStatus; droppedBy?: "user" }>(task: T): boolean {
+	return task.status === "completed" || (task.status === "abandoned" && task.droppedBy === "user");
+}
+
+export function todoHudCounts(tasks: ReadonlyArray<{ status: TodoStatus }>): {
+	completed: number;
+	abandoned: number;
+	total: number;
+} {
+	let completed = 0;
+	let abandoned = 0;
+	for (const task of tasks) {
+		if (task.status === "completed") completed++;
+		else if (task.status === "abandoned") abandoned++;
+	}
+	return { completed, abandoned, total: tasks.length };
+}
+
+/** `2/5` or `2/5 · 1 dropped`. */
+export function formatTodoHudRatio(counts: { completed: number; abandoned: number; total: number }): string {
+	const base = `${counts.completed}/${counts.total}`;
+	return counts.abandoned > 0 ? `${base} · ${counts.abandoned} dropped` : base;
 }
 
 function resolveTaskOrError(
@@ -396,10 +452,37 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function applyEntry(
+	phases: TodoPhase[],
+	entry: TodoOpEntryValue,
+	errors: string[],
+	options?: { userAuthored?: boolean },
+): TodoPhase[] {
 	switch (entry.op) {
-		case "init":
-			return initPhases(entry, errors);
+		case "init": {
+			const next = initPhases(entry, errors);
+			if (options?.userAuthored) return next;
+			// Model init must not erase unresolved model drops the settle gate protects.
+			const replacementContents = new Set(next.flatMap(phase => phase.tasks.map(task => task.content)));
+			const retained: TodoPhase[] = [];
+			for (const phase of phases) {
+				const drops = phase.tasks.filter(t => t.status === "abandoned" && t.droppedBy !== "user");
+				if (drops.length === 0) continue;
+				const existing = next.find(p => p.name === phase.name);
+				if (existing) {
+					for (const drop of drops) {
+						if (replacementContents.has(drop.content)) continue;
+						if (!existing.tasks.some(t => t.content === drop.content)) {
+							existing.tasks.push(cloneTask(drop));
+						}
+					}
+				} else {
+					const unmatched = drops.filter(drop => !replacementContents.has(drop.content));
+					if (unmatched.length > 0) retained.push({ name: phase.name, tasks: unmatched.map(cloneTask) });
+				}
+			}
+			return retained.length === 0 ? next : [...next, ...retained];
+		}
 		case "start": {
 			const hit = resolveTaskOrError(phases, entry.task, errors);
 			if (!hit) return phases;
@@ -407,21 +490,36 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				for (const candidate of phase.tasks) {
 					if (candidate.status === "in_progress" && candidate !== hit.task) {
 						candidate.status = "pending";
+						candidate.droppedBy = undefined;
 					}
 				}
 			}
 			hit.task.status = "in_progress";
+			hit.task.droppedBy = undefined;
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "completed";
+				task.droppedBy = undefined;
 			}
 			return phases;
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
+				if (!options?.userAuthored) {
+					// Phase-wide/untargeted model drops must not reopen finished or
+					// blocked work — same settle-gate contract as model `rm`. A
+					// targeted `drop` (explicit `task`) honors the tool contract and
+					// can abandon blocked/completed work the model no longer tracks.
+					// Keep existing user cancels (incl. droppedBy) untouched.
+					if (!entry.task && (task.status === "completed" || task.status === "blocked")) continue;
+					if (task.status === "abandoned" && task.droppedBy === "user") continue;
+				}
 				task.status = "abandoned";
+				delete task.blocker;
+				if (options?.userAuthored) task.droppedBy = "user";
+				else delete task.droppedBy;
 			}
 			return phases;
 		}
@@ -444,6 +542,7 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") continue;
 				task.status = "blocked";
 				task.blocker = reason;
+				task.droppedBy = undefined;
 			}
 			return phases;
 		}
@@ -456,12 +555,23 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				if (task.status === "blocked") {
 					task.status = "pending";
 					task.blocker = undefined;
+					task.droppedBy = undefined;
 				}
 			}
 			return phases;
 		}
 		case "rm":
-			return removeTasks(phases, entry, errors);
+			if (options?.userAuthored) return removeTasks(phases, entry, errors);
+			// Model `rm` is a settle cheat: abandon in place like `drop`.
+			// Leave completed/blocked alone, and keep existing abandoned (incl. user
+			// droppedBy) so rm cannot rewrite terminals into unprovenanced drops.
+			for (const task of getTaskTargets(phases, entry, errors)) {
+				if (task.status === "completed" || task.status === "blocked") continue;
+				if (task.status === "abandoned") continue; // keep droppedBy
+				task.status = "abandoned";
+				task.droppedBy = undefined;
+			}
+			return phases;
 		case "append":
 			return appendItems(phases, entry, errors);
 		case "view":
@@ -519,11 +629,12 @@ function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: T
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
 	ops: TodoOpEntryValue[],
+	options?: { userAuthored?: boolean },
 ): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = clonePhases(currentPhases);
 	for (const op of ops) {
-		next = applyEntry(next, op, errors);
+		next = applyEntry(next, op, errors, options);
 	}
 	normalizeInProgressTask(next);
 	return { phases: next, errors };
@@ -546,6 +657,23 @@ export function resolveTodoMarkdownPath(input: string, cwd: string): string {
 	return resolveToCwd(raw, cwd);
 }
 
+/**
+ * Escape HTML comment delimiters in todo task text so a literal
+ * `<!-- dropped-by: user -->` (or blocker comment) in content cannot be
+ * mistaken for provenance metadata on the next parse.
+ *
+ * Ampersands are escaped first so a pre-existing `&lt;!--` / `--&gt;` in
+ * content round-trips bijectively instead of decoding into real delimiters.
+ */
+export function escapeTodoMarkdownContent(content: string): string {
+	return content.replaceAll("&", "&amp;").replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+}
+
+/** Inverse of {@link escapeTodoMarkdownContent} after provenance comments are stripped. */
+export function unescapeTodoMarkdownContent(content: string): string {
+	return content.replaceAll("&lt;!--", "<!--").replaceAll("--&gt;", "-->").replaceAll("&amp;", "&");
+}
+
 /** Render todo phases as a Markdown checklist suitable for editing/copying. */
 export function phasesToMarkdown(phases: TodoPhase[]): string {
 	if (phases.length === 0) return "# Todos\n";
@@ -554,12 +682,17 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			// A blocked task's reason rides in a trailing HTML comment: invisible in
-			// rendered markdown, unambiguous to parse back (task content can't
-			// contain the comment delimiters), so the note survives `/todo edit` and
-			// export/import round-trips.
-			const blockerNote = task.status === "blocked" && task.blocker ? ` <!-- blocker: ${task.blocker} -->` : "";
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}${blockerNote}`);
+			// Provenance notes ride in trailing HTML comments: invisible in rendered
+			// markdown. Task content escapes `<!--`/`-->` so only metadata we emit
+			// here can match the parse-time sentinel.
+			const visible = escapeTodoMarkdownContent(task.content);
+			const blockerNote =
+				task.status === "blocked" && task.blocker
+					? ` <!-- blocker: ${escapeTodoMarkdownContent(task.blocker)} -->`
+					: "";
+			const droppedByNote =
+				task.status === "abandoned" && task.droppedBy === "user" ? ` <!-- dropped-by: user -->` : "";
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${visible}${blockerNote}${droppedByNote}`);
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -612,14 +745,31 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-], [!])`);
 				continue;
 			}
-			// Recover a blocked task's reason from its trailing HTML comment (see
-			// phasesToMarkdown), then strip the comment from the visible content.
+			// Recover blocker / dropped-by provenance from trailing HTML comments
+			// (see phasesToMarkdown), then unescape comment delimiters in content.
 			const rawContent = taskMatch[2].trim();
 			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
 			if (status === "blocked" && blockerMatch) {
-				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
+				currentPhase.tasks.push({
+					content: unescapeTodoMarkdownContent(blockerMatch[1].trim()),
+					status,
+					blocker: unescapeTodoMarkdownContent(blockerMatch[2].trim()),
+				});
 			} else {
-				currentPhase.tasks.push({ content: rawContent, status });
+				// Recover an already-stamped user drop from the HTML comment emitted by
+				// phasesToMarkdown. Bare `[-]` stays model-shaped here — callers that
+				// commit user markdown (edit/import) must run applyUserMarkdownPhases
+				// against the prior list so no-op edits do not reclassify model drops.
+				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
+				if (status === "abandoned" && droppedByMatch) {
+					currentPhase.tasks.push({
+						content: unescapeTodoMarkdownContent(droppedByMatch[1].trim()),
+						status,
+						droppedBy: "user",
+					});
+				} else {
+					currentPhase.tasks.push({ content: unescapeTodoMarkdownContent(rawContent), status });
+				}
 			}
 			continue;
 		}
@@ -629,6 +779,150 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 
 	normalizeInProgressTask(phases);
 	return { phases, errors };
+}
+
+/**
+ * Decide whether an abandoned task from a user-authored replace should carry
+ * `droppedBy: "user"` given the matched prior occurrence.
+ *
+ * - newly abandoned → user cancel
+ * - still abandoned + prior `droppedBy: "user"` → keep (comment may have been stripped)
+ * - still abandoned + prior was model-abandoned → stay model (no-op edit)
+ * - empty prior (fresh import / first RPC set) → all abandoned are user-authored
+ */
+function shouldStampAbandonedAsUser(prev: TodoItem | undefined, emptyPrior: boolean, task: TodoItem): boolean {
+	if (task.droppedBy === "user") return true;
+	if (emptyPrior || !prev || prev.status !== "abandoned") return true;
+	return prev.droppedBy === "user";
+}
+
+/**
+ * Prior tasks keyed by phase name, then content, as FIFO occurrence queues.
+ * Duplicate texts with different provenance must not collapse to last-content-wins.
+ */
+function buildPriorOccurrenceLookup(prior: TodoPhase[]): {
+	queues: Map<string, Map<string, TodoItem[]>>;
+	empty: boolean;
+} {
+	const queues = new Map<string, Map<string, TodoItem[]>>();
+	let empty = true;
+	for (const phase of prior) {
+		if (phase.tasks.length > 0) empty = false;
+		let byContent = queues.get(phase.name);
+		if (!byContent) {
+			byContent = new Map();
+			queues.set(phase.name, byContent);
+		}
+		for (const task of phase.tasks) {
+			let list = byContent.get(task.content);
+			if (!list) {
+				list = [];
+				byContent.set(task.content, list);
+			}
+			list.push(task);
+		}
+	}
+	return { queues, empty };
+}
+
+function takePriorOccurrence(
+	queues: Map<string, Map<string, TodoItem[]>>,
+	phaseName: string,
+	content: string,
+): TodoItem | undefined {
+	const list = queues.get(phaseName)?.get(content);
+	if (list && list.length > 0) return list.shift();
+	return undefined;
+}
+
+/** Content-only FIFO across all phases — used when a phase was renamed/moved. */
+function takePriorOccurrenceAnyPhase(
+	queues: Map<string, Map<string, TodoItem[]>>,
+	content: string,
+): TodoItem | undefined {
+	for (const byContent of queues.values()) {
+		const list = byContent.get(content);
+		if (list && list.length > 0) return list.shift();
+	}
+	return undefined;
+}
+
+/**
+ * Merge a user-authored markdown parse against the prior in-memory list.
+ *
+ * `/todo edit` round-trips through phasesToMarkdown → editor → markdownToPhases.
+ * Model drops serialize as bare `[-]` (no HTML comment), so stamping every
+ * abandoned parse result as user-authored would fail open on a no-op save.
+ * Pass an empty `prior` for `/todo import` so every `[-]`/`[~]` is a user cancel
+ * even when the replaced list already held a model-abandoned item with the same content.
+ *
+ * Matching is by phase name + content occurrence order (not a last-content-wins
+ * map), so duplicate texts with different provenance keep their stamps on a no-op edit.
+ * When a phase is renamed/moved, fall back to content-only matching so model-drop
+ * provenance is not rewritten as `droppedBy: "user"`.
+ */
+export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
+	const { queues, empty } = buildPriorOccurrenceLookup(prior);
+
+	// Pass 1: reserve every exact phase+content match so a renamed phase that
+	// sorts earlier cannot steal another phase's pending occurrence via the
+	// content-only fallback (which would mis-stamp model drops as user cancels).
+	const exact = parsed.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => {
+			const next = cloneTask(task);
+			const prev = takePriorOccurrence(queues, phase.name, next.content);
+			return { next, prev };
+		}),
+	}));
+
+	// Reserve content matches across renamed phases before positional matching,
+	// so inserted rows cannot consume an unchanged task's provenance.
+	for (const phase of exact) {
+		for (const item of phase.tasks) {
+			item.prev ??= takePriorOccurrenceAnyPhase(queues, item.next.content);
+		}
+	}
+	const unmatchedAbandoned = [...queues.values()].flatMap(byContent =>
+		[...byContent.values()].flatMap(tasks => tasks.filter(task => task.status === "abandoned")),
+	);
+	return exact.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(({ next, prev: matched }) => {
+			if (next.status !== "abandoned") return next;
+			const prev = matched ?? unmatchedAbandoned.shift();
+			if (shouldStampAbandonedAsUser(prev, empty, next)) next.droppedBy = "user";
+			return next;
+		}),
+	}));
+}
+
+/**
+ * Stamp host-authored abandoned provenance for RPC `set_todos` without
+ * reconstructing phases/tasks — preserves wire fields such as phase/task `id`,
+ * `notes`, and `details` that Python RPC callers round-trip.
+ */
+export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]): TodoPhase[] {
+	const { queues, empty } = buildPriorOccurrenceLookup(prior);
+
+	const exact = incoming.map(phase => ({
+		phase,
+		tasks: phase.tasks.map(task => ({
+			task,
+			prev: takePriorOccurrence(queues, phase.name, task.content),
+		})),
+	}));
+
+	return exact.map(({ phase, tasks }) => ({
+		...phase,
+		tasks: tasks.map(({ task, prev: exactPrev }) => {
+			let prev = exactPrev;
+			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, task.content);
+			if (task.status !== "abandoned") return task;
+			if (!shouldStampAbandonedAsUser(prev, empty, task)) return task;
+			return { ...task, droppedBy: "user" as const };
+		}),
+	}));
 }
 
 function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {
@@ -641,7 +935,9 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	const remainingByPhase = phases
 		.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.filter(task => task.status === "pending" || task.status === "in_progress"),
+			tasks: phase.tasks.filter(
+				task => task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
+			),
 		}))
 		.filter(phase => phase.tasks.length > 0);
 	const remainingTasks = remainingByPhase.flatMap(phase => phase.tasks.map(task => ({ ...task, phase: phase.name })));
@@ -651,21 +947,27 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	);
 	if (currentIdx === -1) currentIdx = phases.length - 1;
 	const current = phases[currentIdx];
-	const done = current.tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+	const done = current.tasks.filter(task => task.status === "completed").length;
 
 	const lines: string[] = [];
 	if (errors.length > 0) lines.push(`Errors: ${errors.join("; ")}`);
 	if (remainingTasks.length === 0) {
 		lines.push("Remaining items: none.");
 	} else {
-		lines.push(`Remaining items (${remainingTasks.length}):`);
+		const droppedRemaining = remainingTasks.filter(task => task.status === "abandoned").length;
+		lines.push(
+			droppedRemaining > 0
+				? `Remaining items (${remainingTasks.length - droppedRemaining} open + ${droppedRemaining} dropped):`
+				: `Remaining items (${remainingTasks.length}):`,
+		);
 		for (const task of remainingTasks) {
 			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
 		}
 	}
-	// Closed = completed + abandoned, mirroring the per-phase `done` count.
-	const closedAll = tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+	const completedAll = tasks.filter(task => task.status === "completed").length;
+	const droppedAll = tasks.filter(task => task.status === "abandoned").length;
 	const blockedAll = tasks.filter(task => task.status === "blocked").length;
+	const openAll = tasks.filter(task => task.status === "pending" || task.status === "in_progress").length;
 	// The active phase is the EARLIEST one still holding open work, so the
 	// in-progress pointer can sit in a phase whose successors already have
 	// completed tasks. Detect that "worked ahead" case to explain the
@@ -676,7 +978,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 			idx > currentIdx && phase.tasks.some(task => task.status === "completed" || task.status === "abandoned"),
 	);
 	lines.push(
-		`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
+		`Overall: ${completedAll}/${tasks.length} done${droppedAll > 0 ? `, ${droppedAll} dropped` : ""}, ${openAll} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
 	);
 	lines.push(
 		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${
