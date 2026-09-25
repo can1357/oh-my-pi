@@ -182,6 +182,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import type { PlanModeState } from "../plan-mode/state";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
+import anthropicUsageWrapUpPrompt from "../prompts/system/anthropic-usage-wrap-up.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
@@ -864,6 +865,8 @@ export class AgentSession implements SettingsScope {
 	#detachUsageBeforeModelCall: (() => void) | undefined;
 	/** Claude account lane (`cred:<id>`/`key:<hash>`) that served the latest Anthropic request. */
 	#anthropicSlowModeLane: string | undefined;
+	/** `<lane>#<window>` of the wrap-up window this session already told the model about. */
+	#anthropicWrapUpHinted: string | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1680,6 +1683,7 @@ export class AgentSession implements SettingsScope {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -9007,15 +9011,42 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Status-line label for Anthropic subscription slow mode, e.g.
-	 * `low priority until 14:30 · 62% left`; undefined unless this session's
-	 * account lane is active and the session is on an Anthropic model.
+	 * Status-line label for the Claude account's usage-limit stage, e.g.
+	 * `limit reached · wrapping up · resets 14:30` or (with `/slow on`)
+	 * `low priority until 14:30 · 62% left`; undefined outside both stages or
+	 * off an Anthropic model.
 	 */
 	getAnthropicSlowModeLabel(): string | undefined {
-		if (this.model?.provider !== "anthropic" || cfgProvidersAnthropicSlowMode.get(this.settings) === "off") {
-			return undefined;
-		}
-		return this.getAnthropicSlowModeLane()?.statusLabel();
+		if (this.model?.provider !== "anthropic") return undefined;
+		return this.getAnthropicSlowModeLane()?.statusLabel(
+			undefined,
+			cfgProvidersAnthropicSlowMode.get(this.settings) === "auto",
+		);
+	}
+
+	/**
+	 * Mid-run, once per wrap-up window: tell the model to checkpoint when its
+	 * Claude account runs on the wrap-up allowance and nothing (low priority,
+	 * extra usage) will carry the work past it.
+	 */
+	#steerAnthropicWrapUp(): void {
+		const lane = this.#anthropicSlowModeLane;
+		if (lane === undefined || this.model?.provider !== "anthropic") return;
+		const window = anthropicSlowModeLanes
+			.lane(lane)
+			.wrapUpHintKey(cfgProvidersAnthropicSlowMode.get(this.settings) === "auto");
+		if (window === undefined) return;
+		const key = `${lane}#${window}`;
+		if (this.#anthropicWrapUpHinted === key) return;
+		this.#anthropicWrapUpHinted = key;
+		this.agent.steer({
+			role: "custom",
+			customType: "anthropic-usage-wrap-up",
+			content: anthropicUsageWrapUpPrompt,
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		});
 	}
 
 	/** Sets or clears one model family's live service tier. */
