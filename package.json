@@ -133,7 +133,7 @@
 		"stats:followups": "python3 scripts/session-stats/analyze.py followups",
 		"stats:audit": "bun scripts/session-stats/audit.ts",
 		"test:py": "python3 -m pytest -x python/omp-rpc/tests && python3 -m pytest -x python/robomp/tests",
-		"robomp:install": "pip install -e 'python/robomp[dev]'",
+		"robomp:install": "pip install -e python/omp-rpc -e 'python/robomp[dev]'",
 		"robomp:serve": "python3 -m robomp serve",
 		"robomp:test:integration": "ROBOMP_INTEGRATION=1 python3 -m pytest -x python/robomp/tests/test_worker_smoke.py",
 		"pi:image": "docker build -t \"${PI_IMAGE:-oh-my-pi/pi:dev}\" .",
