@@ -1,4 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@applefm_swift//:defs.bzl", "APPLEFM_LINKOPTS")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -13,6 +15,36 @@ genrule(
         "//bazel/triples:aarch64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch arm64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
         "//bazel/triples:x86_64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch x86_64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
         "//conditions:default": "echo 'macOS OAuth callback helper selected for a non-macOS target' >&2; exit 1",
+    }),
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+# Apple Foundation Models bridge (src/applefm/build-bridge.sh): bridge.swift
+# with the toolchain @applefm_swift detected, else stub.c. The toolchain
+# fingerprint in toolchain.txt is an input, so cached outputs never cross
+# toolchains. build.rs does the same for cargo builds.
+genrule(
+    name = "applefm_bridge",
+    srcs = [
+        "src/applefm/bridge.swift",
+        "src/applefm/build-bridge.sh",
+        "src/applefm/stub.c",
+        "@applefm_swift//:toolchain.txt",
+    ],
+    outs = ["libomp_applefm.a"],
+    cmd = select({
+        "//bazel/triples:aarch64-apple-darwin": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ arm64 $$(cut -f1,2 $(location @applefm_swift//:toolchain.txt))",
+        "//conditions:default": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ x86_64",
+    }),
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+cc_library(
+    name = "applefm_bridge_lib",
+    srcs = [":applefm_bridge"],
+    linkopts = select({
+        "//bazel/triples:aarch64-apple-darwin": APPLEFM_LINKOPTS,
+        "//conditions:default": [],
     }),
     target_compatible_with = ["@platforms//os:macos"],
 )
@@ -56,6 +88,7 @@ rust_shared_library(
         "src/fonts/*",
         "data/*.bin.zst",
         "src/utok/claude/testdata/*.json",
+        "src/desktop/linux/wayland/testdata/*.xkb",
         "fixtures/*.json",
     ]) + select({
         "@platforms//os:macos": [":oauth_callback_darwin_helper"],
@@ -100,7 +133,10 @@ rust_shared_library(
         "//conditions:default": [],
     }),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(normal = True) + select({
+        "@platforms//os:macos": [":applefm_bridge_lib"],
+        "//conditions:default": [],
+    }) + [
         "//crates/pi-ast",
         "//crates/pi-diff",
         "//crates/pi-edit",

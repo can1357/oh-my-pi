@@ -1,4 +1,5 @@
-import { logger, postmortem, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -6,7 +7,8 @@ import {
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import type { ToolSession } from "../../tools";
-import { ToolAbortError, ToolError } from "../../tools/tool-errors";
+import { ToolAbortError } from "../../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
@@ -17,9 +19,14 @@ import {
 	type SessionOwners,
 } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
+import { updateEvalState } from "../state";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
+import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import type { ShadowPlan } from "../speculation/types";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
+import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
-import { WorkerCore } from "./worker-core";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
@@ -28,7 +35,6 @@ import type {
 	JsToolRequest,
 	RunErrorPayload,
 	SessionSnapshot,
-	Transport,
 	WorkerInbound,
 	WorkerOutbound,
 } from "./worker-protocol";
@@ -42,8 +48,9 @@ export interface VmRunState {
 	onDisplay?: (output: JsDisplayOutput) => void;
 }
 
-interface WorkerHandle {
-	mode: "process" | "worker" | "inline";
+/** Isolated runtime transport used by the context manager and startup regression fixtures. */
+export interface JsEvalWorkerHandle {
+	mode: "process" | "worker";
 	send(msg: WorkerInbound): void;
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
@@ -51,10 +58,17 @@ interface WorkerHandle {
 	terminate(): Promise<void>;
 }
 
+/** Startup dependencies overridden by tests to exercise process-to-Worker recovery. */
+export interface JsEvalWorkerFactories {
+	spawnProcess(): JsEvalWorkerHandle;
+	spawnWorker(): JsEvalWorkerHandle;
+}
+
 interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	shadowCell?: EvalShadowCellSession;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -84,10 +98,16 @@ interface PendingRun {
 interface JsSession {
 	sessionKey: string;
 	sessionId: string;
+	kernelId: string;
 	cwd: string;
-	worker: WorkerHandle;
+	packageRoot?: string;
+	packageEnvironment?: string;
+	worker: JsEvalWorkerHandle;
 	state: "alive" | "dead";
+	stateSessions: Set<ToolSession>;
 	pending: Map<string, PendingRun>;
+	pendingSnapshots: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>>;
+	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
 }
@@ -108,29 +128,25 @@ const resettingSessions = new Map<string, Promise<void>>();
 const WORKER_INIT_TIMEOUT_MS = 15_000;
 const WORKER_CLOSE_TIMEOUT_MS = 1_000;
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
-// Active graceful-close grace period before a worker that ack'd `close` but never
-// emitted its `close` event is force-terminated. Defaults to the production floor;
-// tests override it (and restore it) to exercise the close-timeout -> terminate
-// path without a real wall-clock wait.
-let workerCloseTimeoutMs: number = WORKER_CLOSE_TIMEOUT_MS;
-let useWorkerThreadForTests = false;
+const productionWorkerFactories: JsEvalWorkerFactories = {
+	spawnProcess: spawnJsProcess,
+	spawnWorker: spawnBunWorker,
+};
+let workerFactories = productionWorkerFactories;
 
 /**
- * Test-only seam: override the graceful-close grace period (ms). Returns the
- * previous value so callers can restore it. Production always uses
- * {@link WORKER_CLOSE_TIMEOUT_MS}; never call this outside tests.
+ * Test-only seam for exercising isolated-runtime startup transitions. Returns
+ * an idempotent restore callback so tests cannot strand a process-wide factory.
  */
-export function setWorkerCloseTimeoutMsForTests(ms: number): number {
-	const previous = workerCloseTimeoutMs;
-	workerCloseTimeoutMs = ms;
-	return previous;
-}
-
-/** Test-only seam for the legacy Worker lifecycle mocks. */
-export function setJsEvalWorkerThreadForTests(enabled: boolean): boolean {
-	const previous = useWorkerThreadForTests;
-	useWorkerThreadForTests = enabled;
-	return previous;
+export function setJsEvalWorkerFactoriesForTests(factories: JsEvalWorkerFactories): () => void {
+	const previous = workerFactories;
+	workerFactories = factories;
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		if (workerFactories === factories) workerFactories = previous;
+	};
 }
 
 export async function executeInVmContext(options: {
@@ -141,6 +157,10 @@ export async function executeInVmContext(options: {
 	cwd: string;
 	session: ToolSession;
 	localRoots?: Record<string, string>;
+	/** Selected package directory consulted only after the importing file's project. */
+	packageRoot?: string;
+	/** Model-visible description of the selected package environment. */
+	packageEnvironment?: string;
 	reset?: boolean;
 	code: string;
 	filename: string;
@@ -180,11 +200,27 @@ export async function executeInVmContext(options: {
 	}
 	const session = await acquireSession(
 		sessionKey,
-		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
+		{
+			cwd: options.cwd,
+			sessionId: options.sessionId,
+			localRoots: options.localRoots,
+			packageRoot: options.packageRoot,
+			packageEnvironment: options.packageEnvironment,
+		},
+		options.session,
 		options.timeoutMs,
 		options.ownerId,
 	);
-	return await runOnce(session, options);
+	const result = await runOnce(session, options);
+	if (session.state === "alive" && path.isAbsolute(options.filename)) {
+		updateEvalState(options.session, {
+			language: "js",
+			kernelId: session.kernelId,
+			alive: true,
+			loadedPath: options.filename,
+		});
+	}
+	return result;
 }
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
@@ -275,6 +311,102 @@ export async function invokeJsTool(
 	return { ok: true, tools, missing };
 }
 
+/**
+ * Captures a retained runtime's safe user-global snapshot without executing user
+ * code. A busy runtime returns `null`; callers must execute normally.
+ */
+export async function snapshotVmContext(options: {
+	sessionKey: string;
+	cwd: string;
+	sessionId: string;
+	localRoots?: Record<string, string>;
+	timeoutMs?: number;
+}): Promise<ShadowSnapshot | null> {
+	const session = sessions.get(options.sessionKey);
+	if (session?.state !== "alive") return null;
+	const id = `snapshot-${Snowflake.next()}`;
+	const deferred = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>();
+	session.pendingSnapshots.set(id, deferred);
+	try {
+		session.worker.send({
+			type: "shadow-snapshot",
+			id,
+			snapshot: {
+				cwd: options.cwd,
+				sessionId: options.sessionId,
+				localRoots: options.localRoots,
+				packageRoot: session.packageRoot,
+				packageEnvironment: session.packageEnvironment,
+			},
+		});
+		const reply = await raceWithTimeout(
+			deferred.promise,
+			options.timeoutMs ?? WORKER_INIT_TIMEOUT_MS,
+			"JS shadow snapshot timed out",
+		);
+		return reply.eligible ? (reply.snapshot ?? null) : null;
+	} finally {
+		session.pendingSnapshots.delete(id);
+	}
+}
+
+export interface JavaScriptShadowPlanningResult {
+	snapshot: ShadowSnapshot;
+	digest: string;
+	plan: ShadowPlan;
+}
+
+/**
+ * Retained-only planning seam. It never starts a worker and never executes the
+ * candidate source; unavailable or busy runtimes fall back to normal eval.
+ */
+export async function shadowPlanIfPresent(options: {
+	sessionKey: string;
+	cwd: string;
+	sessionId: string;
+	code: string;
+	localRoots?: Record<string, string>;
+	timeoutMs?: number;
+}): Promise<JavaScriptShadowPlanningResult | null> {
+	const snapshot = await snapshotVmContext(options);
+	if (!snapshot) return null;
+	return {
+		snapshot,
+		digest: shadowSnapshotDigest(snapshot),
+		plan: await projectJavaScriptShadowPlan(options.code, {
+			snapshot: snapshot.values,
+			initialGlobals: snapshot.initialGlobals,
+		}),
+	};
+}
+
+/**
+ * Atomically rechecks a retained runtime's snapshot before starting a real
+ * cell. `null` means the caller must discard speculative outcomes and use the
+ * normal execution path.
+ */
+export async function runIfSnapshotMatches(options: {
+	sessionKey: string;
+	sessionId: string;
+	cwd: string;
+	session: ToolSession;
+	localRoots?: Record<string, string>;
+	code: string;
+	filename: string;
+	runState: VmRunState;
+	expectedRevision: number;
+	expectedDigest: string;
+}): Promise<{ value: unknown } | null> {
+	const session = sessions.get(options.sessionKey);
+	if (session?.state !== "alive") return null;
+	try {
+		return await runOnce(session, options);
+	} catch (error) {
+		if (error instanceof ToolError && error.message === "JS shadow snapshot changed") return null;
+		throw error;
+	}
+}
+
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
@@ -347,10 +479,14 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 	const session: JsSession = {
 		sessionKey: "smoke",
 		sessionId: "smoke",
+		kernelId: `js-${Snowflake.next()}`,
 		cwd: process.cwd(),
 		worker,
 		state: "alive",
+		stateSessions: new Set(),
 		pending: new Map(),
+		pendingSnapshots: new Map(),
+		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
 	};
@@ -380,9 +516,13 @@ async function runOnce(
 		cwd: string;
 		session: ToolSession;
 		localRoots?: Record<string, string>;
+		packageRoot?: string;
+		packageEnvironment?: string;
 		code: string;
 		filename: string;
 		runState: VmRunState;
+		expectedRevision?: number;
+		expectedDigest?: string;
 	},
 ): Promise<{ value: unknown }> {
 	const runId = `r-${Snowflake.next()}`;
@@ -391,6 +531,7 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		shadowCell: getActiveEvalShadowCell(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -428,18 +569,43 @@ async function runOnce(
 	}
 
 	try {
-		session.worker.send({
-			type: "run",
-			runId,
-			code: options.code,
-			filename: options.filename,
-			snapshot: {
-				cwd: options.cwd,
-				sessionId: options.sessionId,
-				localRoots: options.localRoots,
-				preludes: javascriptPreludeSources(options.session),
-			},
-		});
+		if (options.packageRoot !== undefined) session.packageRoot = options.packageRoot;
+		if (options.packageEnvironment !== undefined) session.packageEnvironment = options.packageEnvironment;
+		const snapshot = {
+			cwd: options.cwd,
+			sessionId: options.sessionId,
+			localRoots: options.localRoots,
+			preludes: javascriptPreludeSources(options.session),
+			packageRoot: session.packageRoot,
+			packageEnvironment: session.packageEnvironment,
+		};
+		if (options.expectedRevision !== undefined && options.expectedDigest !== undefined) {
+			const id = `shadow-run-${Snowflake.next()}`;
+			const admission = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>();
+			session.pendingShadowRuns.set(id, admission);
+			try {
+				session.worker.send({
+					type: "run-if-snapshot-matches",
+					id,
+					runId,
+					code: options.code,
+					filename: options.filename,
+					snapshot,
+					expectedRevision: options.expectedRevision,
+					expectedDigest: options.expectedDigest,
+				});
+				const reply = await raceWithTimeout(
+					admission.promise,
+					WORKER_INIT_TIMEOUT_MS,
+					"JS shadow admission timed out",
+				);
+				if (!reply.eligible) throw new ToolError("JS shadow snapshot changed");
+			} finally {
+				session.pendingShadowRuns.delete(id);
+			}
+		} else {
+			session.worker.send({ type: "run", runId, code: options.code, filename: options.filename, snapshot });
+		}
 		return await promise;
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
@@ -450,6 +616,7 @@ async function runOnce(
 async function acquireSession(
 	sessionKey: string,
 	snapshot: SessionSnapshot,
+	toolSession: ToolSession,
 	timeoutMs?: number,
 	ownerId?: string,
 ): Promise<JsSession> {
@@ -457,13 +624,18 @@ async function acquireSession(
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;
 		existing.cwd = snapshot.cwd;
+		existing.packageRoot = snapshot.packageRoot;
+		existing.packageEnvironment = snapshot.packageEnvironment;
 		attachSessionOwner(existing, snapshot.sessionId, ownerId);
+		markJsSessionAlive(existing, toolSession, snapshot.packageEnvironment);
 		return existing;
 	}
 	const starting = startingSessions.get(sessionKey);
 	if (starting) {
 		attachSessionOwner(starting, snapshot.sessionId, ownerId);
-		return await starting.promise;
+		const session = await starting.promise;
+		markJsSessionAlive(session, toolSession, snapshot.packageEnvironment);
+		return session;
 	}
 	// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 	let startingSession!: StartingJsSession;
@@ -475,10 +647,16 @@ async function acquireSession(
 		const session: JsSession = {
 			sessionKey,
 			sessionId: snapshot.sessionId,
+			kernelId: `js-${Snowflake.next()}`,
 			cwd: snapshot.cwd,
+			packageRoot: snapshot.packageRoot,
+			packageEnvironment: snapshot.packageEnvironment,
 			worker,
 			state: "alive",
+			stateSessions: new Set(),
 			pending: new Map(),
+			pendingSnapshots: new Map(),
+			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
 		};
@@ -492,21 +670,21 @@ async function acquireSession(
 			} catch (error) {
 				// Runtime crash/load failures surface asynchronously via the runtime's
 				// error callback, after the synchronous spawn try/catch has returned.
-				// Preserve the full process -> Worker -> inline ladder for those failures.
+				// Recover once from the subprocess into a Bun Worker. A second isolated
+				// runtime failure must surface; running the cell on this host thread
+				// would make synchronous user code impossible to cancel.
 				const failed = session.worker;
 				await failed.terminate().catch(() => undefined);
-				if (failed.mode === "inline") throw error;
-				if (failed.mode === "process") {
-					logger.warn("JS eval subprocess init failed; retrying with a Bun Worker", {
-						error: error instanceof Error ? error.message : String(error),
-					});
-					session.worker = spawnBunWorker();
-				} else {
-					logger.warn("JS eval worker init failed; retrying with inline worker (no sync-loop guard)", {
-						error: error instanceof Error ? error.message : String(error),
-					});
-					session.worker = spawnInlineWorker();
+				if (failed.mode === "worker") {
+					throw new Error(
+						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
+						{ cause: error },
+					);
 				}
+				logger.warn("JS eval subprocess init failed; retrying with a Bun Worker", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				session.worker = workerFactories.spawnWorker();
 				session.state = "alive";
 			}
 		}
@@ -528,7 +706,9 @@ async function acquireSession(
 	attachSessionOwner(startingSession, snapshot.sessionId, ownerId);
 	startingSessions.set(sessionKey, startingSession);
 	try {
-		return await startup;
+		const session = await startup;
+		markJsSessionAlive(session, toolSession, snapshot.packageEnvironment);
+		return session;
 	} finally {
 		if (startingSessions.get(sessionKey) === startingSession) startingSessions.delete(sessionKey);
 	}
@@ -570,7 +750,7 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 	} catch (error) {
 		// Handshake failed (timeout, init-failed, or worker error): drop both listeners
 		// so the abandoned worker can't keep routing messages into a session the caller
-		// is about to discard or retry on the inline fallback.
+		// is about to discard or retry on the isolated Worker fallback.
 		unsubscribeMessage();
 		unsubscribeError();
 		throw error;
@@ -595,6 +775,16 @@ function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 		case "result":
 			settlePending(session, msg);
 			return;
+		case "shadow-snapshot": {
+			const pending = session.pendingSnapshots.get(msg.id);
+			if (pending) pending.resolve(msg);
+			return;
+		}
+		case "shadow-run": {
+			const pending = session.pendingShadowRuns.get(msg.id);
+			if (pending) pending.resolve(msg);
+			return;
+		}
 		case "log":
 			logWorkerMessage(msg);
 			return;
@@ -648,6 +838,8 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
+			identity: msg.identity,
+			shadowCell: pending.shadowCell,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
@@ -705,6 +897,9 @@ async function killSessionFor(session: JsSession, error: Error, options: { force
 async function killSession(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
 	if (session.state === "dead") return;
 	session.state = "dead";
+	for (const toolSession of session.stateSessions) {
+		updateEvalState(toolSession, { language: "js", kernelId: session.kernelId, alive: false });
+	}
 	for (const pending of session.pending.values()) {
 		if (pending.settled) continue;
 		pending.settled = true;
@@ -712,12 +907,28 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 		pending.reject(error);
 	}
 	session.pending.clear();
+	for (const pending of session.pendingSnapshots.values()) pending.reject(error);
+	session.pendingSnapshots.clear();
+	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
+	session.pendingShadowRuns.clear();
 	if (options.force) {
 		await session.worker.terminate().catch(() => undefined);
 		return;
 	}
 	if (await session.worker.close().catch(() => false)) return;
 	await session.worker.terminate().catch(() => undefined);
+}
+
+function markJsSessionAlive(session: JsSession, toolSession: ToolSession, environment: string | undefined): void {
+	if (session.state !== "alive") return;
+	session.stateSessions.add(toolSession);
+	updateEvalState(toolSession, {
+		language: "js",
+		kernelId: session.kernelId,
+		alive: true,
+		environment,
+		interpreter: `Bun ${Bun.version}`,
+	});
 }
 
 function safeSend(session: JsSession, msg: WorkerInbound): void {
@@ -779,38 +990,35 @@ async function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number, reason
 	}
 }
 
-function spawnJsWorker(): WorkerHandle {
-	if (!useWorkerThreadForTests) {
-		try {
-			return spawnJsProcess();
-		} catch (err) {
-			// Fall through to the Bun Worker rung: a worker thread still interrupts
-			// synchronous infinite loops via terminate(), which the inline fallback
-			// cannot.
-			logger.warn("JS eval subprocess spawn failed; falling back to a Bun Worker", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
+function spawnJsWorker(): JsEvalWorkerHandle {
+	try {
+		return workerFactories.spawnProcess();
+	} catch (error) {
+		// A worker thread remains isolated and can interrupt synchronous user code
+		// via terminate(), so it is the only safe recovery from subprocess spawn.
+		logger.warn("JS eval subprocess spawn failed; falling back to a Bun Worker", {
+			error: error instanceof Error ? error.message : String(error),
+		});
 	}
-	return spawnBunWorker();
+	return workerFactories.spawnWorker();
 }
 
-function spawnBunWorker(): WorkerHandle {
+function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
 		const hostEntry = workerHostEntry();
 		const worker = hostEntry
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
 			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
 		return wrapBunWorker(worker);
-	} catch (err) {
-		logger.warn("Bun Worker spawn failed; using inline JS eval worker (no sync-loop guard)", {
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return spawnInlineWorker();
+	} catch (error) {
+		throw new Error(
+			`Failed to start isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
 	}
 }
 
-function spawnJsProcess(): WorkerHandle {
+function spawnJsProcess(): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG),
 		env: workerEnvFromParent(),
@@ -842,7 +1050,7 @@ function spawnJsProcess(): WorkerHandle {
 				if (message.type !== "closed") return;
 				void base.terminate().finally(() => finish(true));
 			});
-			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
 			base.send({ type: "close" });
 			return await promise;
 		},
@@ -850,7 +1058,7 @@ function spawnJsProcess(): WorkerHandle {
 	};
 }
 
-function wrapBunWorker(worker: Worker): WorkerHandle {
+function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
 	return {
 		mode: "worker",
 		send(msg) {
@@ -902,7 +1110,7 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				finishIfClosed();
 			});
 			worker.addEventListener("close", onClose);
-			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), WORKER_CLOSE_TIMEOUT_MS);
 			worker.postMessage({ type: "close" } satisfies WorkerInbound);
 			return await closed;
 		},
@@ -916,66 +1124,4 @@ function errorFromWorkerEvent(event: ErrorEvent): Error {
 	if (event.error instanceof Error) return event.error;
 	if (event.message) return new Error(event.message);
 	return new Error("Unknown JS eval worker error");
-}
-
-/**
- * Inline fallback for environments where Bun cannot spawn the worker entry
- * (e.g. some test runners). Preserves behavior but cannot interrupt synchronous
- * infinite loops because user code runs on the main thread.
- */
-function spawnInlineWorker(): WorkerHandle {
-	const hostListeners = new Set<(message: WorkerOutbound) => void>();
-	const workerListeners = new Set<(message: WorkerInbound) => void>();
-	const workerTransport: Transport = {
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of hostListeners) listener(msg);
-			}),
-		onMessage: handler => {
-			workerListeners.add(handler);
-			return () => workerListeners.delete(handler);
-		},
-		close: () => {},
-	};
-	const core = new WorkerCore(workerTransport, {
-		mode: "inline",
-		interceptUnhandledRejections: postmortem.interceptUnhandledRejections,
-	});
-	return {
-		mode: "inline",
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of workerListeners) listener(msg);
-			}),
-		onMessage: handler => {
-			hostListeners.add(handler);
-			return () => hostListeners.delete(handler);
-		},
-		onError: () => () => {},
-		async close() {
-			const { promise: closed, resolve } = Promise.withResolvers<boolean>();
-			let settled = false;
-			let unsubscribe = (): void => {};
-			const finish = (value: boolean): void => {
-				if (settled) return;
-				settled = true;
-				if (timeout) clearTimeout(timeout);
-				unsubscribe();
-				hostListeners.clear();
-				workerListeners.clear();
-				resolve(value);
-			};
-			unsubscribe = this.onMessage(msg => {
-				if (msg.type === "closed") finish(true);
-			});
-			this.send({ type: "close" });
-			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
-			return await closed;
-		},
-		async terminate() {
-			hostListeners.clear();
-			workerListeners.clear();
-			core.dispose();
-		},
-	};
 }

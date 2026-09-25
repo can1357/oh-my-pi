@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, ToolTier } from "@oh-my-pi/pi-agent-core";
 import securityScanDescription from "../prompts/tools/security-scan.md" with { type: "text" };
-import { selectSecurityAccount } from "../security/auth";
+import { selectSecurityOAuthAccount } from "../security/auth";
 import {
 	CodexSecurityCloudClient,
 	type CodexSecurityCloudConfiguration,
@@ -14,7 +14,7 @@ import { getSecurityCoordinator } from "../security/coordinator";
 import type { SecurityTargetRequest } from "../security/preflight";
 import { SecurityStore } from "../security/store";
 import type { ToolSession } from "./index";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const securityScanSchema = type({
 	action:
@@ -89,7 +89,7 @@ function requireValue(value: string | undefined, label: string): string {
 
 function cloudClientForSession(session: ToolSession, credentialId?: number): CodexSecurityCloudClient {
 	if (!session.authStorage) throw new ToolError("Codex Security cloud requires the authentication registry");
-	const account = selectSecurityAccount(
+	const account = selectSecurityOAuthAccount(
 		session.authStorage,
 		"openai-codex",
 		credentialId,

@@ -1,9 +1,13 @@
 import { getProjectDir } from "@oh-my-pi/pi-utils";
-import { pickCleanseTarget, promptCleanseRequest } from "../cli/cleanse-picker";
-import { shortenPath } from "../tools/render-utils";
+import {
+	type CleanseTargetChoice,
+	pickCleanseTarget,
+	promptCleanseRequest,
+} from "@oh-my-pi/pi-tui/apps/cleanse-picker";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type CleanseAgentHooks, type CleanseAgentRuntime, createCleanseAgentRuntime } from "./agent";
 import { groupDiagnosticsByFile } from "./balance";
-import { type CleanseStatusBoard, createCleanseStatusBoard } from "./board";
+import { type CleanseStatusBoard, createCleanseStatusBoard } from "@oh-my-pi/pi-tui/apps/cleanse-board";
 import {
 	buildCustomCleanseSuite,
 	type CleanseCheckerDescriptor,
@@ -12,7 +16,7 @@ import {
 	discoverCleanseDiagnosticSuite,
 } from "./checkers";
 import { runCleanseLoop } from "./loop";
-import type { CleanseCommandResult, CleanseDiagnosticReport, CleanseLoopResult, CleanseTargetChoice } from "./types";
+import type { CleanseCommandResult, CleanseDiagnosticReport, CleanseLoopResult } from "./types";
 
 const DEFAULT_MODEL = "@smol";
 const DISPLAY_FILE_LIMIT = 50;

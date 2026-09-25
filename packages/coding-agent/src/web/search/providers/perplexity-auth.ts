@@ -46,13 +46,13 @@ export async function getApiConfigs(
 
 	// A Perplexity OAuth session and a real API key are mutually exclusive here:
 	// when the active credential origin is OAuth, `getApiKey("perplexity")`
-	// returns the OAuth session JWT (OAuth wins in AuthStorage.getApiKey), not an
+	// returns the OAuth session JWT (OAuth wins in AuthStorage.keys.get), not an
 	// api.perplexity.ai key. Emitting it as a direct api-key config makes the
 	// search loop send the session token as a Bearer to the direct API endpoint,
 	// which rejects it with 401 and masks the real (transport) failure — see #5315.
 	// Skip the direct config in that case; the OAuth ask-endpoint method covers it.
-	if (authStorage.getCredentialOrigin("perplexity")?.kind !== "oauth") {
-		const perplexityKey = await authStorage.getApiKey("perplexity", sessionId, options);
+	if (authStorage.keys.source("perplexity")?.kind !== "oauth") {
+		const perplexityKey = await authStorage.keys.get("perplexity", sessionId, options);
 		if (perplexityKey) {
 			configs.push({
 				type: "api_key",
@@ -66,7 +66,7 @@ export async function getApiConfigs(
 		}
 	}
 
-	const openrouterKey = await authStorage.getApiKey("openrouter", sessionId, options);
+	const openrouterKey = await authStorage.keys.get("openrouter", sessionId, options);
 	if (openrouterKey) {
 		configs.push({
 			type: "api_key",
@@ -117,7 +117,7 @@ export async function getAvailableAuthMethods(
 
 	// 2. Perplexity OAuth (session bearer)
 	try {
-		const access = await authStorage.getOAuthAccess("perplexity", sessionId, options);
+		const access = await authStorage.oauth.access("perplexity", sessionId, options);
 		const token = access?.accessToken;
 		if (access && token) {
 			const jwtExpiry = jwtExpiryMs(token);

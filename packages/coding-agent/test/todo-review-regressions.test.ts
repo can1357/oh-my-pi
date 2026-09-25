@@ -4,7 +4,8 @@ import {
 	formatIncompleteTodosSection,
 	parseIncompleteTodosFromSummary,
 } from "../src/session/incomplete-todos";
-import { applyOpsToPhases, applyUserMarkdownPhases, type TodoPhase } from "../src/tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { applyOpsToPhases, applyUserMarkdownPhases } from "../src/tools/todo";
 
 it("lets a model finish a reintroduced drop without leaving an unreachable sibling", () => {
 	const prior: TodoPhase[] = [{ name: "Work", tasks: [{ content: "ship", status: "abandoned" }] }];

@@ -4,7 +4,6 @@ import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
-	isSqliteBusyError,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
@@ -16,6 +15,7 @@ import {
 	getStatsDbPath,
 	isRecord,
 	logger,
+	openSqliteDatabase,
 	postmortem,
 } from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
@@ -157,21 +157,9 @@ export class AgentStorage {
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
 	#closing = false;
 
-	private constructor(dbPath: string) {
+	private constructor(db: Database, dbPath: string) {
+		this.#db = db;
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
-		this.#ensureDir(dbPath);
-		try {
-			this.#db = new Database(dbPath);
-		} catch (err) {
-			const dir = path.dirname(dbPath);
-			const dirExists = fs.existsSync(dir);
-			const errMsg = err instanceof Error ? err.message : String(err);
-			throw new Error(
-				`Failed to open agent database at '${dbPath}': ${errMsg}\n` +
-					`Directory '${dir}' exists: ${dirExists}\n` +
-					`Ensure the directory is writable and not corrupted.`,
-			);
-		}
 
 		this.#initializeSchema();
 		this.#hardenPermissions(dbPath);
@@ -214,13 +202,6 @@ ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = 
 	 * AuthCredentialStore handles auth_credentials and cache tables.
 	 */
 	#initializeSchema(): void {
-		// Install the busy handler BEFORE any lock-taking statement (incl.
-		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
-		// recovery). Without this, concurrent omp startups can crash here with
-		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421. Headless
-		// hosts bound the wait so lock contention cannot freeze the protocol
-		// loop for the full interactive timeout.
-		this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -380,7 +361,8 @@ FROM model_usage_legacy
 	/**
 	 * Returns singleton instance for the given database path, creating if needed.
 	 * Retries on the `SQLITE_BUSY` family (including `SQLITE_BUSY_RECOVERY`) with
-	 * exponential backoff. See issue #2421.
+	 * exponential backoff. Corrupt stores are quarantined and initialized once
+	 * from an empty replacement. See issue #2421.
 	 * @param dbPath - Path to the SQLite database file (defaults to config path)
 	 * @returns AgentStorage instance for the given path
 	 */
@@ -388,34 +370,18 @@ FROM model_usage_legacy
 		const existing = instances.get(dbPath);
 		if (existing) return existing;
 
-		const maxRetries = 4;
-		const baseDelayMs = 100;
-		let lastError: Error | undefined;
-
-		for (let attempt = 0; attempt < maxRetries; attempt++) {
-			try {
-				const storage = new AgentStorage(dbPath);
-				// Exit-only: a keep-alive cleanup leaves the open handle valid for the
-				// continuing process (Settings, MCP cache, callers hold it); the real
-				// exit closes. Register before publishing so a real-exit-in-progress
-				// late registration sees an empty map.
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+		return openSqliteDatabase(
+			dbPath,
+			db => {
+				const storage = new AgentStorage(db, dbPath);
+				// Publish synchronously: concurrent opens must reuse this handle before the helper yields.
+				// Exit-only cleanup keeps the connection valid for continuing sessions.
 				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
 				instances.set(dbPath, storage);
 				return storage;
-			} catch (err) {
-				if (!isSqliteBusyError(err)) {
-					throw err;
-				}
-				lastError = err instanceof Error ? err : new Error(String(err));
-				if (attempt < maxRetries - 1) {
-					await Bun.sleep(baseDelayMs * 2 ** attempt);
-				}
-			}
-		}
-
-		throw new Error(
-			`Failed to open agent database at '${dbPath}' after ${maxRetries} attempts: ${lastError?.message}`,
-			{ cause: lastError },
+			},
+			{ recoverCorruption: true },
 		);
 	}
 
@@ -473,6 +439,15 @@ FROM model_usage_legacy
 			}
 		}
 		return settings as Settings;
+	}
+
+	/**
+	 * Drops legacy `settings` rows after they have been written to config.yml.
+	 * The table is only a migration source; leaving rows would resurrect values
+	 * if config.yml is later deleted.
+	 */
+	clearMigratedSettings(): void {
+		this.#db.run("DELETE FROM settings");
 	}
 
 	/**
@@ -789,8 +764,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param credentials - New credentials to store
 	 * @returns Array of newly stored credentials with their database IDs
 	 */
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
-		return this.#authStore.replaceAuthCredentialsForProvider(provider, credentials);
+	replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
+		return this.#authStore.replaceAuthCredentials(provider, credentials);
 	}
 
 	/**
@@ -807,8 +782,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param id - Database row ID of the credential to disable
 	 * @param disabledCause - Human-readable cause stored with the disabled row
 	 */
-	deleteAuthCredential(id: number, disabledCause: string): void {
-		this.#authStore.deleteAuthCredential(id, disabledCause);
+	deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		return this.#authStore.deleteAuthCredential(id, disabledCause);
 	}
 
 	/**
@@ -816,8 +791,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param provider - Provider name whose credentials should be disabled
 	 * @param disabledCause - Human-readable cause stored with the disabled rows
 	 */
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
-		this.#authStore.deleteAuthCredentialsForProvider(provider, disabledCause);
+	deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
+		return this.#authStore.deleteAuthCredentials(provider, disabledCause);
 	}
 
 	/**
@@ -839,27 +814,6 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	cleanExpiredCache(): void {
 		this.#authStore.cleanExpiredCache();
-	}
-
-	/**
-	 * Ensures the parent directory for the database file exists.
-	 * @param dbPath - Path to the database file
-	 */
-	#ensureDir(dbPath: string): void {
-		const dir = path.dirname(dbPath);
-		try {
-			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code;
-			// EEXIST is fine - directory already exists
-			if (code !== "EEXIST") {
-				throw new Error(`Failed to create agent storage directory '${dir}': ${code || err}`);
-			}
-		}
-		// Verify directory was created
-		if (!fs.existsSync(dir)) {
-			throw new Error(`Agent storage directory '${dir}' does not exist after creation attempt`);
-		}
 	}
 
 	#hardenPermissions(dbPath: string): void {

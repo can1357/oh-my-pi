@@ -11,7 +11,7 @@ import type { AssistantMessage, Model, ToolExample, TSchema } from "@oh-my-pi/pi
 import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { YAML } from "bun";
-import { canonicalizeMessage } from "../utils/thinking-display";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import {
 	type BashExecutionMessage,
 	type BranchSummaryMessage,

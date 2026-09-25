@@ -1,4 +1,4 @@
-import type { TodoPhase } from "../tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Cap leftover-todo dumps so a huge list cannot overflow summarizer / nudge prompts. */
 export const INCOMPLETE_TODOS_SNAPSHOT_CAP = 40;

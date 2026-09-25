@@ -1,5 +1,5 @@
 use std::{
-	os::unix::net::UnixStream,
+	os::{fd::AsFd, unix::net::UnixStream},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -10,10 +10,11 @@ use ashpd::desktop::{
 use futures::StreamExt;
 use reis::{
 	ei,
-	event::{Device, DeviceCapability, EiEvent},
+	event::{Device, DeviceCapability, EiEvent, Keymap},
 	tokio::EiConvertEventStream,
 };
 
+use super::xkb::{KeyStroke, KeyboardLayout};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
 	error::{CoreResult, DesktopError},
@@ -39,6 +40,7 @@ impl DiscoveryTargets {
 struct EiDevice {
 	device: Device,
 	serial: u32,
+	layout: Option<KeyboardLayout>,
 }
 
 type RemoteDesktopSession = Session<'static, RemoteDesktop<'static>>;
@@ -53,8 +55,19 @@ pub(super) struct Libei {
 	pointer:        Option<EiDevice>,
 	keyboard:       Option<EiDevice>,
 	sequence:       u32,
+	runtime:        &'static tokio::runtime::Runtime,
+	events:         Option<EiConvertEventStream>,
 	portal_session: Option<PortalSession>,
 }
+
+#[allow(
+	clippy::non_send_fields_in_send_ty,
+	reason = "EiConvertEventStream's only non-Send field is a callback map that stays empty"
+)]
+// SAFETY: the reis event stream is exclusively owned. Its sole non-`Send`
+// field is a private callback map which remains empty because
+// `EiConvertEventStream` exposes no callback-registration API.
+unsafe impl Send for Libei {}
 
 impl Drop for Libei {
 	fn drop(&mut self) {
@@ -84,8 +97,15 @@ impl Libei {
 			},
 			Err(err) => return Err(DesktopError::permission_denied(format!("LIBEI_SOCKET: {err}"))),
 		};
-		let mut backend =
-			Self { context, pointer: None, keyboard: None, sequence: 1, portal_session };
+		let mut backend = Self {
+			context,
+			pointer: None,
+			keyboard: None,
+			sequence: 1,
+			runtime,
+			events: None,
+			portal_session,
+		};
 		let (_connection, mut events) = runtime
 			.block_on(
 				backend
@@ -94,6 +114,7 @@ impl Libei {
 			)
 			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
 		backend.discover_devices(runtime, &mut events, targets)?;
+		backend.events = Some(events);
 		if backend.pointer.is_none() && backend.keyboard.is_none() {
 			return Err(DesktopError::permission_denied(
 				"RemoteDesktop portal granted no libei keyboard or pointer devices",
@@ -146,8 +167,9 @@ impl Libei {
 					Ok((fd, targets)) => Ok((fd, session, targets)),
 					Err(err) => {
 						// Already inside `runtime.block_on`, so the `close_session`
-						// helper (itself a `block_on`) would abort with a nested-runtime
-						// panic; bound this consent-denied close inline instead.
+						// helper (itself a `block_on`) would abort with a
+						// nested-runtime panic; bound this consent-denied close
+						// inline instead.
 						let _ =
 							tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await;
 						Err(err)
@@ -214,11 +236,16 @@ impl Libei {
 					},
 					EiEvent::DeviceResumed(event) => {
 						if pending_pointer.as_ref() == Some(&event.device) {
-							self.pointer =
-								Some(EiDevice { device: event.device.clone(), serial: event.serial });
+							self.pointer = Some(EiDevice {
+								device: event.device.clone(),
+								serial: event.serial,
+								layout: None,
+							});
 						}
 						if pending_keyboard.as_ref() == Some(&event.device) {
-							self.keyboard = Some(EiDevice { device: event.device, serial: event.serial });
+							let layout = event.device.keymap().and_then(read_keymap);
+							self.keyboard =
+								Some(EiDevice { device: event.device, serial: event.serial, layout });
 						}
 					},
 					EiEvent::Disconnected(event) => {
@@ -234,6 +261,51 @@ impl Libei {
 				}
 				if drain_deadline.is_none() && (self.pointer.is_some() || self.keyboard.is_some()) {
 					drain_deadline = Some(tokio::time::Instant::now() + DEVICE_DISCOVERY_DRAIN_TIMEOUT);
+				}
+			}
+			Ok(())
+		})
+	}
+
+	fn refresh_keyboard_state(&mut self) -> CoreResult<()> {
+		let Some(events) = self.events.as_mut() else {
+			return Ok(());
+		};
+		let keyboard = &mut self.keyboard;
+		self.runtime.block_on(async {
+			loop {
+				let event = match tokio::time::timeout(Duration::from_millis(1), events.next()).await {
+					Ok(Some(event)) => event.map_err(|err| {
+						DesktopError::input_failed(format!("libei keyboard state: {err}"))
+					})?,
+					Ok(None) => {
+						return Err(DesktopError::input_failed(
+							"libei disconnected while reading keyboard state",
+						));
+					},
+					Err(_) => break,
+				};
+				match event {
+					EiEvent::KeyboardModifiers(event) => {
+						if let Some(device) = keyboard.as_mut()
+							&& device.device == event.device
+							&& let Some(layout) = device.layout.as_mut()
+						{
+							layout.update_modifiers(
+								event.depressed,
+								event.latched,
+								event.locked,
+								event.group,
+							);
+						}
+					},
+					EiEvent::Disconnected(event) => {
+						return Err(DesktopError::input_failed(format!(
+							"libei disconnected: {}",
+							event.explanation
+						)));
+					},
+					_ => {},
 				}
 			}
 			Ok(())
@@ -405,15 +477,26 @@ impl Libei {
 	}
 
 	pub(super) fn key_chord(&mut self, keys: &[KeyName]) -> CoreResult<()> {
+		self.refresh_keyboard_state()?;
+		let sequence = self.sequence;
+		self.sequence = self.sequence.wrapping_add(1);
+		let mut codes = Vec::with_capacity(keys.len());
+		{
+			let device = self.keyboard.as_mut().ok_or_else(|| {
+				DesktopError::permission_denied("RemoteDesktop portal did not provide a libei keyboard")
+			})?;
+			for &key in keys {
+				let stroke = match key {
+					KeyName::Char(character) => char_stroke(device, character)?,
+					_ => KeyStroke { keycode: evdev_keycode(key)?, modifiers: Vec::new() },
+				};
+				codes.extend(stroke.modifiers);
+				codes.push(stroke.keycode);
+			}
+		}
 		let device = self.keyboard.as_ref().ok_or_else(|| {
 			DesktopError::permission_denied("RemoteDesktop portal did not provide a libei keyboard")
 		})?;
-		let mut codes = Vec::with_capacity(keys.len());
-		for &key in keys {
-			codes.push(evdev_keycode(key)?);
-		}
-		let sequence = self.sequence;
-		self.sequence = self.sequence.wrapping_add(1);
 		Self::begin(device, sequence);
 		let mut time = Self::timestamp();
 		for &code in &codes {
@@ -429,40 +512,80 @@ impl Libei {
 	}
 
 	pub(super) fn type_text(&mut self, text: &str) -> CoreResult<()> {
+		self.refresh_keyboard_state()?;
+		let sequence = self.sequence;
+		self.sequence = self.sequence.wrapping_add(1);
+		let strokes = {
+			let device = self.keyboard.as_mut().ok_or_else(|| {
+				DesktopError::permission_denied("RemoteDesktop portal did not provide a libei keyboard")
+			})?;
+			text
+				.chars()
+				.map(|character| char_stroke(device, character))
+				.collect::<CoreResult<Vec<_>>>()?
+		};
 		let device = self.keyboard.as_ref().ok_or_else(|| {
 			DesktopError::permission_denied("RemoteDesktop portal did not provide a libei keyboard")
 		})?;
-		let strokes: Vec<_> = text
-			.chars()
-			.map(|character| {
-				evdev_char(character).ok_or_else(|| {
-					DesktopError::input_failed(format!(
-						"libei cannot type character {character:?} with the announced evdev keymap"
-					))
-				})
-			})
-			.collect::<CoreResult<_>>()?;
-		let sequence = self.sequence;
-		self.sequence = self.sequence.wrapping_add(1);
 		Self::begin(device, sequence);
 		let mut time = Self::timestamp();
-		for (code, shift) in strokes {
-			if shift {
-				Self::send_key(device, 42, true, time)?;
+		for stroke in strokes {
+			for &modifier in &stroke.modifiers {
+				Self::send_key(device, modifier, true, time)?;
 				time = time.saturating_add(1);
 			}
-			Self::send_key(device, code, true, time)?;
+			Self::send_key(device, stroke.keycode, true, time)?;
 			time = time.saturating_add(1);
-			Self::send_key(device, code, false, time)?;
+			Self::send_key(device, stroke.keycode, false, time)?;
 			time = time.saturating_add(1);
-			if shift {
-				Self::send_key(device, 42, false, time)?;
+			for &modifier in stroke.modifiers.iter().rev() {
+				Self::send_key(device, modifier, false, time)?;
 				time = time.saturating_add(1);
 			}
 		}
 		self.finish(device);
 		Ok(())
 	}
+}
+
+fn read_keymap(keymap: &Keymap) -> Option<KeyboardLayout> {
+	if keymap.type_ != ei::keyboard::KeymapType::Xkb || keymap.size == 0 {
+		return None;
+	}
+	let fd = keymap.fd.as_fd().try_clone_to_owned().ok()?;
+	KeyboardLayout::from_fd(fd, keymap.size as usize)
+}
+
+/// Resolves only through the active XKB group. Falling back to a key from a
+/// different group would emit the wrong glyph because libei cannot request a
+/// portable compositor group switch, so printable misses are reported.
+fn char_stroke(device: &mut EiDevice, character: char) -> CoreResult<KeyStroke> {
+	if let Some(layout) = device.layout.as_mut() {
+		if character.is_ascii()
+			&& layout.can_use_us_ascii_fast_path()
+			&& let Some((keycode, shift)) = evdev_char(character)
+		{
+			return Ok(KeyStroke { keycode, modifiers: if shift { vec![42] } else { Vec::new() } });
+		}
+		if let Some(stroke) = layout.resolve_char(character) {
+			return Ok(stroke);
+		}
+		if character.is_control()
+			&& let Some((keycode, shift)) = evdev_char(character)
+		{
+			return Ok(KeyStroke { keycode, modifiers: if shift { vec![42] } else { Vec::new() } });
+		}
+		return Err(DesktopError::input_failed(format!(
+			"libei cannot type character {character:?} in active XKB group {}",
+			layout.active_group()
+		)));
+	}
+	if let Some((keycode, shift)) = evdev_char(character) {
+		return Ok(KeyStroke { keycode, modifiers: if shift { vec![42] } else { Vec::new() } });
+	}
+	Err(DesktopError::input_failed(format!(
+		"libei cannot type character {character:?}: no usable XKB keymap was announced"
+	)))
 }
 
 fn evdev_keycode(key: KeyName) -> CoreResult<u32> {

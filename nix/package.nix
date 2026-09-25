@@ -1,12 +1,14 @@
 {
+  addDriverRunpath,
   autoPatchelfHook,
   alsa-lib,
   bun,
   bun2nix,
   cmake,
+  config,
+  cudaPackages_13 ? null,
   darwin,
   lib,
-  libopus,
   libpulseaudio,
   makeBinaryWrapper,
   ninja,
@@ -19,6 +21,14 @@
   stdenv,
   stdenvNoCC,
   unzip,
+  # onnxruntime-node (downloaded into the agent cache on first use) ships CUDA
+  # execution providers that dlopen vendor libraries absent from the NixOS
+  # loader path. Enabling this appends them to the inference workers'
+  # LD_LIBRARY_PATH so the GPU provider loads instead of quietly degrading to
+  # CPU. Mirrors nixpkgs' `cudaSupport` convention (sunshine, obs-studio,
+  # btop). Note the closure cost — libcublas ~745 MB, libcurand ~136 MB,
+  # cuda_cudart ~74 MB — so this stays opt-in and off by default.
+  cudaSupport ? config.cudaSupport,
   # Wayland screencast support links libpipewire, whose runtime closure adds
   # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
   # without it, so default to the lean build; opt in via `.override`.
@@ -53,9 +63,37 @@ let
     _: patch: source + "/${patch}"
   ) rootPackageJson.patchedDependencies;
   patchOverrides = bun2nix.patchedDependenciesToOverrides { inherit patchedDependencies; };
-  runtimeNativeLibraries = lib.optionals stdenv.hostPlatform.isLinux (
-    [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
-  );
+  # Vendor libraries the on-demand onnxruntime-node CUDA execution provider
+  # dlopens. These are not needed for the addon itself to load (postFixup's
+  # DT_NEEDED covers libstdc++/libgcc), but the provider is its own .so whose
+  # dependencies sit outside the NixOS loader path, so the worker needs them on
+  # LD_LIBRARY_PATH to load a GPU provider instead of degrading to CPU.
+  #
+  # CUDA 13 specifically: the shipped provider's sonames are libcublasLt.so.13 /
+  # libcublas.so.13 / libcurand.so.10 / libcudart.so.13. CUDA 12 (nixpkgs'
+  # default `cudaPackages`) only provides .so.12, so taking this build's
+  # `cudaPackages` would silently fail to resolve them; pin the 13.x series.
+  # Verified by dlopen: without these the provider dies on libcublasLt.so.13.
+  cudaRuntimeLibraries =
+    let
+      # The driver itself (libcuda.so.1) is not a redistributable: it only
+      # exists at the host's driver link, which is stable across driver
+      # upgrades and present exactly when the machine can run CUDA at all.
+      driver = addDriverRunpath.driverLink;
+      libDirs = lib.concatMap (p: [ (lib.getLib p) ]) [
+        cudaPackages_13.libcublas
+        cudaPackages_13.libcurand
+        cudaPackages_13.cuda_cudart
+      ];
+    in
+    lib.optionals (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) (
+      [ driver ] ++ libDirs
+    );
+  runtimeNativeLibraries =
+    lib.optionals stdenv.hostPlatform.isLinux (
+      [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+    )
+    ++ cudaRuntimeLibraries;
   bunRuntimeTemplate = stdenvNoCC.mkDerivation {
     pname = "omp-bun-runtime-template";
     inherit (bun) version;
@@ -101,17 +139,10 @@ stdenv.mkDerivation {
   ]
   ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
 
-  # pcre2 is vendored via PCRE2_SYS_STATIC, but opus must link the nixpkgs
-  # library: audiopus_sys' bundled cmake build installs to lib64 while its
-  # link-search hardcodes lib, so the pkg-config path is the one that works.
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
-  # All dynamic store paths are pinned into the closure via nix-support (see
-  # installPhase).
-  buildInputs = [
-    libopus
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
-  ++ lib.optionals withWaylandScreencast [ pipewire ];
+  buildInputs =
+    lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
+    ++ lib.optionals withWaylandScreencast [ pipewire ];
 
   strictDeps = true;
   # Nix builders cannot reliably hardlink cache files into node_modules
@@ -178,21 +209,13 @@ stdenv.mkDerivation {
     install -Dm644 LICENSE "$out/share/doc/omp/LICENSE"
     install -Dm644 THIRD-PARTY-NOTICES.txt "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
 
-    # The addon is gzip-compressed inside the compiled binary, so the store
-    # paths it links against are invisible to the output reference scanner.
-    # Record them in plain text to pin the libraries into the runtime closure.
-    mkdir -p "$out/nix-support"
-    ${
-      if stdenv.hostPlatform.isLinux then
-        ''
-          patchelf --print-rpath "packages/natives/native/${platform.addon}" \
-            > "$out/nix-support/embedded-addon-runpath"
-        ''
-      else
-        ''
-          echo "${lib.getLib libopus}/lib" > "$out/nix-support/embedded-addon-runpath"
-        ''
-    }
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The addon is gzip-compressed inside the compiled binary, so its linked
+      # store paths are invisible to the output reference scanner.
+      mkdir -p "$out/nix-support"
+      patchelf --print-rpath "packages/natives/native/${platform.addon}" \
+        > "$out/nix-support/embedded-addon-runpath"
+    ''}
 
     runHook postInstall
   '';
@@ -262,7 +285,18 @@ stdenv.mkDerivation {
       # main process dlopen's directly fail to resolve libstdc++.so.6 on NixOS.
       # wrapProgram moved the real ELF to .omp-wrapped.
       patchelf --print-needed "$out/bin/.omp-wrapped" | grep -q '^libstdc++\.so\.6$'
-    ''}
+    ''}${
+      lib.optionalString (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) ''
+        # The CUDA provider must actually resolve, not merely be advertised: the
+        # wrong CUDA major is invisible at runtime (onnxruntime silently falls
+        # back to CPU), so assert the exact sonames the provider dlopens. Only the
+        # redistributable libraries are checked here — the driver's libcuda.so.1
+        # lives at the host's driver link, which does not exist in this sandbox
+        # and is not a property of the build.
+        env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
+          'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libcublasLt.so.13":{cublasLtGetVersion:{args:[],returns:"ptr"}},"libcublas.so.13":{cublasGetVersion:{args:[],returns:"ptr"}},"libcurand.so.10":{curandGetVersion:{args:["ptr"],returns:"i32"}},"libcudart.so.13":{cudaRuntimeGetVersion:{args:["ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
+      ''
+    }
     runHook postInstallCheck
   '';
 

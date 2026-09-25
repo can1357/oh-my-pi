@@ -29,7 +29,7 @@ function expectVideoProbeFailure(text: string, fileName: string): void {
 		expect(text).toContain("Could not probe video");
 		expect(text).toContain(fileName);
 	} else {
-		expect(text).toContain("requires ffprobe");
+		expect(text).toContain("require ffprobe");
 	}
 	expect(text).not.toContain("\u0000");
 }

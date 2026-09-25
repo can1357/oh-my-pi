@@ -37,7 +37,7 @@ describe("AgentSession bash session ownership", () => {
 		tempDir = TempDir.createSync("@pi-bash-session-owner-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		additionalManagers = [];
 	});
 

@@ -5,6 +5,11 @@ class "deepseek" {
     family "r1" glob="*deepseek-r1*"
     family "reasoner" glob="*deepseek-reasoner*"
     family "flash" glob="*deepseek*v4*flash*"
+    // V4.1 Flash dropped the generation digit from its release id: the native
+    // roster serves it as bare `deepseek-flash`, which the `v4` glob cannot
+    // match. Without a family the descriptor's V4-generation filter drops the
+    // row, so it survived only as a stale previous-snapshot entry.
+    family "flash" glob="*deepseek-flash"
     family "pro" glob="*deepseek*v4*pro*"
     // Bare V4 chat/reasoner ids without a flash/pro segment.
     family "v4" glob="*deepseek-v4*"

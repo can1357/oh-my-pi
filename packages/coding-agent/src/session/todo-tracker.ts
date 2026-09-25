@@ -8,7 +8,8 @@ import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with
 import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
 	type: "text",
 };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import {

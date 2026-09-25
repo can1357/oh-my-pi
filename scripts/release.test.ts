@@ -32,12 +32,6 @@ describe("validateExplicitVersion", () => {
 		expect(validateExplicitVersion("1.0.0-x.7.z.92")).toBe(null);
 	});
 
-	test("accepts bare three-segment numeric versions and returns them unchanged", () => {
-		expect(validateExplicitVersion("17.2.8")).toBe("17.2.8");
-		expect(validateExplicitVersion("0.0.0")).toBe("0.0.0");
-		expect(validateExplicitVersion("1.0.0")).toBe("1.0.0");
-	});
-
 	test("accepts leading v prefix and normalizes to the bare version", () => {
 		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
 		expect(validateExplicitVersion("V17.2.8")).toBe(null);

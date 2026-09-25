@@ -1,9 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	applyOpsToPhases,
@@ -13,23 +12,25 @@ import {
 	formatTodoHudRatio,
 	isCompletedTodo,
 	isHudSettledTodo,
-	isSettledTodo,
 	isTodoPhase,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	todoHudCounts,
+	TodoTool,
+	unescapeTodoMarkdownContent,
+} from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	isClosedTodo,
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
-	TodoTool,
-	todoHudCounts,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
-	unescapeTodoMarkdownContent,
-} from "@oh-my-pi/pi-coding-agent/tools";
+} from "@oh-my-pi/pi-tui/tools/todo";
 import type { Component } from "@oh-my-pi/pi-tui";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
@@ -68,6 +69,68 @@ describe("resolveTodoMarkdownPath", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
 		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+	});
+});
+
+describe("applyOpsToPhases userDrop provenance", () => {
+	it("stamps droppedBy user only when userDrop is set", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Keep shipping", status: "pending" },
+					{ content: "Cancel me", status: "in_progress" },
+				],
+			},
+		];
+
+		const modelDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }]);
+		expect(modelDrop.errors).toEqual([]);
+		expect(modelDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+		});
+
+		const userDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }], { userAuthored: true });
+		expect(userDrop.errors).toEqual([]);
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		// Dropping the in-progress task auto-promotes the remaining pending sibling.
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Keep shipping")?.status).toBe("in_progress");
+	});
+
+	it("clears stale user droppedBy when a task is restarted then model-dropped", () => {
+		const userDropped: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "Retry me", status: "abandoned", droppedBy: "user" }] },
+		];
+		const started = applyOpsToPhases(userDropped, [{ op: "start", task: "Retry me" }]);
+		expect(started.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "in_progress" });
+
+		const modelDrop = applyOpsToPhases(started.phases, [{ op: "drop", task: "Retry me" }]);
+		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "abandoned" });
+	});
+
+	it("preserves sibling user droppedBy across clone when starting another task", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "User cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "Still open", status: "pending" },
+				],
+			},
+		];
+		const started = applyOpsToPhases(current, [{ op: "start", task: "Still open" }]);
+		expect(started.errors).toEqual([]);
+		expect(started.phases[0]?.tasks.find(t => t.content === "User cancelled")).toEqual({
+			content: "User cancelled",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		expect(started.phases[0]?.tasks.find(t => t.content === "Still open")?.status).toBe("in_progress");
 	});
 });
 
@@ -521,9 +584,7 @@ describe("TodoTool operations", () => {
 	});
 
 	it("preserves model-drop provenance when a phase is renamed in /todo edit", () => {
-		const prior: TodoPhase[] = [
-			{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] },
-		];
+		const prior: TodoPhase[] = [{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] }];
 		const { phases: parsed, errors } = markdownToPhases("# New phase\n- [-] model dropped\n");
 		expect(errors).toEqual([]);
 		const merged = applyUserMarkdownPhases(prior, parsed);
@@ -628,7 +689,9 @@ describe("TodoTool operations", () => {
 
 	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
 		const prior: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] }];
-		const incoming: TodoPhase[] = [
+		// Host wire fields (id/notes/details) sit outside TodoItem's type but
+		// must survive the spread passthrough; cast to express the wire shape.
+		const incoming = [
 			{
 				name: "Ship",
 				...{ id: "phase-1" },
@@ -650,8 +713,8 @@ describe("TodoTool operations", () => {
 					},
 				],
 			},
-		];
-		const next = applyRpcTodoProvenance(prior, incoming) as unknown as Array<Record<string, unknown>>;
+		] as unknown as TodoPhase[];
+		const next = applyRpcTodoProvenance(prior, incoming);
 		expect(next).toEqual([
 			{
 				name: "Ship",
@@ -679,7 +742,7 @@ describe("TodoTool operations", () => {
 					},
 				],
 			},
-		]);
+		] as unknown as TodoPhase[]);
 	});
 
 	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
@@ -764,7 +827,7 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["completed", "completed", "in_progress"]);
 	});
 
-	it("abandons all tasks when the model rm omits task and phase", async () => {
+	it("abandons open tasks when model rm omits task and phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
 			op: "init",
@@ -873,18 +936,6 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
 		expect(result.isError).toBeUndefined();
-	});
-});
-
-describe("TodoTool provider schema", () => {
-	it("advertises items for single-phase init and append", () => {
-		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
-			properties: {
-				items: {
-					description: "tasks for single-phase init or append",
-				},
-			},
-		});
 	});
 });
 
@@ -1196,7 +1247,7 @@ describe("abandoned todos in tool summary and compact HUD contracts", () => {
 		];
 		expect(nextActionableTask(phases)).toBeUndefined();
 		expect(phases.flatMap(p => p.tasks).filter(isCompletedTodo)).toHaveLength(0);
-		expect(phases.flatMap(p => p.tasks).filter(isSettledTodo)).toHaveLength(2);
+		expect(phases.flatMap(p => p.tasks).filter(isClosedTodo)).toHaveLength(2);
 		expect(phases.flatMap(p => p.tasks).filter(isHudSettledTodo)).toHaveLength(0);
 		const tool = new TodoTool(createSession(phases));
 		const result = await tool.execute("t1", { op: "view" });

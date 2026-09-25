@@ -91,11 +91,10 @@ impl Utility for Readlink {
 		};
 
 		for operand in &files {
-			let resolved = host.resolve(operand);
 			let path_result = if resolve_mode == ResolveMode::None {
-				fs::read_link(&resolved)
+				fs::read_link(host.paths().resolve_link(operand))
 			} else {
-				canonicalize(&resolved, missing_handling, resolve_mode)
+				canonicalize(&host.resolve(operand), missing_handling, resolve_mode)
 			};
 
 			match path_result {

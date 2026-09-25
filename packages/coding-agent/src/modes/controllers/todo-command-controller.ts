@@ -1,15 +1,13 @@
 import * as fs from "node:fs/promises";
 import {
 	applyOpsToPhases,
-	applyUserMarkdownPhases,
+	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	selectAuthoritativeTodoPhases,
-	type TodoItem,
-	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -137,11 +135,13 @@ export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	/**
-	 * True latest todo state for the user-facing /todo verbs. Live session cache
-	 * is authoritative, including an explicit empty list after RPC `set_todos([])`.
+	 * True latest todo state for the user-facing /todo verbs. Reads from session
+	 * entries or falls back to the active session state.
 	 */
 	#currentPhases(): TodoPhase[] {
-		return selectAuthoritativeTodoPhases(this.ctx.session.getTodoPhases());
+		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
+		if (fromEntries.length > 0) return fromEntries;
+		return this.ctx.session.getTodoPhases();
 	}
 
 	async handleTodoCommand(args: string): Promise<void> {
@@ -157,7 +157,7 @@ export class TodoCommandController {
 
 		switch (verb) {
 			case "expand":
-				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				this.ctx.setTodoExpanded(true);
 				return;
 			case "collapse":
 				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
@@ -250,15 +250,11 @@ export class TodoCommandController {
 			this.ctx.showError(`Failed to read todos: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
-		const { phases: parsed, errors } = markdownToPhases(content);
+		const { phases, errors } = markdownToPhases(content);
 		if (errors.length > 0) {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		// Import replaces the list from a user-authored file: stamp every
-		// abandoned marker as a user cancel even when the prior list already
-		// held a model drop with the same content (unlike `/todo edit` no-ops).
-		const phases = applyUserMarkdownPhases([], parsed);
 		this.#commit(phases, `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
@@ -336,10 +332,9 @@ export class TodoCommandController {
 		const op = target === "completed" ? "done" : "drop";
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
-		const userAuthored = target === "abandoned";
 		if (!trimmed) {
 			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }], { userAuthored });
+			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -351,7 +346,7 @@ export class TodoCommandController {
 
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }], { userAuthored });
+			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -363,7 +358,7 @@ export class TodoCommandController {
 
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }], { userAuthored });
+			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -386,9 +381,7 @@ export class TodoCommandController {
 		}
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }], {
-				userAuthored: true,
-			});
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -399,9 +392,7 @@ export class TodoCommandController {
 		}
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }], {
-				userAuthored: true,
-			});
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -438,10 +429,9 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			const phases = applyUserMarkdownPhases(current, parsed);
-			this.#commit(phases, "/todo edit");
-			const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
-			this.ctx.showStatus(`Todos updated from editor: ${phases.length} phase(s), ${taskCount} task(s).`);
+			this.#commit(parsed, "/todo edit");
+			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
+			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
@@ -453,12 +443,10 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
+		// Persist first so HUD visibility binds to the new canonical source.
 		this.ctx.session.setTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
-
-		// 2. Persist for reload survival via custom session entry.
 		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
+		this.ctx.setTodos(nextPhases);
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the
