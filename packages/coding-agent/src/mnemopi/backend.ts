@@ -43,6 +43,9 @@ import {
 	setMnemopiSessionState,
 } from "./state";
 
+import { cfgMemoryBackend } from "../memory-backend/settings";
+import { cfgMnemopiInjectionTokenLimit } from "./settings";
+
 // `/diagnose` is the only user of this subpath; load it lazily alongside the
 // loaders in ./state to keep mnemopi off the CLI startup module graph.
 let mnemopiDiagnoseMod: typeof MnemopiDiagnoseNs | undefined;
@@ -133,7 +136,7 @@ export const mnemopiBackend: MemoryBackend = {
 		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 		const rendered = parts.join("\n\n").trim();
 		if (!rendered) return undefined;
-		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
+		return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
 	},
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
@@ -148,7 +151,7 @@ export const mnemopiBackend: MemoryBackend = {
 			});
 			const rendered = [instructions, preparation.context].join("\n\n").trim();
 			preparation.context =
-				truncateApproxTokens(rendered, session.settings.get("mnemopi.injectionTokenLimit"))
+				truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(session.settings))
 					.slice(instructions.length)
 					.trim() || undefined;
 		}
@@ -173,7 +176,7 @@ export const mnemopiBackend: MemoryBackend = {
 		requireMnemopiCore().resetMemoryForTests();
 		await Bun.sleep(0);
 		await removeDbFiles(getMnemopiScopedDbPaths(config));
-		if (!session?.sessionId || previous?.aliasOf || session.settings.get("memory.backend") !== "mnemopi") return;
+		if (!session?.sessionId || previous?.aliasOf || cfgMemoryBackend.get(session.settings) !== "mnemopi") return;
 		try {
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
