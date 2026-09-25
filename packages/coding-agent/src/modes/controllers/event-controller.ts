@@ -57,7 +57,6 @@ import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-arg
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
-	cfgDisplayCollapseCompacted,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySmoothStreaming,
@@ -2235,19 +2234,16 @@ export class EventController {
 			this.ctx.lastAssistantUsage = undefined;
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 			this.ctx.statusLine.invalidate();
-			// When history collapses behind the summary divider, the frame
-			// shrinks far below the committed row count; without clearing, the
-			// differential renderer's "duplication, never loss" resync repaints
-			// the whole collapsed transcript (welcome box included) BELOW the
-			// stale pre-compaction scrollback. Compaction is an intentional
-			// transcript replacement then — same as auto-handoff below. With
-			// collapse disabled the rebuilt transcript keeps the full history,
-			// so the resync handles it and scrollback stays.
-			if (cfgDisplayCollapseCompacted.get(settings)) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			// rebuildChatFromMessages clears the container's emission ledger,
+			// so every block re-emits on this frame while the previous copy is
+			// still in native scrollback; the differential resync only ever
+			// adds rows, so without a clear the collapse-disabled arm
+			// duplicates the full transcript (#12140). Pair the rebuild with a
+			// forced scrollback-clearing repaint in both arms — the pairing
+			// transcript-container documents for ledger resets — so compaction
+			// replaces history instead of appending a second copy. The force
+			// matters too: post-clear the frame looks unchanged to the diff.
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
 		} else if (isHandoffAction) {
