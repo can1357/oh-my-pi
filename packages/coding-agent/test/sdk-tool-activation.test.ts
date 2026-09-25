@@ -672,7 +672,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	it("keeps the stable MCP tool-name collision winner during late registration", async () => {
 		const tempDir = makeTempDir();
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => { });
 		const lateMcpCollisionExtension: ExtensionFactory = pi => {
 			pi.on("session_start", async () => {
 				await Promise.resolve();
@@ -2024,7 +2024,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	it("keeps the stable MCP tool-name collision winner during SDK startup and warns", async () => {
 		const tempDir = makeTempDir();
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => { });
 		const createMcpTool = (serverName: string, label: string): CustomTool => ({
 			name: "mcp__foo_bar_lookup",
 			label,
@@ -2683,8 +2683,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain("Use `recall`");
-			expect(prompt).not.toContain("Use `retain`");
+			expect(prompt).not.toContain("proactively before answering");
+			expect(prompt).not.toContain("to store durable facts");
 		} finally {
 			await session.dispose();
 		}
@@ -2702,8 +2702,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain("Use `retain`");
-			expect(prompt).not.toContain("Use `reflect`");
+			expect(prompt).not.toContain("to store durable facts");
+			expect(prompt).not.toContain("needs a synthesised answer");
 		} finally {
 			await session.dispose();
 		}
@@ -2720,8 +2720,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).toContain("Use `recall`");
-			expect(prompt).toContain("Use `retain`");
+			expect(prompt).toContain("proactively before answering");
+			expect(prompt).toContain("to store durable facts");
 		} finally {
 			await session.dispose();
 		}
@@ -2739,7 +2739,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).toContain("Use `recall`");
+			expect(prompt).toContain("proactively before answering");
 		} finally {
 			await session.dispose();
 		}
@@ -2755,7 +2755,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.refreshBaseSystemPrompt();
 			const prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain("Use `recall`");
+			expect(prompt).not.toContain("proactively before answering");
 		} finally {
 			await session.dispose();
 		}
