@@ -221,4 +221,20 @@ describe("buildWorkspaceTree", () => {
 
 		expect(tree.rendered).toContain("ago");
 	});
+
+	it("skips gitignored paths in buildDirectoryTree listings (issue #11532)", async () => {
+		const cwd = await makeTempDir();
+		await Bun.write(path.join(cwd, ".gitignore"), "ignored.txt\nignored-dir/\n");
+		await writeFileWithMtime(path.join(cwd, "ignored.txt"), "x", Date.now());
+		await writeFileWithMtime(path.join(cwd, "kept.txt"), "x", Date.now());
+		await fs.mkdir(path.join(cwd, "ignored-dir"), { recursive: true });
+		await writeFileWithMtime(path.join(cwd, "ignored-dir", "inner.txt"), "x", Date.now());
+
+		const tree = await buildDirectoryTree(cwd, { maxDepth: 2 });
+
+		expect(tree.rendered).toContain("kept.txt");
+		expect(tree.rendered).not.toContain("ignored.txt");
+		expect(tree.rendered).not.toContain("ignored-dir");
+		expect(tree.rendered).not.toContain("inner.txt");
+	});
 });
