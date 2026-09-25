@@ -4,6 +4,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
+import { cfgEditBlackboxEnabled } from "./settings";
+
 const EDIT_BLACKBOX_FILE = "edit-blackbox.jsonl";
 
 /** Full source transition committed by one edit operation. */
@@ -25,7 +27,7 @@ export function createEditBlackboxRecorder(
 	variant: EditMode,
 	arg: unknown,
 ): AppliedEditObserver | undefined {
-	if (!session.settings.get("edit.blackbox.enabled")) return undefined;
+	if (!cfgEditBlackboxEnabled.get(session.settings)) return undefined;
 	const logPath = path.join(session.settings.getAgentDir(), EDIT_BLACKBOX_FILE);
 	const model = session.getActiveModelString?.() ?? "unknown";
 

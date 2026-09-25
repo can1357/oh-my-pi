@@ -251,8 +251,10 @@ fn distinct_paths(entries: &[ApplyPatchEntry]) -> usize {
 		.len()
 }
 
+/// Prefix a multi-file failure with its path. An unresolved internal URL
+/// stays typed so the host can resolve it and retry.
 fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditError {
-	if multiple_files {
+	if multiple_files && !matches!(error, EditError::UnresolvedUrl(_)) {
 		EditError::apply(format!("[{path}]: {error}\n{ATOMICITY_NOTICE}"))
 	} else {
 		error

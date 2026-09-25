@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { CLIP_DESCRIPTION_MAX, DEFAULT_STREAM_URL, STREAM_TITLE_MAX } from "@oh-my-pi/pi-wire";
+import { CLIP_DESCRIPTION_MAX, STREAM_TITLE_MAX } from "@oh-my-pi/pi-wire";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { clipHelp as commandHelp } from "../cli/command-help";
@@ -7,6 +7,8 @@ import { Settings } from "../config/settings";
 import { StencilCredential } from "../stencil/credential";
 import { uploadClip } from "../stream/clip-upload";
 import { latestRecording, recordingsDir } from "../stream/recording";
+
+import { cfgStreamServerUrl } from "../stream/settings";
 
 export default class Clip extends Command {
 	static description = commandHelp.description;
@@ -55,7 +57,7 @@ export default class Clip extends Command {
 				return;
 			}
 			const clip = await uploadClip({
-				serverUrl: flags.server ?? settings.get("stream.serverUrl") ?? DEFAULT_STREAM_URL,
+				serverUrl: flags.server ?? cfgStreamServerUrl.get(settings),
 				token,
 				recording,
 				title: flags.title,

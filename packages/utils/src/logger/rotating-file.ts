@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { localDay } from "../dirs";
+import { openCloexecSync } from "../fs-open";
 
 interface AuditEntry {
 	readonly date: number;
@@ -73,7 +74,7 @@ export class RotatingFileSink {
 
 	#openFd(filePath: string): void {
 		this.#closeFd();
-		this.#fd = fs.openSync(filePath, "a");
+		this.#fd = openCloexecSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);
 	}
 
 	#closeFd(): void {
