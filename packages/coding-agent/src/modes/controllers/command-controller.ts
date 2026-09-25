@@ -74,6 +74,7 @@ import {
 } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
+import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
 	collapseSharedUsageReports,
@@ -1152,6 +1153,12 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.disposeChildren();
 
+		// After a `/fork`, the current session ID is changed to the forked one,
+		// so the session ID before the fork is the one we want to show in the hint.
+		const previousSessionId = this.ctx.sessionManager.isSessionOnDisk()
+			? this.ctx.sessionManager.getSessionId()
+			: undefined;
+
 		const success = await this.ctx.session.fork();
 		if (!success) {
 			this.ctx.showError("Fork failed (session not persisted or cancelled)");
@@ -1161,11 +1168,18 @@ export class CommandController {
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 
-		const sessionFile = this.ctx.session.sessionFile;
-		const shortPath = sessionFile ? sessionFile.split("/").pop() : "new session";
 		this.ctx.present([
 			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Session forked to ${shortPath}`)}`, 1, 1),
+			new Text(
+				theme.fg(
+					"accent",
+					previousSessionId
+						? `${theme.status.success} Session forked · resume: ${resumeCommand(previousSessionId)} or /resume ${previousSessionId}`
+						: `${theme.status.success} Session forked`,
+				),
+				1,
+				1,
+			),
 		]);
 	}
 
