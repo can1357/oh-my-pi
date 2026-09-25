@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import {
@@ -26,27 +26,21 @@ function tool(
 }
 
 function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolvedShell = "/bin/bash"): BashTool {
-	const settings = {
-		get(key: string): unknown {
-			if (Object.hasOwn(settingsOverrides, key)) return settingsOverrides[key];
-			switch (key) {
-				case "async.enabled":
-				case "bash.autoBackground.enabled":
-				case "astGrep.enabled":
-				case "astEdit.enabled":
-				case "grep.enabled":
-				case "glob.enabled":
-					return false;
-				case "bash.autoBackground.thresholdMs":
-					return 60_000;
-				default:
-					return undefined;
-			}
-		},
-		getShellConfig() {
-			return { shell: resolvedShell, args: ["-c"], env: {}, prefix: undefined };
-		},
-	};
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"bash.autoBackground.enabled": false,
+		"astGrep.enabled": false,
+		"astEdit.enabled": false,
+		"grep.enabled": false,
+		"glob.enabled": false,
+		...settingsOverrides,
+	});
+	spyOn(settings, "getShellConfig").mockReturnValue({
+		shell: resolvedShell,
+		args: ["-c"],
+		env: {},
+		prefix: undefined,
+	});
 	return new BashTool({ settings } as unknown as ConstructorParameters<typeof BashTool>[0]);
 }
 
@@ -923,10 +917,6 @@ describe("tool-owned dynamic approval declarations", () => {
 });
 
 describe("resolveApprovalFromContext fail-closed default", () => {
-	function settingsGet(values: Record<string, unknown>) {
-		return { get: (key: string) => values[key] };
-	}
-
 	it("fails closed to always-ask with no grant when context is missing", () => {
 		expect(resolveApprovalFromContext(undefined)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
 		expect(resolveApprovalFromContext(null)).toEqual({ approvalMode: "always-ask", userPolicies: {} });
@@ -941,17 +931,17 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 	it("honors configured mode and per-tool policies when settings are present", () => {
 		expect(
 			resolveApprovalFromContext({
-				settings: settingsGet({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } }),
+				settings: Settings.isolated({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } }),
 			}),
 		).toEqual({ approvalMode: "write", userPolicies: { bash: "deny" } });
-		expect(resolveApprovalFromContext({ settings: settingsGet({ "tools.approvalMode": "yolo" }) })).toEqual({
+		expect(resolveApprovalFromContext({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }) })).toEqual({
 			approvalMode: "yolo",
 			userPolicies: {},
 		});
 	});
 
 	it("keeps the schema default yolo when settings exist but approvalMode is unset", () => {
-		expect(resolveApprovalFromContext({ settings: settingsGet({}) })).toEqual({
+		expect(resolveApprovalFromContext({ settings: Settings.isolated() })).toEqual({
 			approvalMode: "yolo",
 			userPolicies: {},
 		});
@@ -961,7 +951,7 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 		expect(
 			resolveApprovalFromContext({
 				autoApprove: true,
-				settings: settingsGet({ "tools.approvalMode": "always-ask", "tools.approval": { bash: "deny" } }),
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask", "tools.approval": { bash: "deny" } }),
 			}),
 		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
 		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });

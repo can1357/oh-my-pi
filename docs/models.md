@@ -8,7 +8,8 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/settings-schema.ts` — model-related settings (`modelRoles`, provider transport preferences)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; API key + OAuth resolution order
 - `packages/catalog/src/models.ts` and `packages/catalog/src/types.ts` — built-in providers/models and public model types
 
@@ -478,6 +479,7 @@ Related settings:
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`openai` or `anthropic` request format)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`
 accept exact selectors, globs, and fuzzy matches.
@@ -591,6 +593,7 @@ Request shaping:
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
   mode where the endpoint supports it.
 - `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
+- `supportsSteering` — let the Codex WebSocket transport send `response.steer`, so a message typed while the model responds joins that response instead of waiting for the next request. Default: auto (`true` for the GPT-6 family). Set `false` for proxies that reject the event.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
 
 Image handling:

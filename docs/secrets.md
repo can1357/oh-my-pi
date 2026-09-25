@@ -144,7 +144,7 @@ Environment variables are collected first, file-defined entries follow, and the 
 - `packages/coding-agent/src/secrets/index.ts` -- loading, merging, env var collection
 - `packages/coding-agent/src/secrets/obfuscator.ts` -- `SecretObfuscator` class, placeholder generation, message obfuscation
 - `packages/coding-agent/src/secrets/regex.ts` -- regex literal parsing and compilation
-- `packages/coding-agent/src/config/settings-schema.ts` -- `secrets.enabled` setting definition
+- `packages/coding-agent/src/secrets/settings.ts` -- `secrets.enabled` setting definition
 
 ## See also
 

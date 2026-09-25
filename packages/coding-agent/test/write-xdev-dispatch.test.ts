@@ -29,6 +29,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgToolsXdev, cfgToolsXdevDocs } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 /**
  * Mirrors `ToolExecutionComponent#buildRenderContext`: the host state's own
  * resolver (mounted devices plus active top-level tools, the same predicate
@@ -256,8 +258,8 @@ describe("read and write route xd:// device URLs", () => {
 			expect(escaped.isError).toBeUndefined();
 			expect(await Bun.file(path.join(tempDir, "xd/web_search")).text()).toBe("intentional file");
 
-			// conflict:// has no router handler but is a documented write scheme —
-			// the guard must let it reach the conflict resolver, not reject it.
+			// conflict:// is a registered write scheme — the guard must let it
+			// reach the conflict handler, not reject it.
 			await expect(write!.execute("write-conflict", { path: "conflict://1", content: "x" })).rejects.toThrow(
 				"Conflict #1 not found",
 			);
@@ -279,14 +281,14 @@ describe("read and write route xd:// device URLs", () => {
 			if (typeof approval !== "function") throw new Error("expected a function approval");
 			const tier = (path: string, content: string) => approval({ path, content });
 
-			// ast_edit on a filesystem path → write; on internal URLs only → read.
+			// ast_edit on a filesystem path → write; on read-tier sandbox URLs only → read.
 			const astFsPath = JSON.stringify({
 				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
 				paths: [filePath],
 			});
 			const astInternalPath = JSON.stringify({
 				ops: [{ pat: "a", out: "b" }],
-				paths: ["artifact://abc"],
+				paths: ["local://notes.ts"],
 			});
 			expect(tier("xd://ast_edit", astFsPath)).toEqual({ tier: "write", policyKey: "ast_edit" });
 			expect(tier("xd://ast_edit", astInternalPath)).toEqual({ tier: "read", policyKey: "ast_edit" });
@@ -307,7 +309,11 @@ describe("read and write route xd:// device URLs", () => {
 			expect(tier("xd://ast_edit", "{ not json")).toBe("exec");
 			expect(tier("xd://ast_edit", "[1,2,3]")).toBe("exec");
 			expect(tier("xd://ast_edit", '"a string"')).toBe("exec");
-			expect(tier("xd://ast_edit", JSON.stringify({ paths: [null] }))).toBe("exec");
+			// ast_edit's own approval fails a malformed path entry closed at exec.
+			expect(tier("xd://ast_edit", JSON.stringify({ paths: [null] }))).toEqual({
+				tier: "exec",
+				policyKey: "ast_edit",
+			});
 			expect(approval({ path: "xd://ast_edit" })).toBe("exec");
 			expect(tier("xd://no_such_device", "{}")).toBe("exec");
 		} finally {
@@ -575,7 +581,7 @@ describe("read and write route xd:// device URLs", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-docs-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("catalog");
+			expect(cfgToolsXdevDocs.get(session.settings)).toBe("catalog");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");
@@ -606,7 +612,7 @@ describe("read and write route xd:// device URLs", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-external-"));
 		try {
 			const session = xdevSession(tempDir);
-			expect(session.settings.get("tools.xdevDocs")).toBe("catalog");
+			expect(cfgToolsXdevDocs.get(session.settings)).toBe("catalog");
 			await createTools(session);
 			const xdev = session.xdev;
 			if (!xdev) throw new Error("expected xdev state");
@@ -676,7 +682,7 @@ describe("web_search stays top-level under xdev", () => {
 		try {
 			const session = xdevSession(tempDir);
 			// Default config: tools.xdev is on.
-			expect(session.settings.get("tools.xdev")).toBe(true);
+			expect(cfgToolsXdev.get(session.settings)).toBe(true);
 			const tools = await createTools(session);
 			// Regression for #5973: models call web_search directly, so it must
 			// remain a top-level function and never mount behind the xd:// device.

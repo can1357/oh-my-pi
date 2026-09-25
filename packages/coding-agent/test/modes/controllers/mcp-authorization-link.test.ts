@@ -5,6 +5,8 @@ import { MCPAuthorizationLinkPrompt } from "@oh-my-pi/pi-coding-agent/modes/cont
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const OSC = "\x1b]";
 const BEL = "\x07";
 
@@ -57,7 +59,7 @@ describe("MCPAuthorizationLinkPrompt", () => {
 	});
 
 	afterEach(() => {
-		settings.clearOverride("tui.hyperlinks");
+		cfgTuiHyperlinks.clearOverride(settings);
 		resetSettingsForTest();
 	});
 

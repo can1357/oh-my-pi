@@ -28,6 +28,7 @@ import type { Theme, ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
 import type { OutputMeta } from "./output-meta";
 import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import { splitUrlScheme } from "./url-scheme-host";
 
 /** A verified line range with its yes-probability and a one-line preview. */
 export interface FindRange {
@@ -39,7 +40,7 @@ export interface FindRange {
 
 /** A file whose verified passages cleared the threshold; `ranges` are merged positive spans, strongest first. */
 export interface FindHit {
-	/** Display path relative to {@link FindToolDetails.cwd}, or an `omp://` doc URL for docs scopes. */
+	/** Display path relative to {@link FindToolDetails.cwd}, or an internal URL under URL scopes. */
 	rel: string;
 	/** Filename judgment, when the name batch answered. */
 	nameScore?: number;
@@ -85,7 +86,7 @@ export interface FindToolDetails {
 	elapsedMs: number;
 	/** Session cwd; hit paths are relative to it. */
 	cwd: string;
-	/** Display form of the searched directory when narrower than cwd. */
+	/** Display form of the searched directory or file when narrower than cwd. */
 	scopePath?: string;
 	meta?: OutputMeta;
 }
@@ -124,11 +125,11 @@ function gauge(p: number, theme: Theme): string {
 }
 
 function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, theme: Theme): string[] {
-	// `omp://` hits are virtual docs, not files under `cwd`: link the URL
-	// itself instead of joining it onto a filesystem base.
-	const isOmpHit = /^omp:\/\//i.test(hit.rel);
+	// `scheme://` hits (e.g. virtual docs) are not files under `cwd`: link the
+	// URL itself instead of joining it onto a filesystem base.
+	const isUrlHit = splitUrlScheme(hit.rel) !== undefined;
 	const link = (text: string, line?: number): string => {
-		if (isOmpHit) return uriHyperlink(line === undefined ? hit.rel : `${hit.rel}:${line}`, text);
+		if (isUrlHit) return uriHyperlink(line === undefined ? hit.rel : `${hit.rel}:${line}`, text);
 		const absPath = cwd === undefined ? undefined : path.join(cwd, hit.rel);
 		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
 	};

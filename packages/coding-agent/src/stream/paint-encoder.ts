@@ -93,7 +93,7 @@ export function normalizeStreamRow(row: string): string {
  * against the last viewport this encoder emitted.
  */
 export class StreamPaintEncoder {
-	readonly #redactor: StreamRedactor;
+	#redactor: StreamRedactor;
 	#pendingViewport: StreamRow[] | undefined;
 	#pendingHistory: StreamRow[] = [];
 	#pendingHistorySkipped = 0;
@@ -149,6 +149,12 @@ export class StreamPaintEncoder {
 		this.#pendingColumns = paint.columns;
 		this.#pendingRows = paint.rows;
 		this.#pendingViewport = this.#normalizeViewport(paint.viewport);
+	}
+
+	/** Redact rows pushed from now on with `redactor`; cached rows are dropped so the next paint re-redacts. */
+	setRedactor(redactor: StreamRedactor): void {
+		this.#redactor = redactor;
+		this.#rowCache.clear();
 	}
 
 	/** Make the next drain emit a full viewport snapshot, re-sending the last one when nothing is pending. */

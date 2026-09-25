@@ -2649,12 +2649,53 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
 	return "js";
 }
 
+// Set while `resolveLegacyPiSpecifier` is resolving. Every `Bun.resolveSync`
+// below targets a specifier this same hook matches, so Bun re-enters the hook
+// synchronously; the nested call must decline or it recurses.
+let isResolvingLegacyPiSpecifier = false;
+
 function resolveLegacyPiSpecifier(args: { path: string; importer: string }): LegacyPiResolveResult | undefined {
+	// A nested call comes from our own `Bun.resolveSync`: decline so Bun resolves
+	// natively from the directory that call chose (the host location first, so
+	// canonical imports keep landing on the host copy, not a plugin-local one).
+	if (isResolvingLegacyPiSpecifier) {
+		return undefined;
+	}
 	const remappedSpecifier = remapLegacyPiSpecifier(args.path);
 	if (!remappedSpecifier) {
 		return undefined;
 	}
 
+	isResolvingLegacyPiSpecifier = true;
+	try {
+		const resolved = resolveRemappedLegacyPiSpecifier(remappedSpecifier, args);
+		// A canonical specifier that remaps to itself and already resolves to the
+		// same host file from its importer (host code, e.g. `/login` requiring
+		// `@oh-my-pi/pi-ai/index.js`) has nothing to rewrite: decline and let Bun
+		// resolve it natively. Answering it anyway breaks `require()` on Bun
+		// 1.3.x, which reads the returned path back as `file:<path>` and, on
+		// source-link/dev installs, recurses into `NameTooLong reading
+		// "file:file:…"` (#12293). Importers whose native resolution differs (a
+		// plugin-local copy) still get the host path.
+		if (resolved && !resolved.namespace && remappedSpecifier === args.path) {
+			try {
+				if (Bun.resolveSync(args.path, path.dirname(args.importer)) === resolved.path) {
+					return undefined;
+				}
+			} catch {
+				// Unresolvable from the importer: keep the host answer.
+			}
+		}
+		return resolved;
+	} finally {
+		isResolvingLegacyPiSpecifier = false;
+	}
+}
+
+function resolveRemappedLegacyPiSpecifier(
+	remappedSpecifier: string,
+	args: { path: string; importer: string },
+): LegacyPiResolveResult | undefined {
 	// Primary: resolve the canonical @oh-my-pi/* specifier from the host binary
 	// location. Works in dev mode and in source-link installs.
 	try {
