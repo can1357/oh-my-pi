@@ -119,15 +119,6 @@ describe("InternalUrlRouter URL shape", () => {
 			expect(router.isGlob(url)).toBe(true);
 		}
 	});
-
-	it("rejects a glob in an id authority with a scheme-specific error", async () => {
-		const router = InternalUrlRouter.instance();
-		for (const scheme of ["skill", "agent", "artifact", "rule"]) {
-			await expect(router.locateGlob(`${scheme}://*/SKILL.md`)).rejects.toThrow(
-				`Globs are not supported in ${scheme}:// ids`,
-			);
-		}
-	});
 });
 
 describe("InternalUrlRouter.requireLocal diagnostics", () => {

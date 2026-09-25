@@ -81,24 +81,6 @@ const QUERY_START_RE = /\?[\w.-]*=/;
 // Selectors a mutating tool accepts: whole-file display modes that do not change which bytes are addressed.
 const WHOLE_FILE_SELECTOR_RE = /^(?:raw|conflicts)$/i;
 
-/** Bracket-escape glob metacharacters so a literal path survives glob expansion. */
-function escapeGlob(literal: string): string {
-	return literal.replace(/[*?[{]/g, "[$&]");
-}
-
-/**
- * Decode percent-escapes in one raw glob-tail segment, bracket-escaping any
- * metacharacter that was percent-encoded so it stays a literal filename character.
- */
-function decodeGlobSegment(rawSegment: string, input: string): string {
-	try {
-		// Escape runs are decoded together so multi-byte UTF-8 sequences survive.
-		return rawSegment.replace(/(?:%[0-9a-f]{2})+/gi, run => escapeGlob(decodeURIComponent(run)));
-	} catch {
-		throw new ToolError(`Invalid URL encoding in glob pattern: ${input}`);
-	}
-}
-
 /** Process-global scheme registry; tools route internal URLs through its spec-driven API. */
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;
@@ -344,40 +326,6 @@ export class InternalUrlRouter {
 		return glob !== undefined && glob.firstGlob !== -1;
 	}
 
-	/**
-	 * Glob over a locatable directory: splits `scheme://base/**\/*.md` at the first glob
-	 * segment ({@link isGlob}), locates the base as a directory, returns `<abs-base>/<glob-tail>`
-	 * with the base glob-escaped. null when `input` is no glob or its base is not locatable.
-	 * Throws ToolError for a glob in an id authority (`skill://*\/SKILL.md`, no {@link SchemeSpec.pathAuthority}).
-	 */
-	async locateGlob(input: string, context?: ResolveContext): Promise<string | null> {
-		const glob = this.#globSegments(input);
-		if (!glob || glob.firstGlob === -1) return null;
-		const { scheme, handler, segments, firstGlob } = glob;
-		if (!handler.locate) return null;
-		if (firstGlob === 0 && !handler.spec.pathAuthority) {
-			throw new ToolError(`Globs are not supported in ${scheme}:// ids: ${input}`);
-		}
-
-		const rawTail = segments.slice(firstGlob);
-		if (rawTail.some(segment => /%(?:2f|5c)/i.test(segment))) {
-			throw new ToolError(`Encoded path separators are not allowed in ${scheme}:// glob patterns: ${input}`);
-		}
-		const tail = rawTail.map(segment => decodeGlobSegment(segment, input));
-		if (tail.includes("..")) {
-			throw new ToolError(`Glob pattern traversal above the ${scheme}:// base is not allowed: ${input}`);
-		}
-
-		// An empty base path keeps the explicit `/.` so the base names the authority's directory itself.
-		const baseUrl =
-			firstGlob === 0
-				? `${scheme}://`
-				: `${scheme}://${segments[0]}/${segments.slice(1, firstGlob).join("/") || "."}`;
-		const base = await handler.locate(parseInternalUrl(baseUrl), context, { directory: true });
-		if (base === null) return null;
-		return path.join(escapeGlob(base), tail.join("/"));
-	}
-
 	/** Sync locate for renderers; only schemes with spec.linkable. Never throws. */
 	locateSync(input: string, context?: ResolveContext): string | undefined {
 		const registered = this.#registered(input);
@@ -403,11 +351,6 @@ export class InternalUrlRouter {
 			if (root !== undefined) roots.push(path.resolve(root));
 		}
 		return roots;
-	}
-
-	/** Whether `input`'s handler expands it into searchable leaf documents ({@link ProtocolHandler.enumerate}). */
-	canEnumerate(input: string): boolean {
-		return this.#registered(input)?.handler.enumerate !== undefined;
 	}
 
 	/** Searchable leaf documents behind `input` ({@link ProtocolHandler.enumerate}); null when its scheme cannot enumerate. */

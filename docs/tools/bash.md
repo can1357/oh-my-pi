@@ -8,7 +8,7 @@
 - Key collaborators:
   - `packages/coding-agent/src/tools/bash-interactive.ts` — PTY/TUI execution path.
   - `packages/coding-agent/src/tools/bash-interceptor.ts` — blocks tool-better shell patterns.
-  - `packages/coding-agent/src/tools/bash-skill-urls.ts` — expands internal URLs to paths.
+  - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — router-backed shell filesystem for `scheme://` paths.
   - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
   - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
@@ -136,9 +136,9 @@ Choose the setting by the desired outcome:
 1. `BashTool.execute()` in `packages/coding-agent/src/tools/bash.ts` reads `command`. A `name` selects supervised service mode (through the user's shell and launch broker); normal Bash execution defaults `timeout` to `300`.
 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
 3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
-4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before URL expansion or execution.
-5. `expandInternalUrls()` rewrites every shell-operand internal URL (`spec.shellOperand`: skill, agent, artifact, memory, rule, local, attachment) to its located local path inside `command` and protocol-looking `cwd` values. Other schemes, mentions inside larger quoted text, heredoc bodies, and `#` comments are left unchanged. Command replacements are shell-escaped; `cwd` replacements use raw filesystem paths because they are not interpolated into shell text.
-6. `resolveToCwd()` resolves `cwd` against `session.cwd`; `fs.stat()` verifies that the target exists and is a directory.
+4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before execution.
+5. The command text is passed through unchanged; a per-run `InternalUrlFilesystem` is injected into the native shell so every `scheme://` path resolves at operation time.
+6. A host `cwd` resolves against `session.cwd` and `fs.stat()` verifies it is a directory; a URL `cwd` is checked through the URL filesystem and handed to the shell as-is (service and PTY modes refuse it).
 7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
 8. Execution path splits:
    1. `async: true` -> `#startManagedBashJob()` registers a session async job and returns immediately.
@@ -185,7 +185,7 @@ Choose the setting by the desired outcome:
 - Filesystem
   - Validates `cwd` with `fs.stat()`.
   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
-  - `expandInternalUrls(..., { create: true })` locates missing targets of mutable schemes (e.g. `local://`) and creates their parent directories before execution.
+  - `scheme://` paths are served per operation by `InternalUrlFilesystem`: file-backed schemes redirect to their backing files (writes only for mutable file-written schemes such as `local://`, within the approved tier); rendered resources are read-only; `realpath`/`readlink` print the physical backing path of file-backed URLs.
 - Subprocesses / native bindings / client terminal
   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
   - PTY uses native `PtySession.start()`.
@@ -222,8 +222,8 @@ Choose the setting by the desired outcome:
 - Interceptor:
   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
   - invalid interceptor regexes are silently skipped by `compileRules()`.
-- Internal URL expansion:
-  - a shell-operand URL never reaches the shell raw: a line selector (`local://notes.md:1-5`; only `:raw`/`:conflicts` are peeled), a missing target (`<url> does not exist as a local file`), a lookup failure, or a root-containment violation throws `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`. Immutable schemes never create missing targets.
+- Internal URL filesystem:
+  - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable or handler-owned schemes `EROFS`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
@@ -233,7 +233,7 @@ Choose the setting by the desired outcome:
 
 ## Notes
 - `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in isolated one-shot shells (see `shellSessionsInUse` in `bash-executor.ts`).
-- `command` URL expansions shell-escape replacements; `cwd` expansion uses `noEscape: true` because it becomes a filesystem path, not shell text.
+- A bare `skill://<name>` is the skill directory for shell operations; its instructions are `skill://<name>/SKILL.md`.
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Interceptor configuration syntax is unchanged. It handles common flat command lists, not full shell parsing: heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting only receive the existing whole-input check. This is best-effort routing toward dedicated tools, not a security boundary.
 - `bash.direnv` defaults to `"auto"` and honors direnv's allow list; an unallowed `.envrc` is not executed. Set it to `"off"` to bypass preflight. `bash.direnvLoadTimeoutMs` controls the cold-load budget.

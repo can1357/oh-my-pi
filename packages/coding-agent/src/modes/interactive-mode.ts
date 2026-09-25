@@ -1768,30 +1768,35 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.composer.setStatusComponent(this.statusLine);
 
-		this.composer.setRuntimeChildren([
-			this.chatContainer,
-			this.pendingMessagesContainer,
-			this.todoContainer,
-			this.subagentContainer,
-			this.btwContainer,
-			this.omfgContainer,
-			this.cleanseContainer,
-			this.errorBannerContainer,
-			this.modelCycleContainer,
-			this.deferredCommandContainer,
-			// Judge batches stay editor-anchored and update independently of eval
-			// transcript output, directly above the working/throughput/title row.
-			this.judgmentBatchProgressContainer,
-			// Working loader / transient status sits below the sticky todo + subagent
-			// HUDs, just above the editor's hook-widget top margin — so it reads next to
-			// the prompt while keeping the one-line gap above the editor (the band
-			// composer collapses that gap so its status band sits flush).
-			this.statusContainer,
-			this.attachmentChipsContainer,
-			this.hookWidgetContainerAbove,
-			this.editorContainer,
-			this.hookWidgetContainerBelow,
-		]);
+		this.composer.setRuntimeChildren(
+			[
+				this.chatContainer,
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.omfgContainer,
+				this.cleanseContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.deferredCommandContainer,
+				// Judge batches stay editor-anchored and update independently of eval
+				// transcript output, directly above the working/throughput/title row.
+				this.judgmentBatchProgressContainer,
+				// Working loader / transient status sits below the sticky todo + subagent
+				// HUDs, just above the editor's hook-widget top margin — so it reads next to
+				// the prompt while keeping the one-line gap above the editor (the band
+				// composer collapses that gap so its status band sits flush).
+				this.statusContainer,
+				this.attachmentChipsContainer,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			// Inline dialogs and a tall multi-line draft swap into the editor
+			// container and collapse again; everything else is turn-scoped.
+			{ transient: [this.editorContainer] },
+		);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 

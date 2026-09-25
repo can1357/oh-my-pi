@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ShellFilesystem` interface to support asynchronous file I/O and custom filesystem providers in native shell execution
+
+### Changed
+
+- Updated native operation options to accept a `filesystem` provider, enabling direct resolution of arbitrary `scheme://` paths
+
 ### Fixed
 
 - Fixed shell commands using `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`, and `/dev/tty` so they now access the command's descriptors correctly, including preventing heredoc commands from hanging the TUI.

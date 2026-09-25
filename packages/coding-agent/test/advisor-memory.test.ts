@@ -151,7 +151,7 @@ describe("advisor memory context", () => {
 			).rejects.toThrow(unavailableRoot);
 			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(unavailableRoot);
 			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
-				"Glob patterns are not supported for internal URLs: memory://root/*.md",
+				unavailableRoot,
 			);
 
 			if (backend === "mnemopi") {
