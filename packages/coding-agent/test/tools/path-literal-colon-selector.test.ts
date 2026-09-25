@@ -418,7 +418,8 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const tool = new GrepTool(createSession());
 			const rangedResult = await tool.execute("grep-range-filter", {
 				pattern: ".",
-				path: `${absolute}:1-2`,
+				// The native absolute match may retain both C:/ separators and a non-canonical /./ segment.
+				path: `${path.dirname(absolute).replaceAll("\\", "/")}/./notes.txt:1-2`,
 			});
 			const rangedOutput = getText(rangedResult);
 
