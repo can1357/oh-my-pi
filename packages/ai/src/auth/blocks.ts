@@ -386,12 +386,12 @@ export class CredentialBlocks implements BlocksApi {
 	/**
 	 * Whether a fresh report could lift what currently blocks this credential.
 	 *
-	 * A strategy that names healable scopes can only vouch for those scopes, so
-	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
-	 * keeps the credential unusable whatever the report says about a tier. A
-	 * probe then cannot change the outcome and must not be spent; the tier scope
-	 * heals on a later pass, once the block that actually holds the credential
-	 * has lifted.
+	 * For providers whose strategies only vouch for named scopes (such as
+	 * Google Antigravity or OpenAI Codex), a live unscoped block keeps the
+	 * credential unusable whatever the report says about a scoped counter, so a
+	 * probe cannot change the outcome. When a strategy vouches for the
+	 * unscoped scope too (e.g. Anthropic OAuth, where live reports carry shared
+	 * umbrella windows and tier counters), an unscoped block is healable.
 	 */
 	canHeal(
 		provider: Provider,
@@ -400,10 +400,12 @@ export class CredentialBlocks implements BlocksApi {
 		blockScopeOrScopes: string | readonly string[] | undefined,
 	): boolean {
 		if (!this.supportsHealing(provider)) return false;
-		if (this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
+		const strategy = this.#deps.strategies(provider);
+		if (!strategy?.healsUnscopedBlock && this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) {
+			return false;
+		}
 		return this.blockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
 	}
-
 	/**
 	 * Self-heal stale usage-limit blocks: when a fresh live usage report says a
 	 * scope is below every limit gating it, drop its persisted and in-memory
@@ -423,7 +425,7 @@ export class CredentialBlocks implements BlocksApi {
 		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
-			this.#clearHealedBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope);
+			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope);
 		}
 	}
 
@@ -431,19 +433,23 @@ export class CredentialBlocks implements BlocksApi {
 	 * Drop one scope's block after a healthy report, unless the block is too
 	 * fresh: `/usage` can lag the request path that just returned 429, so local
 	 * and broker-sourced blocks get one usage-cache window before a healthy
-	 * report may clear them.
+	 * report may clear them. Only a block stored under this exact scope counts:
+	 * {@link CredentialBlocks.blockedUntil} also merges the unscoped block, so a
+	 * tier heal would otherwise "clear" (and log) the unscoped deadline it
+	 * leaves in place.
 	 */
 	#clearHealedBlockScope(
 		provider: Provider,
 		providerKey: string,
 		credentialId: number,
-		credentialIndex: number,
 		blockScope: string | undefined,
 	): void {
-		const blockedUntilMs = this.blockedUntil(provider, providerKey, credentialIndex, blockScope);
-		if (blockedUntilMs === undefined) return;
 		const nowMs = Date.now();
 		const scopedKey = scopedBackoffKey(providerKey, blockScope);
+		const memoryBlockedUntilMs = this.#getCredentialBlockedUntilForKey(scopedKey, credentialId, nowMs);
+		const storedBlockedUntilMs = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
+		const blockedUntilMs = Math.max(memoryBlockedUntilMs ?? 0, storedBlockedUntilMs ?? 0);
+		if (blockedUntilMs <= nowMs) return;
 		const globalProbeAfterMs = this.#credentialBackoff.get(providerKey)?.get(credentialId)?.probeAfter ?? 0;
 		const scopedProbeAfterMs = this.#credentialBackoff.get(scopedKey)?.get(credentialId)?.probeAfter ?? 0;
 		const storeGlobalProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(credentialId, providerKey, "");
@@ -477,21 +483,26 @@ export class CredentialBlocks implements BlocksApi {
 		const accountId = (
 			usageReportMetadataValue(report, "accountId") ?? usageReportScopeAccountId(report)
 		)?.toLowerCase();
-		if (!email && !accountId) return [];
+		const orgId = usageReportMetadataValue(report, "orgId")?.toLowerCase();
+		if (!email && !accountId && !orgId) return [];
 		const matches: number[] = [];
 		for (const entry of this.#deps.pool.entries(report.provider)) {
 			const credential = entry.credential;
 			if (credential.type !== "oauth") continue;
 			const credentialEmail = credential.email?.trim().toLowerCase();
 			const credentialAccountId = credential.accountId?.trim().toLowerCase();
-			// Every identity dimension present on BOTH sides must agree — the
-			// account id is shared workspace-wide and one email can span
-			// workspaces, so a single-dimension match can cross-link siblings.
+			const credentialOrgId = credential.orgId?.trim().toLowerCase();
+			// Every identity dimension present on both sides must agree: the
+			// account id is shared workspace-wide, one email can span
+			// workspaces, and an account can belong to multiple organizations,
+			// so a single-dimension match can cross-link siblings.
 			const emailComparable = Boolean(email && credentialEmail);
 			const accountComparable = Boolean(accountId && credentialAccountId);
-			if (!emailComparable && !accountComparable) continue;
+			const orgComparable = Boolean(orgId && credentialOrgId);
+			if (!emailComparable && !accountComparable && !orgComparable) continue;
 			if (emailComparable && credentialEmail !== email) continue;
 			if (accountComparable && credentialAccountId !== accountId) continue;
+			if (orgComparable && credentialOrgId !== orgId) continue;
 			matches.push(entry.id);
 		}
 		return matches;

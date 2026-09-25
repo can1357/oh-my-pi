@@ -24,7 +24,7 @@ import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
 /** Shared windows that gate every Claude request, whatever the model. */
-const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
+export const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
 
 const CLAUDE_USAGE_BETAS =
 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
@@ -885,6 +885,29 @@ function findClaudeSecondaryLimit(
 		.reduce<UsageLimit | undefined>((selected, limit) => morePressuredLimit(selected, limit, nowMs), undefined);
 }
 
+/**
+ * Limits that gate an unscoped (Opus/Sonnet) Claude request: shared umbrella
+ * windows (5h, 7d), Opus and Sonnet tier weekly rows, plus Extra Usage
+ * (`anthropic:extra`) when present.
+ *
+ * 429 errors from account spend caps ("This request would exceed your account's
+ * monthly spend limit") reflect the Extra Usage cap rather than base plan
+ * windows, but arrive as unscoped blocks indistinguishable from plan-window
+ * blocks. When Extra Usage is reported, an exhausted extra row must keep the
+ * unscoped block so the client does not clear the block on healthy 5h/7d rows
+ * only to immediately fail and re-block on the next request. When absent or
+ * below limit, the account heals from plan-window headroom alone.
+ */
+export function claudeUnscopedGatingLimits(report: UsageReport): UsageLimit[] {
+	return report.limits.filter(
+		limit =>
+			limit.scope.shared === true ||
+			limit.scope.tier === "opus" ||
+			limit.scope.tier === "sonnet" ||
+			limit.id === "anthropic:extra",
+	);
+}
+
 export const claudeRankingStrategy: CredentialRankingStrategy = {
 	/**
 	 * Anthropic-only idle window after which a session's pinned credential no
@@ -906,6 +929,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// Fable/Mythos weekly cap inside the reserve margin should move the turn to
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
+	healsUnscopedBlock: true,
 	/**
 	 * Fable/Mythos usage-limit errors map to tier-local weekly counters. Scope
 	 * reactive backoff blocks for those tiers, mirroring the per-counter
@@ -916,20 +940,19 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
 	/**
-	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
-	 * Anthropic can restore the tier earlier (plan change, corrected counter),
-	 * and the block then idles a usable account for days. Judge each tier scope
-	 * against the limits that actually gate a request of that kind — its own
-	 * weekly row plus the shared umbrella windows — so a healthy report lifts
-	 * the block while a spent shared 5-hour wall keeps it.
+	 * Reactive blocks carry the reset the 429 reported, but Anthropic can restore
+	 * quota earlier (plan change, corrected counter, or reset redemption), and
+	 * the block then idles a usable account for days. Judge each scope against the
+	 * limits that actually gate a request of that kind:
+	 * - Unscoped (Opus/Sonnet) requests against shared umbrella windows plus Opus/Sonnet tier counters.
+	 * - Fable/Mythos tier scopes against their own weekly row plus shared umbrella windows.
 	 *
-	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
-	 * those tiers alone, so no other scope can exist to heal.
+	 * A healthy report lifts the block while a spent shared 5-hour wall keeps it.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
 		// The endpoint returns a report as soon as one window parses, and a tier
-		// 429 can be caused by a shared wall. A payload missing a shared gate
+		// or unscoped 429 can be caused by a shared wall. A payload missing a shared gate
 		// leaves the block's cause unknown, so vouch for nothing rather than
 		// clear a block that still holds.
 		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
@@ -941,10 +964,11 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const tier = limit.scope.tier;
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
-		return [...tiers].map(tier => ({
+		const tierScopes = [...tiers].map(tier => ({
 			blockScope: `tier:${tier}`,
 			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
 		}));
+		return [{ blockScope: undefined, limits: claudeUnscopedGatingLimits(report) }, ...tierScopes];
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

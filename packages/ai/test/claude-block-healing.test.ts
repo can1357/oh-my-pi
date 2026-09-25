@@ -5,8 +5,9 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
-import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeResetClearedBlockScopes } from "../src/usage/claude-reset";
 
 /**
  * A reactive Fable 429 blocks the credential until the reset that error
@@ -36,6 +37,16 @@ function tierLimit(tier: string, usedFraction: number): UsageLimit {
 		window: { id: "7d", label: "7d", resetsAt: Date.now() + 24 * 60 * 60_000 },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
+	};
+}
+function extraLimit(used: number, limit: number): UsageLimit {
+	const usedFraction = used / limit;
+	return {
+		id: "anthropic:extra",
+		label: "Claude Extra Usage",
+		scope: { provider: "anthropic", windowId: "extra" },
+		amount: { used, limit, usedFraction, unit: "usd" },
+		status: used >= limit ? "exhausted" : "ok",
 	};
 }
 
@@ -80,10 +91,17 @@ interface HealHarness {
 	probeCount: () => number;
 	/** Persisted blocks, keyed `credentialId:blockScope`, so a test can add one. */
 	blocks: Map<string, number>;
+	/** Reconcile-after timestamps, keyed `credentialId:blockScope`. */
+	reconcileAfter: Map<string, number>;
 }
 
-function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarness {
+function makeHarness(
+	report: UsageReport,
+	blockScope = "tier:fable",
+	strategy: CredentialRankingStrategy = claudeRankingStrategy,
+): HealHarness {
 	const rows = [oauthRow(1), oauthRow(2)];
+	const reconcileAfter = new Map<string, number>();
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
 	blocks.set(`1:${blockScope}`, Date.now() + 3 * 24 * 60 * 60_000);
@@ -102,6 +120,8 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		async deleteAuthCredentials() {},
 		getCredentialBlock: (credentialId: number, _providerKey: string, scope: string) =>
 			blocks.get(`${credentialId}:${scope}`),
+		getCredentialBlockReconcileAfter: (credentialId: number, _providerKey: string, scope: string) =>
+			reconcileAfter.get(`${credentialId}:${scope}`),
 		upsertCredentialBlock: block => {
 			blocks.set(`${block.credentialId}:${block.blockScope}`, block.blockedUntilMs);
 		},
@@ -129,10 +149,9 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 	};
 	const storage = new AuthStorage(store, {
 		usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
-		rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
-		configValueResolver: async value => value,
+		rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
 	});
-	return { storage, clearedScopes, probeCount: () => probes, blocks };
+	return { storage, clearedScopes, probeCount: () => probes, blocks, reconcileAfter };
 }
 
 describe("claude usage-block healing", () => {
@@ -218,11 +237,16 @@ describe("claude usage-block healing", () => {
 	});
 
 	it("spends no usage request on a block its scopes cannot heal", async () => {
-		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
-		// every scope the strategy vouches for, so probing cannot change it.
+		// When a strategy does not vouch for unscoped blocks, a live unscoped
+		// block is outside every scope it vouches for, so probing cannot change it.
+		const unvouchedStrategy: CredentialRankingStrategy = {
+			...claudeRankingStrategy,
+			healsUnscopedBlock: false,
+		};
 		const { storage, clearedScopes, probeCount } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
 			"",
+			unvouchedStrategy,
 		);
 		storages.push(storage);
 		await storage.credentials.reload();
@@ -257,10 +281,17 @@ describe("claude usage-block healing", () => {
 
 	it("spends no probe while an unscoped block also holds the credential", async () => {
 		// A tier block written after a global one carries the later deadline, but
-		// the global block still makes the credential unusable, so clearing the
-		// tier early buys nothing and the request must not be spent.
+		// for strategies that do not vouch for unscoped healing, the global block
+		// still makes the credential unusable, so clearing the tier early buys
+		// nothing and the request must not be spent.
+		const unvouchedStrategy: CredentialRankingStrategy = {
+			...claudeRankingStrategy,
+			healsUnscopedBlock: false,
+		};
 		const { storage, probeCount, blocks } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+			"tier:fable",
+			unvouchedStrategy,
 		);
 		storages.push(storage);
 		blocks.set("1:", Date.now() + 60 * 60_000);
@@ -273,5 +304,239 @@ describe("claude usage-block healing", () => {
 
 		expect(probeCount()).toBe(0);
 		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
+	});
+
+	it("lifts a stale unscoped block when a live report has headroom for Opus/Sonnet requests", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-heal", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).toContain("");
+		expect(selected).toBe("access-1");
+	});
+
+	it("keeps an unscoped block when the 7d limit is exhausted", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 1.0)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-exhausted", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).not.toContain("");
+		expect(selected).toBe("access-2");
+	});
+	it("keeps an unscoped block when Extra Usage is exhausted even with plan headroom", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05), extraLimit(52, 50)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-extra-exhausted", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).not.toContain("");
+		expect(selected).toBe("access-2");
+	});
+
+	it("does not report a tier heal for an unscoped block it leaves in place", async () => {
+		// Extra Usage keeps the unscoped block; the healthy Fable row may only
+		// clear a block stored under `tier:fable`. Reporting the unscoped
+		// deadline as a cleared tier block made a still-blocked account look
+		// recovered in the logs on every usage refresh.
+		const { storage, clearedScopes, blocks } = makeHarness(
+			claudeReport([
+				sharedLimit("5h", "5h", 0.02),
+				sharedLimit("7d", "7d", 0.05),
+				tierLimit("fable", 0),
+				extraLimit(52, 50),
+			]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-fable-under-unscoped", { modelId: "claude-fable-5-1" });
+
+		expect(clearedScopes).toEqual([]);
+		expect(blocks.has("1:")).toBe(true);
+		expect(selected).toBe("access-2");
+	});
+
+	it("lifts an unscoped block when Extra Usage is present and has headroom", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05), extraLimit(10, 50)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-extra-healthy", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).toContain("");
+		expect(selected).toBe("access-1");
+	});
+
+	it("does not clear unscoped block scope via reset credit when Extra Usage is exhausted", () => {
+		const report = claudeReport([sharedLimit("5h", "5h", 1.0), sharedLimit("7d", "7d", 0.05), extraLimit(52, 50)]);
+		const cleared = claudeResetClearedBlockScopes(["anthropic:5h"], report);
+		expect(cleared).not.toContain(undefined);
+	});
+
+	it("keeps an unscoped block when the report omits the 7d shared gate", async () => {
+		const { storage, clearedScopes } = makeHarness(claudeReport([sharedLimit("5h", "5h", 0.02)]), "");
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-missing-7d", { modelId: "claude-opus-5-5" });
+		expect(clearedScopes).not.toContain("");
+		expect(selected).toBe("access-2");
+	});
+
+	it("keeps an unscoped block when inside the fresh-block guard window", async () => {
+		const { storage, clearedScopes, blocks, reconcileAfter } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05)]),
+			"",
+		);
+		storages.push(storage);
+		// Place the unscoped block inside the fresh-block guard window
+		reconcileAfter.set("1:", Date.now() + 60_000);
+		await storage.credentials.reload();
+
+		const selected = await storage.keys.get("anthropic", "s-opus-guarded", { modelId: "claude-opus-5-5" });
+
+		expect(clearedScopes).not.toContain("");
+		expect(blocks.has("1:")).toBe(true);
+		expect(selected).toBe("access-2");
+	});
+	it("reports healthy at the health layer when an unscoped block is healed and sibling is exhausted", async () => {
+		const rows = [oauthRow(1), oauthRow(2)];
+		const blocks = new Map<string, number>();
+		blocks.set("1:", Date.now() + 3 * 24 * 60 * 60_000);
+		const store: AuthCredentialStore = {
+			close() {},
+			listAuthCredentials: provider => rows.filter(row => provider === undefined || row.provider === provider),
+			updateAuthCredential() {},
+			async deleteAuthCredential() {
+				return false;
+			},
+			tryDisableAuthCredentialIfMatches: () => false,
+			replaceAuthCredentials: async () => rows,
+			upsertAuthCredential: async () => rows,
+			async deleteAuthCredentials() {},
+			getCredentialBlock: (credentialId: number, _providerKey: string, scope: string) =>
+				blocks.get(`${credentialId}:${scope}`),
+			upsertCredentialBlock: block => {
+				blocks.set(`${block.credentialId}:${block.blockScope}`, block.blockedUntilMs);
+			},
+			deleteCredentialBlock: (credentialId: number, _providerKey: string, scope: string) => {
+				blocks.delete(`${credentialId}:${scope}`);
+			},
+			getCache: () => null,
+			setCache: () => {},
+			cleanExpiredCache() {},
+		};
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			fetchUsage: async params => {
+				const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+				if (access === "access-2") {
+					return {
+						provider: "anthropic",
+						fetchedAt: Date.now(),
+						limits: [sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 1.0)],
+						metadata: { accountId: "account-2" },
+					};
+				}
+				return claudeReport([sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05)]);
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			configValueResolver: async value => value,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude-opus-5-5",
+			reserveFraction: 0.1,
+		});
+
+		expect(health.state).toBe("healthy");
+		expect(health.accounts.find(a => a.credentialId === 1)?.state).toBe("healthy");
+		expect(health.accounts.find(a => a.credentialId === 2)?.state).toBe("depleted");
+	});
+
+	it("reconciles reports to matching credentials by orgId when email and accountId are identical", async () => {
+		const row1 = oauthRow(1);
+		if (row1.credential.type === "oauth") row1.credential.orgId = "org-1";
+		const row2 = oauthRow(2);
+		if (row2.credential.type === "oauth") {
+			row2.credential.orgId = "org-2";
+			row2.credential.accountId = row1.credential.type === "oauth" ? row1.credential.accountId : undefined;
+		}
+		const rows = [row1, row2];
+
+		const blocks = new Map<string, number>();
+		blocks.set("1:", Date.now() + 3 * 24 * 60 * 60_000);
+		blocks.set("2:", Date.now() + 3 * 24 * 60 * 60_000);
+		const clearedScopes: string[] = [];
+
+		const org1Report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 1.0)],
+			metadata: { accountId: "account-1", orgId: "org-1" },
+		};
+		const org2Report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [sharedLimit("5h", "5h", 0.02), sharedLimit("7d", "7d", 0.05)],
+			metadata: { accountId: "account-1", orgId: "org-2" },
+		};
+
+		const store: AuthCredentialStore = {
+			close() {},
+			listAuthCredentials: () => rows,
+			updateAuthCredential() {},
+			async deleteAuthCredential() {
+				return false;
+			},
+			tryDisableAuthCredentialIfMatches: () => false,
+			replaceAuthCredentials: async () => rows,
+			upsertAuthCredential: async () => rows,
+			async deleteAuthCredentials() {},
+			getCredentialBlock: (credentialId, _key, scope) => blocks.get(`${credentialId}:${scope}`),
+			getCredentialBlockReconcileAfter: () => undefined,
+			upsertCredentialBlock: () => {},
+			deleteCredentialBlock: (credentialId, _key, scope) => {
+				clearedScopes.push(`${credentialId}:${scope}`);
+				blocks.delete(`${credentialId}:${scope}`);
+			},
+			getCache: () => null,
+			setCache: () => {},
+			cleanExpiredCache() {},
+			fetchUsageReports: async () => [org1Report, org2Report],
+		};
+
+		const storage = new AuthStorage(store, {
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			configValueResolver: async value => value,
+		});
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.usage.reports();
+
+		expect(clearedScopes).toContain("2:");
+		expect(clearedScopes).not.toContain("1:");
+		expect(blocks.has("1:")).toBe(true);
+		expect(blocks.has("2:")).toBe(false);
 	});
 });

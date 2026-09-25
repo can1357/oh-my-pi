@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stale unscoped Claude OAuth rate-limit blocks so healthy live usage reports can lift them before clock expiry, allowing recovered accounts to be re-selected ([#13249](https://github.com/can1357/oh-my-pi/pull/13249) by [@jwaldrip](https://github.com/jwaldrip)).
+- Fixed Claude `tier:fable`/`tier:mythos` block healing reporting the unscoped block's deadline as cleared while that unscoped block still held the credential, which made a blocked account look recovered in the logs on every usage refresh.
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
