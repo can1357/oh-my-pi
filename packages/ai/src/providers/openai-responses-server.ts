@@ -626,8 +626,10 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
 		options.responseFormat = data.text.format;
 	}
-	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
-	// silently accepted by the schema. No typed slot — drop.
+	// `store` persists the response server-side — required for a later
+	// client-supplied `previous_response_id` to resolve (platform chaining only
+	// resolves stored responses). Forward it into provider options.
+	if (data.store !== undefined) options.store = data.store === true;
 
 	return {
 		modelId: data.model,
