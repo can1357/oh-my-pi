@@ -28,6 +28,7 @@ import {
 	clearRenderCache,
 	getComposerStyle,
 	getPaddingX,
+	getWidthConfigEpoch,
 	Loader,
 	Markdown,
 	Spacer,
@@ -754,16 +755,19 @@ function isHudSubagent(session: ObservableSession): boolean {
  * sentinel, which the click router handles before any registry lookup.
  * Rendering delegates to the same `Text` mount as before, so output bytes are
  * unchanged — only the row map is new. Long rows wrap inside `Text` (content
- * is two cells narrower than the terminal), so the map is rebuilt per render
- * from measured wrapped heights: continuation rows belong to the agent (or
- * toggle) whose logical row started them.
+ * is two cells narrower than the terminal), so the map is built on the first
+ * click after rendering at a new width or width configuration: continuation
+ * rows belong to the agent (or toggle) whose logical row started them.
  */
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
 	readonly #lines: readonly string[];
 	readonly #order: readonly string[];
 	readonly #toggleLine: number | undefined;
-	#physicalOwner: (string | undefined)[] = [];
+	#physicalOwner?: (string | undefined)[];
+	#renderedWidth?: number;
+	#renderedRows = 0;
+	#renderedWidthConfigEpoch?: number;
 	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number) {
 		this.#text = new Text(lines.join("\n"), 1, 0);
 		this.#lines = lines;
@@ -772,11 +776,26 @@ export class SubagentHudComponent implements Component {
 	}
 	render(width: number): readonly string[] {
 		const rows = this.#text.render(width);
-		this.#rebuildHitMap(width, rows.length);
+		const widthConfigEpoch = getWidthConfigEpoch();
+		if (
+			this.#renderedWidth !== width ||
+			this.#renderedRows !== rows.length ||
+			this.#renderedWidthConfigEpoch !== widthConfigEpoch
+		) {
+			this.#physicalOwner = undefined;
+		}
+		this.#renderedWidth = width;
+		this.#renderedRows = rows.length;
+		this.#renderedWidthConfigEpoch = widthConfigEpoch;
 		return rows;
 	}
 	getClickAgentAtRow(row: number): string | undefined {
-		return row >= 0 && row < this.#physicalOwner.length ? this.#physicalOwner[row] : undefined;
+		if (row < 0 || row >= this.#renderedRows || this.#renderedWidth === undefined) return undefined;
+		if (!this.#physicalOwner) {
+			if (this.#renderedWidthConfigEpoch !== getWidthConfigEpoch()) return undefined;
+			this.#rebuildHitMap(this.#renderedWidth, this.#renderedRows);
+		}
+		return this.#physicalOwner?.[row];
 	}
 	// Native wrap splits paragraphs independently, so per-line wrapped
 	// heights compose exactly to the rendered row count. A length mismatch
