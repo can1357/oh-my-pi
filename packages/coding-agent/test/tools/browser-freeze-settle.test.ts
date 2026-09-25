@@ -487,7 +487,7 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			}
 		});
 
-		it("acquireTab records persist and activity; reuse preserves persist and refreshes activity", async () => {
+		it("acquireTab records persist and activity; same-owner reuse preserves persist and refreshes activity", async () => {
 			mockCmuxSocket();
 			const browser = await acquireBrowser(makeKind("settle-bookkeeping"), { cwd: "/tmp" });
 
@@ -500,16 +500,25 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(first.tab.persist).toBe(true);
 			expect(first.tab.frozen).toBe(false);
 			expect(first.tab.lastActivityAt).toBeGreaterThanOrEqual(before);
-			// Backdate, then reuse under a different session without persist: the
+			// Backdate, then reuse under the SAME session without persist: the
 			// creator's opt-out and ownership survive, the clock refreshes.
 			first.tab.lastActivityAt -= 60_000;
 			const stale = first.tab.lastActivityAt;
-			const second = await acquireTab("settle-book", browser, { timeoutMs: 1_000, ownerSessionId: "session-B" });
+			const second = await acquireTab("settle-book", browser, { timeoutMs: 1_000, ownerSessionId: "session-A" });
 			expect(second.tab).toBe(first.tab);
 			expect(second.created).toBe(false);
 			expect(second.tab.ownerSessionId).toBe("session-A");
 			expect(second.tab.persist).toBe(true);
 			expect(second.tab.lastActivityAt).toBeGreaterThan(stale);
+			// A DIFFERENT session opening the same name is a collision, not a
+			// reuse: the open rejects and the creator's persist survives.
+			first.tab.lastActivityAt = stale;
+			await expect(
+				acquireTab("settle-book", browser, { timeoutMs: 1_000, ownerSessionId: "session-B" }),
+			).rejects.toThrow(/already open and owned by another session/);
+			expect(first.tab.persist).toBe(true);
+			expect(first.tab.ownerSessionId).toBe("session-A");
+			expect(first.tab.lastActivityAt).toBe(stale);
 		});
 
 		it("freezeTabsForOwner skips non-headless tabs", async () => {
@@ -645,14 +654,13 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(second.tab).toBe(first.tab);
 			expect(second.tab.persist).toBe(true);
 
-			const third = await acquireTab("settle-rp", browser, {
-				timeoutMs: 1_000,
-				ownerSessionId: "session-B",
-				persist: false,
-			});
-			expect(third.tab).toBe(first.tab);
-			expect(third.tab.ownerSessionId).toBe("session-A");
-			expect(third.tab.persist).toBe(true);
+			// A different session cannot open the same name at all (collision
+			// guard) — its persist choice never reaches the creator's tab.
+			await expect(
+				acquireTab("settle-rp", browser, { timeoutMs: 1_000, ownerSessionId: "session-B", persist: false }),
+			).rejects.toThrow(/already open and owned by another session/);
+			expect(first.tab.ownerSessionId).toBe("session-A");
+			expect(first.tab.persist).toBe(true);
 
 			// Omitted on reuse leaves a previously set value alone.
 			const fourth = await acquireTab("settle-rp", browser, { timeoutMs: 1_000, ownerSessionId: "session-A" });

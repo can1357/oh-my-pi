@@ -142,7 +142,7 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 		expect(getBrowsersMapForTest().size).toBe(0);
 	});
 
-	it("acquireTab reusing an existing tab preserves the original owner", async () => {
+	it("acquireTab by a different owner rejects; ownership and tab survive", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
@@ -156,13 +156,15 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 		const browser = await acquireBrowser(kind, { cwd: "/tmp" });
 
 		const first = await acquireTab("reuse-tab", browser, { timeoutMs: 1_000, ownerSessionId: "session-A" });
-		const second = await acquireTab("reuse-tab", browser, { timeoutMs: 1_000, ownerSessionId: "session-B" });
-
-		expect(first.tab).toBe(second.tab);
-		expect(second.created).toBe(false);
-		// Reuse must NOT reassign ownership — a subagent re-driving an existing
-		// tab shouldn't yank teardown responsibility from the session that opened it.
-		expect(second.tab.ownerSessionId).toBe("session-A");
+		// Cross-session open of the same name is a collision, not a reuse: two
+		// concurrent agents must never silently re-drive each other's live tab.
+		// Deliberate sharing goes through browser.tab()/runInTab, which never
+		// acquires. Ownership therefore can never be yanked by an open.
+		await expect(acquireTab("reuse-tab", browser, { timeoutMs: 1_000, ownerSessionId: "session-B" })).rejects.toThrow(
+			/already open and owned by another session/,
+		);
+		expect(first.tab.ownerSessionId).toBe("session-A");
+		expect(getTabsMapForTest().get("reuse-tab")?.state).toBe("alive");
 
 		// releaseTabsForOwner("session-B") is a no-op here — the tab belongs to A.
 		const releasedB = await releaseTabsForOwner("session-B", { kill: false });

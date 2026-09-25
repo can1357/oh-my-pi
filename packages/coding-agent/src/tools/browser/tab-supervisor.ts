@@ -328,6 +328,27 @@ async function acquireTabImpl(
 	let tempHold = false;
 	const existing = tabs.get(name);
 	if (existing) {
+		// Cross-session collision guard. The registry is keyed by name alone and
+		// shared by every agent session in the process, so two concurrent
+		// sessions opening the same generic name ("pages", "tab") would
+		// silently re-drive — or, via the recycle branches below, destroy —
+		// each other's live tab. Same-owner reuse is unchanged; unowned tabs
+		// (SDK callers without a session id) stay reusable by anyone;
+		// deliberate sharing still works through `browser.tab()`/`runInTab`,
+		// which never acquires.
+		if (
+			existing.state === "alive" &&
+			existing.ownerSessionId !== undefined &&
+			opts.ownerSessionId !== undefined &&
+			existing.ownerSessionId !== opts.ownerSessionId
+		) {
+			throw new ToolError(
+				`Tab ${JSON.stringify(name)} is already open and owned by another session ` +
+					`(owner: ${existing.ownerSessionId}, requested by: ${opts.ownerSessionId}). ` +
+					`Concurrent agents must use unique tab names; to share a tab deliberately, ` +
+					`drive it via browser.tab(${JSON.stringify(name)}) instead of browser.open().`,
+			);
+		}
 		if (existing.browser === browser && existing.state === "alive") {
 			const requestedCmuxSurface = "client" in browser ? (opts.cmuxSurface ?? browser.surface) : undefined;
 			if (existing.backend === "cmux" && existing.cmuxAttachedSurface !== requestedCmuxSurface) {
