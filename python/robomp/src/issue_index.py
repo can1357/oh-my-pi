@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from robomp.config import Settings
@@ -31,6 +30,8 @@ from robomp.github_client import (
     index_entry_from_issue_object,
     index_entry_from_pr_object,
 )
+from robomp.platform_utils import backend_for_repo
+from robomp.search_query import ParsedSearchQuery, parse_search_query
 
 log = logging.getLogger(__name__)
 
@@ -39,64 +40,6 @@ log = logging.getLogger(__name__)
 _SYNC_OVERLAP = timedelta(minutes=2)
 _PAGE_SIZE = 100
 _MAX_PAGES_PER_TICK = 30
-
-
-@dataclass(slots=True, frozen=True)
-class ParsedSearchQuery:
-    """Structured form of a GitHub-issue-search style query string."""
-
-    keywords: tuple[str, ...]
-    is_pr: bool | None = None
-    state: str | None = None
-    merged: bool | None = None
-    label: str | None = None
-    author: str | None = None
-
-
-def parse_search_query(query: str) -> ParsedSearchQuery:
-    """Split a GitHub-search style string into keywords + structured filters.
-
-    Supported qualifiers: `is:pr` / `is:issue` / `is:open` / `is:closed` /
-    `is:merged`, `label:<name>`, `author:<login>`. Unrecognized `key:value`
-    qualifiers are dropped rather than fed to FTS5 (a bare `in:title` token
-    would otherwise be a syntax error). Everything else is a keyword.
-    """
-    keywords: list[str] = []
-    is_pr: bool | None = None
-    state: str | None = None
-    merged: bool | None = None
-    label: str | None = None
-    author: str | None = None
-    for token in query.split():
-        key, sep, value = token.partition(":")
-        if not sep or not value or " " in key:
-            keywords.append(token)
-            continue
-        key = key.lower()
-        if key == "is":
-            v = value.lower()
-            if v == "pr":
-                is_pr = True
-            elif v == "issue":
-                is_pr = False
-            elif v in ("open", "closed"):
-                state = v
-            elif v == "merged":
-                is_pr = True
-                merged = True
-        elif key == "label":
-            label = value.strip('"')
-        elif key == "author":
-            author = value.lstrip("@")
-        # Any other qualifier (in:, sort:, created:, …) is intentionally dropped.
-    return ParsedSearchQuery(
-        keywords=tuple(keywords),
-        is_pr=is_pr,
-        state=state,
-        merged=merged,
-        label=label,
-        author=author,
-    )
 
 
 def ingest_webhook_payload(db: Database, repo: str, event_type: str, payload: Mapping[str, object]) -> bool:
@@ -143,10 +86,13 @@ class IssueIndexSync:
     rather than hogging one.
     """
 
-    def __init__(self, *, settings: Settings, db: Database, github: GitHubBackend) -> None:
+    def __init__(
+        self, *, settings: Settings, db: Database, github: GitHubBackend, forgejo_github: GitHubBackend | None = None
+    ) -> None:
         self._settings = settings
         self._db = db
         self._github = github
+        self._forgejo_github = forgejo_github
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
 
@@ -212,6 +158,7 @@ class IssueIndexSync:
 
     async def sync_repo(self, repo: str) -> int:
         """Pull updated issues/PRs for one repo into the index. Returns count ingested."""
+        gh = backend_for_repo(self._settings, repo, self._github, self._forgejo_github)
         started_at = _utcnow_iso()
         watermark = self._db.issue_index_watermark(repo)
         since = _overlapped(watermark) if watermark else None
@@ -219,7 +166,7 @@ class IssueIndexSync:
         exhausted = False
         last_seen = ""
         for page in range(1, _MAX_PAGES_PER_TICK + 1):
-            batch = await self._github.list_issue_index_entries(repo, since=since, page=page, per_page=_PAGE_SIZE)
+            batch = await gh.list_issue_index_entries(repo, since=since, page=page, per_page=_PAGE_SIZE)
             for entry in batch:
                 self._db.upsert_issue_index(entry)
                 if entry.updated_at > last_seen:
