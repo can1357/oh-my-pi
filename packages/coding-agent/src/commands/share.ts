@@ -7,7 +7,7 @@
  * `share.redactSecrets`.
  */
 
-import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { shareHelp as commandHelp } from "../cli/command-help";
 import { Settings } from "../config/settings";
@@ -35,18 +35,25 @@ export default class Share extends Command {
 		const { args, flags } = await this.parse(Share);
 
 		const sessionArg = args.session ?? "";
-		let sessionPath = sessionArg;
+		let sessionPath: string | undefined = sessionArg;
 		if (!sessionArg.includes("/") && !sessionArg.includes("\\") && !sessionArg.endsWith(".jsonl")) {
 			const match = await resolveResumableSession(sessionArg, process.cwd());
-			if (!match) {
-				process.stderr.write(`Session "${sessionArg}" not found.\n`);
-				process.exitCode = 1;
-				return;
-			}
-			sessionPath = match.session.path;
+			sessionPath = match?.session.path;
 		}
 
-		const sm = await SessionManager.open(sessionPath);
+		let sm: SessionManager | undefined;
+		if (sessionPath) {
+			try {
+				sm = await SessionManager.open(sessionPath, undefined, undefined, { throwIfMissing: true });
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+		}
+		if (!sm) {
+			process.stderr.write(`Session "${sessionArg}" not found.\n`);
+			process.exitCode = 1;
+			return;
+		}
 		// Settings resolve against the session's own project so its
 		// share.redactSecrets/secrets.enabled policy governs, not the invoking cwd's.
 		const settings = await Settings.loadReadOnly({ cwd: sm.getCwd() });

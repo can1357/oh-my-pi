@@ -1,11 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { StatusLineTestComponents } from "./helpers/status-line";
 
+const statusLines = new StatusLineTestComponents();
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
@@ -13,6 +16,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+	statusLines.dispose();
 	resetSettingsForTest();
 });
 
@@ -24,33 +28,40 @@ function makeComponent(
 		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
 	} = {},
 ): StatusLineComponent {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
-		model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
-		sessionManager: {
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		fetchUsageReports: async () => reports,
-		modelRegistry: {
-			authStorage: {
-				getOAuthAccountIdentity: (provider: string) =>
-					provider === options.provider ? options.activeIdentity : undefined,
-			},
-		},
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		getContextUsage: () => undefined,
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = statusLines.track(
+		new StatusLineComponent(
+			{
+				state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
+				model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
+				sessionManager: {
+					getUsageStatistics: () => ({
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						orchestrationInput: 0,
+						orchestrationOutput: 0,
+						orchestrationCacheRead: 0,
+						premiumRequests: 0,
+						cost: 0,
+					}),
+				},
+				fetchUsageReports: async () => reports,
+				modelRegistry: {
+					authStorage: {
+						oauth: {
+							identity: (provider: string) =>
+								provider === options.provider ? options.activeIdentity : undefined,
+						},
+					},
+				},
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				getContextUsage: () => undefined,
+			} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+			statusLineHost,
+		),
+	);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: [],
@@ -288,16 +299,18 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === provider && provider === "openai-codex"
-							? { accountId: "active-account" }
-							: undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === provider && provider === "openai-codex"
+								? { accountId: "active-account" }
+								: undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
 			getContextUsage: () => undefined,
 		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
-		const component = new StatusLineComponent(session);
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: [],
@@ -358,14 +371,16 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
 			getContextUsage: () => undefined,
 		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
-		const component = new StatusLineComponent(session);
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: [],
@@ -593,6 +608,33 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 		expect(content).toContain("mo");
 		expect(content).toContain("42%");
+	});
+
+	it("renders an alibaba-token-plan monthly-only quota without a reported span", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "alibaba-token-plan",
+					limits: [
+						{
+							id: "credits:monthly",
+							scope: { provider: "alibaba-token-plan", windowId: "monthly" },
+							window: { id: "monthly", label: "Monthly Credits", resetsAt: Date.now() + 335 * 3_600_000 },
+							amount: { used: 1.04, usedFraction: 0.0104, unit: "percent" },
+						},
+					],
+				},
+			],
+			{ provider: "alibaba-token-plan" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("mo");
+		expect(content).toContain("1%");
+		expect(content).toContain("13d 23h");
 	});
 
 	it("does not render monthly usage for providers outside the single-bucket gate", async () => {

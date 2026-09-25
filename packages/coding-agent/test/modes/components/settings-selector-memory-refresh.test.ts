@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -47,7 +49,8 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			thinkingLevel: undefined,
 			availableThemes: ["dark"],
 			providers: [],
-			cwd: process.cwd(),
+			settings: createSettingsHost(),
+			plugins: createPluginSettingsHost(process.cwd()),
 		},
 		{
 			onChange: () => {},
@@ -168,14 +171,14 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 	it("puts the exact global settings search hit before incidental matches", () => {
 		const comp = createSelector();
-		for (const ch of "image provider") comp.handleInput(ch);
+		for (const ch of "fetch provider") comp.handleInput(ch);
 
 		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const rendered = comp.render(120).map(strip).join("\n");
 		const providersIndex = rendered.indexOf("Providers");
 		const appearanceIndex = rendered.indexOf("Appearance");
 
-		expect(rendered).toContain("Image Provider");
+		expect(rendered).toContain("Fetch Provider");
 		expect(rendered).not.toContain("Include Model in Prompt");
 		expect(rendered).not.toContain("Service Tier");
 		expect(providersIndex).toBeGreaterThanOrEqual(0);

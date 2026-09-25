@@ -27,7 +27,7 @@ import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { loadExtensions } from "../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { InteractiveMode } from "../src/modes/interactive-mode";
-import { initTheme } from "../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
@@ -89,7 +89,7 @@ describe("extension autocomplete provider API (#4919)", () => {
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const resolved = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!resolved) throw new Error("Expected anthropic model claude-sonnet-4-5 to exist");

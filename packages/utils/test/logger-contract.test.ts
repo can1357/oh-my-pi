@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -48,6 +47,9 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 			env: {
 				...process.env,
 				HOME: primaryDir,
+				// os.homedir() on Windows reads USERPROFILE, not HOME: without
+				// this the default-file scenario logs into the real profile.
+				USERPROFILE: primaryDir,
 				PI_CONFIG_DIR: ".omp",
 				OMP_PROFILE: "",
 				PI_PROFILE: "",
@@ -298,7 +300,7 @@ describe("DailyRotateFile option and retention contract", () => {
 		expect(audit.hashType).toBe("sha256");
 		expect(audit.files.map(file => file.name)).toEqual(expectedNames.map(name => path.join(result.primaryDir, name)));
 		for (const file of audit.files) {
-			const hash = crypto.createHash("sha256").update(`${file.name}LOG_FILE${file.date}`).digest("hex");
+			const hash = Bun.SHA256.hash(`${file.name}LOG_FILE${file.date}`, "hex");
 			expect(file.hash).toBe(hash);
 			expect(file.hash).toMatch(/^[0-9a-f]{64}$/);
 		}

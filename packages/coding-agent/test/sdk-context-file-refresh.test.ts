@@ -23,7 +23,7 @@ async function createContextSession(
 	const authStorage = await AuthStorage.create(`${cwd}/auth.db`);
 	const model = getBundledModel("openai", "gpt-4o-mini");
 	if (options.advisor) {
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		settings.set("advisor.enabled", true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}
@@ -143,7 +143,9 @@ describe("context-file prompt refresh", () => {
 		const cwdA = tempDir.join("cwd-a");
 		const cwdB = tempDir.join("cwd-b");
 		fs.mkdirSync(path.join(cwdA, "old-repo", ".git"), { recursive: true });
+		fs.writeFileSync(path.join(cwdA, "old-repo", ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
 		fs.mkdirSync(path.join(cwdB, "new-repo", ".git"), { recursive: true });
+		fs.writeFileSync(path.join(cwdB, "new-repo", ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
 		const { session, authStorage, sessionManager } = await createContextSession(cwdA, Settings.isolated({}));
 
 		try {

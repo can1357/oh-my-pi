@@ -374,7 +374,11 @@ function generateZsh(spec: CompletionSpec): string {
 
 	// Dynamic helpers (single source: `<bin> __complete <kind>` → value<TAB>desc).
 	parts.push(`_omp_call() {
-	local kind=$1
+	# zsh's _arguments invokes an action function with the compadd options it
+	# computed prepended ($subopts, then $expl — _arguments:465), so $1 is
+	# "-J" in a stock setup and the kind arrives last. Read it from the end:
+	# the prepended options can be either flags or option/value pairs.
+	local kind=\${argv[-1]}
 	local -a items
 	local line
 	for line in "\${(@f)$(command ${bin} __complete $kind -- "$PREFIX" 2>/dev/null)}"; do

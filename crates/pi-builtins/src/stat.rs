@@ -1156,7 +1156,7 @@ for details about the options it supports.";
 		#[cfg(unix)]
 		fn exec(&self, host: &mut Host) -> i32 {
 			let mut stdin_is_fifo = false;
-			if let Ok(md) = fs::metadata("/dev/stdin") {
+			if let Ok(md) = fs::metadata(host.resolve("/dev/stdin")) {
 				stdin_is_fifo = md.file_type().is_fifo();
 			}
 
@@ -1312,7 +1312,7 @@ for details about the options it supports.";
 						writeln!(&mut host.stderr, "stat: {}", StatError::StdinFilesystemMode);
 					return 1;
 				}
-				if let Ok(p) = Path::new("/dev/stdin").canonicalize() {
+				if let Ok(p) = host.resolve("/dev/stdin").canonicalize() {
 					p.into_os_string()
 				} else {
 					OsString::from("/dev/stdin")
@@ -2989,6 +2989,18 @@ mod win_tests {
 
 	use super::Stat;
 	use crate::host::run_util;
+
+	/// Temp dir plus its path.
+	///
+	/// Unlike `canonical_tempdir` in the Unix `tests` module, the path is left
+	/// exactly as `tempfile` reports it: `fs::canonicalize` yields a `\\?\`
+	/// verbatim path on Windows, and these tests hand the path back in as a
+	/// scope cwd for the Win32 stat and volume backends.
+	fn tempdir() -> (tempfile::TempDir, PathBuf) {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().to_path_buf();
+		(dir, path)
+	}
 
 	fn run_in(cwd: PathBuf, args: Vec<&str>) -> (i32, String, String) {
 		let (code, capture) = run_util::<Stat>(&args, "", cwd);

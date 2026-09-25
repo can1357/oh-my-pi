@@ -62,7 +62,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -1647,7 +1647,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			.getEntries()
 			.filter((e): e is CompactionEntry => e.type === "compaction")
 			.at(-1);
-		expect(compactionEntry?.warning).toContain(NO_PROGRESS_FRAGMENT);
+		expect(compactionEntry?.warning).toBe(noProgress[0].message);
 	});
 
 	it("auto-continues (no warning) when the image-drop tier frees an image-only tail", async () => {

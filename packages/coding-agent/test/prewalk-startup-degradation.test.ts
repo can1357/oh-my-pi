@@ -57,12 +57,32 @@ describe("prewalk startup degradation", () => {
 		const settings = Settings.isolated();
 		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 
 		const options = await buildSessionOptions(parseArgs([]), [], SessionManager.inMemory(), modelRegistry, settings);
 
 		expect(options.prewalk?.target.provider).toBe(model.provider);
 		expect(options.prewalk?.target.id).toBe(model.id);
+	});
+
+	test("skips a disabled provider and arms the next enabled prewalk candidate", async () => {
+		const disabled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const enabled = getBundledModel("openai", "gpt-4o");
+		if (!disabled || !enabled) throw new Error("expected claude-sonnet-4-5 and gpt-4o to be bundled");
+		const settings = Settings.isolated({ disabledProviders: [disabled.provider] });
+		authStorage.keys.setRuntime(disabled.provider, "test-key");
+		authStorage.keys.setRuntime(enabled.provider, "test-key");
+
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", `${disabled.provider}/${disabled.id},${enabled.provider}/${enabled.id}`]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.prewalk?.target.provider).toBe(enabled.provider);
+		expect(options.prewalk?.target.id).toBe(enabled.id);
 	});
 
 	test("does not implicitly re-arm configured prewalk while restoring a session", async () => {
@@ -71,7 +91,7 @@ describe("prewalk startup degradation", () => {
 		const settings = Settings.isolated();
 		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 
 		for (const args of [parseArgs(["--continue"]), parseArgs(["--resume=session.jsonl"])]) {
 			const options = await buildSessionOptions(args, [], SessionManager.inMemory(), modelRegistry, settings);
@@ -84,7 +104,7 @@ describe("prewalk startup degradation", () => {
 		if (!model) throw new Error("expected claude-sonnet-4-5 to be bundled");
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 
 		const options = await buildSessionOptions(
 			parseArgs(["--continue", "--prewalk"]),

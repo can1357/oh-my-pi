@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import { bzip2Decompress, isBzip2 } from "../../src/ar/codecs/bzip2";
 import { isCompressZ, lzwDecompress } from "../../src/ar/codecs/lzw";
 import { ArchiveError } from "../../src/ar/error";
 import { arFixture } from "./fixtures";
 
 function sha256(bytes: Uint8Array): string {
-	return crypto.createHash("sha256").update(bytes).digest("hex");
+	return Bun.SHA256.hash(bytes, "hex");
 }
 
 async function fixture(name: string): Promise<Uint8Array> {

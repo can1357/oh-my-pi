@@ -1,3 +1,4 @@
+import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe session lifecycle vocabulary: the persisted `vibe-session-lifecycle`
  * custom-entry schema and its parser.
@@ -7,9 +8,6 @@
  * the internal-URL resolution path. Importing `vibe/runtime` from there would
  * drag the task executor and SDK into the render-utils module cycle.
  */
-
-/** The two worker CLI flavors the director drives. */
-export type VibeCli = "fast" | "good";
 
 /** Custom-entry type tag for persisted Vibe lifecycle events. */
 export const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
