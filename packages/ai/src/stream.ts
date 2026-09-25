@@ -2099,6 +2099,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
 		previousResponseId: options?.previousResponseId,
+		store: options?.store,
 		parallelToolCalls: options?.parallelToolCalls,
 		seed: options?.seed,
 		logitBias: options?.logitBias,
