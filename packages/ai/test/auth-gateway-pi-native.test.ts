@@ -164,6 +164,15 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.statefulResponses).toBe(false);
 	});
 
+	it("preserves an explicit Responses continuation ID in the native options", () => {
+		const parsed = parseRequest({
+			modelId: "openai/gpt-5",
+			context: baseContext,
+			options: { previousResponseId: "resp_caller_owned" },
+		});
+		expect(parsed.options.previousResponseId).toBe("resp_caller_owned");
+	});
+
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",

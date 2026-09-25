@@ -6,7 +6,9 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import { getEnvApiKey, getEnvApiKeyName } from "../stream";
 import type { SessionAffinity } from "./affinity";
+import type { CredentialCoordination } from "./coordination";
 import type { CredentialPool } from "./pool";
+import type { ApiKeySelection } from "./rank";
 import type { CredentialSelector } from "./select";
 import type { AuthApiKeyOptions, AuthCredential, AuthSource, AuthSourceOptions, KeysApi, LimitsApi } from "./types";
 
@@ -107,6 +109,8 @@ export interface KeyCascadeDeps {
 	overrides: KeyOverrides;
 	selector: CredentialSelector;
 	affinity: SessionAffinity;
+	/** In-process requestId reservations/quota-probe leases; resolution failure must release them. */
+	coordination: CredentialCoordination;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
 	sourceLabel?: string;
@@ -320,13 +324,19 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
 		if (loginApiKeySelection) {
-			this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
-			const credentialId = onCredentialId
-				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
-				: undefined;
-			const apiKey = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
-			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
-			return apiKey;
+			const apiKey = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				loginApiKeySelection,
+				options?.requestId,
+			);
+			if (apiKey !== undefined) {
+				if (onCredentialId) {
+					const credentialId = this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id;
+					if (credentialId !== undefined) onCredentialId(credentialId);
+				}
+				return apiKey;
+			}
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -343,13 +353,43 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
-			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
-			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
-			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
-			return apiKey;
+			const apiKey = await this.#resolveReservedApiKey(provider, sessionId, apiKeySelection, options?.requestId);
+			if (apiKey !== undefined) {
+				if (onCredentialId) {
+					const credentialId = this.#deps.pool.entries(provider)[apiKeySelection.index]?.id;
+					if (credentialId !== undefined) onCredentialId(credentialId);
+				}
+				return apiKey;
+			}
 		}
 		return undefined;
+	}
+
+	/**
+	 * Resolve a selected stored api_key's key material through the config-value
+	 * resolver. The selection already holds this request's turn reservation —
+	 * a failed resolve (missing env/command, resolver error) must release it so
+	 * a later request is not locked out by a credential that never vendored a
+	 * key. Affinity records only on success.
+	 */
+	async #resolveReservedApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): Promise<string | undefined> {
+		try {
+			const resolved = await this.#deps.overrides.resolve(selection.credential.key);
+			if (resolved === undefined || resolved === "") {
+				if (requestId) this.#deps.coordination.releaseTurnReservation(requestId);
+				return undefined;
+			}
+			this.#deps.affinity.record(provider, sessionId, "api_key", selection.index);
+			return resolved;
+		} catch (error) {
+			if (requestId) this.#deps.coordination.releaseTurnReservation(requestId);
+			throw error;
+		}
 	}
 
 	/**
