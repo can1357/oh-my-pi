@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `devin-windsurf` login for Windsurf Enterprise seats that cannot complete the Devin-native flow: it drives the Windsurf editor authorize endpoint directly, exchanges the PKCE code through Windsurf's Connect API, and stores the raw seat key under the `devin` provider ([#13116](https://github.com/can1357/oh-my-pi/issues/13116), [#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))
