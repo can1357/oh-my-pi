@@ -250,4 +250,25 @@ describe("path-pasted image source path (#12244)", () => {
 		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
 		expect(modelVisibleText(session)).toContain(url);
 	});
+
+	for (const dequeue of ["popLastQueuedMessage", "clearQueue"] as const) {
+		it(`drops a queued image's hidden path notice with its prompt on ${dequeue}`, async () => {
+			if (!session) throw new Error("Session was not initialized");
+			const { editor } = await pasteImageFile();
+			const text = "What is in [Image #1]?";
+			await session.followUp(text, [...editor.pendingImages]);
+			expect(
+				session.agent
+					.peekFollowUpQueue()
+					.map(message => (message.role === "custom" ? message.customType : message.role)),
+			).toEqual(["image-attachment", "user"]);
+
+			if (dequeue === "clearQueue")
+				expect(session.clearQueue().followUp.map(message => message.text)).toEqual([text]);
+			else expect(session.popLastQueuedMessage()?.text).toBe(text);
+
+			// A notice left behind would be delivered later as its own orphaned turn.
+			expect(session.agent.peekFollowUpQueue()).toEqual([]);
+		});
+	}
 });

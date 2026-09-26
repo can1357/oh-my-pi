@@ -148,4 +148,35 @@ describe("model mentions", () => {
 			),
 		).toBe('^b/y <model agent="m9" name="Unknown"/>');
 	});
+
+	test("removeQueuedMessage matches raw text expanded with an already-authorized model mention", async () => {
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [] }).stream,
+		});
+		const agentSession = new AgentSession({
+			agent,
+			sessionManager: session,
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+		});
+		try {
+			// Force queueing instead of an actual turn: prompt() while streaming
+			// applies mention expansion before it queues the message.
+			agentSession.agent.state.isStreaming = true;
+			const raw = "ask ^b/y to help";
+			const queued = await agentSession.prompt(raw, { streamingBehavior: "steer" });
+			expect(queued).toBe(true);
+			expect(agentSession.getQueuedMessages().steering).toEqual(['ask <model agent="m1" name="Y"/> to help']);
+
+			// The RPC client that submitted `raw` only ever holds that raw text;
+			// removal must still find the mention-expanded queued chip.
+			expect(agentSession.removeQueuedMessage(raw, "steering")).toBe(true);
+			expect(agentSession.getQueuedMessages().steering).toEqual([]);
+		} finally {
+			agentSession.agent.state.isStreaming = false;
+			await agentSession.dispose();
+		}
+	});
 });
