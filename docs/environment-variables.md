@@ -573,6 +573,8 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 
 ## 9) TUI runtime flags (shared package, affects coding-agent UX)
 
+`PI_UI_LANG=ja` displays the startup welcome, settings tabs and setting names, and built-in slash-command descriptions in Japanese. `ja-JP` and `ja_JP` also select Japanese (case-insensitive). `en` or an unset value keeps English; other values are rejected. Some setting descriptions, choices, and other screens remain in English. This does not change model replies.
+
 | Variable                       | Behavior                                                                                                                                                                                                                                           |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PI_NOTIFICATIONS`             | `off` / `0` / `false` suppress desktop notifications                                                                                                                                                                                               |

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Japanese startup guidance, settings, and built-in command descriptions with `PI_UI_LANG=ja` ([#13179](https://github.com/can1357/oh-my-pi/pull/13179) by [@sota411](https://github.com/sota411)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

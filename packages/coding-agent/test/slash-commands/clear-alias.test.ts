@@ -4,6 +4,7 @@ import {
 	lookupBuiltinSlashCommand,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+import { translateUi } from "@oh-my-pi/pi-tui/ui-locale";
 
 describe("/clear slash command", () => {
 	it("resolves /clear to the context reset command and removed /clear alias from /new", async () => {
@@ -16,7 +17,7 @@ describe("/clear slash command", () => {
 
 		expect(suggestions?.items[0]).toMatchObject({
 			value: "clear",
-			description: "Clear the conversation context in place, keeping the session",
+			description: translateUi("Clear the conversation context in place, keeping the session"),
 		});
 		expect(lookupBuiltinSlashCommand("clear")?.name).toBe("clear");
 		expect(lookupBuiltinSlashCommand("new")?.aliases).toBeUndefined();

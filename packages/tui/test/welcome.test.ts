@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { pickWeightedTip, WelcomeComponent } from "@oh-my-pi/pi-tui/prompt/welcome";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 describe("WelcomeComponent", () => {
 	beforeAll(async () => {
@@ -14,7 +15,7 @@ describe("WelcomeComponent", () => {
 	it("selects standard tip when preset is not unicode", () => {
 		vi.spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
 
-		const welcome = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcome = new WelcomeComponent("1.0.0", "model", "provider", [], [], "en");
 		expect(welcome.tip).not.toBe("Please use nerdfont 😭.");
 		expect(welcome.tip).toBeDefined();
 	});
@@ -24,12 +25,12 @@ describe("WelcomeComponent", () => {
 
 		// 9% chance => selects special tip
 		vi.spyOn(Math, "random").mockReturnValue(0.09);
-		const welcomeSpecial = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcomeSpecial = new WelcomeComponent("1.0.0", "model", "provider", [], [], "en");
 		expect(welcomeSpecial.tip).toBe("Please use nerdfont 😭.");
 
 		// 10% chance => selects regular tip
 		vi.spyOn(Math, "random").mockReturnValue(0.1);
-		const welcomeRegular = new WelcomeComponent("1.0.0", "model", "provider");
+		const welcomeRegular = new WelcomeComponent("1.0.0", "model", "provider", [], [], "en");
 		expect(welcomeRegular.tip).not.toBe("Please use nerdfont 😭.");
 		expect(welcomeRegular.tip).toBeDefined();
 	});
@@ -66,11 +67,27 @@ describe("WelcomeComponent", () => {
 		// column or changing the box height when authoritative session data
 		// replaces the prepaint labels.
 		const modelName = "DeepSeek V4 Flash (2x usage)";
-		const output = new WelcomeComponent("17.3.4", modelName, "opencode-go").render(55).join("\n");
+		const output = new WelcomeComponent("17.3.4", modelName, "opencode-go", [], [], "en").render(55).join("\n");
 		const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
 
 		expect(plain).not.toContain(modelName);
 		expect(plain).toMatch(/DeepSeek V4 [^│]*…/);
 		expect(plain).toContain("Recent sessions");
+	});
+
+	it("shows Japanese startup guidance without overflowing the terminal", () => {
+		const welcome = new WelcomeComponent("18.3.0", "gpt-6", "OpenAI", [], [], "ja");
+		const wide = welcome
+			.render(80)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(wide).toContain("おかえりなさい");
+		expect(wide).toContain("最近のセッション");
+		expect(wide).toContain("LSPサーバー");
+		expect(wide).toContain("ヒント:");
+		expect(wide).not.toContain("No recent sessions");
+		for (const width of [40, 80]) {
+			for (const line of welcome.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 });

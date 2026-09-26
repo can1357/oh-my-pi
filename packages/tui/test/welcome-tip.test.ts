@@ -97,7 +97,7 @@ describe("renderWelcomeTip", () => {
 		// the switch to the user's configured "nerd" preset.
 		const rand = spyOn(Math, "random").mockReturnValue(0.05);
 		try {
-			const welcome = new WelcomeComponent("1.0.0", "model", "provider");
+			const welcome = new WelcomeComponent("1.0.0", "model", "provider", [], [], "en");
 			expect(welcome.tip).toBe("Please use nerdfont 😭.");
 			await setSymbolPreset("nerd");
 			expect(welcome.tip).not.toBe("Please use nerdfont 😭.");

@@ -1,4 +1,5 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import { translateUi, translateUiStatus } from "@oh-my-pi/pi-tui/ui-locale";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
@@ -62,9 +63,12 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		name: command.name,
 		aliases: command.aliases,
 		allowArgs: command.allowArgs === true,
-		description: command.description,
+		description: translateUi(command.description),
 		icon: command.icon,
-		subcommands: command.subcommands,
+		subcommands: command.subcommands?.map(subcommand => ({
+			...subcommand,
+			description: translateUi(subcommand.description),
+		})),
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
 	}),
@@ -91,7 +95,10 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
-		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+		materialized.getAutocompleteDescription = () => {
+			const description = cmd.getTuiAutocompleteDescription?.(runtime);
+			return description === undefined ? undefined : translateUiStatus(description);
+		};
 	}
 	return materialized;
 }
