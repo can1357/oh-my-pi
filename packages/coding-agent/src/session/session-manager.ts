@@ -129,7 +129,7 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }
 
-/** Copy a session's artifact directory to another session, matching interactive `/fork`. */
+/** Merge a session's artifact directory into another session's, keeping files already at the destination. */
 export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
 	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
@@ -139,7 +139,7 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 	try {
 		const sourceStat = await fs.promises.stat(sourceArtifactsDir);
 		if (sourceStat.isDirectory()) {
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true });
+			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true, force: false });
 		}
 	} catch (error) {
 		if (!isEnoent(error)) {

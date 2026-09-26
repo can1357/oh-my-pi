@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `omp gc --sessions [archive|delete]` to merge duplicate and forked session files back into one conversation, then archive (default) or delete sessions nobody answered; dry-run unless `--apply` ([#12630](https://github.com/can1357/oh-my-pi/pull/12630) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- `omp gc` session passes now skip sessions another process holds open or locked, naming the holder ([#12630](https://github.com/can1357/oh-my-pi/pull/12630) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+
 ### Fixed
 
 - Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
