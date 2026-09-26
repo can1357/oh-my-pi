@@ -468,10 +468,17 @@ function factsHaveScopeColumn(beam: BeamMemoryState): boolean {
 
 function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where: string; params: DbValue[] } {
 	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
-	if (factsHaveScopeColumn(beam)) {
-		return { where: `(${prefix}session_id = ? OR ${prefix}scope = 'global')`, params: [beam.sessionId] };
-	}
-	return { where: `${prefix}session_id = ?`, params: [beam.sessionId] };
+	const scope = factsHaveScopeColumn(beam)
+		? `(${prefix}session_id = ? OR ${prefix}scope = 'global')`
+		: `${prefix}session_id = ?`;
+	// A fact is a derivative of the working_memory row it was extracted from: once that row is
+	// explicitly superseded (`memory_edit invalidate`) or has expired, the fact must stop
+	// surfacing — otherwise an explicit invalidation is silently defeated at the fact layer.
+	// Correlated EXISTS probes the source's primary key (same shape as the fts_working /
+	// fts_episodes visibility predicates). Facts whose source row no longer exists stay
+	// visible: nothing contradicts them.
+	const sourceSuperseded = `NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.id = ${prefix}source_msg_id AND (w.superseded_by IS NOT NULL OR (w.valid_until IS NOT NULL AND w.valid_until <= ?)))`;
+	return { where: `${scope} AND ${sourceSuperseded}`, params: [beam.sessionId, nowIso()] };
 }
 
 function buildWhere(

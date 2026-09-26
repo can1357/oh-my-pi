@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { factRecall, formatContext, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
+import { invalidate } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
 
 type TestBeam = BeamMemoryState & { close(): void };
@@ -527,5 +528,35 @@ describe("beam recall free functions", () => {
 		const fullHit = full.find(row => row.id === "wm-cap");
 		expect(fullHit?.content).toBe(long);
 		expect(fullHit?.truncated).toBe(false);
+	});
+});
+
+describe("fact recall respects source lifecycle", () => {
+	it("hides a fact once its source row is superseded or expired, keeps sourceless facts visible", () => {
+		const beam = makeBeam();
+		const stale = new Date(Date.now() - 60_000).toISOString();
+		const insertFact = (factId: string, object: string, sourceMsgId: string | null): void => {
+			beam.db.run(
+				"INSERT INTO facts (fact_id, session_id, subject, predicate, object, timestamp, confidence, source_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				[factId, beam.sessionId, "release process", "uses", object, "2026-05-30T00:00:00.000Z", 0.8, sourceMsgId],
+			);
+		};
+
+		insertWorking(beam, "src-live", "release process uses canary", { importance: 0.6 });
+		insertFact("fact-live", "canary", "src-live");
+		insertWorking(beam, "src-expired", "release process uses bluegreen", { importance: 0.6 });
+		beam.db.run("UPDATE working_memory SET valid_until = ? WHERE id = ?", [stale, "src-expired"]);
+		insertFact("fact-expired", "bluegreen", "src-expired");
+		insertFact("fact-orphan", "orphan", null);
+
+		const before = factRecall(beam, "release process uses", 10).map(row => row.fact_id);
+		expect(before).toContain("fact-live");
+		expect(before).toContain("fact-orphan");
+		expect(before).not.toContain("fact-expired");
+
+		expect(invalidate(beam, "src-live", "src-live-v2")).toBe(true);
+		const after = factRecall(beam, "release process uses", 10).map(row => row.fact_id);
+		expect(after).not.toContain("fact-live");
+		expect(after).toContain("fact-orphan");
 	});
 });

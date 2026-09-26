@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed extracted facts still being recalled after their source memory was invalidated or expired. ([#12825](https://github.com/can1357/oh-my-pi/pull/12825) by [@Jpei1994](https://github.com/Jpei1994))
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
