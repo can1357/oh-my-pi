@@ -483,13 +483,22 @@ export interface CredentialRankingStrategy {
 	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
 	 * once every listed limit is below exhaustion, so a 429 whose retry-after
 	 * overstated the real reset does not sideline a recovered account until the
-	 * clock runs out. Scopes not returned expire by clock only.
+	 * clock runs out. Scopes not returned expire by clock only. `blockScope:
+	 * undefined` names the unscoped block; set {@link healsUnscopedBlock} with it.
 	 *
 	 * `healthy` is the provider's own verdict for the scope (e.g. meter metadata):
 	 * false never heals; true heals even with empty limits; absent requires
 	 * non-empty limits with none exhausted.
 	 */
-	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
+	healableBlockScopes?(
+		report: UsageReport,
+	): { blockScope: string | undefined; limits: UsageLimit[]; healthy?: boolean }[];
+	/**
+	 * Whether {@link healableBlockScopes} vouches for the unscoped block. Without
+	 * it, a live unscoped block makes a probe pointless and selection skips the
+	 * credential until the block expires by clock.
+	 */
+	healsUnscopedBlock?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;
