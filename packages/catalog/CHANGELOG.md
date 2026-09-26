@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed the `max` reasoning effort tier for Muse Spark 1.3 contributor models on the Meta and Muse Code providers.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
