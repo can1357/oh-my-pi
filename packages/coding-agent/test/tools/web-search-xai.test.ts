@@ -652,7 +652,7 @@ describe("xAI web search provider", () => {
 			.mockResolvedValueOnce({ apiKey: "initial-xai-key" })
 			.mockResolvedValueOnce({ apiKey: "refreshed-xai-key" })
 			.mockResolvedValueOnce({ apiKey: "rotated-xai-key" });
-		const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(true);
+		const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: true });
 		const fetchMock: FetchImpl = (_input, init) => {
 			requestCount += 1;
 			authorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");

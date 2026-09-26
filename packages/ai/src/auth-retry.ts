@@ -42,6 +42,12 @@ export interface ResolvedApiKey {
 	apiKey: string;
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
+	/**
+	 * Resolved after `LimitsApi.rotate` slept out a sibling's short block
+	 * (`afterSiblingWait`): the driver accepts this bearer even if the request
+	 * already sent it before that block.
+	 */
+	afterSiblingWait?: boolean;
 }
 
 export type ApiKeyResolution = string | ResolvedApiKey | undefined;
@@ -51,6 +57,19 @@ export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<ApiKeyResolu
 /** Extract the bearer while preserving optional credential provenance for streaming callers. */
 export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undefined {
 	return (typeof resolved === "string" ? resolved : resolved?.apiKey) || undefined;
+}
+
+/**
+ * Mark a post-rotation resolution as following a sibling-unblock wait so the
+ * retry driver may resend a bearer it already tried. Used by the rotating
+ * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
+ */
+export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
+	const apiKey = resolvedApiKeyBearer(resolved);
+	if (apiKey === undefined) return resolved;
+	return typeof resolved === "string"
+		? { apiKey, afterSiblingWait: true }
+		: { ...resolved, apiKey, afterSiblingWait: true };
 }
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
@@ -174,8 +193,15 @@ export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
 	};
 }
 
-function acceptRetryKey(state: AuthRetryKeyState, key: string, refreshedCurrent: boolean): string | undefined {
-	if (state.attemptedKeys.has(key) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+function acceptRetryKey(
+	state: AuthRetryKeyState,
+	key: string,
+	refreshedCurrent: boolean,
+	afterSiblingWait = false,
+): string | undefined {
+	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
+		return undefined;
+	}
 	state.attemptedKeys.add(key);
 	state.attempts += 1;
 	state.lastKey = key;
@@ -215,9 +241,13 @@ export async function resolveNextAuthRetryKey(
 	}
 
 	if (signal?.aborted) return undefined;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, onResolved);
+	let afterSiblingWait = false;
+	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
+		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+		onResolved?.(resolved);
+	});
 	if (signal?.aborted || rotated === undefined) return undefined;
-	const accepted = acceptRetryKey(state, rotated, !directRotation);
+	const accepted = acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
 	if (accepted !== undefined && !directRotation) state.legacyAuthSwitchUsed = true;
 	return accepted;
 }
@@ -424,14 +454,16 @@ export async function withOAuthAccess<T>(
 		}
 
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
+		let afterSiblingWait = false;
 		try {
-			const rotated = await storage.limits.rotate(provider, sessionId, {
+			const rotation = await storage.limits.rotate(provider, sessionId, {
 				error: lastError,
 				signal,
 				apiKey: lastAccess.accessToken,
 				credentialId: lastAccess.credentialId,
 			});
-			if (!rotated) break;
+			if (!rotation.switched) break;
+			afterSiblingWait = rotation.afterSiblingWait === true;
 			next = await storage.oauth.access(provider, sessionId, { signal });
 		} catch {
 			next = undefined;
@@ -439,8 +471,8 @@ export async function withOAuthAccess<T>(
 		if (signal?.aborted || !next) break;
 		const credentialIdentity = oauthCredentialIdentity(next);
 		if (
-			attemptedCredentialIdentities.has(credentialIdentity) ||
-			attemptedBearers.has(next.accessToken) ||
+			(!afterSiblingWait &&
+				(attemptedCredentialIdentities.has(credentialIdentity) || attemptedBearers.has(next.accessToken))) ||
 			attemptCount >= AUTH_RETRY_MAX_ATTEMPTS
 		) {
 			break;

@@ -195,7 +195,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			credentialId: first.credentialId,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).not.toContain(first.credentialId);
 		const next = await clientStorage.oauth.access("anthropic", "invalidated-session");
 		expect(next?.credentialId).not.toBe(first.credentialId);

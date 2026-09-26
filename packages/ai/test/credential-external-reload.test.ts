@@ -107,13 +107,13 @@ describe("credential pool visibility across processes", () => {
 		const usageLimitError = Object.assign(new Error("429 usage limit reached"), { status: 429 });
 
 		// Sole account is spent: nothing to rotate onto.
-		expect(await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).toBe(false);
+		expect((await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).switched).toBe(false);
 
 		commitExternally(oauthRow(2));
 
 		// The new account is usable, so the same session must switch to it rather
 		// than report the provider exhausted.
-		expect(await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).toBe(true);
+		expect((await storage.limits.rotate("anthropic", "session-1", { error: usageLimitError })).switched).toBe(true);
 		expect(await storage.keys.get("anthropic", "session-1")).toBe("access-2");
 	});
 
@@ -201,7 +201,7 @@ describe("credential pool visibility across processes", () => {
 
 		// The failure belongs to an account that is gone; the sibling that took
 		// index 0 must not be blocked for it.
-		expect(switched).toBe(false);
+		expect(switched.switched).toBe(false);
 		expect([...blocks.keys()].filter(key => key.startsWith("2:"))).toEqual([]);
 	});
 

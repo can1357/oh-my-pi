@@ -42,7 +42,7 @@ describe("Parallel web search", () => {
 			resolver: (_provider: string) => async () => process.env.PARALLEL_API_KEY ?? undefined,
 		},
 		limits: {
-			rotate: async () => false,
+			rotate: async () => ({ switched: false }),
 		},
 	} as unknown as AuthStorage;
 
