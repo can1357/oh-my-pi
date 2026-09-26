@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 
 function createContainer() {
 	return {
@@ -43,6 +44,7 @@ describe("/handoff command", () => {
 		});
 		const requestRender = vi.fn();
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -95,6 +97,7 @@ describe("/handoff command", () => {
 		const lateWorkingLoader = { stop: vi.fn() };
 		let loadingAnimation: { stop: () => void } | undefined;
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -145,6 +148,7 @@ describe("/handoff command", () => {
 		let isStreaming = false;
 		let loaderAtEnsureCall: { stop: () => void } | undefined | "unset" = "unset";
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -207,6 +211,7 @@ describe("/handoff command", () => {
 		let activeRetryLoader: { stop: () => void } | undefined;
 		const ensureLoadingAnimation = vi.fn();
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -262,6 +267,7 @@ describe("/handoff command", () => {
 		const showError = vi.fn();
 		const statusContainer = createContainer();
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -296,6 +302,7 @@ describe("/handoff command", () => {
 		const showWarning = vi.fn();
 		const statusContainer = createContainer();
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},
@@ -325,6 +332,7 @@ describe("/handoff command", () => {
 		});
 		const showWarning = vi.fn();
 		const ctx = {
+			keybindings: KeybindingsManager.inMemory(),
 			sessionManager: {
 				getEntries: () => [{ type: "message" }, { type: "message" }],
 			},

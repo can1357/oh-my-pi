@@ -9,6 +9,7 @@ import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 import { cfgBranchSummaryEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 
 const SHIFT_ENTER = "\x1b[13;2u";
 
@@ -68,6 +69,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 	});
 	let selector: { handleInput(key: string): void } | undefined;
 	const ctx = {
+		keybindings: KeybindingsManager.inMemory(),
 		sessionManager: {
 			getTree: () => [root],
 			getLeafId: () => null,
