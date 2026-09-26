@@ -7,7 +7,7 @@ const removeAssets = process.argv.includes("--remove-assets-after-first-use");
 let assetsRemoved = 0;
 if (removeAssets) {
 	for (const name of fs.readdirSync(import.meta.dir)) {
-		if (/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js)$/.test(name)) {
+		if (/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/.test(name)) {
 			fs.rmSync(path.join(import.meta.dir, name));
 			assetsRemoved++;
 		}

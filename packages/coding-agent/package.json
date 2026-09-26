@@ -37,6 +37,8 @@
 		"dist/template-*.html",
 		"dist/template-*.js",
 		"dist/tool-views.generated-*.js",
+		"dist/marked.min-*.js",
+		"dist/highlight.min-*.js",
 		"scripts",
 		"examples",
 		"README.md",
