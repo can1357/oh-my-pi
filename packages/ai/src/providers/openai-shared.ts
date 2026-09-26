@@ -1673,14 +1673,14 @@ export function hoistInterleavedResponsesToolBatchMessages<T extends object>(ite
 		if (classifyResponsesBatchItem(items[index]) !== "output") continue;
 		// Only anchor on the first output of a run.
 		if (index > 0 && classifyResponsesBatchItem(items[index - 1]) === "output") continue;
-		// Walk back over the batch body (calls interleaved with assistant messages).
+		// Walk back over the batch body (calls and outputs interleaved with assistant messages).
 		let start = index;
 		let sawCall = false;
 		const messageIndexes: number[] = [];
 		while (start > 0) {
 			const kind = classifyResponsesBatchItem(items[start - 1]);
-			if (kind === "call") {
-				sawCall = true;
+			if (kind === "call" || kind === "output") {
+				if (kind === "call") sawCall = true;
 			} else if (kind === "assistant-message") {
 				messageIndexes.push(start - 1);
 			} else {
@@ -2070,11 +2070,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					},
 				);
 				const sanitizedHistoryItems = rawSanitizedHistoryItems
-					? adaptResponsesReplayItemsForModel(
-							rawSanitizedHistoryItems,
-							supportsCustomToolCalls,
-							customToolWireNameMap,
-							options.model.supportsComputerUse === true,
+					? ensureRequiredResponsesReasoningReplay(
+							adaptResponsesReplayItemsForModel(
+								rawSanitizedHistoryItems,
+								supportsCustomToolCalls,
+								customToolWireNameMap,
+								options.model.supportsComputerUse === true,
+							),
+							assistantMsg.stopReason,
+							options.requiresReasoningReplayForAllTurns ?? false,
+							options.requiresReasoningReplayForToolCalls ?? false,
 						)
 					: undefined;
 				if (nativeReplayEnabled && sanitizedHistoryItems) {
@@ -2174,6 +2179,70 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
  * bare-dot synthetic placeholder on the chat-completions path.
  */
 export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
+
+function createSyntheticResponsesReasoningItem(
+	text = SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
+	id?: string,
+): ResponseReasoningItem {
+	const item = {
+		type: "reasoning",
+		...(id ? { id } : {}),
+		summary: [],
+		content: [{ type: "reasoning_text", text }],
+	} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
+	// The vendored SDK type marks `id` required; the wire accepts its absence.
+	return item as ResponseReasoningItem;
+}
+
+function isResponsesAssistantTurnBoundary(item: ResponseInput[number]): boolean {
+	if (responsesToolOutputKind(item.type) !== undefined) return true;
+	if (item.type === "compaction") return true;
+	return "role" in item && item.role !== "assistant";
+}
+
+function ensureRequiredResponsesReasoningReplay(
+	items: ResponseInput,
+	stopReason: AssistantMessage["stopReason"],
+	requiresAllTurns: boolean,
+	requiresToolCalls: boolean,
+): ResponseInput {
+	if (stopReason === "error" || (!requiresAllTurns && !requiresToolCalls)) return items;
+
+	const insertBefore: number[] = [];
+	let turnStart = 0;
+	for (let index = 0; index <= items.length; index++) {
+		if (index < items.length && !isResponsesAssistantTurnBoundary(items[index])) continue;
+
+		let hasContent = false;
+		let hasReasoning = false;
+		let hasToolCall = false;
+		for (let turnIndex = turnStart; turnIndex < index; turnIndex++) {
+			const item = items[turnIndex];
+			if (item.type === "reasoning") {
+				hasReasoning = true;
+				continue;
+			}
+			hasContent = true;
+			if (classifyResponsesBatchItem(item) === "call") hasToolCall = true;
+		}
+		if (hasContent && !hasReasoning && (requiresAllTurns || (requiresToolCalls && hasToolCall))) {
+			insertBefore.push(turnStart);
+		}
+		turnStart = index + 1;
+	}
+	if (insertBefore.length === 0) return items;
+
+	const repaired: ResponseInput = [];
+	let insertionIndex = 0;
+	for (let index = 0; index < items.length; index++) {
+		if (insertBefore[insertionIndex] === index) {
+			repaired.push(createSyntheticResponsesReasoningItem());
+			insertionIndex++;
+		}
+		repaired.push(items[index]);
+	}
+	return repaired;
+}
 
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
@@ -2345,14 +2414,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		const carriedReasoningText = carriedReasoningTexts.join("\n");
 		const reasoningText =
 			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
-		const reasoningItem = {
-			type: "reasoning",
-			...(synthesizedReasoningItemId ? { id: synthesizedReasoningItemId } : {}),
-			summary: [],
-			content: [{ type: "reasoning_text", text: reasoningText }],
-		} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
-		// The vendored SDK type marks `id` required; the wire accepts its absence.
-		outputItems.unshift(reasoningItem as ResponseReasoningItem);
+		outputItems.unshift(createSyntheticResponsesReasoningItem(reasoningText, synthesizedReasoningItemId));
 	}
 
 	return outputItems;
