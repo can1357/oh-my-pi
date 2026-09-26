@@ -56,6 +56,7 @@ import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-crede
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
+import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { transformMessages } from "./transform-messages";
 
 /**
@@ -381,9 +382,7 @@ interface MetadataEvent {
 	};
 }
 
-const REQUEST_METADATA_PATTERN = /^[a-zA-Z0-9\s:_@$#=/+,\-.]*$/;
 const REQUEST_METADATA_MAX_ENTRIES = 16;
-const REQUEST_METADATA_MAX_LENGTH = 256;
 
 /**
  * Bedrock rejects the whole invocation on a malformed `requestMetadata` entry.
@@ -400,10 +399,8 @@ function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefin
 		if (
 			typeof value !== "string" ||
 			key.length < 1 ||
-			key.length > REQUEST_METADATA_MAX_LENGTH ||
-			!REQUEST_METADATA_PATTERN.test(key) ||
-			value.length > REQUEST_METADATA_MAX_LENGTH ||
-			!REQUEST_METADATA_PATTERN.test(value) ||
+			!isBedrockRequestMetadataValue(key) ||
+			!isBedrockRequestMetadataValue(value) ||
 			kept >= REQUEST_METADATA_MAX_ENTRIES
 		) {
 			dropped.push(key);

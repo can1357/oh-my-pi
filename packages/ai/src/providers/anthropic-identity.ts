@@ -1,5 +1,6 @@
 import * as nodeCrypto from "node:crypto";
 import { getInstallId } from "@oh-my-pi/pi-utils";
+import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { claudeToolPrefix } from "./claude-code-fingerprint";
 
 const CLAUDE_CLOAKING_USER_ID_REGEX =
@@ -112,6 +113,13 @@ export function resolveAnthropicMetadataUserId(
 
 	if (!isOAuthToken) return undefined;
 	return generateClaudeJsonUserId(sessionId, accountId);
+}
+
+/** Fit a metadata user id to Bedrock's pattern, falling back to its session id; drop it if neither fits. */
+export function toBedrockMetadataUserId(userId: string | undefined): string | undefined {
+	if (userId === undefined || isBedrockRequestMetadataValue(userId)) return userId;
+	const sessionId = extractClaudeMetadataSessionId(userId);
+	return sessionId !== undefined && isBedrockRequestMetadataValue(sessionId) ? sessionId : undefined;
 }
 
 const ANTHROPIC_BUILTIN_TOOL_NAMES: Record<string, true> = {

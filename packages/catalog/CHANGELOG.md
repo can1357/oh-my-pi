@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed on-demand compaction staying off for Claude models on the `amazon-bedrock` and `bedrock-mantle` providers when they use Bedrock's `/anthropic` routes ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali))
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

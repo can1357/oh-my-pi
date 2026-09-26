@@ -1,4 +1,4 @@
-import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isBedrockAnthropicRoute, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Model } from "../types";
 import type { AnthropicMessagesClientLike } from "./anthropic-client";
 import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
@@ -46,6 +46,8 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 		(model.provider === "anthropic"
 			? resolveDirectAnthropicBaseUrl(model)
 			: normalizeAnthropicBaseUrl(model.baseUrl));
+	// Bedrock's own `/anthropic` routes are AWS endpoints, not gateways.
+	if (isBedrockAnthropicRoute(route)) return true;
 	return (
 		isSupportedCompactionEndpoint(route) &&
 		(model.compat.firstPartyProvider === true ||
