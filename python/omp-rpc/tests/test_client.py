@@ -17,6 +17,7 @@ from omp_rpc import (
     AgentEndEvent,
     OpenSessionResult,
     PromptResultEvent,
+    QueueUpdateEvent,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
@@ -153,7 +154,8 @@ FAKE_SERVER = textwrap.dedent(
             "tokensPerSecond": 7.25,
             "autoCompactionEnabled": auto_compaction_enabled,
             "messageCount": len(messages),
-            "queuedMessageCount": 0,
+            "queuedMessageCount": sum(len(items) for items in queued_messages.values()),
+            "queuedMessages": {"steering": queued_messages["steering"], "followUp": queued_messages["followUp"]},
             "todoPhases": todo_phases,
             "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
         }
@@ -305,6 +307,7 @@ FAKE_SERVER = textwrap.dedent(
     print(json.dumps({"type": "ready"}), flush=True)
     todo_phases = []
     messages = []
+    queued_messages = {"steering": [], "followUp": []}
     branch_messages = [{"entryId": "entry-1", "text": "branch message"}]
     model_provider = "anthropic"
     model_id = "claude-sonnet-4-5"
@@ -475,7 +478,31 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "set_session_name":
             session_name = command["name"]
             respond(request_id, "set_session_name", {})
-        elif command_type in {"steer", "follow_up", "abort"}:
+        elif command_type in {"steer", "follow_up"}:
+            queue_name = "steering" if command_type == "steer" else "followUp"
+            queued_messages[queue_name].append(command["message"])
+            respond(request_id, command_type, {})
+            print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "remove_queued_message":
+            items = queued_messages.get(command.get("queue"))
+            if items is None:
+                respond(request_id, command_type, success=False, error="invalid queue")
+                continue
+            removed = command["message"] in items
+            if removed:
+                items.remove(command["message"])
+            respond(request_id, command_type, {"removed": removed})
+            if removed:
+                print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "promote_queued_message":
+            promoted = command["message"] in queued_messages["followUp"]
+            if promoted:
+                queued_messages["followUp"].remove(command["message"])
+                queued_messages["steering"].append(command["message"])
+            respond(request_id, command_type, {"promoted": promoted})
+            if promoted:
+                print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
+        elif command_type == "abort":
             respond(request_id, command_type, {})
         elif command_type in {"prompt", "abort_and_prompt"}:
             message = command["message"]
@@ -1006,6 +1033,102 @@ class RpcClientTests(unittest.TestCase):
             request_timeout=2.0,
             **kwargs,
         )
+
+    def test_remove_queued_message_preserves_queue_and_duplicate_identity(self) -> None:
+        with self.make_client() as client:
+            client.steer("same")
+            client.steer("same")
+            client.follow_up("same")
+            client.follow_up("keep")
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertEqual(client.get_state().queued_message_count, 3)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 2)
+            self.assertIs(client.remove_queued_message("same", "followUp").removed, True)
+            self.assertIs(client.remove_queued_message("missing", "followUp").removed, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+            self.assertIs(client.remove_queued_message("keep", "followUp").removed, True)
+
+    def test_queue_update_event_matches_get_state_and_removal_invariant(self) -> None:
+        updates: list[QueueUpdateEvent] = []
+        with self.make_client() as client:
+            client.on_queue_update(lambda event: updates.append(event))
+
+            client.follow_up("first")
+            client.follow_up("second")
+            # The server writes each queue_update after the command's response, and
+            # the reader thread dispatches frames in order: the get_state round trip
+            # guarantees both updates have reached the listener before asserting.
+            state = client.get_state()
+            self.assertEqual([event.follow_up for event in updates], [("first",), ("first", "second")])
+            self.assertEqual(updates[-1].steering, ())
+            self.assertEqual(state.queued_messages.follow_up, updates[-1].follow_up)
+            self.assertEqual(state.queued_messages.steering, updates[-1].steering)
+
+            # Snapshot-string-removal invariant: every chip string in a snapshot,
+            # passed back verbatim to remove_queued_message with its queue,
+            # removes that message.
+            for text in state.queued_messages.follow_up:
+                self.assertIs(client.remove_queued_message(text, "followUp").removed, True)
+
+            self.assertEqual(client.get_state().queued_messages.follow_up, ())
+            self.assertEqual(updates[-1].follow_up, ())
+
+    def test_remove_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "remove_queued_message":',
+            'elif command_type == "unavailable_remove_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.steer("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.remove_queued_message("keep", "steering")
+            self.assertEqual(ctx.exception.command, "remove_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_remove_queued_message_rejects_missing_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
+
+    def test_remove_queued_message_rejects_nonboolean_result(self) -> None:
+        server = FAKE_SERVER.replace('{"removed": removed}', '{"removed": "false"}')
+        with self.make_client(server) as client:
+            with self.assertRaises(ValueError):
+                client.remove_queued_message("missing", "steering")
+
+    def test_promote_queued_message_moves_one_follow_up_into_steering(self) -> None:
+        with self.make_client() as client:
+            client.follow_up("same")
+            client.follow_up("same")
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.remove_queued_message("same", "steering").removed, True)
+            self.assertIs(client.promote_queued_message("same").promoted, True)
+            self.assertIs(client.promote_queued_message("same").promoted, False)
+            self.assertIs(client.promote_queued_message("missing").promoted, False)
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_propagates_unsupported_command(self) -> None:
+        server = FAKE_SERVER.replace(
+            'elif command_type == "promote_queued_message":',
+            'elif command_type == "unavailable_promote_queued_message":',
+        )
+        with self.make_client(server) as client:
+            client.follow_up("keep")
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.promote_queued_message("keep")
+            self.assertEqual(ctx.exception.command, "promote_queued_message")
+            self.assertEqual(client.get_state().queued_message_count, 1)
+
+    def test_promote_queued_message_rejects_missing_or_nonboolean_result(self) -> None:
+        for payload in ("{}", '{"promoted": "false"}'):
+            with self.subTest(payload=payload):
+                server = FAKE_SERVER.replace('{"promoted": promoted}', payload)
+                with self.make_client(server) as client:
+                    with self.assertRaises(ValueError):
+                        client.promote_queued_message("missing")
 
     def test_protocol_v2_decoder_accepts_exact_logical_boundary(self) -> None:
         frame = {

@@ -222,6 +222,8 @@ const AGENT_EVENT_TYPES = new Set([
 	"tool_execution_end",
 ]);
 
-function isAgentEvent(event: AgentSessionEvent): event is AgentEvent {
+// `queue_changed` is an internal Agent signal that AgentSession turns into
+// `queue_update`; it never reaches session subscribers.
+function isAgentEvent(event: AgentSessionEvent): event is Exclude<AgentEvent, { type: "queue_changed" }> {
 	return AGENT_EVENT_TYPES.has(event.type);
 }

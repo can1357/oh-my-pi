@@ -141,6 +141,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
 	skill: Skill;
+	queueChipText: string;
 }
 
 /**
@@ -154,7 +155,7 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt };
+	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 
 /**
@@ -162,13 +163,14 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
  * and dispatches it through the full prompt pipeline (usage preflight,
  * compaction checks, provider calls). Resolves once the turn is scheduled.
  * Must not run on the RPC serial queue's response path — register it with
- * watchAndReportLocalOnlyPromptResult and answer the command first.
+ * watchAndReportPromptResult and answer the command once it is admitted.
  */
 export async function runRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	onPromptAdmitted?: () => void,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
@@ -179,17 +181,18 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, queueChipText: invocation.queueChipText, onPromptAdmitted },
 	);
 }
 
 /**
  * Skill branch of the `prompt` command: resolves the invocation cheaply, then
- * registers the slow dispatch with watchAndReportPromptResult and
- * returns immediately. The caller answers the command right away — building
- * the skill prompt and running the prompt pipeline (usage preflight,
- * compaction, provider calls) can outlast any client's prompt timeout under
- * provider stress; the plain-prompt path responds first for the same reason.
+ * registers the slow dispatch with watchAndReportPromptResult and awaits
+ * admission (or completion, for a message that settles without ever being
+ * admitted) before answering. The caller still does not wait for the full
+ * dispatch pipeline — building the skill prompt and running it (usage
+ * preflight, compaction, provider calls) can outlast any client's prompt
+ * timeout under provider stress; only queue admission gates the response.
  */
 export async function dispatchRpcSkillPrompt(input: {
 	ticket: RpcPromptTicket;
@@ -208,9 +211,12 @@ export async function dispatchRpcSkillPrompt(input: {
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
 	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
-	watchAndReportPromptResult({
+	// A failure before admission still resolves this wait (without rejecting this
+	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
+	await watchAndReportPromptResult({
 		ticket: input.ticket,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		startPrompt: onPromptAdmitted =>
+			runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built, onPromptAdmitted),
 		results: input.results,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -284,17 +290,22 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 /**
  * Dispatch a single parsed frame from the RPC input stream.
  *
- * Bash commands are dispatched in the background so the caller can keep reading
- * subsequent frames while a shell command is still running. This lets a client
- * send `abort_bash` while a long-running `bash` is in flight. Response
- * correlation is preserved via each command's `id`; ordering across concurrent
- * commands is not guaranteed and clients MUST match on `id`.
+ * `bash` and `prompt` are dispatched in the background so the caller can keep
+ * reading subsequent frames while either is still settling: a `bash` command
+ * can run for a long time, and a `prompt` command's response is held until the
+ * message is admitted, which can span real wall-clock time (image
+ * normalization, a vision-model description call). Backgrounding both lets a
+ * client send `abort_bash` while a shell command runs, or `abort` (and
+ * `steer`/`follow_up`/`get_state`) while a `prompt` is still admitting.
+ * Response correlation is preserved via each command's `id`; ordering across
+ * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`). Otherwise a promise that resolves once the response
- *   for the command has been emitted via `output`. Errors from `handleCommand`
- *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ *   background (`bash`, `prompt`). Otherwise a promise that resolves once the
+ *   response for the command has been emitted via `output`. Errors from
+ *   `handleCommand` on a command dispatched inline propagate; the caller is
+ *   expected to wrap them.
  */
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
 	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
@@ -304,17 +315,20 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	// the union here.
 	const command = parsed as RpcCommand;
 
-	// `bash` can run for a long time. Dispatch it in the background so a
-	// subsequent `abort_bash` frame can be read and handled without waiting
-	// for the shell command to finish on its own. The response is emitted
-	// when `handleCommand` resolves; clients correlate via `command.id`.
-	if (command.type === "bash") {
+	// `bash` can run for a long time, and `prompt`'s response is held until
+	// admission (see PromptOptions.onPromptAdmitted), which can likewise span
+	// real wall-clock time. Dispatch both in the background so a subsequent
+	// frame — `abort_bash` for a running `bash`, or `abort`/`steer`/`follow_up`/
+	// `get_state` for an admitting `prompt` — can be read and handled without
+	// waiting for the earlier command to finish on its own. The response is
+	// emitted when `handleCommand` resolves; clients correlate via `command.id`.
+	if (command.type === "bash" || command.type === "prompt") {
 		const task = (async () => {
 			try {
 				deps.output(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				deps.output(deps.errorResponse(command.id, "bash", message));
+				deps.output(deps.errorResponse(command.id, command.type, message));
 			}
 		})();
 		deps.trackBackgroundTask?.(task);
@@ -326,7 +340,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	})();
 }
 
-/** Serializes ordinary RPC commands while allowing control frames to dispatch immediately. */
+/** Serializes ordinary RPC commands while allowing control frames, `bash`, and
+ *  `prompt` to dispatch immediately (see dispatchRpcInputFrame). */
 export class RpcInputDispatcher {
 	#tail: Promise<void> = Promise.resolve();
 	#tasks = new Set<Promise<void>>();
@@ -344,7 +359,10 @@ export class RpcInputDispatcher {
 			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
 
 			const command = parsed as RpcCommand;
-			if (command.type === "bash") {
+			// `bash` and `prompt` dispatch in the background (see dispatchRpcInputFrame)
+			// so neither holds up the serialized queue below — most importantly, so
+			// `abort` reaches the session while a `prompt` is still admitting.
+			if (command.type === "bash" || command.type === "prompt") {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
 			}
@@ -388,10 +406,10 @@ export class RpcInputDispatcher {
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
  * `pi.shutdown()` from an extension only *requests* shutdown; the process must
- * not exit while a background-dispatched command (`bash`, see
+ * not exit while a background-dispatched command (`bash` or `prompt`, see
  * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
  * coordinator tracks those tasks, re-checks the shutdown request whenever one
- * settles (covering a shutdown requested mid-bash with no follow-up client
+ * settles (covering a shutdown requested mid-command with no follow-up client
  * frame), and drains every tracked task before invoking `performShutdown`.
  * The shutdown sequence is latched so concurrent triggers (input loop and
  * settling tasks) run it exactly once.
@@ -1163,9 +1181,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					});
 					if (builtinResult !== false) {
 						if ("prompt" in builtinResult) {
-							watchAndReportPromptResult({
+							await watchAndReportPromptResult({
 								ticket,
-								startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+								startPrompt: onPromptAdmitted =>
+									session.prompt(builtinResult.prompt, { images: command.images, onPromptAdmitted }),
 								results: promptResults,
 								onError: onPromptError(id, "prompt"),
 								extensionUserMessageTracker,
@@ -1193,15 +1212,22 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						return success(id, "prompt", { agentInvoked: builtinResult.agentInvoked === true });
 					}
 
-					// Don't await - events will stream
-					// Extension commands are executed immediately, file prompt templates are expanded
-					// If streaming and streamingBehavior specified, queues via steer/followUp
-					watchAndReportPromptResult({
+					// Await admission only, not the full turn — events still stream after this
+					// response. Extension commands run immediately; file prompt templates expand;
+					// while streaming and a streamingBehavior is given, this queues via steer/followUp.
+					// Acking after admission (not on receipt) is what lets a client act on the
+					// queued message as soon as the ack arrives: `promote_queued_message` or
+					// `remove_queued_message` sent right after it finds the message, instead of
+					// returning false because image normalization or a vision description was
+					// still running. `prompt` is dispatched off the serial command chain, so this
+					// wait never holds up a later `abort`, `steer`, or `get_state`.
+					await watchAndReportPromptResult({
 						ticket,
-						startPrompt: () =>
+						startPrompt: onPromptAdmitted =>
 							session.prompt(command.message, {
 								images: command.images,
 								streamingBehavior: command.streamingBehavior,
+								onPromptAdmitted,
 							}),
 						results: promptResults,
 						onError: onPromptError(id, "prompt"),
@@ -1223,6 +1249,25 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "follow_up": {
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
+			}
+
+			case "remove_queued_message": {
+				if (typeof command.message !== "string") {
+					return error(id, "remove_queued_message", "message must be a string");
+				}
+				if (command.queue !== "steering" && command.queue !== "followUp") {
+					return error(id, "remove_queued_message", 'queue must be "steering" or "followUp"');
+				}
+				return success(id, "remove_queued_message", {
+					removed: session.removeQueuedMessage(command.message, command.queue),
+				});
+			}
+
+			case "promote_queued_message": {
+				if (typeof command.message !== "string") {
+					return error(id, "promote_queued_message", "message must be a string");
+				}
+				return success(id, "promote_queued_message", { promoted: session.promoteQueuedMessage(command.message) });
 			}
 
 			case "abort": {
@@ -1271,6 +1316,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "get_state": {
+				const queuedMessages = session.getQueuedMessages();
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
@@ -1286,6 +1332,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					queuedMessageCount: session.queuedMessageCount,
 					hasPendingAsyncWork: session.hasPendingAsyncWork(),
 					isSettled: isRpcSessionSettled(session),
+					queuedMessages: { steering: [...queuedMessages.steering], followUp: [...queuedMessages.followUp] },
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),

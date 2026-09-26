@@ -361,6 +361,17 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/**
+	 * Called synchronously once this prompt is admitted: idle, at the start of
+	 * #promptWithMessage's own turn setup (before preflight, image
+	 * normalization, or provider dispatch); while streaming, once the message
+	 * is pushed onto its steer/follow-up/aside queue (after image
+	 * normalization and vision-description preprocessing for that prompt); or
+	 * is routed to an extension command, before its handler runs. Admission is
+	 * not proof that a model call will occur. A prompt dropped, cancelled, or
+	 * failed before admission still only settles through the returned promise.
+	 */
+	onPromptAdmitted?: () => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

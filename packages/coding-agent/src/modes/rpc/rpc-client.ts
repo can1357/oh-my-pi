@@ -162,6 +162,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"thinking_level_changed",
 	"model_changed",
 	"goal_updated",
+	"queue_update",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
@@ -625,11 +626,13 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns the request id once accepted; use onEvent() to receive streaming events
-	 * and onPromptResult() to observe its completion under that id.
+	 * Returns the request id once the message is admitted (dispatched, queued via
+	 * `streamingBehavior` while the agent is busy, or routed to an extension command);
+	 * use onEvent() to receive streaming events and onPromptResult() to observe its
+	 * completion under that id.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<string> {
-		const response = await this.#send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp"): Promise<string> {
+		const response = await this.#send({ type: "prompt", message, images, streamingBehavior });
 		this.#getData(response);
 		return response.id ?? "";
 	}
@@ -646,6 +649,23 @@ export class RpcClient {
 	 */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "follow_up", message, images });
+	}
+
+	/**
+	 * Remove the first matching user message and its companions from one pending queue.
+	 */
+	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
+		const response = await this.#send({ type: "remove_queued_message", message, queue });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Move the first matching queued follow-up into steering.
+	 * A missing target returns false; retrying may promote another occurrence.
+	 */
+	async promoteQueuedMessage(message: string): Promise<{ promoted: boolean }> {
+		const response = await this.#send({ type: "promote_queued_message", message });
+		return this.#getData(response);
 	}
 
 	/**
