@@ -122,15 +122,22 @@ function openDb(dbPath: string): Database | null {
 export class SkillDescriptionCatalog {
 	readonly #dbPath: string;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #verbatim: boolean;
 	readonly #snapshot = new Map<string, string>();
 
-	constructor(options: { dbPath?: string; compress?: SkillDescriptionCompressor } = {}) {
+	/**
+	 * `verbatim` renders every description exactly as authored: no preview truncation, no cache
+	 * reads, and no compression work (`skills.compressDescriptions: false`).
+	 */
+	constructor(options: { dbPath?: string; compress?: SkillDescriptionCompressor; verbatim?: boolean } = {}) {
 		this.#dbPath = options.dbPath ?? path.join(getAgentDir(), "skill-descriptions.db");
 		this.#compress = options.compress;
+		this.#verbatim = options.verbatim === true;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.#verbatim) return skills.map(skill => ({ ...skill }));
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -139,6 +146,7 @@ export class SkillDescriptionCatalog {
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
+		if (this.#verbatim) return skills.map(skill => ({ ...skill }));
 		const db = openDb(this.#dbPath);
 		try {
 			return skills.map(skill => {

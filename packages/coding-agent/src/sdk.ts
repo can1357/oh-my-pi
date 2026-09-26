@@ -330,6 +330,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -3501,10 +3502,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
-		const skillDescriptions = new SkillDescriptionCatalog({
-			dbPath: path.join(agentDir, "skill-descriptions.db"),
-			compress: createSkillDescriptionCompressor(modelRegistry, settings),
-		});
+		// Read once per session. `false` keeps authored descriptions and never schedules compression calls.
+		const skillDescriptions = cfgSkillsCompressDescriptions.get(settings)
+			? new SkillDescriptionCatalog({
+					dbPath: path.join(agentDir, "skill-descriptions.db"),
+					compress: createSkillDescriptionCompressor(modelRegistry, settings),
+				})
+			: new SkillDescriptionCatalog({ verbatim: true });
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
