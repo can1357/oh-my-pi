@@ -121,6 +121,7 @@ export function createAgentsHubDeps(
 						? cfgTaskAgentPrewalk
 						: cfgTaskAgentAdvisor;
 			setting.set(settings, overrides);
+			if (property === "model") cfgTaskAgentModelOverrides.clearOverride(settings);
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();
