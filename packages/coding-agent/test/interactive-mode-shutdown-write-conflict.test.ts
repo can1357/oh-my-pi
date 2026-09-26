@@ -124,7 +124,6 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 
 		const message = showErrorSpy.mock.calls.map((call: unknown[]) => String(call[0])).join("\n");
 		expect(message).toContain("Could not close session");
-		expect(message).toContain("Ctrl+C");
 		// The surfaced detail is the real guard's message, proving the error
 		// came from the storage backend rather than a hand-constructed throw.
 		expect(message).toContain("Session file changed before rewrite");

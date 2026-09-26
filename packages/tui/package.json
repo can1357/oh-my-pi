@@ -34,7 +34,8 @@
     "lint": "oxlint .",
     "test": "bun test --parallel test/*.test.ts",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
-    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
+    "gen:glyphs": "bun scripts/gen-glyphs.ts"
   },
   "dependencies": {
     "@oh-my-pi/omptype": "catalog:",

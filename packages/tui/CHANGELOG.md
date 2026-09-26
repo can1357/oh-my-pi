@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a cross-platform keyboard hint system supporting both text and Nerd Font glyph representations
+- Added automated glyph generation and binary bundle serialization for terminal UI assets
+
+### Changed
+
+- Replaced all static keyboard labels across overlays, apps, and status lines with dynamic, platform-aware key formatting
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

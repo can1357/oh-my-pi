@@ -19,6 +19,7 @@ import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -2147,7 +2148,7 @@ export class EventController {
 	 * label carries no dangling whitespace.
 	 */
 	#maintenanceEscHint(): string {
-		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
+		return this.ctx.focusedAgentId ? "" : ` (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
 	}
 
 	async #handleAutoCompactionStart(

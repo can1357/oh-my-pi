@@ -10,6 +10,7 @@ import {
 	type Focusable,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { StreamChatMessage } from "@oh-my-pi/pi-wire";
 import type { StreamConsoleEvent, StreamMuxHost } from "./streamer";
@@ -124,7 +125,9 @@ class StreamConsoleComponent implements Component, Focusable {
 				: [...this.#panes.values()].map(pane => `${pane.id}:${safeInline(pane.title)}`).join(" ");
 		const viewerUrl = this.#viewerUrl ? safeInline(this.#viewerUrl) : chalk.dim("waiting for stream server");
 		const details = `${viewerUrl} ${chalk.dim("·")} 👁 ${this.#viewers} watching ${chalk.dim("·")} panes: ${paneList}`;
-		const hint = chalk.dim("/title <text> · /quit · ↑/↓ history · Ctrl-C quit");
+		const hint = chalk.dim(
+			`/title <text> · /quit · ${formatKeyHints(["up", "down"])} history · ${formatKeyHint("ctrl+c")} quit`,
+		);
 
 		this.#logView.setLines(this.#logLines.map(line => truncateToWidth(line, width)));
 		this.#logView.setHeight(bodyHeight);

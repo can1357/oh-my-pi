@@ -25,6 +25,7 @@ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } fr
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -706,8 +707,9 @@ export const cfgRetryWaitForUsageReset = register({
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Wait For Usage Reset",
-		description:
-			"When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (Esc) but also hold subagents, so leave off for unattended runs.",
+		get description() {
+			return `When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
+		},
 	},
 });
 

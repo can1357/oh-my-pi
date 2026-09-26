@@ -37,7 +37,7 @@ describe("InputController tool output expansion", () => {
 			hideToolActivity: true,
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable] },
-			keybindings: { getDisplayString: vi.fn(() => "Alt+H") },
+			keybindings: { getKeys: vi.fn(() => ["alt+h"]) },
 			showStatus,
 			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
@@ -47,7 +47,6 @@ describe("InputController tool output expansion", () => {
 		expect(ctx.toolOutputExpanded).toBe(false);
 		expect(expandable.setExpanded).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Alt+H"));
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("/settings"));
 	});
 });

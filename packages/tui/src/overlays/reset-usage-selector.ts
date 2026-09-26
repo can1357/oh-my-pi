@@ -7,6 +7,8 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
 import { formatUsageResetWindow } from "./usage-display";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 
 const RESET_SELECTOR_MAX_VISIBLE = 10;
 
@@ -142,7 +144,10 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		const pending = items.find(item => this.#menu.isPending(item));
 		const hint = pending
 			? theme.fg("warning", oneLine(this.#confirmationMessage(pending)))
-			: theme.fg("muted", "↑/↓ select · ↵ spend a reset · Esc cancel");
+			: theme.fg(
+					"muted",
+					`${editorKeys("tui.select.up", "tui.select.down")} select · ${formatKeyHint("enter")} spend a reset · ${editorKey("tui.select.cancel")} cancel`,
+				);
 		this.#listContainer.addChild(new Text(hint, 0, 0));
 
 		if (this.#statusMessage) {
@@ -153,7 +158,9 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 
 	#confirmationMessage(account: ResetUsageAccount): string {
 		const subject = account.credit?.title ? `“${account.credit.title}”` : "1 saved reset";
-		const messages = [`Press Enter again to spend ${subject} for ${account.label} (${account.providerLabel}).`];
+		const messages = [
+			`Press ${formatKeyHint("enter")} again to spend ${subject} for ${account.label} (${account.providerLabel}).`,
+		];
 		if (account.credit?.program === "juniper_tide") {
 			messages.push("This resets Claude's 5h session limit only; weekly limits stay unchanged.");
 		} else if (account.credit?.clears?.length) {
@@ -162,7 +169,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		if (account.credit?.requiresLimit === false) {
 			messages.push("Optional early use: this can be spent before the covered limit is reached.");
 		}
-		messages.push("Esc cancels.");
+		messages.push(`${editorKey("tui.select.cancel")} cancels.`);
 		return messages.join(" ");
 	}
 

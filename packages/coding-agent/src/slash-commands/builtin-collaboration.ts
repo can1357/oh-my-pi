@@ -1,5 +1,6 @@
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
@@ -599,7 +600,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (arg && arg !== "link" && arg !== "url") {
-				runtime.ctx.showStatus("Usage: /open [link]  (pick a specific link: /copy, → blocks, o)");
+				runtime.ctx.showStatus(
+					`Usage: /open [link]  (pick a specific link: /copy, ${formatKeyHint("right")} blocks, ${formatKeyHint("o")})`,
+				);
 				runtime.ctx.editor.setText("");
 				return;
 			}

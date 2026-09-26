@@ -62,7 +62,10 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		name: command.name,
 		aliases: command.aliases,
 		allowArgs: command.allowArgs === true,
-		description: command.description,
+		// Getter: some descriptions name keys, formatted at read time (theme/preset may change).
+		get description() {
+			return command.description;
+		},
 		icon: command.icon,
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,

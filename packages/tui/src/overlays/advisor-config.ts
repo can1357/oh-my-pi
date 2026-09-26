@@ -31,6 +31,8 @@ import {
 } from "../index";
 import { getSelectListTheme, theme } from "../theme";
 import { sanitizeDisplayWarnings } from "../render/render-utils";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { HookEditorComponent } from "./hook-editor";
 import { buildBrowserItems, ModelBrowser, type ModelBrowserSource, sortModelItems } from "./model-browser";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
@@ -514,7 +516,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 				this.#cb.notify(`Advisor config: ${err instanceof Error ? err.message : String(err)}`);
 			});
 		list.onCancel = () => this.#cb.close();
-		this.#setScreen("list", list, "↑↓ move · Enter / click select · scroll preview on the right · Esc close");
+		this.#setScreen(
+			"list",
+			list,
+			`${editorKeys("tui.select.up", "tui.select.down")} move · ${editorKey("tui.select.confirm")} / click select · scroll preview on the right · ${editorKey("tui.select.cancel")} close`,
+		);
 	}
 
 	async #onListSelect(value: string): Promise<void> {
@@ -596,7 +602,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
 		list.onSelect = item => this.#onDetailSelect(index, item.value);
 		list.onCancel = () => this.#showList();
-		this.#setScreen("detail", list, `Editing "${advisor.name}" · Enter / click edit field · Esc back`);
+		this.#setScreen(
+			"detail",
+			list,
+			`Editing "${advisor.name}" · ${editorKey("tui.select.confirm")} / click edit field · ${editorKey("tui.select.cancel")} back`,
+		);
 	}
 
 	#onDetailSelect(index: number, field: string): void {
@@ -647,7 +657,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#showDetail(index);
 		};
 		input.onEscape = () => this.#showDetail(index);
-		this.#setScreen("name", input, "Type a name · Enter save · Esc cancel");
+		this.#setScreen(
+			"name",
+			input,
+			`Type a name · ${editorKey("tui.input.submit")} save · ${editorKey("tui.select.cancel")} cancel`,
+		);
 	}
 
 	#showModelPicker(index: number): void {
@@ -680,7 +694,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 			}
 		};
 		picker.onCancel = () => this.#showDetail(index);
-		this.#setScreen("model", picker, "Type to search · Enter / click twice picks · Esc back");
+		this.#setScreen(
+			"model",
+			picker,
+			`Type to search · ${formatKeyHint("enter")} / click twice picks · ${editorKey("tui.select.cancel")} back`,
+		);
 	}
 
 	#showThinkingPicker(index: number, selector: string, efforts: readonly string[]): void {
@@ -694,7 +712,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#showDetail(index);
 		};
 		list.onCancel = () => this.#showModelPicker(index);
-		this.#setScreen("thinking", list, `Thinking effort for ${selector} · Enter / click pick · Esc back`);
+		this.#setScreen(
+			"thinking",
+			list,
+			`Thinking effort for ${selector} · ${editorKey("tui.select.confirm")} / click pick · ${editorKey("tui.select.cancel")} back`,
+		);
 	}
 
 	#showToolsEditor(index: number, selected: Set<string>, cursor: number): void {
@@ -729,7 +751,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#setScreen(
 			"tools",
 			list,
-			"Enter / click toggle · select Done or Esc to apply (empty = no tools; read/grep/glob = default)",
+			`${editorKey("tui.select.confirm")} / click toggle · select Done or ${editorKey("tui.select.cancel")} to apply (empty = no tools; read/grep/glob = default)`,
 		);
 	}
 

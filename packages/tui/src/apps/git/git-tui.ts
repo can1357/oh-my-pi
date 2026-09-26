@@ -24,6 +24,7 @@
  * every file underneath it.
  */
 
+import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
 import { SplitPane } from "../../components/layout/split-pane";
 import { Stack } from "../../components/layout/stack";
 import { matchesKey } from "../../keys";
@@ -340,7 +341,10 @@ class GitTuiComponent implements Component {
 			if (this.#pendingDiscard !== key) {
 				this.#pendingDiscard = key;
 				this.#setStatus(
-					theme.fg("warning", `Discard changes to ${action.selection.label}? Press delete again to confirm`),
+					theme.fg(
+						"warning",
+						`Discard changes to ${action.selection.label}? Press ${formatKeyHint("delete")} again to confirm`,
+					),
 				);
 				return;
 			}
@@ -451,7 +455,7 @@ class GitTuiComponent implements Component {
 		if (!hunk.patch) return;
 		if (action === "discard" && this.#pendingDiscard !== hunk.patch) {
 			this.#pendingDiscard = hunk.patch;
-			this.#setStatus(theme.fg("warning", "Discard hunk? Press x (or click) again to confirm"));
+			this.#setStatus(theme.fg("warning", `Discard hunk? Press ${formatKeyHint("x")} (or click) again to confirm`));
 			return;
 		}
 		this.#pendingDiscard = null;
@@ -487,7 +491,7 @@ class GitTuiComponent implements Component {
 		}
 		if (action === "discard" && this.#pendingDiscard !== patch) {
 			this.#pendingDiscard = patch;
-			this.#setStatus(theme.fg("warning", "Discard selected lines? Press x again to confirm"));
+			this.#setStatus(theme.fg("warning", `Discard selected lines? Press ${formatKeyHint("x")} again to confirm`));
 			return;
 		}
 		this.#pendingDiscard = null;
@@ -768,8 +772,8 @@ class GitTuiComponent implements Component {
 			theme.fg(
 				"dim",
 				this.#focus === "diff"
-					? "alt+↓/↑ hunk · ]/[ file · shift+↑/↓ select · s/u stage · x/del discard · v view · c commit · q quit"
-					: "↑/↓ move · ←/→ fold · space stage · del discard · enter open · alt+↓/↑ hunk · c commit · t tree · q quit",
+					? `${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHints(["]", "["])} file · ${formatKeyHints(["shift+up", "shift+down"])} select · ${formatKeyHints(["s", "u"])} stage · ${formatKeyHints(["x", "delete"])} discard · ${formatKeyHint("v")} view · ${formatKeyHint("c")} commit · ${formatKeyHint("q")} quit`
+					: `${formatKeyHints(["up", "down"])} move · ${formatKeyHints(["left", "right"])} fold · ${formatKeyHint("space")} stage · ${formatKeyHint("delete")} discard · ${formatKeyHint("enter")} open · ${formatKeyHints(["alt+down", "alt+up"])} hunk · ${formatKeyHint("c")} commit · ${formatKeyHint("t")} tree · ${formatKeyHint("q")} quit`,
 			);
 		const free = width - row.width - right.width - 1;
 		const middleText = free > visibleWidth(middle) + 4 ? middle : truncateToWidth(middle, Math.max(0, free - 4));

@@ -1,3 +1,4 @@
+import { formatKeyHint } from "../../app-keybindings";
 import type { Component } from "../../tui";
 import { matchesKey } from "../../keys";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../../mouse";
@@ -252,7 +253,7 @@ export class RawSseViewerComponent implements Component {
 	}
 
 	#statusText(): string {
-		const help = "Esc close · Ctrl+C copy raw · End follow tail · wheel scroll · click summary toggles follow";
+		const help = `${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy raw · ${formatKeyHint("end")} follow tail · wheel scroll · click summary toggles follow`;
 		return this.#statusMessage
 			? `${theme.fg("success", this.#statusMessage)}  ${theme.fg("dim", help)}`
 			: theme.fg("dim", help);

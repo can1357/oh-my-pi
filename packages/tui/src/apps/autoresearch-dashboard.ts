@@ -1,3 +1,4 @@
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 import { ScrollView } from "../components/scroll-view";
@@ -186,7 +187,10 @@ function renderExpandedHeader(runtime: AutoresearchDashboardRuntime, width: numb
 	const state = runtime.state;
 	const status = renderModeStatus(runtime, state);
 	const label = state.name ? ` autoresearch: ${replaceTabs(state.name)} ` : " autoresearch ";
-	const hint = theme.fg("dim", ` ctrl+x collapse  ctrl+shift+x overlay${status ? `  ${status}` : ""} `);
+	const hint = theme.fg(
+		"dim",
+		` ${formatKeyHint("ctrl+x")} collapse  ${formatKeyHint("ctrl+shift+x")} overlay${status ? `  ${status}` : ""} `,
+	);
 	const fillWidth = Math.max(0, width - visibleWidth(label) - visibleWidth(hint));
 	return truncateToWidth(theme.fg("accent", label) + theme.fg("borderMuted", "-".repeat(fillWidth)) + hint, width);
 }
@@ -256,7 +260,7 @@ function renderCollapsedLine(runtime: AutoresearchDashboardRuntime, state: Exper
 	} else if (!runtime.autoresearchMode) {
 		parts.push(theme.fg("dim", ` | ${renderModeStatus(runtime, state)}`));
 	}
-	parts.push(theme.fg("dim", " | ctrl+x expand"));
+	parts.push(theme.fg("dim", ` | ${formatKeyHint("ctrl+x")} expand`));
 	return parts.join("");
 }
 
@@ -471,7 +475,10 @@ function renderOverlayRunningLine(
 }
 
 function renderOverlayFooter(width: number, theme: Theme): string {
-	const hint = theme.fg("dim", " up/down j/k pageup pagedown g G esc ");
+	const hint = theme.fg(
+		"dim",
+		` ${formatKeyHints(["up", "down"])} ${formatKeyHints(["j", "k"])} ${formatKeyHint("pageUp")} ${formatKeyHint("pageDown")} ${formatKeyHint("g")} ${formatKeyHint("shift+g")} ${formatKeyHint("escape")} `,
+	);
 	const fill = Math.max(0, width - visibleWidth(hint));
 	return theme.fg("borderMuted", "-".repeat(fill)) + hint;
 }

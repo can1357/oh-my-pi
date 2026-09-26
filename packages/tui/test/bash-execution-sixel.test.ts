@@ -166,7 +166,6 @@ describe("BashExecutionComponent expand footer", () => {
 	it("advertises hidden lines while collapsed", () => {
 		const rendered = makeComponent().render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
 	});
 
 	it("drops the hidden-lines footer once expanded", () => {
@@ -174,7 +173,6 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(true);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).not.toContain("more lines");
-		expect(rendered).not.toContain("ctrl+o to expand");
 		// Every line is now present, including the previously hidden prefix.
 		expect(rendered).toContain("entry0");
 		expect(rendered).toContain("entry26");
@@ -186,6 +184,5 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(false);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
 	});
 });

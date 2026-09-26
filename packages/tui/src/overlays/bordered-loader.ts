@@ -1,6 +1,7 @@
 import { CancellableLoader, Container, Spacer, Text, type TUI } from "../index";
 import type { Theme } from "../theme/theme";
 import { DynamicBorder } from "../chrome/dynamic-border";
+import { editorKey } from "../chrome/keybinding-hints";
 
 /** Loader wrapped with borders for hook UI */
 export class BorderedLoader extends Container {
@@ -18,7 +19,7 @@ export class BorderedLoader extends Container {
 		);
 		this.addChild(this.#loader);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", "esc cancel"), 1, 0));
+		this.addChild(new Text(theme.fg("muted", `${editorKey("tui.select.cancel")} cancel`), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder(borderColor));
 	}

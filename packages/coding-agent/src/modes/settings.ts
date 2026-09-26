@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -442,8 +443,9 @@ export const cfgTuiCodexResetFireworks = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Codex Reset Fireworks",
-		description:
-			"Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until Escape",
+		get description() {
+			return `Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until ${formatKeyHint("escape")}`;
+		},
 	},
 });
 
@@ -505,8 +507,10 @@ export const cfgTuiMouse = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Mouse Click-to-Focus",
-		description:
-			"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+		},
 	},
 });
 
@@ -720,8 +724,9 @@ export const cfgTuiVimMode = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Vim Editing Mode",
-		description:
-			"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		get description() {
+			return `Modal prompt editing. ${formatKeyHint("escape")} leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes`;
+		},
 	},
 });
 
@@ -798,8 +803,9 @@ export const cfgComposerRecallClearedDrafts = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Recall Cleared Drafts",
-		description:
-			"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		get description() {
+			return `Keep drafts cleared with ${formatKeyHint("ctrl+c")} in local ${formatKeyHints(["up", "down"])} history until exit; disabling affects future clears`;
+		},
 	},
 });
 
@@ -812,8 +818,9 @@ export const cfgDoubleEscapeAction = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Double-Escape Action",
-		description:
-			"What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing",
+		get description() {
+			return `What pressing ${formatKeyHint("escape")} twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing`;
+		},
 	},
 });
 
@@ -871,7 +878,9 @@ export const cfgSpellingAutocomplete = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Word Autocomplete (macOS)",
-		description: "Show macOS dictionary word completions as inline hints accepted with Tab",
+		get description() {
+			return `Show macOS dictionary word completions as inline hints accepted with ${formatKeyHint("tab")}`;
+		},
 		condition: "macOS",
 	},
 });

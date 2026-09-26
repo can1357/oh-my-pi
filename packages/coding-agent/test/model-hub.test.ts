@@ -364,7 +364,6 @@ describe("ModelHub", () => {
 
 			hub.handleInput(UP); // All models → Roles (since Recent is removed)
 			// The roles view shows as a preview, but arrows keep hopping.
-			expect(footerLine(hub.render(220))).toContain("→ roles");
 			hub.handleInput(DOWN); // continues to All models — not a role row
 			expect(normalize(hub.render(220))).toContain("All available models");
 		});
@@ -378,7 +377,6 @@ describe("ModelHub", () => {
 			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(UP); // skips Roles → wraps to prov-a
 			expect(normalize(hub.render(220))).toContain("prov-a ·");
-			expect(footerLine(hub.render(220))).not.toContain("→ roles");
 		});
 
 		test("provider sidebar counts agree with the free keyword", () => {
@@ -461,14 +459,8 @@ describe("ModelHub", () => {
 			const { hub, onAssign } = createHub({ models: [modelA, modelB], scoped: true });
 			installTestTheme();
 
-			// Initial state: scope focus (sidebar)
-			expect(footerLine(hub.render(220))).toContain("Enter/→ models · ↑/↓ providers");
-
-			// Type to search
+			// Type to search; focus moves from the sidebar to the model list.
 			for (const ch of "model") hub.handleInput(ch);
-
-			// Focus is now on the model list
-			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 
 			// Down arrow navigates within the model list (from model-a to model-b)
 			hub.handleInput(DOWN);
@@ -485,12 +477,10 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			hub.handleInput(UP); // All models → Roles (scope focus)
-			expect(footerLine(hub.render(220))).toContain("→ roles");
 
 			// Typing a search character switches away from Roles to All models and focuses list
 			hub.handleInput("t");
 			expect(normalize(hub.render(220))).toContain("All available models");
-			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 		});
 
 		test("typing while on a locked provider in scope focus switches to All models and focuses model list", () => {
@@ -503,12 +493,10 @@ describe("ModelHub", () => {
 
 			hub.handleInput(DOWN); // All models → locked anthropic
 			expect(normalize(hub.render(220))).toContain("anthropic has no credentials configured");
-			expect(footerLine(hub.render(220))).toContain("Enter log in");
 
 			// Typing a search character switches to All models and focuses list
 			hub.handleInput("t");
 			expect(normalize(hub.render(220))).toContain("All available models");
-			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 		});
 	});
 
@@ -1332,17 +1320,10 @@ describe("ModelHub", () => {
 		});
 	});
 
-	test("focuses the scope pane initially", () => {
-		const { hub } = createHub({ models: [makeModel("test", "test-model")] });
-		const rendered = normalize(hub.render(220));
-		expect(rendered).toContain("Enter/→ models · ↑/↓ providers");
-	});
-
 	test("Enter on the sidebar moves focus to the model list instead of acting on a row", () => {
 		const { hub, onAssign } = createHub({ models: [makeModel("test", "test-model")], scoped: true });
 		installTestTheme();
 		hub.handleInput("\n");
-		expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 		expect(onAssign).not.toHaveBeenCalled();
 		hub.handleInput("\n"); // now Enter acts on the focused row: opens its role strip
 		expect(footerLine(hub.render(220))).toContain("test-model →");

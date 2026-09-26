@@ -4,6 +4,8 @@ import { getMarkdownTheme, theme } from "../theme/theme";
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { StreamingPanelContent } from "../chrome/streaming-panel";
+import { interruptKey } from "../chrome/keybinding-hints";
+import { formatKeyHint } from "../app-keybindings";
 
 type BtwPanelState = "running" | "complete" | "branching" | "aborted" | "error";
 
@@ -129,15 +131,18 @@ export class BtwPanelComponent extends OverlayPanel {
 	}
 
 	#footerLine(): string {
+		// The main editor routes `app.interrupt` (Escape by default) to the panel.
+		const esc = interruptKey();
 		switch (this.#state) {
 			case "running":
-				return theme.fg("muted", "Esc to cancel");
+				return theme.fg("muted", `${esc} to cancel`);
 			case "complete": {
 				const actions: string[] = [];
-				if (this.isCopyable()) actions.push(this.#copied ? "c to copy again" : "c to copy");
-				if (this.#canFollowUp?.()) actions.push("f to follow up");
-				if (this.#canBranch?.() ?? this.isBranchable()) actions.push("b to branch");
-				actions.push("Esc to close");
+				const copyKey = formatKeyHint("c");
+				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} to copy`);
+				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
+				if (this.#canBranch?.() ?? this.isBranchable()) actions.push(`${formatKeyHint("b")} to branch`);
+				actions.push(`${esc} to close`);
 				if (this.#copied) {
 					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
 				}
@@ -146,9 +151,9 @@ export class BtwPanelComponent extends OverlayPanel {
 			case "branching":
 				return theme.fg("muted", `${theme.status.pending} Branching to chat…`);
 			case "aborted":
-				return theme.fg("warning", `${theme.status.warning} Cancelled · Esc to close`);
+				return theme.fg("warning", `${theme.status.warning} Cancelled · ${esc} to close`);
 			case "error":
-				return theme.fg("error", `${theme.status.error} Error · Esc to close`);
+				return theme.fg("error", `${theme.status.error} Error · ${esc} to close`);
 		}
 	}
 

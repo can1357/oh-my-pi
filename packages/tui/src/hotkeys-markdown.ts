@@ -1,9 +1,9 @@
 import {
 	type AppKeybinding,
+	formatKeyHint,
 	formatKeyHints,
 	type KeybindingsManager,
 	keyHintPlatform,
-	modifierLabel,
 } from "./app-keybindings";
 import { canonicalKeyId } from "./keybindings";
 
@@ -18,10 +18,7 @@ function hotkeyLabel(bindings: HotkeysMarkdownBindings, action: AppKeybinding): 
 
 /** Build the platform-aware Markdown reference for effective application hotkeys. */
 export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string {
-	const platform = keyHintPlatform();
-	const isMac = platform === "darwin";
-	const alt = modifierLabel("alt", platform);
-	const cmd = modifierLabel("super", platform);
+	const isMac = keyHintPlatform() === "darwin";
 	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
 	// that also carries tui.editor.deleteCharForward (the readline `^D` overlap) forward-deletes
 	// while the prompt holds a draft, any other exit key quits immediately. Mixed bindings such as
@@ -48,26 +45,26 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"**Navigation**",
 		"| Key | Action |",
 		"|-----|--------|",
-		"| `Arrow keys` | Move cursor / browse history (Up when empty) |",
-		`| \`${alt}+Left/Right\` | Move by word |`,
-		isMac ? `| \`Ctrl+A\` / \`Home\` / \`${cmd}+Left\` | Start of line |` : "| `Ctrl+A` / `Home` | Start of line |",
-		isMac ? `| \`Ctrl+E\` / \`End\` / \`${cmd}+Right\` | End of line |` : "| `Ctrl+E` / `End` | End of line |",
+		`| \`${formatKeyHints(["up", "down", "left", "right"])}\` | Move cursor / browse history (${formatKeyHint("up")} when empty) |`,
+		`| \`${formatKeyHints(["alt+left", "alt+right"])}\` | Move by word |`,
+		`| \`${formatKeyHints(isMac ? ["ctrl+a", "home", "super+left"] : ["ctrl+a", "home"])}\` | Start of line |`,
+		`| \`${formatKeyHints(isMac ? ["ctrl+e", "end", "super+right"] : ["ctrl+e", "end"])}\` | End of line |`,
 		"",
 		"**Editing**",
 		"| Key | Action |",
 		"|-----|--------|",
-		"| `Enter` | Send message |",
-		`| \`Shift+Enter\` / \`${alt}+Enter\` | New line |`,
-		`| \`Ctrl+W\` / \`${alt}+Backspace\` | Delete word backwards |`,
-		"| `Ctrl+U` | Delete to start of line |",
-		"| `Ctrl+K` | Delete to end of line |",
+		`| \`${formatKeyHint("enter")}\` | Send message |`,
+		`| \`${formatKeyHints(["shift+enter", "alt+enter"])}\` | New line |`,
+		`| \`${formatKeyHints(["ctrl+w", "alt+backspace"])}\` | Delete word backwards |`,
+		`| \`${formatKeyHint("ctrl+u")}\` | Delete to start of line |`,
+		`| \`${formatKeyHint("ctrl+k")}\` | Delete to end of line |`,
 		`| \`${hotkeyLabel(bindings, "app.clipboard.copyLine")}\` | Copy current line |`,
 		`| \`${hotkeyLabel(bindings, "app.clipboard.copyPrompt")}\` | Copy whole prompt |`,
 		"",
 		"**Other**",
 		"| Key | Action |",
 		"|-----|--------|",
-		"| `Tab` | Path completion / accept autocomplete |",
+		`| \`${formatKeyHint("tab")}\` | Path completion / accept autocomplete |`,
 		`| \`${hotkeyLabel(bindings, "app.interrupt")}\` | Cancel autocomplete / interrupt active work |`,
 		`| \`${hotkeyLabel(bindings, "app.clear")}\` | Clear editor (first) / exit (second) |`,
 		...exitRows,
@@ -86,9 +83,9 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		`| \`${hotkeyLabel(bindings, "app.editor.external")}\` | Edit message in external editor |`,
 		`| \`${hotkeyLabel(bindings, "app.retry")}\` | Retry last failed assistant turn |`,
 		`| \`${hotkeyLabel(bindings, "app.clipboard.pasteImage")}\` | Paste image or text from clipboard |`,
-		"| Hold `Space` | Speech-to-text (push-to-talk): hold to record, release to transcribe |",
+		`| Hold \`${formatKeyHint("space")}\` | Speech-to-text (push-to-talk): hold to record, release to transcribe |`,
 		`| \`${hotkeyLabel(bindings, "app.live.toggle")}\` | Start/stop live voice mode (/live) |`,
-		`| \`${hotkeyLabel(bindings, "app.agents.hub")}\` / \`${hotkeyLabel(bindings, "app.session.observe")}\` / double-tap \`←\` (empty editor) | Open the agent hub |`,
+		`| \`${hotkeyLabel(bindings, "app.agents.hub")}\` / \`${hotkeyLabel(bindings, "app.session.observe")}\` / double-tap \`${formatKeyHint("left")}\` (empty editor) | Open the agent hub |`,
 		"| `#<number>` | GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`) |",
 		"| `#` / `#<text>` | Prompt actions (copy / undo / move cursor) |",
 		"| `/` | Slash commands |",

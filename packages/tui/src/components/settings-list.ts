@@ -1,3 +1,5 @@
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
@@ -547,7 +549,9 @@ export class SettingsList implements Component {
 			}
 			lines.push(this.#theme.hint("  No matching settings"));
 			lines.push("");
-			lines.push(truncateToWidth(this.#theme.hint("  Backspace to edit search · Esc to cancel"), width));
+			const editKey = editorKey("tui.editor.deleteCharBackward");
+			const cancelKey = editorKey("tui.select.cancel");
+			lines.push(truncateToWidth(this.#theme.hint(`  ${editKey} to edit search · ${cancelKey} to cancel`), width));
 			return lines;
 		}
 
@@ -638,8 +642,11 @@ export class SettingsList implements Component {
 		// Add hint (suppressed entirely when the host owns the footer)
 		if (this.#options.hint !== "") {
 			lines.push("");
-			const jumpHint = sections.length >= 2 ? "PgUp/PgDn to jump sections · " : "";
-			const hintText = this.#options.hint ?? `Enter/Space to change · ${jumpHint}Type to search · Esc to cancel`;
+			const jumpHint =
+				sections.length >= 2 ? `${editorKeys("tui.select.pageUp", "tui.select.pageDown")} to jump sections · ` : "";
+			const hintText =
+				this.#options.hint ??
+				`${editorKey("tui.select.confirm")}/${formatKeyHint("space")} to change · ${jumpHint}Type to search · ${editorKey("tui.select.cancel")} to cancel`;
 			lines.push(truncateToWidth(this.#theme.hint(`  ${hintText}`), width));
 		}
 

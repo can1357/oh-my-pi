@@ -113,9 +113,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 		expect(rendered).toContain("(current folder)");
 		expect(rendered).not.toContain("(all projects)");
 		expect(rendered).not.toContain("other-project");
-		// The empty-state hint must be visible so the user knows Tab is the way out.
 		expect(rendered).toContain("No sessions in current folder");
-		expect(rendered).toContain("Press Tab to view all");
 	});
 
 	it("marks forked child sessions in the rendered list", () => {

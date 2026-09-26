@@ -4,6 +4,7 @@ import { type Component } from "../tui";
 import { Markdown } from "../components/markdown";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../theme";
+import { expandKeyHint } from "../render/render-utils";
 import type { BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "./messages";
 
 /** Divider labels per compaction method; unknown/legacy methods fall back to "compacted". */
@@ -54,7 +55,7 @@ class DividerSummary implements Component {
 		const rule = theme.tree.horizontal;
 		const label = this.#label();
 		// sep.dot ships pre-padded (" · "); trim so the hint joins with single spaces.
-		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		const hint = `${theme.sep.dot.trim()} ${expandKeyHint()}`;
 		const plainWidth = Bun.stringWidth(`${label} ${hint}`, { countAnsiEscapeCodes: false });
 		// ` label hint ` framed by rules on both sides.
 		const remaining = width - plainWidth - 2;
