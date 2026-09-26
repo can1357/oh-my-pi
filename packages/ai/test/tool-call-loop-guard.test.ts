@@ -12,6 +12,30 @@ const zeroUsage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } satisfies AssistantMessage["usage"];
 
+function textTurn(
+	id: string,
+	name: string,
+	args: Record<string, unknown>,
+	text: string,
+): { message: AssistantMessage; toolResults: ToolResultMessage[] } {
+	return {
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "text", text },
+				{ type: "toolCall", id, name, arguments: args },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage,
+		toolResults: [],
+	};
+}
+
 describe("ToolCallLoopGuard", () => {
 	test("detects the fifth consecutive identical tool call", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: ["job", "irc"] });
@@ -51,6 +75,76 @@ describe("ToolCallLoopGuard", () => {
 			resultSummary: "1263 passed, 4 skipped",
 			argumentsSummary: '{"command":"pytest -q","timeout":120}',
 		});
+	});
+
+	test("detects incrementing echo suffixes when assistant text repeats", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Merging the next live revision.";
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			const detection = guard.recordTurn(
+				textTurn(`call-${iteration}`, "bash", { command: `echo merge-live-${iteration}` }, text),
+			);
+			if (iteration < 5) expect(detection).toBeNull();
+			if (iteration === 5) expect(detection).toMatchObject({ toolName: "bash", count: 5 });
+		}
+	});
+
+	test("does not flag reads of distinct file paths", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			expect(
+				guard.recordTurn(
+					textTurn(
+						`call-${iteration}`,
+						"read",
+						{ path: `src/file-${iteration}.ts` },
+						"Reading the next source file.",
+					),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("does not count normalized calls when assistant text changes", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		for (let iteration = 1; iteration <= 152; iteration++) {
+			expect(
+				guard.recordTurn(
+					textTurn(
+						`call-${iteration}`,
+						"bash",
+						{ command: `echo merge-live-${iteration}` },
+						`Running merge iteration ${iteration}.`,
+					),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("resets value-drift counts after a turn without tool calls", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		const text = "Continue checking the merge status.";
+		const driftTurn = (iteration: number) =>
+			textTurn(`call-${iteration}`, "bash", { command: `echo merge-live-${iteration}` }, text);
+		expect(guard.recordTurn(driftTurn(1))).toBeNull();
+		expect(
+			guard.recordTurn({
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test-model",
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: Date.now(),
+				} satisfies AssistantMessage,
+				toolResults: [],
+			}),
+		).toBeNull();
+		expect(guard.recordTurn(driftTurn(2))).toBeNull();
+		expect(guard.recordTurn(driftTurn(3))).toBeNull();
+		expect(guard.recordTurn(driftTurn(4))).toMatchObject({ toolName: "bash", count: 3 });
 	});
 
 	test("canonicalizes argument key order and ignores harness intent fields", () => {

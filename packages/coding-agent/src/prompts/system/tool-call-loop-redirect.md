@@ -1,8 +1,8 @@
 <system-interrupt reason="tool_call_loop_detected">
-You called `{{tool_name}}` {{count}} consecutive times with identical arguments:
+The `{{tool_name}}` call pattern repeated for {{count}} consecutive turns:
 `{{arguments_summary}}`
 
 Last result (truncated): `{{result_summary}}`
 
-NEVER call `{{tool_name}}` with those arguments again this turn. Use different arguments, choose another tool, or summarize findings and yield if complete.
+NEVER repeat the `{{tool_name}}` call pattern this turn. Change the operation or choose a different tool. Summarize findings and yield if complete.
 </system-interrupt>
