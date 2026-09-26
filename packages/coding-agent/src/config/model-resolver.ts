@@ -1535,7 +1535,7 @@ export function resolveRoleChain(
 	role: string,
 	settings: Settings,
 	pool: Model<Api>[],
-	options?: { hoistProvider?: string },
+	options?: { hoistProvider?: string; hoistPredicate?: (model: Model<Api>) => boolean },
 ): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
@@ -1565,11 +1565,13 @@ export function resolveRoleChain(
 	}
 
 	const hoistProvider = options?.hoistProvider;
-	if (!hoistProvider) return candidates;
+	const hoistPredicate = options?.hoistPredicate;
+	if (!hoistProvider && !hoistPredicate) return candidates;
+	const shouldHoist = hoistPredicate ?? ((model: Model<Api>) => model.provider === hoistProvider);
 	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
-	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
+	const hoisted = nonExplicit.filter(candidate => shouldHoist(candidate.model));
 	if (hoisted.length === 0) return candidates;
-	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
+	const remaining = nonExplicit.filter(candidate => !shouldHoist(candidate.model));
 	const reordered = [...hoisted, ...remaining];
 	let reorderedIndex = 0;
 	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));

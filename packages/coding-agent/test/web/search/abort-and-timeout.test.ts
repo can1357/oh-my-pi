@@ -156,12 +156,13 @@ describe("executeSearch abort propagation", () => {
 	function fakeProvider(
 		id: SearchProviderId,
 		behaviour: (params: SearchParams) => Promise<SearchResponse>,
+		available = true,
 	): provider.SearchProvider {
 		return {
 			id,
 			label: id,
-			isAvailable: () => true,
-			isExplicitlyAvailable: () => true,
+			isAvailable: () => available,
+			isExplicitlyAvailable: () => available,
 			search: behaviour,
 		};
 	}
@@ -182,6 +183,69 @@ describe("executeSearch abort propagation", () => {
 		});
 		return { authStorage, modelRegistry, getProvider };
 	}
+
+	it("prefers grounded search matching the active model's grounding family when the web role is not configured", async () => {
+		const config = await Settings.init({ inMemory: true });
+		const authStorage = createInMemoryAuthStorage();
+		openAuthStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-anthropic-key");
+		authStorage.keys.setRuntime("openai-codex", "test-codex-token");
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings: config });
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
+		const anthropicModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const hostedClaudeModel = modelRegistry.find("gitlab-duo", "duo-chat-sonnet-4-6");
+		if (!codexModel || !anthropicModel || !hostedClaudeModel) {
+			throw new Error("Bundled Codex, Anthropic, or GitLab Duo model missing");
+		}
+		const anthropicSearch = vi.fn(async (): Promise<SearchResponse> => ({
+			provider: "anthropic",
+			sources: [{ title: "Anthropic result", url: "https://example.com/anthropic" }],
+		}));
+		const codexSearch = vi.fn(async (): Promise<SearchResponse> => ({
+			provider: "codex",
+			sources: [{ title: "OpenAI result", url: "https://example.com/openai" }],
+		}));
+		vi.spyOn(provider, "getSearchProvider").mockImplementation(async id => {
+			const providerId = id as SearchProviderId;
+			return fakeProvider(providerId, async () => ({ provider: providerId, sources: [] }), false);
+		});
+		vi.spyOn(provider, "getGroundedSearchProvider").mockImplementation(async grounding => {
+			if (grounding === "anthropic") return fakeProvider("anthropic", anthropicSearch);
+			if (grounding === "codex") return fakeProvider("codex", codexSearch);
+			return fakeProvider(grounding, async () => ({ provider: grounding, sources: [] }), false);
+		});
+
+		const codexResult = await runSearchQuery(
+			{ query: "anything" },
+			{ authStorage, modelRegistry, activeModel: codexModel },
+		);
+
+		expect(codexResult.details.response.provider).toBe("codex");
+		expect(codexSearch).toHaveBeenCalledTimes(1);
+		expect(anthropicSearch).not.toHaveBeenCalled();
+
+		codexSearch.mockClear();
+		anthropicSearch.mockClear();
+		const anthropicResult = await runSearchQuery(
+			{ query: "anything" },
+			{ authStorage, modelRegistry, activeModel: anthropicModel },
+		);
+
+		expect(anthropicResult.details.response.provider).toBe("anthropic");
+		expect(anthropicSearch).toHaveBeenCalledTimes(1);
+		expect(codexSearch).not.toHaveBeenCalled();
+
+		codexSearch.mockClear();
+		anthropicSearch.mockClear();
+		const hostedClaudeResult = await runSearchQuery(
+			{ query: "anything" },
+			{ authStorage, modelRegistry, activeModel: hostedClaudeModel },
+		);
+
+		expect(hostedClaudeResult.details.response.provider).toBe("anthropic");
+		expect(anthropicSearch).toHaveBeenCalledTimes(1);
+		expect(codexSearch).not.toHaveBeenCalled();
+	});
 
 	it("passes the configured provider-request timeout into the search adapter", async () => {
 		let timeoutMs: number | undefined;

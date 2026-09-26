@@ -8,7 +8,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { modelKind, type Model } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
@@ -130,6 +130,7 @@ function hasRenderableSearchContent(response: SearchResponse): boolean {
 interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
 	modelRegistry?: ModelRegistry;
+	activeModel?: Model;
 	sessionId?: string;
 	signal?: AbortSignal;
 }
@@ -140,9 +141,10 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
-	const { authStorage, sessionId, signal } = options;
+	const { authStorage, activeModel, sessionId, signal } = options;
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
 	const pool = roleCandidatePool("web", settings, modelRegistry);
+	const activeGrounding = activeModel?.webSearch;
 	const candidates = params.model
 		? (() => {
 				const resolved = resolveModelRoleValue(params.model, pool, { settings });
@@ -150,7 +152,10 @@ async function executeSearch(
 					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
 					: [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain("web", settings, pool, {
+				hoistProvider: activeModel?.provider,
+				hoistPredicate: activeGrounding ? candidate => candidate.webSearch === activeGrounding : undefined,
+			});
 
 	const parsedQuery = parseSearchQuery(params.query);
 
@@ -298,6 +303,7 @@ export async function runSearchQuery(
 	options: {
 		authStorage?: AuthStorage;
 		modelRegistry?: ModelRegistry;
+		activeModel?: Model;
 		sessionId?: string;
 		signal?: AbortSignal;
 	} = {},
@@ -311,6 +317,7 @@ export async function runSearchQuery(
 		return await executeSearch("cli-web-search", params, {
 			authStorage,
 			modelRegistry: options.modelRegistry,
+			activeModel: options.activeModel,
 			sessionId: options.sessionId,
 			signal: options.signal,
 		});
@@ -353,6 +360,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		return executeSearch(_toolCallId, params, {
 			authStorage,
 			modelRegistry: this.#session.modelRegistry,
+			activeModel: this.#session.getActiveModel?.(),
 			sessionId,
 			signal,
 		});
@@ -379,6 +387,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 		return executeSearch(toolCallId, params, {
 			authStorage,
 			modelRegistry: ctx.modelRegistry,
+			activeModel: ctx.model,
 			sessionId,
 			signal,
 		});
