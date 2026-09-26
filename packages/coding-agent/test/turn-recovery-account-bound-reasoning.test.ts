@@ -82,7 +82,7 @@ function createHost(model: Model, modelRegistry: ModelRegistry, messages: AgentM
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => false,
 		runAutoCompaction: async () => ({ deferredHandoff: false, continuationScheduled: false }) as never,
 		shakeForRequestBodyReadTimeout: async () => false,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
@@ -99,7 +99,7 @@ describe("TurnRecovery account-bound reasoning replay", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-account-bound-reasoning-");
 		const authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
-		authStorage.setRuntimeApiKey("openai", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: Settings.isolated() });
 	});
 
