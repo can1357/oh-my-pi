@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { composeAppendPrompt, USER_APPEND_HEADING } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { composeAppendPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 
 /**
  * The generated blocks that precede a user's append prompt end with the MCP
@@ -20,10 +20,18 @@ describe("composeAppendPrompt", () => {
 		const composed = composeAppendPrompt(["memory guidance", MCP_SECTION], "Reply in English.");
 		expect(composed).toBeDefined();
 
-		const boundary = composed!.indexOf(USER_APPEND_HEADING);
+		const boundary = composed!.indexOf("\n## User Instructions\n\n");
 		expect(boundary).toBeGreaterThan(composed!.indexOf("### codegraph"));
 		expect(composed!.slice(0, boundary)).not.toContain("Reply in English.");
-		expect(composed!.endsWith(`${USER_APPEND_HEADING}\n\nReply in English.`)).toBe(true);
+		expect(composed!.slice(boundary).endsWith("Reply in English.")).toBe(true);
+	});
+
+	it("preserves Markdown hard breaks and literal content when framing user instructions", () => {
+		const generated = "## MCP Server Instructions\n\nKeep this hard break.  \nNext line.\n\n\n<server>";
+		const user = "Keep this hard break.  \nNext line.\n\n\n| left | right |\n{{literal}} <user> & value\n";
+		const composed = composeAppendPrompt([generated], user)!;
+		expect(composed.startsWith(`${generated}\n\n## User Instructions\n\n`)).toBe(true);
+		expect(composed.slice(-user.length)).toBe(user);
 	});
 
 	it("leaves a lone user append prompt untouched", () => {

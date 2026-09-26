@@ -28,6 +28,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -601,21 +602,9 @@ export interface BuildSystemPromptResult {
 }
 
 /**
- * Heading that separates the user's append prompt (`APPEND_SYSTEM.md`,
- * `--append-system-prompt`) from the generated blocks that precede it.
- */
-export const USER_APPEND_HEADING =
-	"## User Instructions\n\nThe following instructions are user-authored (session configuration or CLI). They are authoritative and supersede conflicting guidance above.";
-
-/**
  * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
- * instructions) with the user's append prompt.
- *
- * The generated blocks end with `## MCP Server Instructions`, whose text tells
- * the model it is server-controlled and may not be verified. Concatenating the
- * user's append text directly behind it, with no heading of its own, rendered
- * user-authored instructions as a trailing paragraph of that section, so the
- * user's text gets a boundary heading whenever generated blocks precede it.
+ * instructions) with the user's append prompt. Keep the user text in its own
+ * section so it is not misclassified as MCP server-controlled instructions.
  */
 export function composeAppendPrompt(appendParts: readonly string[], appendSystemPrompt?: string): string | undefined {
 	const generated = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
@@ -625,7 +614,11 @@ export function composeAppendPrompt(appendParts: readonly string[], appendSystem
 	if (!generated) {
 		return appendSystemPrompt;
 	}
-	return `${generated}\n\n${USER_APPEND_HEADING}\n\n${appendSystemPrompt}`;
+	// Render the static wrapper without reformatting user-authored Markdown.
+	return prompt.compile(userAppendPromptTemplate.trimEnd())({
+		generatedAppend: generated,
+		userAppend: appendSystemPrompt,
+	});
 }
 
 /** Build the system prompt with tools, guidelines, and context */

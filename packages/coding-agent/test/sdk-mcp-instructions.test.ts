@@ -8,7 +8,6 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { USER_APPEND_HEADING } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -44,6 +43,7 @@ function routeSection(prompt: string): string {
 	const end = prompt.indexOf("\n#", start + MCP_ROUTE_SECTION.length);
 	return prompt.slice(start, end === -1 ? undefined : end);
 }
+const USER_APPEND_SECTION_HEADING = "## User Instructions";
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
 	let tempDir: string;
@@ -245,7 +245,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The user's append prompt is its own block, never the trailing
 			// paragraph of the server-controlled section above it.
-			const boundary = prompt.indexOf(USER_APPEND_HEADING);
+			const boundary = prompt.indexOf(`\n${USER_APPEND_SECTION_HEADING}\n\n`);
 			expect(boundary).toBeGreaterThan(prompt.indexOf(SERVER_INSTRUCTIONS));
 			expect(prompt.slice(prompt.indexOf("## MCP Server Instructions"), boundary)).not.toContain(USER_APPEND_MARKER);
 			expect(prompt.slice(boundary)).toContain(USER_APPEND_MARKER);
