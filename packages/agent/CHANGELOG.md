@@ -10,6 +10,10 @@
 
 - The agent now logs a structured warning when a tool call the model issued never receives a real result, without ever interrupting the turn or changing its control flow.
 
+### Fixed
+
+- Fixed a rejecting `onToolCallAnomaly` hook aborting the turn: hook failures are now logged and swallowed, so the turn always completes and `turn_end` still emits — `onToolCallAnomaly` remains non-fatal by contract.
+- Fixed user aborts, model errors, and terminal tool-result yields bypassing tool-call anomaly detection: placeholder tool results are now audited on every turn-end path with unchanged control flow.
 ## [18.0.4] - 2026-08-24
 
 ### Changed

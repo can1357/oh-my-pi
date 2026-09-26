@@ -46,10 +46,7 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import {
-	createToolCallAuditEvent,
-	detectToolCallAnomaly,
-} from "@oh-my-pi/pi-ai/utils/tool-call-anomaly";
+import { createToolCallAuditEvent, detectToolCallAnomaly } from "@oh-my-pi/pi-ai/utils/tool-call-anomaly";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
@@ -622,6 +619,45 @@ function buildAgentEndEvent(
 		fireOnRunEnd(telemetry, snapshot.summary, snapshot.coverage);
 	}
 	return { type: "agent_end", messages, telemetry: snapshot.summary, coverage: snapshot.coverage };
+}
+/**
+ * Records a non-fatal tool-call anomaly for a turn and fires the optional
+ * `onToolCallAnomaly` hook. Called on both the normal execution path and the
+ * abort/error path so every turn that produced placeholder results is audited.
+ *
+ * The hook is isolated: a rejecting hook logs and is swallowed, so it can never
+ * prevent `emitTurnEnd` / `turnOpen` from running on every path (the non-fatal
+ * contract of the anomaly audit).
+ */
+async function auditToolCallAnomaly(
+	message: AssistantMessage,
+	toolResults: ToolResultMessage[],
+	config: AgentLoopConfig,
+): Promise<void> {
+	const anomaly = detectToolCallAnomaly(message, toolResults);
+	if (!anomaly) return;
+	const { provider, id } = config.getModel?.() ?? config.model;
+	logger.warn("tool-call anomaly: invocation did not land as a real executed tool result", {
+		kinds: anomaly.kinds.join(", "),
+		stopReason: anomaly.stopReason,
+		truncated: anomaly.stopReason === "length",
+		calls: anomaly.details.map(d => `${d.toolName} -> ${d.kind} (${d.reason})`),
+		model: { provider, id },
+	});
+	try {
+		await config.onToolCallAnomaly?.(
+			createToolCallAuditEvent({
+				anomaly,
+				model: { provider, id },
+				timestamp: Date.now(),
+			}),
+		);
+	} catch (err) {
+		logger.error("tool-call anomaly hook failed; swallowing so the turn still completes", {
+			kinds: anomaly.kinds.join(", "),
+			message: err instanceof Error ? err.message : String(err),
+		});
+	}
 }
 /**
  * Push a `turn_end` event and run the awaited per-turn hook when the run is
@@ -1291,6 +1327,7 @@ async function runLoopBody(
 							status: message.stopReason === "aborted" ? "aborted" : "error",
 						});
 					}
+					await auditToolCallAnomaly(message, toolResults, config);
 					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
 					turnOpen = false;
 
@@ -1436,34 +1473,13 @@ async function runLoopBody(
 				}
 
 				// Detect tool calls on this turn that did not land as a real, executed
-				// tool result (empty/error output, or a synthetic placeholder for a call
-				// the assistant never invoked locally). This audits the "model emitted a
+				// tool result (empty/error output, a synthetic placeholder for a call the
+				// assistant never invoked locally, or a model-facing-sanitized call that
+				// never reached the provider). This audits the "model emitted a
 				// malformed / invalid tool invocation and was never shown to it" failure
 				// mode. Non-fatal: no throw, no turn abort — just a structured warning plus
 				// the optional onToolCallAnomaly hook.
-				const toolCallAnomaly = detectToolCallAnomaly(message, toolResults);
-				if (toolCallAnomaly) {
-					const { provider, id } = config.getModel?.() ?? config.model;
-					logger.warn(
-						"tool-call anomaly: invocation did not land as a real executed tool result",
-						{
-							kinds: toolCallAnomaly.kinds.join(", "),
-							stopReason: toolCallAnomaly.stopReason,
-							truncated: toolCallAnomaly.stopReason === "length",
-							calls: toolCallAnomaly.details.map(
-								(d) => `${d.toolName} -> ${d.kind} (${d.reason})`,
-							),
-							model: { provider, id },
-						},
-					);
-					await config.onToolCallAnomaly?.(
-						createToolCallAuditEvent({
-							anomaly: toolCallAnomaly,
-							model: { provider, id },
-							timestamp: Date.now(),
-						}),
-					);
-				}
+				await auditToolCallAnomaly(message, toolResults, config);
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
 				});
