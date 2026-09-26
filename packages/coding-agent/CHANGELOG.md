@@ -9,6 +9,10 @@
 - Added `ctx.agent` to the extension context, reporting whether the session is the top-level agent or a subagent, plus its registry id, agent definition name, task depth and parent id, so handlers rebound to subagent sessions can tell which agent they serve ([#13314](https://github.com/can1357/oh-my-pi/pull/13314) by [@andrebrait](https://github.com/andrebrait))
 - Added tracking of Anthropic's usage-limit wrap-up allowance for Claude subscription accounts: after the 5-hour or weekly limit is reached, the status line and `/slow status` show `limit reached · wrapping up · resets HH:MM`, and the agent is told to wrap up when neither low priority nor extra usage will continue the work ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
 
+### Added
+
+- Added `examples/extensions/typesafe-jev.ts`: a `before_agent_start` hook that asks TypeSafe Jev which installed skill (if any) to read, then appends a per-turn `<skill_relevance>` line. Jev is not a chat model; copy the file to `~/.omp/agent/extensions/` and use `/login typesafe` or `TYPESAFE_API_KEY`. Fail-open on missing key, timeout, or HTTP error.
+
 ### Changed
 
 - `providers.anthropic.slowMode` now controls only the low-priority lane; the usage-limit wrap-up allowance is tracked for every first-party Claude subscription account ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
