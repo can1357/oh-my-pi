@@ -610,12 +610,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
 				try {
-					const result = await run(runSignal, (text, details) => {
-						latestText = text;
-						latestDetails = details;
-						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
-						if (forwardUpdates) emitToolUpdate?.(text, details);
-					}, jobId);
+					const result = await run(
+						runSignal,
+						(text, details) => {
+							latestText = text;
+							latestDetails = details;
+							void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
+							if (forwardUpdates) emitToolUpdate?.(text, details);
+						},
+						jobId,
+					);
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
 						formatOutputNotice(result.details?.meta);
@@ -743,7 +747,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, asyncJobId } = options;
+		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, asyncJobId } =
+			options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
