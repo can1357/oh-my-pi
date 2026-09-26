@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the session tree (`/tree`) exhausting memory and freezing the machine on long conversations ([#12622](https://github.com/can1357/oh-my-pi/pull/12622) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- Fixed the session tree redrawing and searching slowly on long conversations ([#12622](https://github.com/can1357/oh-my-pi/pull/12622) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes
