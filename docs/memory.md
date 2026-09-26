@@ -17,6 +17,29 @@ memory:
   backend: local
 ```
 
+## Running Sharpshooter alongside a backend
+
+The backends above are mutually exclusive, with one exception. Sharpshooter distills project decisions into three markdown files instead of storing memories, so it needs nothing the backend slot provides and can run beside a store. Set `sharpshooter.enabled` to get searchable recall and always-on project decisions in the same session:
+
+```yaml
+memory:
+  backend: mnemopi
+sharpshooter:
+  enabled: true
+```
+
+The selected backend keeps its identity and its tools; Sharpshooter adds its own startup work and appends its decision files to the injected instructions. `/memory stats`, `/memory diagnose` and `/memory queue` report on both. Memory search through the SDK adds Sharpshooter's hits to whatever the selected backend returns, which for `hindsight` is nothing, since it exposes no search of its own; its `recall` tool is unaffected. The flag is ignored when `memory.backend` is already `sharpshooter`.
+
+A Sharpshooter failure never stops the selected backend, and the selected backend's own failures surface as they always did. Where a Sharpshooter failure shows up depends on which one it is: the wrapper logs a warning when Sharpshooter throws at a paired call, while a background consolidation that fails once it holds the bank lock records itself in the bank's state and reaches you through `/memory stats` and `/memory diagnose` rather than the log. A failure before that point does not: the state file lives inside the bank directory, so a directory the agent could not create has nowhere to record, and an error escaping the lock is reported to its caller, which the scheduler discards. Those reach the log alone.
+
+`/memory clear` and `/memory sync` stay on the selected backend. Sharpshooter rewrites all three decision files whole on every consolidation and keeps no history, so neither a wipe nor a bad rewrite can be undone, and an action aimed at the store should not be able to cause one. Sharpshooter still consolidates on its own interval, so nothing is stranded. To clear or consolidate the decision files deliberately, select `sharpshooter` as the backend and use the command there.
+
+Sharpshooter writes on its own schedule and calls a model to do it, using `sharpshooter.model` and consolidating every `sharpshooter.intervalMinutes`. Whether the session ends up with a second model-driven writer depends on the backend: `local` and `hindsight` write through a model, `mnemopi` does so only when `mnemopi.llmMode` is not `none`, and `off` adds nothing.
+
+Enabling the flag starts Sharpshooter for a project that was not running it before, so consolidation now has to hold up on its own. The prompt asks for the complete content of all three files, and a reply returning fewer is refused before anything is written and before any delta is consumed.
+
+That refusal is there because accepting a partial reply loses work with nothing to show for it. Only returned files are written, so an omitted file would keep its old content while the consolidation went on to mark every queued delta consumed, and any decision bound for that file would be gone without a record. Refusing leaves the deltas in place for the next cycle, which is the only outcome that loses nothing. Emptying a file remains a decision the admission law allows, from a reply that covered all three.
+
 ## Usage
 
 ### What gets injected

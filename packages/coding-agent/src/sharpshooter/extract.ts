@@ -49,9 +49,95 @@ const recordDeltasTool = {
 };
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
+const kExtractionInFlightMessage = Symbol("sharpshooter.extractionInFlightMessage");
+const kExtractionHandledMessages = Symbol("sharpshooter.extractionHandledMessages");
+const kExtractionPendingQueue = Symbol("sharpshooter.extractionPendingQueue");
+
+export interface SharpshooterExtractionOptions {
+	session: AgentSession;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	agentDir: string;
+	/** The just-committed user message; falls back to the transcript's latest user message. */
+	message?: AgentMessage;
+}
+
+/** A dropped prompt plus the project it belonged to when it was dropped. */
+export interface PendingExtraction {
+	options: SharpshooterExtractionOptions;
+	/**
+	 * Captured at drop time. A `/move` can land between the drop and the
+	 * retry; binding the bank then would file the prompt's decisions in the
+	 * project it was never written in.
+	 */
+	cwd: string;
+}
+
+// Bound the model spend a burst of dropped prompts can trigger after the
+// slot clears; beyond this the newest prompts are still transcript history
+// for whichever prompt extracts next.
+const MAX_PENDING_EXTRACTIONS = 4;
 
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
+	/**
+	 * The message the in-flight run was started on. A catch-up that names this
+	 * same message is already being extracted; `undefined` when the run was
+	 * started without a snapshot.
+	 */
+	[kExtractionInFlightMessage]?: AgentMessage | undefined;
+	/**
+	 * Every user prompt this session has already enrolled for extraction, keyed
+	 * by message identity. Enrollment is idempotent for the whole session rather
+	 * than only for the concurrently-in-flight window: a live restart (a primary
+	 * backend switch, or `sharpshooter.enabled` off→on) re-fires the catch-up for
+	 * a transcript whose newest prompt may already have settled. The set holds at
+	 * most one entry per user prompt of the session, and prompts are never
+	 * dropped from their transcript, so it stays bounded by the session.
+	 */
+	[kExtractionHandledMessages]?: Set<AgentMessage>;
+	/** Prompts dropped while the slot was busy, retried in order when it clears. */
+	[kExtractionPendingQueue]?: PendingExtraction[];
+}
+
+/**
+ * Retry dropped prompts in drop order, serially. Called from the in-flight
+ * extraction's `finally`; each retried prompt re-enters the normal guard, so
+ * a prompt dropped during a retry queues behind it and this loop yields.
+ */
+async function drainSharpshooterExtractionQueue(session: AgentSession): Promise<void> {
+	const host = session as ExtractionHost;
+	for (;;) {
+		if (session.isDisposed || host[kExtractionInFlight]) return;
+		const pending = host[kExtractionPendingQueue]?.shift();
+		if (!pending) return;
+		maybeStartSharpshooterExtraction(pending.options, pending.cwd);
+		if (host[kExtractionInFlight]) await host[kExtractionInFlight];
+	}
+}
+
+/**
+ * Drop prompts queued for a retry. The queue belongs to the pairing that is
+ * being released: with no subscription of its own, a retry would extract a
+ * prompt for a project the session no longer pairs with.
+ */
+export function clearPendingSharpshooterExtraction(session: AgentSession): void {
+	delete (session as ExtractionHost)[kExtractionPendingQueue];
+}
+
+/**
+ * Take the prompts queued for a retry, leaving the session with no queue. A leg
+ * restart that keeps pairing replaces the subscription that owned the queue, so
+ * the prompts have to travel with it rather than be dropped: the new leg
+ * suppresses its catch-up for a rebind, and nothing else re-enrolls a prompt
+ * that only ever reached the queue. The caller hands the taken prompts to the
+ * leg it installs in place of the one it released.
+ */
+export function takePendingSharpshooterQueue(session: AgentSession): PendingExtraction[] {
+	const host = session as ExtractionHost;
+	const queue = host[kExtractionPendingQueue] ?? [];
+	delete host[kExtractionPendingQueue];
+	return queue;
 }
 
 /**
@@ -171,30 +257,63 @@ export async function resolveSharpshooterModel(
 }
 
 /** Start best-effort extraction for one committed user prompt without blocking the caller. */
-export function maybeStartSharpshooterExtraction(options: {
-	session: AgentSession;
-	settings: Settings;
-	modelRegistry: ModelRegistry;
-	agentDir: string;
-	/** The just-committed user message; falls back to the transcript's latest user message. */
-	message?: AgentMessage;
-}): void {
+export function maybeStartSharpshooterExtraction(options: SharpshooterExtractionOptions, forcedCwd?: string): void {
 	try {
 		const { session } = options;
-		if (session.isDisposed || (session as ExtractionHost)[kExtractionInFlight]) return;
+		if (session.isDisposed) return;
+		const host = session as ExtractionHost;
+		// Keyed by message identity, which both firesites can supply: `message_start`
+		// pins the committed message, and the install's catch-up pins
+		// `session.messages.at(-1)` out of that same transcript array. Checked ahead
+		// of the in-flight branch so a settled prompt is skipped even though the slot
+		// it once held is free again.
+		const handled = (host[kExtractionHandledMessages] ??= new Set());
+		if (options.message && handled.has(options.message)) return;
+		if (host[kExtractionInFlight]) {
+			// One model call at a time. A prompt dropped here is otherwise lost
+			// outright: notably the first prompt after a `/move`, whose slot is
+			// held across the rebind by the source prompt's extraction. Queue it
+			// with the project it belonged to at drop time.
+			// A snapshot that is already being extracted, or already queued for a
+			// retry, is one extraction: a catch-up can name the very prompt that
+			// holds the slot (a live toggle mid-turn), and queueing it a second
+			// time would extract that prompt twice.
+			if (options.message) {
+				if (host[kExtractionInFlightMessage] === options.message) return;
+				if (host[kExtractionPendingQueue]?.some(pending => pending.options.message === options.message)) return;
+			}
+			const queue = (host[kExtractionPendingQueue] ??= []);
+			if (queue.length >= MAX_PENDING_EXTRACTIONS) {
+				logger.debug("Sharpshooter extraction backlog full; dropping prompt", {
+					sessionId: session.sessionId,
+				});
+				return;
+			}
+			queue.push({ cwd: forcedCwd ?? session.sessionManager.getCwd(), options });
+			return;
+		}
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
 		if (trimmedPrompt.startsWith("/") || trimmedPrompt.length < 16) return;
 
-		const run = runSharpshooterExtraction(options, envelope)
+		// Bind the bank now. The model call below can outlive a `/move`, and the
+		// deltas belong to the project whose prompt produced them.
+		const cwd = forcedCwd ?? session.sessionManager.getCwd();
+		const run = runSharpshooterExtraction(options, envelope, cwd)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
 			})
 			.finally(() => {
-				(session as ExtractionHost)[kExtractionInFlight] = undefined;
+				host[kExtractionInFlight] = undefined;
+				host[kExtractionInFlightMessage] = undefined;
+				void drainSharpshooterExtractionQueue(session);
 			});
-		(session as ExtractionHost)[kExtractionInFlight] = run;
+		host[kExtractionInFlight] = run;
+		host[kExtractionInFlightMessage] = options.message;
+		// Enrolled at the slot, not at the fire: a prompt that is only queued has
+		// not been extracted yet, and its retry re-enters this same guard.
+		if (options.message) handled.add(options.message);
 	} catch (error) {
 		logger.debug("Sharpshooter extraction could not start", { error: String(error) });
 	}
@@ -208,6 +327,12 @@ async function runSharpshooterExtraction(
 		agentDir: string;
 	},
 	envelope: SharpshooterEnvelope,
+	/**
+	 * The project the prompt was written in, captured before the model call.
+	 * `/move` can land while extraction is in flight, and a decision earned in the
+	 * source project is not a decision about the destination.
+	 */
+	cwd: string,
 ): Promise<void> {
 	const { session, settings, modelRegistry, agentDir } = options;
 	const model = await resolveSharpshooterModel(settings, modelRegistry);
@@ -248,7 +373,7 @@ async function runSharpshooterExtraction(
 			const delta = admitDelta(candidate, envelope.prompt, session.sessionId);
 			if (!delta) continue;
 			if (session.isDisposed) return;
-			await appendSharpshooterDelta(agentDir, session.sessionManager.getCwd(), delta);
+			await appendSharpshooterDelta(agentDir, cwd, delta);
 		}
 	}
 }

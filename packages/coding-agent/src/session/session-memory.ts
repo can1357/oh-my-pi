@@ -7,9 +7,11 @@ import { all as allSettings, combine, type Derived } from "../config/registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
-import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import type { MemoryBackendStartOptions, MemoryBackendStartReason } from "../memory-backend/types";
+import { startSharpshooterLeg } from "../memory-backend/with-sharpshooter";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
+import { cfgSharpshooterEnabled } from "../sharpshooter/settings";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
@@ -67,7 +69,7 @@ export class SessionMemory {
 	/** Cwd the running backend state was built for; a transcript is never retained after it moved. */
 	#runtimeCwd: string | undefined;
 	/** Apply waiting behind the current transition; later requests join it. */
-	#queuedApply: { retainMnemopi: boolean; done: Promise<void> } | undefined;
+	#queuedApply: { retainMnemopi: boolean; reason?: MemoryBackendStartReason; done: Promise<void> } | undefined;
 	/** Memory settings as last dispatched to `#applySettingsChange`; unset when live changes are disabled. */
 	#observedSettings: Record<string, unknown> | undefined;
 	/** Dispatched setting changes still running, including backend hooks that run outside the transition queue. */
@@ -294,19 +296,25 @@ export class SessionMemory {
 	 * settings only once it starts. Cwd rebinding can disable Mnemopi
 	 * auto-retention without skipping its drain.
 	 */
-	async applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
+	async applyMemoryBackend(
+		options: { retainMnemopi?: boolean; reason?: MemoryBackendStartReason } = {},
+	): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		const retainMnemopi = options.retainMnemopi !== false;
 		const queued = this.#queuedApply;
 		if (queued) {
 			queued.retainMnemopi &&= retainMnemopi;
+			// A cwd rebind never catches up on the transcript the outgoing scope
+			// leaves behind, so a rebind reason must not be weakened by a queued
+			// default-reason request it overtakes.
+			if (queued.reason !== "rebind") queued.reason = options.reason ?? queued.reason;
 			return queued.done;
 		}
-		const request = { retainMnemopi, done: Promise.resolve() };
+		const request = { retainMnemopi, reason: options.reason, done: Promise.resolve() };
 		this.#queuedApply = request;
 		request.done = this.#enqueueTransition(() => {
 			this.#queuedApply = undefined;
-			return this.#applyMemoryBackend(request.retainMnemopi);
+			return this.#applyMemoryBackend(request.retainMnemopi, request.reason);
 		});
 		await request.done;
 	}
@@ -321,12 +329,75 @@ export class SessionMemory {
 		return transition;
 	}
 
-	async #applyMemoryBackend(retainMnemopi: boolean): Promise<void> {
+	/**
+	 * Start, restart or release only the paired decision backend, leaving the
+	 * selected store's live state untouched.
+	 *
+	 * Two callers, and for both a full `applyMemoryBackend` would be wrong rather
+	 * than merely heavy, because it disposes the selected store and builds a new
+	 * one. A fresh `HindsightSessionState` starts at `lastRetainedTurn: 0` with an
+	 * empty transcript cache and `hasRecalledForFirstTurn: false`, so the next
+	 * `agent_end` re-retains the whole conversation under a new document and
+	 * first-turn recall fires a second time.
+	 *
+	 * A cwd move is one caller. `rebindMemoryBackendForCwd` skips the full apply
+	 * while a Hindsight transition owns the backend, so that it does not retry a
+	 * partially torn-down store outside its own task, and Sharpshooter still has
+	 * to follow: it keys its decision bank and its per-bank scheduler on cwd, so
+	 * skipping leaves it consolidating the project the session just left and
+	 * ignoring the destination project's own `sharpshooter.enabled`. The
+	 * destination decides both ways, and a destination that turns pairing off has
+	 * to take the source's subscription and scheduler with it.
+	 *
+	 * A live `sharpshooter.enabled` toggle is the other. Nothing caches what
+	 * `resolveMemoryBackend` returns, so search and status pick the flag up on
+	 * their own; what needs doing is exactly this, the session resources and the
+	 * prompt.
+	 *
+	 * Sharpshooter selected as the backend is left alone either way. The flag is
+	 * documented as ignored there, and it rebinds through the normal apply.
+	 *
+	 * Every branch that changed anything ends with a prompt rebuild. Sharpshooter's
+	 * decision files are injected as developer instructions, and the Hindsight
+	 * rebuild a move runs beside this refreshes the base prompt only when its own
+	 * bank scope changed, which a `global` scope or an unchanged bank never does.
+	 */
+	async applyPairedMemoryBackend(reason: MemoryBackendStartReason): Promise<void> {
+		if (this.#host.isDisposed()) return;
+		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
+		const settings = this.#host.settings;
+		const backend = cfgMemoryBackend.get(settings);
+		if (backend === "sharpshooter") return;
+		const session = this.#host.memoryBackendSession();
+		if (cfgSharpshooterEnabled.get(settings)) {
+			startSharpshooterLeg(
+				{
+					session,
+					settings,
+					modelRegistry: this.#host.modelRegistry,
+					agentDir: this.#memoryAgentDir,
+					taskDepth: this.#memoryTaskDepth,
+					reason,
+				},
+				backend ?? "off",
+			);
+		} else {
+			releaseSharpshooterSession(session);
+		}
+		if (this.#host.isDisposed()) return;
+		await this.#host.refreshBaseSystemPrompt();
+	}
+
+	async #applyMemoryBackend(retainMnemopi = true, reason: MemoryBackendStartReason = "start"): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		const cwd = this.#host.cwd();
 		// A cwd move (or its rollback) may reach here before the rebind does:
 		// drain the outgoing state without capturing the transcript under a stale scope.
 		const retain = retainMnemopi && (this.#runtimeCwd ?? cwd) === cwd;
+		// A full apply that runs while the session cwd has moved past the applied
+		// cwd IS the move's rebind, not a fresh start: it must not catch up on a
+		// transcript the destination never earned.
+		if ((this.#runtimeCwd ?? cwd) !== cwd) reason = "rebind";
 		try {
 			await this.#disposeMemoryBackendState(true, retain);
 			this.#runtimeCwd = cwd;
@@ -338,6 +409,7 @@ export class SessionMemory {
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
+					reason,
 				});
 			}
 			if (this.#host.isDisposed()) return;
