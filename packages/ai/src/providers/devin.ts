@@ -21,6 +21,7 @@ import {
 	GetUserJwtResponseSchema,
 	type ImageData,
 	ImageDataSchema,
+	type Metadata,
 	MetadataSchema,
 	type ModelAssignment,
 	PromptCacheOptionsSchema,
@@ -28,7 +29,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -221,7 +222,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const turn: DevinTurn = {
-				apiKey: options?.apiKey,
+				apiKey: auth.apiKey,
 				userJwt: auth.userJwt,
 				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
 				messages: transformMessages(context.messages, model),
@@ -526,7 +527,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 /** Per-turn wire state shared by `AssignModel` and `GetChatMessage`. */
 interface DevinTurn {
-	apiKey: string | undefined;
+	apiKey: string;
 	userJwt: string;
 	/** Cascade thread id; assignment and chat must agree on it or the JWT is rejected. */
 	cascadeId: string;
@@ -534,13 +535,18 @@ interface DevinTurn {
 	messages: Message[];
 }
 
-async function fetchDevinAuthMetadata(
-	apiKey: string | undefined,
+interface DevinAuthAttempt {
+	response: Response;
+	payload: Uint8Array;
+}
+
+async function requestDevinAuth(
+	metadata: Metadata,
 	baseUrl: string,
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
-): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
+): Promise<DevinAuthAttempt> {
+	const request = create(GetUserJwtRequestSchema, { metadata });
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
 		headers: {
@@ -551,9 +557,29 @@ async function fetchDevinAuthMetadata(
 		body: toBinary(GetUserJwtRequestSchema, request),
 		signal,
 	});
-	const payload = new Uint8Array(await response.arrayBuffer());
-	if (!response.ok) throw createDevinHttpError("auth", response, payload);
-	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, payload);
+	return { response, payload: new Uint8Array(await response.arrayBuffer()) };
+}
+
+async function fetchDevinAuthMetadata(
+	apiKey: string | undefined,
+	baseUrl: string,
+	fetchImpl: NonNullable<StreamOptions["fetch"]>,
+	signal: AbortSignal | undefined,
+): Promise<{ userJwt: string; apiKey: string; baseUrl?: string }> {
+	const sessionMetadata = create(MetadataSchema, devinCliMetadata(apiKey));
+	let wireApiKey = sessionMetadata.apiKey;
+	let attempt = await requestDevinAuth(sessionMetadata, baseUrl, fetchImpl, signal);
+
+	if (attempt.response.status === 401) {
+		const apiKeyMetadata = create(MetadataSchema, devinWireMetadata(apiKey));
+		if (apiKeyMetadata.apiKey && apiKeyMetadata.apiKey !== sessionMetadata.apiKey) {
+			attempt = await requestDevinAuth(apiKeyMetadata, baseUrl, fetchImpl, signal);
+			wireApiKey = apiKeyMetadata.apiKey;
+		}
+	}
+
+	if (!attempt.response.ok) throw createDevinHttpError("auth", attempt.response, attempt.payload);
+	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, attempt.payload);
 	if (!decoded?.userJwt) {
 		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
 			provider: "devin",
@@ -561,7 +587,11 @@ async function fetchDevinAuthMetadata(
 		});
 	}
 	const customBaseUrl = decoded.customApiServerUrl.trim();
-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
+	return {
+		userJwt: decoded.userJwt,
+		apiKey: wireApiKey,
+		...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined),
+	};
 }
 
 /**
@@ -578,7 +608,7 @@ async function assignDevinModel(
 	signal: AbortSignal | undefined,
 ): Promise<ModelAssignment> {
 	const request = create(AssignModelRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey)),
+		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey)),
 		modelRouterUid: model.requestModelId ?? model.id,
 		cascadeId: turn.cascadeId,
 		chatMessagePrompt: buildRouterPrompt(turn.messages),
@@ -660,7 +690,7 @@ function buildDevinChatRequest(
 		});
 	});
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
+		metadata: create(MetadataSchema, devinWireMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
 		chatModelUid,

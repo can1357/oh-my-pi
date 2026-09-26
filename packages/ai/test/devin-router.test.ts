@@ -11,6 +11,8 @@ import {
 	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
+	type GetUserJwtRequest,
+	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	ModelAssignmentSchema,
 	StopReason,
@@ -57,6 +59,7 @@ interface RecordedTurn {
 	/** Request paths in call order, so ordering between AssignModel and chat is observable. */
 	paths: string[];
 	assignment?: AssignModelRequest;
+	authApiKeys: string[];
 	chat?: GetChatMessageRequest;
 }
 
@@ -70,12 +73,20 @@ function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
 }
 
+function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
+	return fromBinary(GetUserJwtRequestSchema, new Uint8Array(body as ArrayBuffer));
+}
+
 /** Fake Devin edge: serves auth, a fixed model assignment, and one chat response frame. */
-function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: string }; chat?: ChatResponseFields }): {
+function fakeDevin(options: {
+	assignment?: { assignmentJwt: string; modelUid: string };
+	chat?: ChatResponseFields;
+	rejectPrefixedAuth?: boolean;
+}): {
 	fetch: typeof fetch;
 	recorded: RecordedTurn;
 } {
-	const recorded: RecordedTurn = { paths: [] };
+	const recorded: RecordedTurn = { paths: [], authApiKeys: [] };
 	const chatFrame = frameConnectMessage(
 		toBinary(
 			GetChatMessageResponseSchema,
@@ -89,7 +100,14 @@ function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: st
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
 		recorded.paths.push(new URL(url).pathname);
-		if (url.includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
+		if (url.includes("GetUserJwt")) {
+			const apiKey = decodeAuthRequest(init?.body).metadata?.apiKey ?? "";
+			recorded.authApiKeys.push(apiKey);
+			if (options.rejectPrefixedAuth && apiKey.startsWith("devin-session-token$")) {
+				return new Response("", { status: 401 });
+			}
+			return new Response(AUTH_PAYLOAD);
+		}
 		if (url.includes("AssignModel")) {
 			recorded.assignment = decodeAssignRequest(init?.body);
 			const response = create(AssignModelResponseSchema, {
@@ -165,6 +183,23 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.cascadeId).toBe("cascade-42");
 		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "user-jwt" });
 		expect(result.upstreamModel).toBe("claude-sonnet-4-5");
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("retries auth with an unprefixed API key and keeps it for routing and chat", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({
+			rejectPrefixedAuth: true,
+			assignment: { assignmentJwt: "assign-jwt", modelUid: "claude-sonnet-4-5" },
+		});
+
+		const result = await streamDevin(devinModel({ modelRouter: true }), context, {
+			apiKey: "legacy-windsurf-key",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(recorded.authApiKeys).toEqual(["devin-session-token$legacy-windsurf-key", "legacy-windsurf-key"]);
+		expect(recorded.assignment?.metadata?.apiKey).toBe("legacy-windsurf-key");
+		expect(recorded.chat?.metadata?.apiKey).toBe("legacy-windsurf-key");
 		expect(result.stopReason).toBe("stop");
 	});
 
