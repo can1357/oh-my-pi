@@ -12,8 +12,8 @@ Layout:
 
 The cargo workspace stays authoritative for local iteration (rust-analyzer,
 `cargo nextest`, napi typedef regeneration); Bazel is the artifact and CI
-pipeline. `crate_universe` derives the Bazel dependency graph directly from
-Cargo.toml/Cargo.lock and the module annotations; no separate repin step is required.
+pipeline. `crate_universe` derives @crates from Cargo.toml/Cargo.lock; its result is cached in
+MODULE.bazel.lock, which must be refreshed with them: `bun run gen:bazel-lock`.
 """
 
 module(name = "omp")
