@@ -2570,10 +2570,10 @@ export class TurnRecovery {
 		// can act on it.
 		// Opt-out: retry.waitForUsageReset lets a provider-stated usage-limit
 		// reset (Flag.UsageLimit — 5h/weekly quota windows, CN 使用上限, spend
-		// caps, … on any provider) sleep past the cap. Gated on authoritative
-		// provider timing: either a parsed reset hint from the error text, or
-		// a complete usage-report window (every exhausted limit carries a
-		// future reset). Usage-limit errors with neither fall back to the
+		// caps, … on any provider) sleep past the cap. A parsed error-text hint
+		// is authoritative even when usage-report correlation has no outcome;
+		// report correlation is only required when its complete window supplies
+		// the timing instead. Usage-limit errors with neither fall back to the
 		// 30-minute QUOTA_EXHAUSTED heuristic, and sleeping on that for a
 		// permanent error (402 balance, dead spend cap) would hold the session
 		// through repeated heuristic sleeps instead of surfacing it. Bounded
@@ -2582,8 +2582,8 @@ export class TurnRecovery {
 		const maxDelayMs = retrySettings.maxDelayMs;
 		const waitForUsageReset =
 			retrySettings.waitForUsageReset === true &&
-			recordedUsageLimitOutcome !== undefined &&
-			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
+			AIError.is(id, AIError.Flag.UsageLimit) &&
+			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome?.reportResetAtMs !== undefined) &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			delayMs <= effectiveUsageLimitWaitMs;
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
