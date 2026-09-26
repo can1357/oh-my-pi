@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 
@@ -180,6 +181,11 @@ async function runCommand(command: readonly string[]): Promise<number> {
 		const currentPath = env.PATH ?? env.Path ?? "";
 		env.PATH = currentPath === "" ? toolchainBin : `${toolchainBin}${pathSep}${currentPath}`;
 	}
+	// pi-vcs tests shell out to real `git` for the oracle they compare gix
+	// output against, so pin git to its defaults: a developer's
+	// `diff.external` makes `git diff` emit that tool's display format.
+	env.GIT_CONFIG_GLOBAL = os.devNull;
+	env.GIT_CONFIG_SYSTEM = os.devNull;
 	const proc = Bun.spawn(argv, {
 		cwd: repoRoot,
 		env,
