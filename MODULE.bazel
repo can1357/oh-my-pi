@@ -226,6 +226,7 @@ xwin_sysroot(name = "xwin_sysroot")
 xwin_sysroot(
     name = "xwin_sysroot_arm64",
     arch = "aarch64",
+    sdk_version = "10.0.22621",
 )
 
 msvc_cc = use_repo_rule("//bazel/toolchains/msvc:cc.bzl", "msvc_cc_repository")
