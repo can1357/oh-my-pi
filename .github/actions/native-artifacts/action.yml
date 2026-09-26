@@ -1,12 +1,11 @@
 name: "Install native addon artifacts"
 description: >
    Downloads the native addons built once by the native_addons jobs and
-   installs exact targets without invoking Bazel. The linux-x64 addons ship as
-   per-leg `natives-linux-x64-<variant>` artifacts; the cross targets as
-   per-target `natives-cross-<target>` artifacts, fetched only when a
-   requested target needs them. On omp-kata pods the linux-x64 addons are
-   first restored from the in-cluster stash native_addons writes to the
-   shared runner-cache PVC, skipping the artifact download.
+   installs exact targets without invoking Bazel. The linux-x64 pair ships as
+   its own small `natives-linux-x64` artifact; the rest (`native-addons`) is
+   fetched only when a requested target needs it. On omp-kata pods the pair is
+   first restored from the in-cluster stash native_addons writes to the shared
+   runner-cache PVC, skipping the artifact download.
 
 inputs:
    targets:
@@ -16,12 +15,11 @@ inputs:
       description: Destination directory for the .node files
       required: false
       default: packages/natives/native
-   stash-run:
+   stash:
       description: >
-         Run id whose in-cluster stash index native_addons wrote
-         (run-<id>/<artifact-relative path>.sha256). Used only where the stash
-         directory is mounted; any missing or mismatched entry falls back to
-         the artifact download.
+         native_addons `stash` output ("<artifact-relative path>=<sha256>"
+         pairs). Used only where the stash directory is mounted; any missing
+         or mismatched entry falls back to the artifact download.
       required: false
       default: ""
 
@@ -33,7 +31,7 @@ runs:
         shell: bash
         env:
            NATIVE_TARGETS: ${{ inputs.targets }}
-           STASH_RUN: ${{ inputs.stash-run }}
+           NATIVE_STASH: ${{ inputs.stash }}
         run: |
            set -euo pipefail
            read -r -a targets <<< "$NATIVE_TARGETS"
@@ -41,65 +39,59 @@ runs:
              echo "::error::At least one native addon target is required"
              exit 1
            fi
-           x64=()
+           x64=false
            rest=false
            for t in "${targets[@]}"; do
              case "$t" in
-               linux-x64-baseline|linux-x64-modern) x64+=("$t") ;;
+               linux-x64-baseline|linux-x64-modern) x64=true ;;
                *) rest=true ;;
              esac
            done
-           # ci.yml uploads cross targets on non-PR events only.
+           # ci.yml uploads `native-addons` on non-PR events only.
            if [ "$rest" = true ] && [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-             echo "::error::PR runs only publish linux-x64 addons; targets outside linux-x64-baseline/linux-x64-modern are unavailable: $NATIVE_TARGETS"
+             echo "::error::PR runs only publish natives-linux-x64; targets outside linux-x64-baseline/linux-x64-modern are unavailable: $NATIVE_TARGETS"
              exit 1
            fi
            # Written by ci.yml native_addons ("Stage native addons for
-           # consumers"); keep the layout in sync with it.
+           # consumers"); keep the directory in sync with it.
            stash_dir=/opt/bazel-repo-cache/ci-natives
            out="$RUNNER_TEMP/omp-native-artifacts"
-           need_x64=false
-           if [ "${#x64[@]}" -gt 0 ]; then
-             need_x64=true
-             index="$stash_dir/run-$STASH_RUN"
-             if [ -n "$STASH_RUN" ] && [ -d "$index" ]; then
-               restored=true
-               for t in "${x64[@]}"; do
-                 rel="natives-$t/pi_natives.$t.node"
-                 sha="$(cat "$index/$rel.sha256" 2>/dev/null || true)"
-                 mkdir -p "$out/natives-$t"
-                 if [ -z "$sha" ] || ! cp "$stash_dir/$sha.node" "$out/$rel" 2>/dev/null \
-                   || [ "$(sha256sum "$out/$rel" | cut -d' ' -f1)" != "$sha" ]; then
-                   restored=false
-                   break
-                 fi
-               done
-               if [ "$restored" = true ]; then
-                 echo "linux-x64 addons restored from the in-cluster stash"
-                 need_x64=false
-               else
-                 echo "::warning title=Native addon stash miss::falling back to the natives-linux-x64-* artifacts"
-                 for t in "${x64[@]}"; do rm -f "$out/natives-$t/pi_natives.$t.node"; done
+           if [ "$x64" = true ] && [ -n "$NATIVE_STASH" ] && [ -d "$stash_dir" ]; then
+             read -r -a entries <<< "$NATIVE_STASH"
+             restored=true
+             for entry in "${entries[@]}"; do
+               rel="${entry%%=*}"
+               sha="${entry##*=}"
+               mkdir -p "$out/$(dirname "$rel")"
+               if ! cp "$stash_dir/$sha.node" "$out/$rel" 2>/dev/null \
+                 || [ "$(sha256sum "$out/$rel" | cut -d' ' -f1)" != "$sha" ]; then
+                 restored=false
+                 break
                fi
+             done
+             if [ "$restored" = true ]; then
+               echo "linux-x64 addons restored from the in-cluster stash"
+               x64=false
+             else
+               echo "::warning title=Native addon stash miss::falling back to the natives-linux-x64 artifact"
+               for entry in "${entries[@]}"; do rm -f "$out/${entry%%=*}"; done
              fi
            fi
-           echo "x64=$need_x64" >> "$GITHUB_OUTPUT"
+           echo "x64=$x64" >> "$GITHUB_OUTPUT"
            echo "rest=$rest" >> "$GITHUB_OUTPUT"
 
-      - name: Download linux-x64 native addon artifacts
+      - name: Download linux-x64 native addon artifact
         if: steps.need.outputs.x64 == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-           pattern: natives-linux-x64-*
-           merge-multiple: true
+           name: natives-linux-x64
            path: ${{ runner.temp }}/omp-native-artifacts
 
-      - name: Download cross native addon artifacts
+      - name: Download remaining native addon artifacts
         if: steps.need.outputs.rest == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-           pattern: natives-cross-*
-           merge-multiple: true
+           name: native-addons
            path: ${{ runner.temp }}/omp-native-artifacts
 
       - name: Install native addon targets
