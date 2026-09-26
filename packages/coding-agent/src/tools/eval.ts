@@ -539,6 +539,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const run = async (
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
+			asyncJobId?: string,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
 			// Re-check the retained namespace against the streamed planning snapshot:
 			// timers, background work, or concurrent session users may have changed
@@ -568,6 +569,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					signal: runSignal,
 					sessionAbortController,
 					emitUpdate,
+					asyncJobId,
 				}),
 			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
@@ -613,7 +615,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						latestDetails = details;
 						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
 						if (forwardUpdates) emitToolUpdate?.(text, details);
-					});
+					}, jobId);
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
 						formatOutputNotice(result.details?.meta);
@@ -737,10 +739,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		notice: string | undefined;
 		excludeWebP: boolean | undefined;
 		signal: AbortSignal | undefined;
+		asyncJobId?: string;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate } = options;
+		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, asyncJobId } = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -902,6 +905,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						sessionId,
 						sessionFile: sessionFile ?? undefined,
 						kernelOwnerId,
+						asyncJobId,
 						signal: combinedSignal,
 						session,
 						idleTimeoutMs,

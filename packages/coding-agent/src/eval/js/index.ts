@@ -43,6 +43,7 @@ export default {
 			signal: opts.signal,
 			sessionId: identity.sessionKey,
 			kernelOwnerId: identity.ownerId,
+			asyncJobId: opts.asyncJobId,
 			sessionFile: opts.sessionFile,
 			filename: opts.filename,
 			packages: opts.packages,
