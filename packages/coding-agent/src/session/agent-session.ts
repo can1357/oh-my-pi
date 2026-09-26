@@ -8781,6 +8781,9 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
+			// A new transcript keeps the configured selector, not the prior turn's auto resolution.
+			// Restore without persisting; the new session gets exactly one initial receipt below.
+			this.#models.restoreThinkingLevel(this.configuredThinkingLevel());
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 

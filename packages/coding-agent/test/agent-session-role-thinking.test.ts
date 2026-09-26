@@ -373,6 +373,39 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
+	it("starts /new without carrying the previous session's auto-classified effort", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierSpy = vi
+			.spyOn(autoThinkingClassifier, "classifyDifficulty")
+			.mockResolvedValueOnce(Effort.Low)
+			.mockResolvedValueOnce(Effort.Medium);
+
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Handle a straightforward update");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+
+		expect(await session.newSession()).toBe(true);
+		const provisional = resolveProvisionalAutoLevel(model);
+		expect(classifierSpy).toHaveBeenCalledTimes(1);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+		expect(session.thinkingLevel).toBe(provisional);
+		expect(session.agent.state.thinkingLevel).toBe(provisional);
+		expect(session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toMatchObject(
+			[{ thinkingLevel: provisional, configured: AUTO_THINKING }],
+		);
+
+		await session.prompt("Investigate a parser regression");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+		expect(session.sessionManager.buildSessionContext().thinkingLevel).toBe(Effort.Medium);
+	});
+
 	it("does not record late classifier usage in a replacement session after abort", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		await createSession({
