@@ -284,6 +284,7 @@
 - Added Handlebars-based system prompt templates through SYSTEM_TEMPLATE.md, --system-prompt-template, and the SDK, with access to live settings and tool data.
 - Added configurable image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, legacy backend-setting migration, and omp models --kind filtering.
 - Added native OpenRouter image generation, model-selected web-plugin search, and live discovery of TypeSafe judge models.
+- Added OMP Jev Gate to the standalone extension list, with direct GitHub installation and graphical configuration ([#12585](https://github.com/can1357/oh-my-pi/pull/12585) by [@cyriusweng](https://github.com/cyriusweng)).
 
 ### Changed
 
