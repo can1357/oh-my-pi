@@ -35,6 +35,13 @@ inputs:
    scope:
       description: Disk-cache key discriminator shared by compatible consumers
       required: true
+   fallback-scope:
+      description: >
+         Optional scope whose newest archive is the last restore fallback
+         (e.g. the sibling darwin target on the same runner image, which
+         shares every exec-config action). Empty disables it.
+      required: false
+      default: ""
 
 outputs:
    rc:
@@ -72,11 +79,16 @@ runs:
            key="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
            prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-"
            bare_prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-"
+           fallback_prefix=""
+           if [ -n "${{ inputs.fallback-scope }}" ]; then
+             fallback_prefix="bazel-disk-v3-${{ inputs.fallback-scope }}-${{ runner.os }}-${{ runner.arch }}-"
+           fi
            {
              echo "remote=$remote"
              echo "cache-key=$key"
              echo "cache-prefix=$prefix"
              echo "cache-bare-prefix=$bare_prefix"
+             echo "cache-fallback-prefix=$fallback_prefix"
            } >> "$GITHUB_OUTPUT"
 
       - name: Restore bazel disk cache
@@ -101,6 +113,7 @@ runs:
            restore-keys: |
               ${{ steps.backend.outputs.cache-prefix }}
               ${{ steps.backend.outputs.cache-bare-prefix }}
+              ${{ steps.backend.outputs.cache-fallback-prefix }}
 
       - name: Compose cache config
         id: compose

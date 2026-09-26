@@ -3,8 +3,12 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version|major|minor|patch|canary>   Full release (preflight, version, changelog, commit, push, watch)
+ *   bun scripts/release.ts <version|major|minor|patch|canary> [--skip-ci-check]
+ *                                                        Full release (preflight incl. CI-green check, version,
+ *                                                        changelog, commit, push, watch)
  *   bun scripts/release.ts watch                         Watch CI for current commit
+ *   bun scripts/release.ts deps                          Full third-party dependency refresh (bun.lock + Cargo.lock);
+ *                                                        land it via PR/main CI before the next release
  *
  * Example: bun scripts/release.ts minor
  */
@@ -37,6 +41,120 @@ export function validateExplicitVersion(version: string): string | null {
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
+}
+
+// =============================================================================
+// CI-green preflight
+// =============================================================================
+
+export interface CIRun {
+	databaseId: number;
+	status: string;
+	conclusion: string | null;
+	event?: string;
+}
+
+export interface CommitRuns {
+	sha: string;
+	runs: readonly CIRun[];
+}
+
+export type CIGateDecision =
+	| { kind: "pass"; sha: string; runId: number; ancestor: boolean }
+	| { kind: "fail"; sha: string; runId: number; conclusion: string; ancestor: boolean }
+	| { kind: "wait"; sha: string; runId: number; ancestor: boolean }
+	| { kind: "none" };
+
+/**
+ * Decide the CI gate from HEAD's first-parent chain (index 0 = HEAD). The
+ * first commit that has any CI run is authoritative; its latest run (highest
+ * databaseId) must have completed with `success`. Commits without runs (e.g.
+ * path-filtered pushes) fall through to their first-parent ancestor.
+ */
+export function decideCIGate(chain: readonly CommitRuns[]): CIGateDecision {
+	for (let i = 0; i < chain.length; i++) {
+		const { sha, runs } = chain[i];
+		if (runs.length === 0) continue;
+		const latest = runs.reduce((a, b) => (b.databaseId > a.databaseId ? b : a));
+		const ancestor = i > 0;
+		if (latest.status !== "completed") return { kind: "wait", sha, runId: latest.databaseId, ancestor };
+		if (latest.conclusion === "success") return { kind: "pass", sha, runId: latest.databaseId, ancestor };
+		return { kind: "fail", sha, runId: latest.databaseId, conclusion: latest.conclusion ?? "unknown", ancestor };
+	}
+	return { kind: "none" };
+}
+
+const CI_ANCESTOR_LIMIT = 30;
+
+async function listCIRuns(sha: string): Promise<CIRun[]> {
+	const out = await $`gh run list --commit ${sha} --workflow CI --json databaseId,status,conclusion,event`.text();
+	return JSON.parse(out) as CIRun[];
+}
+
+/** Poll a run until it completes; fail fast on the first failed job. */
+async function waitForRun(runId: number): Promise<boolean> {
+	while (true) {
+		const out = await $`gh run view ${runId} --json status,conclusion,jobs`.quiet().text();
+		const run = JSON.parse(out) as {
+			status: string;
+			conclusion: string | null;
+			jobs: Array<{ name: string; databaseId: number; status: string; conclusion: string | null }>;
+		};
+		const failedJob = run.jobs.find(
+			j => j.status === "completed" && j.conclusion !== "success" && j.conclusion !== "skipped",
+		);
+		if (failedJob) {
+			console.error(`  CI job failed: ${failedJob.name} (job ${failedJob.databaseId}): ${failedJob.conclusion}`);
+			return false;
+		}
+		if (run.status === "completed") return run.conclusion === "success";
+		const done = run.jobs.filter(j => j.status === "completed").length;
+		console.log(`  Waiting for CI run ${runId}... (${done}/${run.jobs.length} jobs done)`);
+		await Bun.sleep(10000);
+	}
+}
+
+async function checkCIGreen(): Promise<void> {
+	await git(["fetch", "origin", "main"]).quiet();
+	const head = (await git(["rev-parse", "HEAD"]).text()).trim();
+	const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
+	if (head !== remote) {
+		console.error(`Error: HEAD (${head.slice(0, 8)}) != origin/main (${remote.slice(0, 8)}). Pull/push first.`);
+		process.exit(1);
+	}
+	console.log("  HEAD matches origin/main");
+
+	const shas = (await git(["rev-list", "--first-parent", "-n", String(CI_ANCESTOR_LIMIT), "HEAD"]).text())
+		.trim()
+		.split("\n")
+		.filter(Boolean);
+	const chain: CommitRuns[] = [];
+	let decision: CIGateDecision = { kind: "none" };
+	for (const sha of shas) {
+		chain.push({ sha, runs: await listCIRuns(sha) });
+		decision = decideCIGate(chain);
+		if (decision.kind !== "none") break;
+	}
+
+	if (decision.kind === "none") {
+		console.error(`Error: No CI run found on HEAD or its last ${CI_ANCESTOR_LIMIT} first-parent ancestors.`);
+		process.exit(1);
+	}
+	const label = decision.ancestor
+		? `ancestor ${decision.sha.slice(0, 8)} (HEAD ${head.slice(0, 8)} has no CI run)`
+		: `HEAD ${decision.sha.slice(0, 8)}`;
+	if (decision.kind === "wait") {
+		console.log(`  CI run ${decision.runId} for ${label} in progress; waiting...`);
+		if (!(await waitForRun(decision.runId))) {
+			console.error(`Error: CI run ${decision.runId} for ${label} failed. Fix main before releasing.`);
+			process.exit(1);
+		}
+	} else if (decision.kind === "fail") {
+		console.error(`Error: CI run ${decision.runId} for ${label} concluded '${decision.conclusion}'.`);
+		console.error("  Fix main (or re-run CI) before releasing, or pass --skip-ci-check to override.");
+		process.exit(1);
+	}
+	console.log(`  CI green for ${label} (run ${decision.runId})`);
 }
 
 // =============================================================================
@@ -218,7 +336,18 @@ export function bumpCanaryVersion(current: string): string {
 	return `${major}.${minor}.${patch + 1}-canary.1`;
 }
 
-async function cmdRelease(versionOrBump: string): Promise<void> {
+async function cmdDeps(): Promise<void> {
+	console.log("\n=== Full dependency refresh ===\n");
+	await $`rm -f bun.lock`;
+	await $`bun install`;
+	await $`cargo generate-lockfile`;
+	await generateNixBunDeps(resolveNixBunDepsGenerator());
+	await $`bun scripts/gen-clippy-bazelrc.ts`;
+	console.log("\nDependencies refreshed. Land these lockfile changes through a PR (or push to main) and");
+	console.log("let CI go green BEFORE the next release; `release` no longer refreshes third-party deps.");
+}
+
+async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
 	// never throws, so without this guard garbage like "999.bad" would be
@@ -258,6 +387,12 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		process.exit(1);
 	}
 	console.log("  Working directory clean");
+
+	if (skipCICheck) {
+		console.warn("\n  !!! WARNING: --skip-ci-check given: NOT verifying that CI is green on main. !!!\n");
+	} else {
+		await checkCIGreen();
+	}
 
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
@@ -333,38 +468,16 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// 3b. Rename the pi-natives version sentinel so any `.node` left on disk from
-	// a previous release physically cannot expose the symbol the new `index.js`
-	// expects. The JS loader derives `VERSION_SENTINEL_EXPORT` from `package.json`
-	// at runtime, so the only thing that has to move on the Rust side is the
-	// `js_name = "__piNativesV…"` literal. `gen-enums.ts` regenerates the matching
-	// entries in `packages/natives/native/{index.d.ts,index.js}` on the next napi
-	// build, but bump them here too so the committed surface tracks the version
-	// without waiting for a local rebuild on the release host.
-	console.log(`Bumping pi-natives version sentinel to v${version}…`);
-	const sentinelJsId = version.replace(/[^A-Za-z0-9]/g, "_");
-	const sentinelName = `__piNativesV${sentinelJsId}`;
-	const sentinelFiles = [
-		"crates/pi-natives/src/lib.rs",
-		"packages/natives/native/index.d.ts",
-		"packages/natives/native/index.js",
-	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
-	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
-	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
-		console.error(
-			`Error: pi-natives version sentinel did not move to ${sentinelName} in crates/pi-natives/src/lib.rs. ` +
-				"The `__piNativesV…` literal may have been removed or renamed; restore it before releasing.",
-		);
-		process.exit(1);
-	}
-	console.log(`  sentinel: ${sentinelName}\n`);
+	// pi-natives addons carry no per-release Rust edit: every install stamps
+	// `packages/natives/package.json#version` into the addon post-link
+	// (scripts/stamp-native-version.ts via scripts/bazel-natives.ts), so the
+	// version bump above is the only native-facing change.
 
 	// 4. Regenerate lockfiles and generated configs
-	console.log("Regenerating lockfiles...");
-	await $`rm -f bun.lock`;
+	// Only workspace member versions change here; third-party deps are refreshed
+	// separately via `bun scripts/release.ts deps` so they get CI before release.
 	await $`bun install`;
-	await $`cargo generate-lockfile`;
+	await $`cargo update --workspace`;
 	await generateNixBunDeps(nixBunDepsGenerator);
 	// bazel/clippy.bazelrc mirrors [workspace.lints] in Cargo.toml; regenerate
 	// it here (like the lockfiles) so the bazel clippy policy can never drift.
@@ -457,17 +570,25 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 // =============================================================================
 
 if (import.meta.main) {
-	const arg = process.argv[2];
+	const args = process.argv.slice(2);
+	const skipCICheck = args.includes("--skip-ci-check");
+	const arg = args.find(a => a !== "--skip-ci-check");
+	const usage = () => {
+		console.error("Usage:");
+		console.error("  bun scripts/release.ts <version|major|minor|patch|canary> [--skip-ci-check]   Full release");
+		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		console.error("  bun scripts/release.ts deps                          Full third-party dependency refresh");
+	};
 
 	if (!arg) {
-		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
-		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		usage();
 		process.exit(1);
 	}
 
 	if (arg === "watch") {
 		await cmdWatch();
+	} else if (arg === "deps") {
+		await cmdDeps();
 	} else if (
 		arg === "major" ||
 		arg === "minor" ||
@@ -475,12 +596,10 @@ if (import.meta.main) {
 		arg === "canary" ||
 		validateExplicitVersion(arg) !== null
 	) {
-		await cmdRelease(arg);
+		await cmdRelease(arg, skipCICheck);
 	} else {
 		console.error(`Unknown command or invalid version: ${arg}`);
-		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
-		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		usage();
 		process.exit(1);
 	}
 }

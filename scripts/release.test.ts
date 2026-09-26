@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bumpCanaryVersion, bumpVersion, validateExplicitVersion } from "./release";
+import { bumpCanaryVersion, bumpVersion, decideCIGate, validateExplicitVersion } from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -57,5 +57,72 @@ describe("release version bumps", () => {
 
 	test("rejects explicit canary versions", () => {
 		expect(validateExplicitVersion("1.2.3-canary.1")).toBe(null);
+	});
+});
+
+describe("decideCIGate", () => {
+	const run = (databaseId: number, status: string, conclusion: string | null) => ({ databaseId, status, conclusion });
+
+	test("green HEAD passes", () => {
+		expect(decideCIGate([{ sha: "h", runs: [run(1, "completed", "success")] }])).toEqual({
+			kind: "pass",
+			sha: "h",
+			runId: 1,
+			ancestor: false,
+		});
+	});
+
+	test("failed run blocks", () => {
+		expect(decideCIGate([{ sha: "h", runs: [run(1, "completed", "failure")] }])).toMatchObject({
+			kind: "fail",
+			conclusion: "failure",
+		});
+	});
+
+	test("cancelled run blocks", () => {
+		expect(decideCIGate([{ sha: "h", runs: [run(1, "completed", "cancelled")] }])).toMatchObject({
+			kind: "fail",
+			conclusion: "cancelled",
+		});
+	});
+
+	test("in-progress run waits", () => {
+		expect(decideCIGate([{ sha: "h", runs: [run(2, "in_progress", null)] }])).toEqual({
+			kind: "wait",
+			sha: "h",
+			runId: 2,
+			ancestor: false,
+		});
+	});
+
+	test("latest run wins (rerun after failure)", () => {
+		expect(decideCIGate([{ sha: "h", runs: [run(1, "completed", "failure"), run(5, "completed", "success")] }])).toMatchObject({
+			kind: "pass",
+			runId: 5,
+		});
+		expect(decideCIGate([{ sha: "h", runs: [run(5, "queued", null), run(1, "completed", "success")] }])).toMatchObject({
+			kind: "wait",
+			runId: 5,
+		});
+	});
+
+	test("no run on HEAD falls back to nearest ancestor with a run", () => {
+		const chain = [
+			{ sha: "h", runs: [] },
+			{ sha: "p1", runs: [] },
+			{ sha: "p2", runs: [run(3, "completed", "success")] },
+			{ sha: "p3", runs: [run(2, "completed", "failure")] },
+		];
+		expect(decideCIGate(chain)).toEqual({ kind: "pass", sha: "p2", runId: 3, ancestor: true });
+		expect(decideCIGate([{ sha: "h", runs: [] }, { sha: "p", runs: [run(1, "completed", "failure")] }])).toMatchObject({
+			kind: "fail",
+			sha: "p",
+			ancestor: true,
+		});
+	});
+
+	test("no runs anywhere yields none", () => {
+		expect(decideCIGate([{ sha: "h", runs: [] }])).toEqual({ kind: "none" });
+		expect(decideCIGate([])).toEqual({ kind: "none" });
 	});
 });

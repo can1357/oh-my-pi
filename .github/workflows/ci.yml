@@ -62,6 +62,13 @@ on:
             description: "Skip npm publish"
             type: boolean
             default: false
+         # TEST-BRANCH ONLY (ci/release-speedups): run every release build leg
+         # (release_binary, release_binary_hosted, release_gate) without any
+         # publish job, so release timing can be measured off-main.
+         release_dry_run:
+            description: "Build release legs, publish nothing"
+            type: boolean
+            default: false
 
 # Release runs publish a `v*` tag pushed atomically with main HEAD; sharing
 # the cheap branch-wide `CI-refs/heads/main` group meant a later main push
@@ -109,6 +116,8 @@ jobs:
          # Canary tags publish to npm's canary dist-tag (derived script-side), mark
          # the GitHub release prerelease, and skip the stable-only brew tap.
          channel: ${{ steps.detect.outputs.channel }}
+         # true for a release_dry_run dispatch: build legs run, publish jobs skip.
+         dry-run: ${{ steps.detect.outputs.dry-run }}
       steps:
          # Only a main-branch run needs tags fetched, so `git tag --points-at
          # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
@@ -135,6 +144,12 @@ jobs:
                   fi
                   ;;
               esac
+              dry_run=false
+              if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.release_dry_run }}" = true ]; then
+                dry_run=true
+                release_tag="v$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' packages/coding-agent/package.json | head -n1)-dryrun"
+                echo "release_dry_run: building release legs for $release_tag; every publish job is skipped."
+              fi
               if [ -n "$release_tag" ]; then
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
@@ -146,6 +161,7 @@ jobs:
                 echo "is-release=$is_release"
                 echo "release-tag=$release_tag"
                 echo "channel=$channel"
+                echo "dry-run=$dry_run"
               } >> "$GITHUB_OUTPUT"
 
    check:
@@ -247,17 +263,23 @@ jobs:
    # fan-out starts as soon as it links; native_addons_cross builds the other
    # Linux-hosted targets in parallel. Job name says "bazel" for continuity
    # with required checks.
+   #
+   # Non-PR runs build baseline and modern as parallel matrix legs: the
+   # one-addon-per-invocation OOM guard is per pod, so two pods link
+   # concurrently without sharing memory (serial pair: ~324 s + ~172 s on a
+   # pi_natives rebuild, probe run 36238796966).
    native_addons:
-      name: Build native addons (bazel)
+      name: "Build native addons (bazel) ${{ matrix.variant }}"
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       # actions: write lets main prune superseded addon cache entries.
       permissions:
          contents: read
          actions: write
-      outputs:
-         # "<artifact-relative path>=<sha256>" pairs; kata consumers restore
-         # these from the in-cluster stash (see native-artifacts).
-         stash: ${{ steps.stage.outputs.stash }}
+      strategy:
+         fail-fast: true
+         matrix:
+            # PRs restore both addons in one leg ("pair"); builds split.
+            variant: ${{ fromJSON(github.event_name == 'pull_request' && '["pair"]' || '["baseline","modern"]') }}
       steps:
          - uses: actions/checkout@v4
          - name: Compute native addon cache key
@@ -268,77 +290,107 @@ jobs:
               # saved for the same inputs. Mirrors the bazel-cache hash inputs.
               NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
            run: |
-              echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
-              echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
+              for v in baseline modern; do
+                echo "prefix-$v=natives-linux-x64-$v-v1-" >> "$GITHUB_OUTPUT"
+                echo "key-$v=natives-linux-x64-$v-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
+              done
+              # Entries saved before the split hold both addons.
+              echo "legacy-prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
 
          # ---- PR path: main-built addons from actions/cache, else npm ----
          # `ci-natives` is a plain workspace-relative path on purpose: the
          # cache version hashes the literal path list, so kata (save) and
          # hosted (restore) must spell it identically, and upload-artifact
          # skips dot-directories by default.
-         - name: Restore main-built native addons
-           id: natives-cache
+         - name: Restore main-built baseline addon
+           id: natives-cache-baseline
            if: github.event_name == 'pull_request'
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
+              key: ${{ steps.natives-key.outputs.key-baseline }}
               restore-keys: |
-                 ${{ steps.natives-key.outputs.prefix }}
-         - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request' && steps.natives-cache.outputs.cache-matched-key == ''
+                 ${{ steps.natives-key.outputs.prefix-baseline }}
+                 ${{ steps.natives-key.outputs.legacy-prefix }}
+         - name: Restore main-built modern addon
+           id: natives-cache-modern
+           if: github.event_name == 'pull_request'
+           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ci-natives
+              key: ${{ steps.natives-key.outputs.key-modern }}
+              restore-keys: |
+                 ${{ steps.natives-key.outputs.prefix-modern }}
+                 ${{ steps.natives-key.outputs.legacy-prefix }}
+         - name: Fetch missing addons from the npm release
+           if: github.event_name == 'pull_request'
            shell: bash
            run: |
               set -euo pipefail
+              missing=()
+              for v in baseline modern; do
+                [ -f "ci-natives/natives-linux-x64-$v/pi_natives.linux-x64-$v.node" ] || missing+=("$v")
+              done
+              if [ "${#missing[@]}" -eq 0 ]; then exit 0; fi
               tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
+              echo "Fetching $tarball for: ${missing[*]}"
               curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
+              for v in "${missing[@]}"; do
+                mkdir -p "ci-natives/natives-linux-x64-$v"
+                cp "$RUNNER_TEMP/package/pi_natives.linux-x64-$v.node" "ci-natives/natives-linux-x64-$v/"
+              done
+              echo "npm_fill=${missing[*]}" >> "$GITHUB_ENV"
          # Make the addon source visible whenever it is not source-matched,
          # instead of leaving a reviewer to wonder which addons the tests ran.
          - name: Report native addon source
            if: github.event_name == 'pull_request'
            shell: bash
            env:
-              EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
-              MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
+              EXACT_BASELINE: ${{ steps.natives-cache-baseline.outputs.cache-hit }}
+              EXACT_MODERN: ${{ steps.natives-cache-modern.outputs.cache-hit }}
+              MATCHED_BASELINE: ${{ steps.natives-cache-baseline.outputs.cache-matched-key }}
+              MATCHED_MODERN: ${{ steps.natives-cache-modern.outputs.cache-matched-key }}
            run: |
-              if [ "$EXACT" = true ]; then
-                echo "Using main's addons for this exact native source state ($MATCHED)."
-              elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon build ($MATCHED). Native changes are validated post-merge on main and at release."
+              if [ "$EXACT_BASELINE" = true ] && [ "$EXACT_MODERN" = true ]; then
+                echo "Using main's addons for this exact native source state ($MATCHED_BASELINE, $MATCHED_MODERN)."
+              elif [ -n "${npm_fill:-}" ]; then
+                echo "::notice title=Native addons from npm::No main-built cache entry for: ${npm_fill}; those addons come from the latest npm release."
               else
-                echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
+                echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon builds ($MATCHED_BASELINE, $MATCHED_MODERN). Native changes are validated post-merge on main and at release."
               fi
 
-         # ---- main path: bazel build of the linux-x64 pair ----
+         # ---- main path: bazel build of this leg's addon ----
          - id: cache
            if: github.event_name != 'pull_request'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
-         - name: Build linux-x64 native addons
+         - name: Build linux-x64 native addon
            if: github.event_name != 'pull_request'
+           env:
+              TARGET: natives-linux-x64-${{ matrix.variant }}
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              # The addon cdylib links each peak at several GiB of rustc RSS;
-              # building several addons in one invocation runs them
-              # concurrently, which OOMs the kata pod and takes the bazel
-              # server with it (exit 37 "Server terminated abruptly", runs
-              # 30556752623 / 30557524371). Build one addon per invocation —
-              # analysis and cached actions are shared through the persistent
-              # server, so only the heavy links serialize.
-              : > "$RUNNER_TEMP/bazel-build.log"
-              for target in $NATIVES_X64_TARGETS; do
-                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-              done
-              for target in $NATIVES_X64_TARGETS; do
-                mkdir -p "ci-natives/$target"
-                cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
-              done
+              # TEST-BRANCH: --profile to attribute the ~100-130 s spent before
+              # package loading on every fresh kata bazel server.
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --profile="$RUNNER_TEMP/bazel-profile.json.gz" "//:$TARGET" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+              mkdir -p "ci-natives/$TARGET"
+              cp -L bazel-bin/"$TARGET"/*.node "ci-natives/$TARGET/"
+         - name: Summarize bazel profile (test branch)
+           if: github.event_name != 'pull_request'
+           continue-on-error: true
+           shell: bash
+           run: |
+              bazelisk analyze-profile "$RUNNER_TEMP/bazel-profile.json.gz" 2>&1 | sed -n '1,60p'
+         - name: Upload bazel profile (test branch)
+           if: github.event_name != 'pull_request'
+           continue-on-error: true
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: bazel-profile-${{ matrix.variant }}
+              path: ${{ runner.temp }}/bazel-profile.json.gz
+              retention-days: 3
          # Cache-hit visibility: a supposedly warm build that executes
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
@@ -350,7 +402,7 @@ jobs:
               # matching — escapes split "INFO:" from the process count in
               # the raw log.
               summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
-              echo "::notice title=Bazel build summary::${summary:-no process summary found}"
+              echo "::notice title=Bazel build summary (${{ matrix.variant }})::${summary:-no process summary found}"
 
          # ---- both paths ----
          # A corrupt download or cache entry must fail here, not as a
@@ -373,54 +425,52 @@ jobs:
               EOF
               loader=node
               if command -v bun >/dev/null 2>&1; then loader=bun; fi
-              "$loader" "$RUNNER_TEMP/smoke-addons.js" \
-                "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
-                "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
+              "$loader" "$RUNNER_TEMP/smoke-addons.js" "$PWD"/ci-natives/natives-linux-x64-*/*.node
          # Kata test jobs download ~120 MB of artifact over the node's NAT
          # egress (44-68 s per job, on the critical path). Every kata pod
          # mounts the shared runner-cache PVC at /opt/bazel-repo-cache (the
-         # xwin cache already lives there), so stash the pair content-addressed
-         # beside it; the native-artifacts action restores and re-verifies it
-         # and falls back to the artifact on any miss. Best-effort: a stash
-         # failure only costs consumers the download.
+         # xwin cache already lives there), so stash each addon
+         # content-addressed beside it plus a per-run index
+         # (run-<run_id>/<artifact-relative path>.sha256) naming it; the
+         # native-artifacts action restores and re-verifies it and falls back
+         # to the artifact on any miss. A run-scoped index (instead of a job
+         # output) lets the matrix legs publish independently. Best-effort: a
+         # stash failure only costs consumers the download.
          - name: Stage native addons for consumers
-           id: stage
            shell: bash
            run: |
               set -euo pipefail
-              stash=""
-              for f in ci-natives/natives-linux-x64-*/*.node; do
-                sha="$(sha256sum "$f" | cut -d' ' -f1)"
-                stash="$stash ${f#ci-natives/}=$sha"
-              done
-              echo "stash=${stash# }" >> "$GITHUB_OUTPUT"
               stash_dir=/opt/bazel-repo-cache/ci-natives
               if [ -z "${BAZEL_REMOTE_USER:-}" ] || [ ! -w /opt/bazel-repo-cache ]; then
                 echo "No in-cluster stash on this runner; consumers download the artifact."
                 exit 0
               fi
-              if ! mkdir -p "$stash_dir"; then
+              index="$stash_dir/run-${{ github.run_id }}"
+              if ! mkdir -p "$stash_dir" "$index"; then
                 echo "::warning title=Native addon stash::cannot create $stash_dir; consumers will download the artifact"
                 exit 0
               fi
               # Consumers of a run need its entries for minutes; two days
               # covers re-runs while bounding the PVC footprint.
-              find "$stash_dir" -type f -mmin +2880 -delete 2>/dev/null || true
-              for entry in ${stash# }; do
-                rel="${entry%%=*}"
-                sha="${entry##*=}"
+              find "$stash_dir" -mindepth 1 -mmin +2880 -delete 2>/dev/null || true
+              for f in ci-natives/natives-linux-x64-*/*.node; do
+                rel="${f#ci-natives/}"
+                sha="$(sha256sum "$f" | cut -d' ' -f1)"
                 dest="$stash_dir/$sha.node"
                 if [ -f "$dest" ]; then
                   touch "$dest"
-                  continue
-                fi
-                tmp="$stash_dir/.$sha.$$.tmp"
-                if cp "ci-natives/$rel" "$tmp" && mv -f "$tmp" "$dest"; then
-                  echo "stashed $rel -> $dest"
                 else
-                  rm -f "$tmp"
-                  echo "::warning title=Native addon stash::could not stash $rel; consumers will download the artifact"
+                  tmp="$stash_dir/.$sha.$$.tmp"
+                  if ! { cp "$f" "$tmp" && mv -f "$tmp" "$dest"; }; then
+                    rm -f "$tmp"
+                    echo "::warning title=Native addon stash::could not stash $rel; consumers will download the artifact"
+                    continue
+                  fi
                 fi
+                # Index written last: a present index entry implies its blob.
+                mkdir -p "$index/$(dirname "$rel")"
+                printf '%s\n' "$sha" > "$index/$rel.sha256.tmp" && mv -f "$index/$rel.sha256.tmp" "$index/$rel.sha256"
+                echo "stashed $rel -> $dest"
               done
          # Only main saves: an entry saved on any other ref is readable by
          # that ref alone yet counts against the shared 10 GB repo quota,
@@ -437,7 +487,7 @@ jobs:
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
+              key: ${{ steps.natives-key.outputs[format('key-{0}', matrix.variant)] }}
               lookup-only: true
          - name: Save native addon cache entry
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
@@ -445,14 +495,14 @@ jobs:
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
+              key: ${{ steps.natives-key.outputs[format('key-{0}', matrix.variant)] }}
          - name: Prune superseded native addon cache entries
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            shell: bash
            env:
               GH_TOKEN: ${{ github.token }}
-              PREFIX: ${{ steps.natives-key.outputs.prefix }}
+              PREFIX: ${{ steps.natives-key.outputs[format('prefix-{0}', matrix.variant)] }}
            run: |
               # Best-effort: a failed prune leaves eviction to GitHub's LRU.
               gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIX" \
@@ -461,46 +511,62 @@ jobs:
                     gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
                   done || true
 
+         # Uploading the ci-natives directory (not a file glob) keeps the
+         # natives-linux-x64-<variant>/ subdirectory even for a one-file leg;
+         # consumers merge every natives-linux-x64-* artifact.
          - name: Upload linux-x64 native addon artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
-              name: natives-linux-x64
-              path: ci-natives/natives-linux-x64-*/*.node
+              name: natives-linux-x64-${{ matrix.variant }}
+              path: ci-natives
               if-no-files-found: error
               retention-days: 1
 
    # The remaining Linux-hosted targets (arm64, musl, win32 cross). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
-   # ahead of it: serially after the pair they held every test job back ~10
-   # min on native-changing main pushes. Non-PR only, like rust_validate;
-   # the build also keeps the remote cache warm for release runs.
+   # ahead of it. One matrix leg per target: serially the four took ~16 min on
+   # a pi_natives rebuild (probe run 36238796966). Non-PR only, like
+   # rust_validate; the build also keeps the remote cache warm for release
+   # runs. The matrix must list exactly NATIVES_CROSS_TARGETS (checked below).
    native_addons_cross:
-      name: Build native addons (bazel, cross targets)
+      name: "Build native addons (bazel, cross) ${{ matrix.target }}"
       if: github.event_name != 'pull_request'
       runs-on: omp-kata
+      strategy:
+         fail-fast: false
+         matrix:
+            target: [natives-linux-arm64, natives-linux-musl-arm64, natives-linux-musl-x64-baseline, natives-win32-x64-baseline]
       steps:
          - uses: actions/checkout@v4
          - id: cache
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
-         - name: Build cross-target native addons
+         - name: Build cross-target native addon
+           env:
+              TARGET: ${{ matrix.target }}
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              # One addon per invocation, for the OOM reason in native_addons.
-              : > "$RUNNER_TEMP/bazel-build.log"
-              for target in $NATIVES_CROSS_TARGETS; do
-                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-              done
-         # The two jobs' target lists must together cover //:natives-linux-all
-         # exactly; a target added to the filegroup but to neither list would
-         # otherwise silently never build or ship. cquery, not query: the rc's
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$TARGET" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+              mkdir -p "ci-natives/$TARGET"
+              cp -L bazel-bin/"$TARGET"/*.node "ci-natives/$TARGET/"
+         # The x64 pair plus the cross list must cover //:natives-linux-all
+         # exactly, and the matrix must equal NATIVES_CROSS_TARGETS; a target
+         # added to the filegroup but to no list would otherwise silently
+         # never build or ship. One leg checks. cquery, not query: the rc's
          # --config=ci is defined for build only, which cquery inherits and
          # query rejects; this also reuses the warm server.
          - name: Check addon target lists cover natives-linux-all
+           if: matrix.target == 'natives-linux-arm64'
+           env:
+              MATRIX_TARGETS: natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-x64-baseline
            run: |
               set -euo pipefail
+              if [ "$(printf '%s\n' $MATRIX_TARGETS | sort)" != "$(printf '%s\n' $NATIVES_CROSS_TARGETS | sort)" ]; then
+                echo "::error title=Native addon target lists::native_addons_cross matrix must equal NATIVES_CROSS_TARGETS"
+                exit 1
+              fi
               read -r -a listed <<< "$NATIVES_X64_TARGETS $NATIVES_CROSS_TARGETS"
               expected="$(printf '%s\n' "${listed[@]}" | sort)"
               actual="$(bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" cquery 'labels(srcs, //:natives-linux-all)' 2>"$RUNNER_TEMP/query.err" | sed -E 's/ \(.*\)$//; s/.*://' | sort)" || {
@@ -516,18 +582,47 @@ jobs:
            shell: bash
            run: |
               summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
-              echo "::notice title=Bazel build summary::${summary:-no process summary found}"
-         # Everything except the linux-x64 pair, which native_addons ships as
-         # its own small `natives-linux-x64` artifact.
-         - name: Upload remaining native addon artifacts
+              echo "::notice title=Bazel build summary (${{ matrix.target }})::${summary:-no process summary found}"
+         # Directory upload keeps the natives-<target>/ subdirectory; the
+         # native-artifacts action merges every natives-cross-* artifact.
+         - name: Upload cross native addon artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
-              name: native-addons
-              path: |
-                 bazel-bin/natives-*/*.node
-                 !bazel-bin/natives-linux-x64-*/*.node
+              name: natives-cross-${{ matrix.target }}
+              path: ci-natives
               if-no-files-found: error
               retention-days: 1
+
+   test_coding_agent_native:
+      name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      # The longest PR job, so it runs as three shards on hosted PR runners
+      # (two left the slower shard ~25 s behind every other job). Main keeps
+      # one: omp-kata caps at 8 runners and the fan-out already fills it.
+      # Declared first among the test jobs: when the 8-runner pool is full
+      # the longest bucket should not be the one left queued (probe run
+      # 36238796966 queued it 1.9 min behind the shorter buckets).
+      # No required check keys on this job name (branch protection and
+      # rulesets are off for main/omp2), so the per-shard names are safe.
+      strategy:
+         fail-fast: false
+         matrix:
+            shard: ${{ fromJSON(github.event_name == 'pull_request' && '["1/3","2/3","3/3"]' || '["1/1"]') }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+              stash-run: ${{ github.run_id }}
+         - name: Test coding-agent native/unit bucket
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+              OMP_TEST_SHARD: ${{ matrix.shard }}
+           run: bun run ci:test:coding-agent:native
 
    test_workspace:
       name: Test TS workspace fast
@@ -541,7 +636,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Test workspace packages and repo scripts (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -564,7 +659,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Test coding-agent singleton/global-state bucket
            # Keep global Settings/env/fake-timer tests serial; native addon
            # artifacts are still available like every other coding-agent bucket.
@@ -582,7 +677,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Test native/TUI/browser-ish packages (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -600,7 +695,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Test coding-agent UI/TUI bucket
            env:
               OMP_TEST_CONCURRENCY: "2"
@@ -618,41 +713,13 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Test coding-agent runtime bucket
            # Runtime/session tests import native-backed barrels too; keep this
            # separate for concurrency, not as a native-free guardrail.
            env:
               OMP_TEST_CONCURRENCY: "4"
            run: bun run ci:test:coding-agent:runtime
-
-   test_coding_agent_native:
-      name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
-      needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
-      timeout-minutes: 25
-      # The longest PR job, so it runs as three shards on hosted PR runners
-      # (two left the slower shard ~25 s behind every other job). Main keeps
-      # one: omp-kata caps at 8 runners and the fan-out already fills it.
-      # No required check keys on this job name (branch protection and
-      # rulesets are off for main/omp2), so the per-shard names are safe.
-      strategy:
-         fail-fast: false
-         matrix:
-            shard: ${{ fromJSON(github.event_name == 'pull_request' && '["1/3","2/3","3/3"]' || '["1/1"]') }}
-      steps:
-         - uses: actions/checkout@v4
-         - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/native-artifacts
-           with:
-              targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
-         - name: Test coding-agent native/unit bucket
-           env:
-              OMP_TEST_CONCURRENCY: "4"
-              OMP_TEST_SHARD: ${{ matrix.shard }}
-           run: bun run ci:test:coding-agent:native
 
    test_smoke:
       name: Test CLI smoke (TS)
@@ -666,7 +733,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: CLI smoke test
            run: bun run ci:test:smoke
 
@@ -681,7 +748,7 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+              stash-run: ${{ github.run_id }}
          - name: Install method smoke tests
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
@@ -789,14 +856,6 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
-         # that ref yet count against the shared 10 GB quota (see bazel-cache).
-         - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
-           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - name: Install prebuilt native addon(s)
            uses: ./.github/actions/native-artifacts
            with:
@@ -833,6 +892,16 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # Main-only save, after the build so it is off the leg's critical
+         # path: caches saved on a tag or branch are readable only by that ref
+         # yet count against the shared 10 GB quota (see bazel-cache).
+         - name: Save bun store
+           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
 
    # Native-host builds make addons that native_addons cannot provide: Darwin
    # uses Bazel/Xcode and Windows ARM64 uses Cargo/MSVC. They gate on
@@ -859,13 +928,21 @@ jobs:
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
                     native_targets: darwin-x64-baseline,
+                    cache_scope: release-darwin-x64,
+                    fallback_scope: release-darwin-arm64-macos15,
                  }
+               # Same image as darwin-x64 so the two scopes can seed each
+               # other's exec-config actions (proc-macros, build scripts): a
+               # macos-14 probe restoring the arm64 archive got 584 disk-cache
+               # hits for the x64 build, macos-15 got 0 across images.
                - {
-                    os: macos-14,
+                    os: macos-15,
                     platform: darwin,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
                     native_targets: darwin-arm64,
+                    cache_scope: release-darwin-arm64-macos15,
+                    fallback_scope: release-darwin-x64,
                  }
                - {
                     os: windows-11-arm,
@@ -890,25 +967,31 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
-         # that ref yet count against the shared 10 GB quota (see bazel-cache).
-         - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
-           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          # Darwin addons use the host Xcode toolchain. The warm workflow keeps
          # these scopes seeded near HEAD, so this is normally the version-bump
-         # delta.
+         # delta. No save here: every release push also triggers
+         # bazel-cache-warm, which builds and saves the same key concurrently;
+         # release legs lost that race and spent 0.5-6.4 min compressing an
+         # archive before "Unable to reserve cache" (18.3.2, 18.2.x).
          - name: Build native addon (bazel)
            if: matrix.platform == 'darwin'
            uses: ./.github/actions/bazel-natives
            with:
               targets: ${{ matrix.native_targets }}
-              cache-scope: release-${{ matrix.target_id }}
+              cache-scope: ${{ matrix.cache_scope }}
+              fallback-scope: ${{ matrix.fallback_scope }}
+              save: "false"
          # The Bazel MSVC toolchain is cross-host-only. Build natively on the
          # Windows ARM64 runner with its installed Rust and Visual Studio tools.
+         # Third-party crates restore from the cache bazel-cache-warm seeds on
+         # main (the ~9.5 min dependency phase of the ~17 min cargo build);
+         # workspace crates always rebuild. Release legs never save.
+         - name: Restore cargo cache
+           if: matrix.platform == 'win32'
+           uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+           with:
+              shared-key: win32-arm64-ci
+              save-if: "false"
          - name: Build native addon (cargo)
            if: matrix.platform == 'win32'
            env:
@@ -966,6 +1049,14 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # Main-only save, after the build so it is off the critical path.
+         - name: Save bun store
+           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
 
    # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf
@@ -977,6 +1068,7 @@ jobs:
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_binary_hosted.result == 'success' &&
+         needs.release_metadata.outputs.dry-run != 'true' &&
          !inputs.skip_npm }}
       needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
       runs-on: ubuntu-22.04
@@ -1072,7 +1164,8 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
-         needs.release_binary_hosted.result == 'success' }}
+         needs.release_binary_hosted.result == 'success' &&
+         needs.release_metadata.outputs.dry-run != 'true' }}
       needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
       runs-on: ubuntu-22.04
       permissions:
@@ -1160,6 +1253,7 @@ jobs:
    release_npm:
       name: Publish to npm
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_metadata.outputs.dry-run != 'true' &&
          needs.release_binary.result == 'success' &&
          needs.release_binary_hosted.result == 'success' &&
          needs.release_github_verify.result == 'success' &&
