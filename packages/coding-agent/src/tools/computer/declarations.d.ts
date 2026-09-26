@@ -1,6 +1,6 @@
 /** Options shared by every native input helper. */
 interface ComputerInputOptions {
-	/** Omit by default: window input then never focuses the target or moves the pointer. `true` briefly activates the target and posts real input; only after a `BackgroundUnavailable` or a verified no-op. */
+	/** Omit for background input without deliberate activation or pointer movement. `true` temporarily takes control; use only after BackgroundUnavailable or a verified no-op, never to replay uncertain input. */
 	takeover?: boolean;
 }
 
@@ -49,7 +49,7 @@ interface ComputerWindowFilter {
 	title?: string;
 }
 
-/** Rectangle in global desktop coordinates. */
+/** Rectangle in platform-native global coordinates: physical desktop pixels on Windows, logical points on macOS. */
 interface ComputerBounds {
 	x: number;
 	y: number;
@@ -71,6 +71,7 @@ interface ComputerWindowInfo extends ComputerBounds {
 interface ComputerDisplay extends ComputerBounds {
 	id: string;
 	name: string;
+	/** OS DPI scale; screenshot mapping uses the explicit desktop and pixel rectangles. */
 	scale: number;
 	pixelX: number;
 	pixelY: number;

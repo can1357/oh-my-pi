@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import { withDownload } from "../downloads/activity";
 import { downloadFile } from "../utils/tools-manager";
 
 /**
@@ -16,8 +17,15 @@ import { downloadFile } from "../utils/tools-manager";
  * Layout follows the tiny-model cache: `<tiny-models>/predict/<org>--<name>/`,
  * a cross-process install lock next to it, `.part` downloads renamed into
  * place, and a ready marker holding the revision so a warm start is one read.
+ *
+ * Only interactive processes download (the composer on first use through
+ * {@link prefetchSmolLmWeights}, shown in the download HUD, or
+ * `omp tiny-models download smollm`); the prediction daemon just checks
+ * {@link smolLmWeightsReady} and serves ngram until then.
  */
 
+/** Human label for the weights (HUD, CLI). */
+export const SMOLLM_LABEL = "SmolLM2-135M";
 const SMOLLM_REPO = "HuggingFaceTB/SmolLM2-135M";
 const SMOLLM_REVISION = "93efa2f097d58c2a74874c7e644dbc9b0cee75a2";
 const HF_RESOLVE_BASE = "https://huggingface.co";
@@ -45,6 +53,9 @@ const SMOLLM_FILES: readonly WeightFile[] = [
 		sha256: "80521b40281d6ce74e35c9282c22539e75aa0ac8578892b2a59955ef78d55da1",
 	},
 ];
+
+/** Total download size in bytes. */
+export const SMOLLM_TOTAL_BYTES = SMOLLM_FILES.reduce((sum, file) => sum + file.size, 0);
 
 /** Directory `ensureSmolLmWeights` fills. */
 export function getSmolLmModelDir(): string {
@@ -76,7 +87,12 @@ async function hasVerifiedFile(filePath: string, file: WeightFile): Promise<bool
 	return (await sha256File(filePath)) === file.sha256;
 }
 
-async function fetchVerified(dir: string, file: WeightFile, signal: AbortSignal | undefined): Promise<void> {
+async function fetchVerified(
+	dir: string,
+	file: WeightFile,
+	signal: AbortSignal | undefined,
+	onBytes: (loaded: number) => void,
+): Promise<void> {
 	const target = path.join(dir, file.name);
 	if (await hasVerifiedFile(target, file)) return;
 	const part = `${target}.part`;
@@ -84,7 +100,7 @@ async function fetchVerified(dir: string, file: WeightFile, signal: AbortSignal 
 	const startedAt = performance.now();
 	logger.debug("smollm weights: downloading", { url, bytes: file.size });
 	try {
-		await downloadFile(url, part, signal, DOWNLOAD_TIMEOUT_MS);
+		await downloadFile(url, part, { signal, timeoutMs: DOWNLOAD_TIMEOUT_MS, onProgress: onBytes });
 		const { size } = await fs.stat(part);
 		if (size !== file.size) throw new Error(`${file.name}: expected ${file.size} bytes, received ${size}`);
 		const digest = await sha256File(part);
@@ -101,6 +117,18 @@ async function fetchVerified(dir: string, file: WeightFile, signal: AbortSignal 
 	});
 }
 
+/** Whether the pinned weights are fully downloaded and verified (one small file read). */
+export async function smolLmWeightsReady(): Promise<boolean> {
+	return (await readReadyMarker(getSmolLmModelDir())) === SMOLLM_REVISION;
+}
+
+/** Options for {@link ensureSmolLmWeights}. */
+export interface EnsureSmolLmWeightsOptions {
+	signal?: AbortSignal;
+	/** Bytes present so far out of {@link SMOLLM_TOTAL_BYTES}, and the file being fetched. */
+	onProgress?: (loaded: number, file: string) => void;
+}
+
 /**
  * Ensure the pinned SmolLM2-135M files are present and verified, downloading
  * any that are missing or corrupt, and return the model directory to pass as
@@ -109,18 +137,62 @@ async function fetchVerified(dir: string, file: WeightFile, signal: AbortSignal 
  * @throws when a download fails, is aborted through `signal`, or does not
  * match the pinned size/digest.
  */
-export async function ensureSmolLmWeights(signal?: AbortSignal): Promise<string> {
+export async function ensureSmolLmWeights(options: EnsureSmolLmWeightsOptions = {}): Promise<string> {
+	const { signal, onProgress } = options;
 	const dir = getSmolLmModelDir();
 	if ((await readReadyMarker(dir)) === SMOLLM_REVISION) return dir;
 	await fs.mkdir(dir, { recursive: true });
 	return withFileLock(`${dir}.install`, async () => {
 		if ((await readReadyMarker(dir)) === SMOLLM_REVISION) return dir;
+		let finished = 0;
 		for (const file of SMOLLM_FILES) {
 			signal?.throwIfAborted();
-			await fetchVerified(dir, file, signal);
+			onProgress?.(finished, file.name);
+			await fetchVerified(dir, file, signal, loaded => onProgress?.(finished + loaded, file.name));
+			finished += file.size;
 		}
+		onProgress?.(finished, "verified");
 		await Bun.write(path.join(dir, READY_MARKER), `${SMOLLM_REVISION}\n`);
 		logger.debug("smollm weights: ready", { dir, revision: SMOLLM_REVISION });
 		return dir;
 	});
+}
+
+/** After a failed background fetch, wait this long before the next attempt. */
+const PREFETCH_RETRY_MS = 10 * 60_000;
+let prefetching = false;
+let prefetchRetryAt = 0;
+let weightsReady = false;
+
+/**
+ * Start fetching the weights in the background, shown in the download HUD,
+ * unless they are ready, already downloading, or a failure is backing off.
+ * Called by the composer's word-completion backend on each `auto`/`smollm`
+ * request, so the fetch starts on first use; cheap after that.
+ */
+export function prefetchSmolLmWeights(): void {
+	if (weightsReady || prefetching || Date.now() < prefetchRetryAt) return;
+	prefetching = true;
+	void (async () => {
+		if (await smolLmWeightsReady()) return;
+		await withDownload(
+			SMOLLM_LABEL,
+			tracker => ensureSmolLmWeights({ onProgress: (loaded, file) => tracker.update({ loaded, detail: file }) }),
+			{ loaded: 0, total: SMOLLM_TOTAL_BYTES, detail: "word completion model" },
+		);
+	})()
+		.then(
+			() => {
+				weightsReady = true;
+			},
+			(error: unknown) => {
+				prefetchRetryAt = Date.now() + PREFETCH_RETRY_MS;
+				logger.warn("smollm weights: download failed; word completion stays on n-gram", {
+					error: String(error),
+				});
+			},
+		)
+		.finally(() => {
+			prefetching = false;
+		});
 }

@@ -351,8 +351,12 @@ impl Wm<'_> {
 	/// unless it would land on `window`. Another window of the same process
 	/// and an unowned override-redirect popup are not the requested target.
 	pub(super) fn check_pointer_target(&self, window: Window, x: i16, y: i16) -> CoreResult<()> {
-		let attributes = self.conn.get_window_attributes(window)
-			.map_err(wm_failed)?.reply().map_err(wm_failed)?;
+		let attributes = self
+			.conn
+			.get_window_attributes(window)
+			.map_err(wm_failed)?
+			.reply()
+			.map_err(wm_failed)?;
 		if attributes.map_state != MapState::VIEWABLE {
 			return Err(DesktopError::background_unavailable(format!(
 				"window {window} is not viewable; use ax actions or takeover:true"
@@ -470,9 +474,12 @@ impl FocusSnapshot {
 		let watch_until = Instant::now() + FOCUS_SETTLE_WATCH;
 		loop {
 			if self.changed(wm) {
-				let moved_to_target = (self.active != Some(target) && wm.active_window() == Some(target))
+				let moved_to_target = (self.active != Some(target)
+					&& wm.active_window() == Some(target))
 					|| (!wm.is_within(self.focus, target)
-						&& wm.input_focus().is_some_and(|(focus, _)| wm.is_within(focus, target)));
+						&& wm
+							.input_focus()
+							.is_some_and(|(focus, _)| wm.is_within(focus, target)));
 				return if moved_to_target {
 					Err(DesktopError::input_failed(format!(
 						"window {target} changed the desktop focus during background input; the action \

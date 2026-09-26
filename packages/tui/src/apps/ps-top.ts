@@ -282,7 +282,12 @@ export class PsTopComponent implements Component {
 	}
 
 	#renderTable(width: number, height: number): string[] {
-		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(this.#all ? "(all)" : "(current)")}`;
+		const scopeKind = this.#all
+			? "(all)"
+			: this.#target.dir !== undefined || this.#target.global !== undefined
+				? "(target)"
+				: "(current + global)";
+		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(scopeKind)}`;
 		const header = this.#header(width, scopesLabel);
 		const footer = this.#footer(
 			width,

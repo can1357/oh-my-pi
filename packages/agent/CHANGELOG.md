@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added live steering mechanism allowing models to ingest steering messages mid-stream
+
+### Fixed
+
+- Fixed lost steering input during stream aborts by requeueing unrecorded live-steered messages
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

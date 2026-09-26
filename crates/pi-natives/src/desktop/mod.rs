@@ -1084,16 +1084,16 @@ mod capture_tests {
 	/// Backend that mints a composite AT-SPI window id, mirroring the Wayland
 	/// `AtSpiAx` path. Exists to exercise `Worker::process` without a display.
 	struct FakeWaylandBackend {
-		window: DesktopWindow,
-		overlap: Option<DesktopWindow>,
+		window:         DesktopWindow,
+		overlap:        Option<DesktopWindow>,
 		window_present: bool,
-		clicks: Arc<Mutex<Vec<String>>>,
+		clicks:         Arc<Mutex<Vec<String>>>,
 	}
 
 	impl FakeWaylandBackend {
 		fn new() -> Self {
 			Self {
-				window: DesktopWindow {
+				window:         DesktopWindow {
 					id:      WAYLAND_ID.to_string(),
 					title:   "Obsidian".to_string(),
 					app:     "obsidian".to_string(),
@@ -1104,9 +1104,9 @@ mod capture_tests {
 					height:  48,
 					focused: true,
 				},
-				overlap: None,
+				overlap:        None,
 				window_present: true,
-				clicks: Arc::new(Mutex::new(Vec::new())),
+				clicks:         Arc::new(Mutex::new(Vec::new())),
 			}
 		}
 	}
@@ -1126,15 +1126,15 @@ mod capture_tests {
 
 		fn props(&mut self, _: &AxHandle) -> CoreResult<AxProps> {
 			Ok(AxProps {
-				role: "button".to_string(),
+				role:        "button".to_string(),
 				native_role: "button".to_string(),
-				title: None,
-				value: None,
+				title:       None,
+				value:       None,
 				description: None,
-				enabled: true,
-				focused: false,
-				bounds: Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
-				actions: Vec::new(),
+				enabled:     true,
+				focused:     false,
+				bounds:      Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
+				actions:     Vec::new(),
 				child_count: 0,
 			})
 		}
@@ -1253,16 +1253,16 @@ mod capture_tests {
 
 	fn overlapping_backend() -> FakeWaylandBackend {
 		let mut backend = FakeWaylandBackend::new();
-		backend.overlap = Some(DesktopWindow {
-			id: "unrelated-overlay".to_string(),
-			..backend.window.clone()
-		});
+		backend.overlap =
+			Some(DesktopWindow { id: "unrelated-overlay".to_string(), ..backend.window.clone() });
 		backend
 	}
 
 	fn click_reference(worker: &mut Worker, origin: &str) -> CoreResult<Response> {
 		let generation = worker.registry.current_generation(origin);
-		let reference = worker.registry.register(origin, generation, AxHandle::Test(1));
+		let reference = worker
+			.registry
+			.register(origin, generation, AxHandle::Test(1));
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(&Request::AxClick {
 			reference,

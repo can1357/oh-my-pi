@@ -42,7 +42,8 @@ await win.click(120, 48, button="right")
 - PREFER AX over pixels: `win.ax()` → `el.press()`/`el.click()`/`el.setValue()`. Element actions need no screenshot.
 - Pointer `x,y`: pixels in the MOST RECENT screenshot of the SAME target. AX coordinates are global desktop coordinates. NEVER mix them.
 - Each window `.ax()` starts a ref generation. Current/previous snapshot refs remain valid; older refs throw `StaleRef`. Re-snapshot; NEVER guess.
-- Window input runs in the background: it never focuses the target or moves the user's pointer. NEVER pass `takeover` by default. Only when THAT call threw `BackgroundUnavailable` or a screenshot proves it had no effect, and AX cannot do it, retry that one call with `{ takeover: true }`: it briefly activates the target and posts real input. A keyboard refusal does not make clicks need takeover. NEVER infer a background action landed from absent error.
+- Window input defaults to background routes without moving the user's pointer or deliberately activating the target. NEVER pass `takeover` by default. Only after THAT call throws `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot do it, retry that call with `{ takeover: true }`. A keyboard refusal does not make clicks need takeover. OS acceptance alone does not prove the application acted.
+- Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it with takeover.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.
 - Wayland: per-window native input and `.raise()` are unavailable; use AX, or desktop input after focusing the target yourself.
 - Screenshots save full resolution to a temp path; use `{ silent: true }` in loops.

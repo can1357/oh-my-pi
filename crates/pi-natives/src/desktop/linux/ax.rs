@@ -121,7 +121,10 @@ impl AtSpiAx {
 		let mut matches = Vec::new();
 		for app in apps {
 			if win.id.starts_with("atspi:") {
-				if app.name().is_some_and(|name| win.id.starts_with(&format!("atspi:{name}:"))) {
+				if app
+					.name()
+					.is_some_and(|name| win.id.starts_with(&format!("atspi:{name}:")))
+				{
 					matches.push(app);
 				}
 				continue;
@@ -155,7 +158,9 @@ impl AtSpiAx {
 		} else {
 			Err(format!(
 				"application '{}' (pid {:?}) has {} AT-SPI matches; refusing ambiguous ownership",
-				win.app, win.pid, matches.len()
+				win.app,
+				win.pid,
+				matches.len()
 			))
 		}
 	}
@@ -272,14 +277,31 @@ fn action_index<'a>(
 	mut actions: impl Iterator<Item = &'a str> + Clone,
 	requested: &str,
 ) -> Option<usize> {
-	actions.clone().position(|name| name.eq_ignore_ascii_case(requested)).or_else(|| {
-		requested.eq_ignore_ascii_case("press").then(|| {
-			actions.position(|name| {
-				["click", "clickAncestor", "activate", "invoke", "toggle", "open", "jump",
-				 "do default", "do-default"].iter().any(|safe| name.eq_ignore_ascii_case(safe))
-			})
-		}).flatten()
-	})
+	actions
+		.clone()
+		.position(|name| name.eq_ignore_ascii_case(requested))
+		.or_else(|| {
+			requested
+				.eq_ignore_ascii_case("press")
+				.then(|| {
+					actions.position(|name| {
+						[
+							"click",
+							"clickAncestor",
+							"activate",
+							"invoke",
+							"toggle",
+							"open",
+							"jump",
+							"do default",
+							"do-default",
+						]
+						.iter()
+						.any(|safe| name.eq_ignore_ascii_case(safe))
+					})
+				})
+				.flatten()
+		})
 }
 
 impl AxBackend for AtSpiAx {
@@ -325,17 +347,18 @@ impl AxBackend for AtSpiAx {
 					.as_accessible_proxy(self.connection.connection())
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
-				let role = proxy.get_role().await.map_err(|err| {
-					DesktopError::ax_failed(format!("AT-SPI window role: {err}"))
-				})?;
+				let role = proxy
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
 				if matches!(role, Role::Frame | Role::Dialog | Role::Window) {
 					let id = atspi_window_id(&object);
 					if windows.iter().any(|window| window.id == id) {
 						return Ok(id);
 					}
-					let name = object.name().ok_or_else(|| {
-						DesktopError::ax_failed("AT-SPI window has no bus owner")
-					})?;
+					let name = object
+						.name()
+						.ok_or_else(|| DesktopError::ax_failed("AT-SPI window has no bus owner"))?;
 					let dbus = atspi::zbus::fdo::DBusProxy::new(self.connection.connection())
 						.await
 						.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
@@ -343,14 +366,16 @@ impl AxBackend for AtSpiAx {
 						.get_connection_unix_process_id(name.clone().into())
 						.await
 						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
-					let title = proxy.name().await.map_err(|err| {
-						DesktopError::ax_failed(format!("AT-SPI window title: {err}"))
-					})?;
+					let title = proxy
+						.name()
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
 					return native_window_for_frame(windows, pid, &title);
 				}
-				let parent = proxy.parent().await.map_err(|err| {
-					DesktopError::ax_failed(format!("AT-SPI window parent: {err}"))
-				})?;
+				let parent = proxy
+					.parent()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
 				if parent.is_null() || parent == object {
 					break;
 				}
@@ -493,7 +518,9 @@ impl AxBackend for AtSpiAx {
 			let mut names = actions.iter().map(|item| item.name.as_str());
 			let mut index = action_index(names.clone(), action);
 			if index.is_none() && action.eq_ignore_ascii_case("press") {
-				let accessible = object.as_accessible_proxy(self.connection.connection()).await
+				let accessible = object
+					.as_accessible_proxy(self.connection.connection())
+					.await
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 				if matches!(accessible.get_role().await, Ok(Role::CheckBox | Role::CheckMenuItem)) {
 					index = names.position(|name| {
@@ -527,19 +554,24 @@ impl AxBackend for AtSpiAx {
 				.as_accessible_proxy(self.connection.connection())
 				.await
 				.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-			let interfaces = accessible.get_interfaces().await
+			let interfaces = accessible
+				.get_interfaces()
+				.await
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI interfaces: {err}")))?;
 			if interfaces.contains(atspi::Interface::EditableText) {
-				let editable =
-				atspi::proxy::editable_text::EditableTextProxy::builder(self.connection.connection())
-					.destination(name.clone())
-					.and_then(|b| b.path(object.path().clone()))
-					.map_err(|err| DesktopError::ax_failed(err.to_string()))?
-					.build()
-					.await;
+				let editable = atspi::proxy::editable_text::EditableTextProxy::builder(
+					self.connection.connection(),
+				)
+				.destination(name.clone())
+				.and_then(|b| b.path(object.path().clone()))
+				.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+				.build()
+				.await;
 				let editable = editable
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI editable text: {err}")))?;
-				return if editable.set_text_contents(value).await
+				return if editable
+					.set_text_contents(value)
+					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
 				{
 					Ok(())
@@ -592,34 +624,89 @@ impl AxBackend for AtSpiAx {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
 		self.rt.block_on(async {
+			let mut root = None;
 			for app in Self::apps(&self.connection)
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
 				for frame in Self::frames(&self.connection, &app)
 					.await
-					.unwrap_or_default()
+					.map_err(DesktopError::ax_failed)?
 				{
-					let Ok(component) = Self::component(&self.connection, &frame).await else {
-						continue;
+					let contains = {
+						let component = Self::component(&self.connection, &frame)
+							.await
+							.map_err(DesktopError::ax_failed)?;
+						component
+							.contains(x, y, CoordType::Screen)
+							.await
+							.map_err(|err| {
+								DesktopError::ax_failed(format!("AT-SPI frame hit test: {err}"))
+							})?
 					};
-					if !component
-						.contains(x, y, CoordType::Screen)
-						.await
-						.unwrap_or(false)
-					{
+					if !contains {
 						continue;
 					}
-					let found = component
+					// AT-SPI enumeration is not stacking order. Never choose an
+					// arbitrary frame when two top-levels contain the point.
+					if let Some(previous) = &root {
+						if previous != &frame {
+							return Err(DesktopError::ax_failed(
+								"multiple AT-SPI windows contain this point; topmost ownership is \
+								 ambiguous",
+							));
+						}
+					} else {
+						root = Some(frame);
+					}
+				}
+			}
+			let Some(mut current) = root else {
+				return Ok(None);
+			};
+			let mut ancestors = Vec::new();
+			for _ in 0..64 {
+				let has_component = {
+					let accessible = current
+						.as_accessible_proxy(self.connection.connection())
+						.await
+						.map_err(|err| {
+							DesktopError::ax_failed(format!("AT-SPI hit-test element: {err}"))
+						})?;
+					accessible
+						.get_interfaces()
+						.await
+						.map_err(|err| {
+							DesktopError::ax_failed(format!("AT-SPI hit-test interfaces: {err}"))
+						})?
+						.contains(atspi::Interface::Component)
+				};
+				if !has_component {
+					return Ok(Some(AxHandle::AtSpi(current)));
+				}
+				// GetAccessibleAtPoint returns an immediate child, not
+				// necessarily the leaf that owns the requested pixel.
+				let child = {
+					let component = Self::component(&self.connection, &current)
+						.await
+						.map_err(DesktopError::ax_failed)?;
+					component
 						.get_accessible_at_point(x, y, CoordType::Screen)
 						.await
 						.map_err(|err| {
 							DesktopError::ax_failed(format!("AT-SPI element at point: {err}"))
-						})?;
-					return Ok((!found.is_null()).then_some(AxHandle::AtSpi(found)));
+						})?
+				};
+				if child.is_null() || child == current {
+					return Ok(Some(AxHandle::AtSpi(current)));
 				}
+				if ancestors.contains(&child) {
+					return Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy contains a cycle"));
+				}
+				ancestors.push(current);
+				current = child;
 			}
-			Ok(None)
+			Err(DesktopError::ax_failed("AT-SPI hit-test hierarchy exceeds the depth limit"))
 		})
 	}
 
@@ -679,8 +766,15 @@ mod tests {
 	#[test]
 	fn frame_ownership_requires_unique_process_and_title() {
 		let window = |id: &str, pid: u32| DesktopWindow {
-			id: id.to_owned(), pid: Some(pid), title: "Document".into(),
-			app: "Editor".into(), x: 0, y: 0, width: 100, height: 100, focused: false,
+			id:      id.to_owned(),
+			pid:     Some(pid),
+			title:   "Document".into(),
+			app:     "Editor".into(),
+			x:       0,
+			y:       0,
+			width:   100,
+			height:  100,
+			focused: false,
 		};
 		let mut windows = vec![window("1", 10), window("2", 20)];
 		assert_eq!(native_window_for_frame(&windows, 20, "Document").unwrap(), "2");

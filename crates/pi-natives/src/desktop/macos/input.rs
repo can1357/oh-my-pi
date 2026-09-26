@@ -121,9 +121,9 @@ impl MacInput {
 									skylight::require_front_window(pid, wid)?;
 									post_bare_keys(transitions)
 								},
-								None => type_text(&self.source, text, |event| {
-									post_takeover_key(pid, wid, event)
-								}),
+								None => {
+									type_text(&self.source, text, |event| post_takeover_key(pid, wid, event))
+								},
 							}
 						})
 					},
@@ -163,12 +163,10 @@ impl MacInput {
 							})
 						})
 					},
-					DeliveryMode::Foreground => {
-						skylight::with_foreground(pid, wid, |activated| {
-							thread::sleep(first_key_settle(activated));
-							key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
-						})
-					},
+					DeliveryMode::Foreground => skylight::with_foreground(pid, wid, |activated| {
+						thread::sleep(first_key_settle(activated));
+						key_chord(&self.source, keys, |event| post_takeover_key(pid, wid, event))
+					}),
 				}
 			},
 		}
@@ -1017,9 +1015,11 @@ fn uncover(
 	let covering = || -> CoreResult<Option<ax::PointOwner>> {
 		let mut first = None;
 		for (x, y) in points.into_iter().flatten() {
-			let owner = ax::point_owner(x, y).ok_or_else(|| DesktopError::input_failed(format!(
-				"cannot determine which window owns takeover point ({x}, {y}); no input was sent"
-			)))?;
+			let owner = ax::point_owner(x, y).ok_or_else(|| {
+				DesktopError::input_failed(format!(
+					"cannot determine which window owns takeover point ({x}, {y}); no input was sent"
+				))
+			})?;
 			if owner.window.is_none() {
 				return Err(DesktopError::input_failed(
 					"takeover point has no identifiable native window; no input was sent",
@@ -1034,7 +1034,9 @@ fn uncover(
 	let Some(first) = covering()? else {
 		return Ok(());
 	};
-	*occluder = first.window.map(|window| Occluder { pid: first.pid, window });
+	*occluder = first
+		.window
+		.map(|window| Occluder { pid: first.pid, window });
 	ax::MacAx::new().raise(window)?;
 	let deadline = Instant::now() + UNCOVER_TIMEOUT;
 	loop {
@@ -1386,7 +1388,11 @@ mod tests {
 		let result = key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], |event| {
 			let kind = event.get_type();
 			let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-			events.push((kind as u32, code));
+			events.push((
+				kind as u32,
+				code,
+				event.get_flags().contains(CGEventFlags::CGEventFlagControl),
+			));
 			if matches!(kind, CGEventType::KeyDown) && code == 36 {
 				Err(DesktopError::input_failed("focus changed"))
 			} else {
@@ -1394,11 +1400,13 @@ mod tests {
 			}
 		});
 		assert!(result.is_err());
+		// Quartz expresses modifier transitions as FlagsChanged; the final
+		// cleared flag proves Ctrl is released even when Enter's press fails.
 		assert_eq!(events, vec![
-			(CGEventType::KeyDown as u32, 59),
-			(CGEventType::KeyDown as u32, 36),
-			(CGEventType::KeyUp as u32, 36),
-			(CGEventType::KeyUp as u32, 59),
+			(CGEventType::FlagsChanged as u32, 59, true),
+			(CGEventType::KeyDown as u32, 36, true),
+			(CGEventType::KeyUp as u32, 36, true),
+			(CGEventType::FlagsChanged as u32, 59, false),
 		]);
 	}
 

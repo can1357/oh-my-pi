@@ -11,10 +11,14 @@
 
 ### Changed
 
-- Replaced internal macOS-specific completion logic with a unified provider architecture
+- Updated ps top UI to show scope kind "(target)" or "(current + global)" in scope label
 - Updated TUI task interfaces to reflect the new `complexity` field requirement
 - Refined right-arrow acceptance behavior to skip forced trailing spaces
 - Replaced all static keyboard labels across overlays, apps, and status lines with dynamic, platform-aware key formatting
+
+### Removed
+
+- Removed legacy `TinyTitleDownloadProgress` overlay in favor of the new centralized agent HUD
 
 ## [18.3.1] - 2026-09-25
 

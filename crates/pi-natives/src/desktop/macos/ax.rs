@@ -13,14 +13,15 @@ use objc2_core_foundation::{
 	CFArray, CFBoolean, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize, Type,
 };
 
-use super::super::{
-	ax::{AxBounds, AxHandle, AxProps, normalize_role_macos},
-	backend::AxBackend,
-	error::{CoreResult, DesktopError},
-	types::DesktopWindow,
+use super::{
+	super::{
+		ax::{AxBounds, AxHandle, AxProps, normalize_role_macos},
+		backend::AxBackend,
+		error::{CoreResult, DesktopError},
+		types::DesktopWindow,
+	},
+	process, skylight,
 };
-
-use super::{process, skylight};
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
 /// Messaging timeout for the focus and hit-test probes made around input
@@ -83,9 +84,9 @@ pub(super) struct AxWindowRecord {
 
 /// The owner of the hit-testable surface at a global point.
 pub(super) struct PointOwner {
-	pub(super) pid:             libc::pid_t,
+	pub(super) pid:    libc::pid_t,
 	/// `WindowServer` id of the surface's top-level window, when AX exposes it.
-	pub(super) window:          Option<u32>,
+	pub(super) window: Option<u32>,
 }
 
 /// `WindowServer` id of `pid`'s `AXFocusedWindow`.
@@ -155,21 +156,21 @@ pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
 		return None;
 	}
 	let window = element_window(&element);
-	Some(PointOwner {
-		pid,
-		window: window.as_deref().and_then(window_id),
-	})
+	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
 }
 
 /// Raises a known window for explicit takeover or restoration.
 pub(super) fn raise_window_id(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
-	let app = probe_application(pid)
-		.ok_or_else(|| DesktopError::ax_failed(format!("cannot inspect process {pid} for AXRaise")))?;
+	let app = probe_application(pid).ok_or_else(|| {
+		DesktopError::ax_failed(format!("cannot inspect process {pid} for AXRaise"))
+	})?;
 	let windows = copy_elements(&app, "AXWindows")?;
 	let window = windows
 		.into_iter()
 		.find(|window| window_id(window) == Some(wid))
-		.ok_or_else(|| DesktopError::window_not_found(format!("window {wid} is no longer available for AXRaise")))?;
+		.ok_or_else(|| {
+			DesktopError::window_not_found(format!("window {wid} is no longer available for AXRaise"))
+		})?;
 	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
 }
 
@@ -248,7 +249,9 @@ impl AxBackend for MacAx {
 			))
 		})?;
 		if matches.next().is_some() {
-			return Err(DesktopError::ax_failed("accessibility window title/frame match is ambiguous"));
+			return Err(DesktopError::ax_failed(
+				"accessibility window title/frame match is ambiguous",
+			));
 		}
 		set_timeout(&element)?;
 		Ok(AxHandle::Mac(element))
@@ -268,9 +271,11 @@ impl AxBackend for MacAx {
 					&& candidate.pid.and_then(|pid| i32::try_from(pid).ok()) == Some(pid)
 			})
 			.map(|candidate| candidate.id.clone())
-			.ok_or_else(|| DesktopError::window_not_found(format!(
-				"AX element's window {wid} is not an available window of process {pid}"
-			)))
+			.ok_or_else(|| {
+				DesktopError::window_not_found(format!(
+					"AX element's window {wid} is not an available window of process {pid}"
+				))
+			})
 	}
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
@@ -337,7 +342,9 @@ impl AxBackend for MacAx {
 		// API has no "unverified" outcome, so refuse before mutating that surface.
 		ensure_native_text_target(element)?;
 		if !attribute_settable(element, "AXValue") {
-			return Err(DesktopError::ax_failed("AXValue is not settable; no typing fallback was attempted"));
+			return Err(DesktopError::ax_failed(
+				"AXValue is not settable; no typing fallback was attempted",
+			));
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
@@ -447,7 +454,8 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 	if process::is_terminal(element_pid(element)?) {
 		return Err(DesktopError::ax_failed(
-			"terminal AX text represents its rendered grid, not terminal input; use typeText or takeover:true instead",
+			"terminal AX text represents its rendered grid, not terminal input; use typeText or \
+			 takeover:true instead",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
@@ -465,7 +473,8 @@ fn attribute_settable(element: &AXUIElement, name: &str) -> bool {
 	// SAFETY: The Boolean out parameter is writable and all CF objects outlive
 	// the synchronous AX query.
 	(unsafe { element.is_attribute_settable(&attribute, NonNull::from(&mut settable)) }
-		== AXError::Success) && settable != 0
+		== AXError::Success)
+		&& settable != 0
 }
 
 fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult<()> {
@@ -501,8 +510,10 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 	};
 	if element_window(&element).as_deref().and_then(window_id) != Some(wid)
 		|| text_surface(&element) != TextSurface::Native
-		|| !matches!(copy_string(&element, "AXRole").as_deref(), Some("AXTextField" | "AXTextArea" | "AXComboBox"))
-		|| !attribute_settable(&element, "AXSelectedText")
+		|| !matches!(
+			copy_string(&element, "AXRole").as_deref(),
+			Some("AXTextField" | "AXTextArea" | "AXComboBox")
+		) || !attribute_settable(&element, "AXSelectedText")
 	{
 		return Ok(false);
 	}
@@ -531,7 +542,12 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 }
 
 /// AX text ranges use UTF-16 offsets, not UTF-8 byte or Unicode scalar indices.
-fn replace_utf16_selection(before: &str, location: isize, length: isize, text: &str) -> Option<String> {
+fn replace_utf16_selection(
+	before: &str,
+	location: isize,
+	length: isize,
+	text: &str,
+) -> Option<String> {
 	let start = usize::try_from(location).ok()?;
 	let end = start.checked_add(usize::try_from(length).ok()?)?;
 	let mut units = 0;
