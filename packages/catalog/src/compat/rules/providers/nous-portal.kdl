@@ -1,0 +1,10 @@
+// Nous Portal inference gateway. Catalog is account-scoped live `/v1/models`
+// (dashboard key). Deliberately NO `discovery` node so generate-models.ts does
+// not freeze one account's roster into models.json.
+provider "nous-portal" {
+	default-model "anthropic/claude-sonnet-4.6"
+	env "NOUS_API_KEY"
+	dynamic-models-authoritative #true
+	// Live `/v1/models` is the whole truth per account. Pricing stays
+	// provider-local; canonical recovery supplies intrinsic capabilities only.
+}
