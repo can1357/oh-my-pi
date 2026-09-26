@@ -812,8 +812,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		/** Whether the call still waits on the cells; `out://` replies are drawn only then. */
 		foreground: () => boolean;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, foreground, asyncJobId } =
-			options;
+		const {
+			session,
+			cells,
+			languages,
+			notice,
+			excludeWebP,
+			signal,
+			sessionAbortController,
+			emitUpdate,
+			foreground,
+			asyncJobId,
+		} = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
