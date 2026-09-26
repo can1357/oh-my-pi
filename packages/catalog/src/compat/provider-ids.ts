@@ -48,6 +48,7 @@ export type KnownProvider =
 	| "moonshot"
 	| "muse-code"
 	| "nanogpt"
+	| "nous-portal"
 	| "novita"
 	| "nvidia"
 	| "ollama"

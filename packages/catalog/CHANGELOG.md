@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added Nous Portal as a built-in API-key provider against `https://inference-api.nousresearch.com/v1`, with `/login nous-portal` and live `/v1/models` discovery.
+
 - Added compatibility flags for models that stop output at the context-window limit and models that support steering, including defaults for Claude 4.5+ and GPT-6+ models.
 
 ### Fixed
