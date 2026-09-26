@@ -41,7 +41,6 @@ const findSchema = type({
 export type GlobToolInput = typeof findSchema.infer;
 
 const DEFAULT_LIMIT = 200;
-const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
 
 /**
@@ -218,7 +217,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
 				throw new ToolError("Limit must be a positive number");
 			}
-			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
+			const effectiveLimit = Math.max(1, Math.floor(requestedLimit));
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
