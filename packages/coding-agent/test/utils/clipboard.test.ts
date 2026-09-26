@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyToClipboard,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -82,6 +83,22 @@ afterEach(() => {
 // 1x1 red PNG; round-tripped through PowerShell as base64 in the real flow.
 const RED_1X1_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+describe("copyToClipboard on Termux", () => {
+	it("does not invoke the native fallback when the Termux helper fails", async () => {
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		spySpawn(calls, "", 1);
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd).toEqual(["termux-clipboard-set"]);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+});
 
 describe("readImageFromClipboard on WSL", () => {
 	it("decodes the PowerShell base64 payload without touching the native bridge", async () => {

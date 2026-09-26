@@ -25,4 +25,6 @@ interface AdaptedDesktopSessionConstructor {
 	new (options: Record<string, unknown>): AdaptedDesktopSession;
 }
 
+export function adaptDesktopSession(NativeDesktopSession: undefined): undefined;
+export function adaptDesktopSession(NativeDesktopSession: null): null;
 export function adaptDesktopSession(NativeDesktopSession: unknown): AdaptedDesktopSessionConstructor;

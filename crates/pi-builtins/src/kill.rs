@@ -599,6 +599,17 @@ mod tests {
 		assert!(printed_signal("128").is_err());
 		assert!(printed_signal("265").is_err());
 	}
+
+	/// Android's bionic exposes real-time signal numbers through SIGRTMAX, but
+	/// brush's portable signal enum intentionally contains only named signals.
+	/// The process matcher carries the raw number to `kill(2)` instead.
+	#[cfg(target_os = "android")]
+	#[test]
+	fn accepts_android_realtime_signal_numbers() {
+		let max = libc::SIGRTMAX();
+		assert_eq!(signal_number(&max.to_string()), Some(max));
+		assert_eq!(signal_number(&(max + 1).to_string()), None);
+	}
 }
 
 /// A `kill` signal argument: a real signal, or the "does this process
@@ -640,12 +651,16 @@ pub(crate) fn signal_number(value: &str) -> Option<i32> {
 		.strip_prefix("SIG")
 		.or_else(|| value.strip_prefix("sig"))
 		.unwrap_or(value);
+	#[cfg(any(target_os = "android", target_os = "linux"))]
 	if let Ok(number) = value.parse::<i32>() {
-		#[cfg(target_os = "linux")]
 		return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);
-		#[cfg(target_os = "macos")]
+	}
+	#[cfg(target_os = "macos")]
+	if let Ok(number) = value.parse::<i32>() {
 		return (0..=31).contains(&number).then_some(number);
-		#[cfg(not(unix))]
+	}
+	#[cfg(not(unix))]
+	if let Ok(number) = value.parse::<i32>() {
 		return (0..=64).contains(&number).then_some(number);
 	}
 	match KillSignal::parse(value).ok()? {

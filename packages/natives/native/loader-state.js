@@ -33,6 +33,7 @@ import { containsVersionSentinel, versionSentinelFor } from "./version-sentinel.
  */
 
 const SUPPORTED_PLATFORMS = [
+	"android-arm64",
 	"linux-x64",
 	"linux-arm64",
 	"darwin-x64",

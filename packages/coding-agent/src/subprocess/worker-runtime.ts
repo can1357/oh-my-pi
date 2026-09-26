@@ -438,9 +438,9 @@ export class MemoizedRuntime<T> {
 
 /**
  * Load the `@huggingface/transformers` runtime into `holder` (memoized): from
- * the ambient install when running from source, or from a version-keyed side
- * runtime (resolved lazily at `runtimeDir()`) when running as a compiled binary.
- * The result is cast to the caller's concrete runtime type `T`.
+ * the ambient install when running from source or a desktop bundle, or from
+ * a version-keyed side runtime when running as a compiled binary or relocated
+ * Android bundle. The result is cast to the caller's concrete runtime type `T`.
  */
 export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	holder: MemoizedRuntime<T>,
@@ -450,7 +450,11 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	runtimeDir: () => string,
 ): Promise<T> {
 	return holder.load(async () => {
-		if (!isCompiledBinary()) {
+		// Relocated Android bundles cannot resolve the source workspace's
+		// externalized Transformers.js package from a worker subprocess. Their
+		// bundle-time marker routes them through the same side-runtime install
+		// used by compiled binaries without changing normal source/desktop runs.
+		if (!isCompiledBinary() && process.env.PI_ANDROID_BUNDLE !== "1") {
 			const entry = sourceRequire.resolve(TRANSFORMERS_PACKAGE);
 			return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {
 				__ompTransformersEntry: entry,

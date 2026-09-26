@@ -153,6 +153,7 @@ function frameSignature(capture) {
  * current addons already expose the complete API and pass through unchanged.
  */
 export function adaptDesktopSession(NativeDesktopSession) {
+	if (typeof NativeDesktopSession !== "function") return NativeDesktopSession;
 	if (typeof NativeDesktopSession?.prototype?.click === "function") return NativeDesktopSession;
 	const cached = ADAPTED_SESSION_CLASSES.get(NativeDesktopSession);
 	if (cached) return cached;

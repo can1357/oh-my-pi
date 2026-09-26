@@ -21,6 +21,12 @@ import { generateEnumExports } from "./gen-enums";
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
 
+// Termux ships a stable Rust compiler, while xutf and pi-natives use features
+// enabled by the repository's pinned nightly. Scope the bootstrap escape hatch.
+if (process.platform === "android") {
+	process.env.RUSTC_BOOTSTRAP ??= "xutf,pi_natives";
+}
+
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
 // registry, but the cmake crate (opusic-sys' bundled Opus) needs cmake —
 // and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
@@ -58,6 +64,57 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
+// napi-rs omits modules guarded out for the target (currently desktop and
+// clipboard on Android), but the package's public entrypoint remains
+// platform-neutral. Keep the declarations needed by those optional modules in
+// the generated surface so `gen-enums.ts` preserves their named exports.
+const PLATFORM_NEUTRAL_BINDING_NAMES: Record<string, true> = {
+	AxNode: true,
+	AxQuery: true,
+	AxSnapshot: true,
+	AxSnapshotOptions: true,
+	CaptureCaps: true,
+	ClipboardImage: true,
+	DesktopCapabilities: true,
+	DesktopCapture: true,
+	DesktopDisplay: true,
+	DesktopPoint: true,
+	DesktopSession: true,
+	DesktopSessionOptions: true,
+	DesktopWindow: true,
+	PointerOptions: true,
+	copyToClipboard: true,
+	readImageFromClipboard: true,
+};
+
+const DECLARATION_START_RE = /^export (?:declare (?:class|function|enum)|(?:interface|type))\s+(\w+)/;
+
+function declarationBlocks(dts: string): Map<string, string> {
+	const lines = dts.split("\n");
+	const starts: Array<{ name: string; line: number }> = [];
+	for (let line = 0; line < lines.length; line++) {
+		const match = DECLARATION_START_RE.exec(lines[line]!);
+		if (match !== null) starts.push({ name: match[1]!, line });
+	}
+
+	const blocks = new Map<string, string>();
+	for (let index = 0; index < starts.length; index++) {
+		const current = starts[index]!;
+		const nextLine = starts[index + 1]?.line ?? lines.length;
+		blocks.set(current.name, lines.slice(current.line, nextLine).join("\n").trim());
+	}
+	return blocks;
+}
+
+function preservePlatformNeutralDeclarations(generated: string, existing: string): string {
+	const generatedBlocks = declarationBlocks(generated);
+	const existingBlocks = declarationBlocks(existing);
+	const preserved = [...existingBlocks.entries()]
+		.filter(([name]) => PLATFORM_NEUTRAL_BINDING_NAMES[name] === true && !generatedBlocks.has(name))
+		.map(([, block]) => block);
+	if (preserved.length === 0) return generated;
+	return `${generated.trimEnd()}\n\n${preserved.join("\n\n")}\n`;
+}
 
 const localAddon = resolveLocalHostAddon({
 	platform: process.platform,
@@ -167,7 +224,11 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 	const sourcePath = path.join(outputDir, "index.d.ts");
 	const destPath = path.join(nativeDir, "index.d.ts");
 	try {
-		await fs.copyFile(sourcePath, destPath);
+		const generated = await fs.readFile(sourcePath, "utf8");
+		const existing = await fs
+			.readFile(destPath, "utf8")
+			.catch(err => ((err as NodeJS.ErrnoException).code === "ENOENT" ? "" : Promise.reject(err)));
+		await fs.writeFile(destPath, preservePlatformNeutralDeclarations(generated, existing));
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);

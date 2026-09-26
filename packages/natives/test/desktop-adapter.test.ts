@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { adaptDesktopSession } from "../native/desktop-adapter.js";
 
 class LegacyDesktopSession {
@@ -42,6 +45,55 @@ class LegacyDesktopSession {
 }
 
 describe("legacy DesktopSession adapter", () => {
+	it("keeps unavailable desktop bindings usable through the public entrypoint", async () => {
+		const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-public-entrypoint-"));
+		try {
+			const realLoaderUrl = new URL("../native/loader-state.js", import.meta.url).href;
+			await Promise.all([
+				fs.writeFile(path.join(fixtureDir, "package.json"), '{"type":"module"}\n'),
+				fs.copyFile(path.join(import.meta.dir, "../native/index.js"), path.join(fixtureDir, "index.js")),
+				fs.copyFile(
+					path.join(import.meta.dir, "../native/desktop-adapter.js"),
+					path.join(fixtureDir, "desktop-adapter.js"),
+				),
+				fs.writeFile(
+					path.join(fixtureDir, "loader-state.js"),
+					[
+						`import { loadNative as loadActualNative } from ${JSON.stringify(realLoaderUrl)};`,
+						"export function loadNative() {",
+						"\treturn { ...loadActualNative(), DesktopSession: undefined };",
+						"}",
+						"",
+					].join("\n"),
+				),
+				fs.writeFile(
+					path.join(fixtureDir, "consumer.js"),
+					[
+						'import { DesktopSession, visibleWidth } from "./index.js";',
+						"if (DesktopSession !== undefined) throw new Error('expected unavailable DesktopSession, got ' + typeof DesktopSession);",
+						'if (visibleWidth("supported", 4) !== 9) throw new Error("supported native export failed");',
+						'process.stdout.write("ok\\n");',
+						"",
+					].join("\n"),
+				),
+			]);
+
+			const child = Bun.spawn([process.execPath, path.join(fixtureDir, "consumer.js")], {
+				cwd: fixtureDir,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(exitCode, stderr).toBe(0);
+			expect(stdout.trim()).toBe("ok");
+		} finally {
+			await fs.rm(fixtureDir, { recursive: true, force: true });
+		}
+	});
 	it("fills conservative capabilities and translates default foreground input", async () => {
 		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
 		const session = new DesktopSession({ display: "all" });
