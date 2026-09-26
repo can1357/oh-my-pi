@@ -82,7 +82,7 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 
-import { cfgDisplayCollapseCompacted, cfgTerminalShowImages } from "../settings";
+import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 
@@ -1625,15 +1625,12 @@ export class CommandController {
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
 			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
-			if (cfgDisplayCollapseCompacted.get(this.ctx.settings)) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
+			// Same pairing as the auto-compaction arm in event-controller: the
+			// rebuild clears the container's emission ledger, so every block
+			// re-emits on this frame while the previous copy is still in native
+			// scrollback — without a clear the collapse-disabled path appends a
+			// duplicate transcript, exactly as `/compact` reproduced (#12140).
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
