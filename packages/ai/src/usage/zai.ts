@@ -408,6 +408,35 @@ export const zaiRankingStrategy: CredentialRankingStrategy = {
 		const limits = getZaiCredentialLimits(report);
 		return limits;
 	},
+	/**
+	 * ZAI 429s are credential-pool exhaustions (5h/weekly credits or tokens),
+	 * not model-family specific, so every block lands under one pool scope
+	 * instead of the provider-wide catch-all.
+	 */
+	blockScope() {
+		return "credits";
+	},
+	/**
+	 * A 429 block carries the reset the error reported, but the 5-hour pool
+	 * refills on its own cadence and a plan change can raise weekly credits
+	 * mid-window; the block then idles a usable account for days. Judge the
+	 * pool scope by every credential-pool limit the report carries — the ""
+	 * entry also heals the pre-scoping catch-all bucket that every ZAI block
+	 * written before this strategy scoped blocks lives under. A report with
+	 * no credits/tokens gate leaves the block's cause unknown, so vouch for
+	 * nothing rather than clear a block that may still hold.
+	 */
+	healableBlockScopes(report) {
+		const limits = getZaiCredentialLimits(report);
+		const hasPoolGate = limits.some(
+			limit => limit.id.startsWith("zai:credits:") || limit.id.startsWith("zai:tokens:"),
+		);
+		if (!hasPoolGate) return [];
+		return [
+			{ blockScope: "credits", limits },
+			{ blockScope: "", limits },
+		];
+	},
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
 		secondaryMs: WEEK_MS,
