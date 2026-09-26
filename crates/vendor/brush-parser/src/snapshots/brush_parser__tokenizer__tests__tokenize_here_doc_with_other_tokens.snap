@@ -1,0 +1,117 @@
+---
+source: brush-parser/src/tokenizer.rs
+expression: "test_tokenizer(r\"cat <<EOF | wc -l\nA B C\n1 2 3\nD E F\nEOF\n\")?"
+---
+TokenizerResult(
+  input: "cat <<EOF | wc -l\nA B C\n1 2 3\nD E F\nEOF\n",
+  result: [
+    Word("cat", SourceSpan(
+      start: SourcePosition(
+        index: 0,
+        line: 1,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 3,
+        line: 1,
+        column: 4,
+      ),
+    )),
+    Operator("<<", SourceSpan(
+      start: SourcePosition(
+        index: 4,
+        line: 1,
+        column: 5,
+      ),
+      end: SourcePosition(
+        index: 6,
+        line: 1,
+        column: 7,
+      ),
+    )),
+    Word("EOF", SourceSpan(
+      start: SourcePosition(
+        index: 6,
+        line: 1,
+        column: 7,
+      ),
+      end: SourcePosition(
+        index: 9,
+        line: 1,
+        column: 10,
+      ),
+    )),
+    Word("A B C\n1 2 3\nD E F\n", SourceSpan(
+      start: SourcePosition(
+        index: 18,
+        line: 2,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 40,
+        line: 6,
+        column: 1,
+      ),
+    )),
+    Word("EOF", SourceSpan(
+      start: SourcePosition(
+        index: 40,
+        line: 6,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 40,
+        line: 6,
+        column: 1,
+      ),
+    )),
+    Operator("|", SourceSpan(
+      start: SourcePosition(
+        index: 9,
+        line: 1,
+        column: 10,
+      ),
+      end: SourcePosition(
+        index: 11,
+        line: 1,
+        column: 12,
+      ),
+    )),
+    Word("wc", SourceSpan(
+      start: SourcePosition(
+        index: 12,
+        line: 1,
+        column: 13,
+      ),
+      end: SourcePosition(
+        index: 14,
+        line: 1,
+        column: 15,
+      ),
+    )),
+    Word("-l", SourceSpan(
+      start: SourcePosition(
+        index: 14,
+        line: 1,
+        column: 15,
+      ),
+      end: SourcePosition(
+        index: 17,
+        line: 1,
+        column: 18,
+      ),
+    )),
+    Operator("\n", SourceSpan(
+      start: SourcePosition(
+        index: 17,
+        line: 1,
+        column: 18,
+      ),
+      end: SourcePosition(
+        index: 18,
+        line: 2,
+        column: 1,
+      ),
+    )),
+  ],
+)

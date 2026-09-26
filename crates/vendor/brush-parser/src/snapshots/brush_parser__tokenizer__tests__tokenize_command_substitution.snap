@@ -1,0 +1,33 @@
+---
+source: brush-parser/src/tokenizer.rs
+expression: "test_tokenizer(\"a$(echo hi)b c\")?"
+---
+TokenizerResult(
+  input: "a$(echo hi)b c",
+  result: [
+    Word("a$(echo hi)b", SourceSpan(
+      start: SourcePosition(
+        index: 0,
+        line: 1,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 12,
+        line: 1,
+        column: 13,
+      ),
+    )),
+    Word("c", SourceSpan(
+      start: SourcePosition(
+        index: 13,
+        line: 1,
+        column: 14,
+      ),
+      end: SourcePosition(
+        index: 14,
+        line: 1,
+        column: 15,
+      ),
+    )),
+  ],
+)

@@ -1,0 +1,20 @@
+---
+source: brush-parser/src/word.rs
+expression: "test_parse(\"\\\"$(cat <<'EOF'\\n'hello'\\nEOF\\n)\\\"\")?"
+---
+ParseTestResults(
+  input: "\"$(cat <<\'EOF\'\n\'hello\'\nEOF\n)\"",
+  result: [
+    WordPieceWithSource(
+      piece: DoubleQuotedSequence([
+        WordPieceWithSource(
+          piece: CommandSubstitution("cat <<\'EOF\'\n\'hello\'\nEOF\n"),
+          start_index: 1,
+          end_index: 28,
+        ),
+      ]),
+      start_index: 0,
+      end_index: 29,
+    ),
+  ],
+)
