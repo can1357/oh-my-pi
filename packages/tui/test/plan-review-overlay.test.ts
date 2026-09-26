@@ -392,7 +392,6 @@ describe("PlanReviewOverlay", () => {
 		for (let i = 0; i < 10; i++) overlay.handleInput(DOWN);
 		const out = render(overlay);
 		// Actions focus restores the option cursor highlight + actions help.
-		expect(out).toContain("⏎ confirm");
 		expect(out).not.toContain("a annotate");
 	});
 

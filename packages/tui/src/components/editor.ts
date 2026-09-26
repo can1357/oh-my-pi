@@ -395,6 +395,9 @@ const VIM_NAV_KEYS: Record<string, string | undefined> = {
 	space: "l",
 };
 
+/** Minimum free cells between an end-of-line cursor and a right-aligned placeholder. */
+const PLACEHOLDER_MIN_GAP = 2;
+
 const DEFAULT_PAGE_SCROLL_LINES = 10;
 
 const MAX_UNDO_STACK = 100;
@@ -642,6 +645,11 @@ export class Editor implements Component, Focusable {
 	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
+	/** Placeholder painted right-aligned on the cursor row while the editor is empty and no
+	 *  autocomplete is open; hidden when it can't keep {@link PLACEHOLDER_MIN_GAP} cells from the
+	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
+	 *  it from live state. */
+	placeholder?: () => string | undefined;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -675,7 +683,7 @@ export class Editor implements Component, Focusable {
 			cursorCol: this.#state.cursorCol,
 			lineCount: lines.length,
 			selection: null,
-			placeholderActive: false,
+			placeholderActive: this.#getPlaceholder() !== undefined,
 		};
 	}
 
@@ -1265,9 +1273,22 @@ export class Editor implements Component, Focusable {
 		const emitCursorMarker = this.focused;
 		const lineContentWidth = contentAreaWidth;
 
-		// Compute inline hint text (dim ghost text after cursor)
-		const inlineHint = this.#getInlineHint();
+		// Text painted after an end-of-line cursor with `avail` free cells: dim ghost text
+		// against the cursor, or the placeholder flush right.
+		const placeholder = this.#getPlaceholder();
+		const inlineHint = placeholder ? null : this.#getInlineHint();
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
+		const hintTail = (avail: number): { text: string; width: number } | undefined => {
+			if (placeholder) {
+				const gap = avail - visibleWidth(placeholder);
+				return gap >= PLACEHOLDER_MIN_GAP ? { text: padding(gap) + placeholder, width: avail } : undefined;
+			}
+			if (!inlineHint) return undefined;
+			return {
+				text: hintStyle(truncateToWidth(inlineHint, avail)),
+				width: Math.min(visibleWidth(inlineHint), avail),
+			};
+		};
 
 		// Active Vim visual selection, if any. The cursor always sits inside it, so selected rows
 		// skip the normal cursor-glyph branches: the reverse-video span already marks the spot.
@@ -1360,17 +1381,16 @@ export class Editor implements Component, Focusable {
 				if (marker) {
 					const before = displayText.slice(0, layoutLine.cursorPos);
 					const after = displayText.slice(layoutLine.cursorPos);
+					const tail = after.length === 0 ? hintTail(Math.max(0, lineContentWidth - displayWidth)) : undefined;
 					if (this.#imeSafeCursorLayout && after.length === 0 && isSideBordered) {
 						// Terminal frontends render IME marked text locally before committed bytes
 						// reach the application. Keep the end-of-input cursor row empty to its
 						// right so that insertion cannot shift box chrome onto the next row.
 						displayText = before + marker;
 						imeSafeCursorTail = true;
-					} else if (after.length === 0 && inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + hintText;
-						displayWidth += Math.min(visibleWidth(inlineHint), availWidth);
+					} else if (tail) {
+						displayText = before + marker + tail.text;
+						displayWidth += tail.width;
 					} else if (after.length === 0 && !isSideBordered && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
@@ -1413,14 +1433,10 @@ export class Editor implements Component, Focusable {
 						});
 						displayText = widthLimitedCursor.text;
 						displayWidth = widthLimitedCursor.width;
-					} else if (inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth - overrideWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + this.cursorOverride + hintText;
-						displayWidth += overrideWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + this.cursorOverride;
-						displayWidth += overrideWidth;
+						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - overrideWidth));
+						displayText = before + marker + this.cursorOverride + (tail?.text ?? "");
+						displayWidth += overrideWidth + (tail?.width ?? 0);
 					}
 				} else {
 					// Cursor is at the end - add thin cursor glyph
@@ -1431,14 +1447,10 @@ export class Editor implements Component, Focusable {
 						const widthLimitedCursor = this.#renderEndOfLineCursorAtWidthLimit(before, marker, lineContentWidth);
 						displayText = widthLimitedCursor.text;
 						displayWidth = widthLimitedCursor.width;
-					} else if (inlineHint) {
-						const availWidth = Math.max(0, lineContentWidth - displayWidth - cursorWidth);
-						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + cursor + hintText;
-						displayWidth += cursorWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + cursor;
-						displayWidth += cursorWidth;
+						const tail = hintTail(Math.max(0, lineContentWidth - displayWidth - cursorWidth));
+						displayText = before + marker + cursor + (tail?.text ?? "");
+						displayWidth += cursorWidth + (tail?.width ?? 0);
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {
 						cursorPaddingOverflow = displayWidth - lineContentWidth;
@@ -4281,6 +4293,10 @@ export class Editor implements Component, Focusable {
 		}
 
 		return this.#getWordCompletion();
+	}
+	#getPlaceholder(): string | undefined {
+		if (this.#autocompleteState || !this.#isEditorEmpty()) return undefined;
+		return this.placeholder?.() || undefined;
 	}
 	#getWordCompletion(): string | null {
 		return (

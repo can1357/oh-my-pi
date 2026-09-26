@@ -1,3 +1,4 @@
+import { formatKeyHint } from "../app-keybindings";
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { type KeyId, matchesKey } from "../keys";
@@ -197,7 +198,7 @@ export class LiveVisualizer implements Component {
 		const frames = theme.spinnerFrames;
 		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
-		const fullLabel = ` ${status} · space mute · esc end `;
+		const fullLabel = ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
 		const shortLabel = ` ${status} `;
 		const label =
 			innerWidth >= visibleWidth(fullLabel) + 1

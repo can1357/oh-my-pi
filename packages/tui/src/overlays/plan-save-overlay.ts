@@ -1,6 +1,7 @@
 import { type Component, CURSOR_MARKER, type Focusable, Input, truncateToWidth, visibleWidth } from "../index";
 import { theme } from "../theme/theme";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
+import { editorKey } from "../chrome/keybinding-hints";
 
 /** A confirmed destination chosen from {@link PlanSaveOverlay}. */
 export interface PlanSaveOverlayResult {
@@ -58,7 +59,8 @@ export class PlanSaveOverlay implements Component, Focusable {
 	render(width: number): readonly string[] {
 		const innerWidth = Math.max(0, width - 4);
 		this.#input.focused = this.#focused;
-		this.#body.setLines([this.#renderInput(innerWidth), theme.fg("dim", "Enter save and quit · Esc cancel")]);
+		const hint = `${editorKey("tui.input.submit")} save and quit · ${editorKey("tui.select.cancel")} cancel`;
+		this.#body.setLines([this.#renderInput(innerWidth), theme.fg("dim", hint)]);
 		return this.#panel.render(width);
 	}
 

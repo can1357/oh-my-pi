@@ -166,6 +166,7 @@
 		"gen:bundle": "bun --cwd=packages/coding-agent run gen:bundle",
 		"gen:native": "bun --cwd=packages/natives run gen:native",
 		"gen:native:reset": "bun --cwd=packages/natives run gen:native:reset",
+		"gen:glyphs": "bun --cwd=packages/tui run gen:glyphs",
 		"check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
 	},
 	"dependencies": {

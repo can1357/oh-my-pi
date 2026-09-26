@@ -1,5 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getDefaultPasteImageKeys, KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import {
+	formatDoubleTap,
+	formatKeyHint,
+	getDefaultPasteImageKeys,
+	KeybindingsManager,
+	setKeyHintPlatform,
+} from "@oh-my-pi/pi-tui/app-keybindings";
+import { initTheme, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 
 describe("KeybindingsManager.getDisplayString", () => {
 	beforeEach(() => setKeyHintPlatform("linux"));
@@ -55,6 +62,57 @@ describe("KeybindingsManager.getDisplayString", () => {
 
 		expect(keybindings.getDisplayString("app.display.reset")).toBe("Alt+L");
 		expect(keybindings.getDisplayString("app.clipboard.pasteImage")).toBe("Ctrl+V/Super+V");
+	});
+});
+
+describe("formatKeyHint with keycap glyphs", () => {
+	beforeAll(() => initTheme(false, "unicode"));
+	afterAll(() => setSymbolPreset("unicode"));
+	afterEach(() => setKeyHintPlatform(undefined));
+
+	it("abuts macOS glyph modifiers and keeps Ctrl/Alt/Super as words elsewhere", () => {
+		setKeyHintPlatform("darwin");
+		expect(formatKeyHint("ctrl+shift+c")).toBe("⌃⇧C");
+		expect(formatKeyHint("alt+up")).toBe("⌥↑");
+		expect(formatKeyHint("super+v")).toBe("⌘V");
+
+		setKeyHintPlatform("linux");
+		expect(formatKeyHint("ctrl+shift+c")).toBe("Ctrl+⇧C");
+		expect(formatKeyHint("alt+up")).toBe("Alt+↑");
+		expect(formatKeyHint("super+v")).toBe("Super+V");
+	});
+
+	it("orders modifiers canonically regardless of binding order", () => {
+		setKeyHintPlatform("darwin");
+		expect(formatKeyHint("shift+ctrl+p")).toBe("⌃⇧P");
+		expect(formatKeyHint("super+shift+alt+k")).toBe("⌥⇧⌘K");
+	});
+
+	it("keeps a bare letter lowercase but capitalizes it inside a chord", () => {
+		expect(formatKeyHint("q")).toBe("q");
+		expect(formatKeyHint("shift+g")).toBe("⇧G");
+	});
+
+	it("renders a bare modifier and the plus key itself", () => {
+		setKeyHintPlatform("linux");
+		expect(formatKeyHint("shift")).toBe("⇧");
+		expect(formatKeyHint("ctrl++")).toBe("Ctrl++");
+		expect(formatKeyHint("+")).toBe("+");
+	});
+
+	it("spaces a double tap only when the key renders as a word", async () => {
+		expect(formatDoubleTap("left")).toBe("←←");
+		await setSymbolPreset("ascii");
+		expect(formatDoubleTap("left")).toBe("Left Left");
+		await setSymbolPreset("unicode");
+	});
+
+	it("separates nerd icons so adjacent keycaps stay legible", async () => {
+		setKeyHintPlatform("darwin");
+		await setSymbolPreset("nerd");
+		expect(formatKeyHint("shift+tab")).toBe("\u{f0636} \u{f0312}");
+		expect(formatKeyHint("ctrl+shift+c")).toBe("\u{f0634} \u{f0636} C");
+		await setSymbolPreset("unicode");
 	});
 });
 

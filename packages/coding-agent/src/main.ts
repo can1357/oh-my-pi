@@ -26,6 +26,7 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -244,7 +245,7 @@ export async function readPipedInput(): Promise<string | undefined> {
 		? undefined
 		: setTimeout(() => {
 				process.stderr.write(
-					`${chalk.dim("Reading prompt from piped stdin (waiting for EOF; ctrl+c to abort)…")}\n`,
+					`${chalk.dim(`Reading prompt from piped stdin (waiting for EOF; ${formatKeyHint("ctrl+c")} to abort)…`)}\n`,
 				);
 			}, 1000);
 	notice?.unref?.();
@@ -337,7 +338,7 @@ export function buildModelScopeNotification(
 			return `${scopedModel.model.id}${thinkingStr}`;
 		})
 		.join(", ");
-	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
+	return { kind: "info", message: `Model scope: ${modelList} (${formatKeyHint("ctrl+p")} to cycle)` };
 }
 export async function submitInteractiveInput(
 	mode: Pick<

@@ -127,8 +127,8 @@ describe("storage process-exit cleanup", () => {
 			"const prompts = reopenedHistory.getRecent(10).map(row => row.prompt);",
 			"HistoryStorage.close();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("after-cleanup");',
-			"const commands = agent.listCommandUsage();",
+			'agent.recordUsage("command", "after-cleanup");',
+			'const commands = agent.listUsage("command");',
 			"AgentStorage.close();",
 			"console.log(JSON.stringify({ prompts, commands }));",
 		].join("\n");
@@ -242,11 +242,11 @@ describe("storage process-exit cleanup", () => {
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("before-cleanup");',
+			'agent.recordUsage("command", "before-cleanup");',
 			"await postmortem.cleanup();",
 			// Same handle after cleanup: writing here throws if statements were finalized.
-			'agent.recordCommandUsage("after-cleanup");',
-			"console.log(JSON.stringify(agent.listCommandUsage()));",
+			'agent.recordUsage("command", "after-cleanup");',
+			'console.log(JSON.stringify(agent.listUsage("command")));',
 			"process.exit(0);",
 		].join("\n");
 		const child = Bun.spawn([process.execPath, "--eval", script], {

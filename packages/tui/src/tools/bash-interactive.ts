@@ -4,6 +4,7 @@ import type { Component } from "../tui";
 import { extractPrintableText, matchesKey, parseKey, parseKittySequence } from "../keys";
 import { padding, truncateToWidth, visibleWidth } from "../utils";
 import type { Theme } from "../theme/theme";
+import { formatKeyHint } from "../app-keybindings";
 import { formatStatusIcon, replaceTabs } from "../render/render-utils";
 import { readTerminalRows, styleTerminalRow } from "./terminal-output";
 
@@ -267,7 +268,7 @@ export class BashInteractiveOverlayComponent implements Component {
 		const footer =
 			this.#state === "running"
 				? truncateToWidth(
-						`${this.#uiTheme.fg("warning", "esc")} ${this.#uiTheme.fg("dim", "force-kill")} ${this.#uiTheme.fg("dim", "· input forwarded to PTY")}`,
+						`${this.#uiTheme.fg("warning", formatKeyHint("escape"))} ${this.#uiTheme.fg("dim", "force-kill")} ${this.#uiTheme.fg("dim", "· input forwarded to PTY")}`,
 						innerWidth,
 					)
 				: truncateToWidth(this.#uiTheme.fg("dim", "session finished"), innerWidth);

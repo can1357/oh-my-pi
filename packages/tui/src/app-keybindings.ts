@@ -18,6 +18,9 @@ import {
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
 } from "./keybindings";
+import type { ModifierName } from "./keys";
+import { SYMBOL_PRESETS, type SymbolKey } from "./theme/symbols";
+import { theme } from "./theme/theme";
 
 /**
  * Application-level keybindings (coding agent specific).
@@ -645,12 +648,9 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		return this.getResolvedBindings();
 	}
 
-	/**
-	 * Get display string for a keybinding (e.g., "ctrl+c/escape").
-	 */
+	/** Display string for a keybinding's keys (see {@link formatKeyHints}); empty when unbound. */
 	getDisplayString(keybinding: Keybinding): string {
-		const keys = this.getKeys(keybinding);
-		return formatKeyHints(keys.length === 0 ? [] : keys);
+		return formatKeyHints(this.getKeys(keybinding));
 	}
 
 	/**
@@ -665,11 +665,14 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 }
 
 /**
- * Key hint formatting utilities for UI labels.
+ * Key hint formatting: every key shown to the user renders through
+ * {@link formatKeyHint}, so a key reads the same everywhere in the UI.
  *
- * Modifier labels are platform-aware: macOS names the physical keys `Option`
- * (`alt`) and `Cmd` (`super`), so rendering `Alt`/`Super` there would name keys
- * absent from a Mac keyboard. Every other platform keeps `Alt`/`Super`.
+ * Keys resolve through the active theme's `key.*` symbols — words in the
+ * ascii preset, keycap glyphs in unicode, icons in nerd — falling back to the
+ * ascii words before a theme loads. Modifiers are platform-aware: macOS
+ * keycaps are labelled ⌃ ⌥ ⌘ (`key.*Mac`), while other platforms keep
+ * `Ctrl`/`Alt`/`Super`, since those glyphs name no key on a PC keyboard.
  */
 
 /**
@@ -690,70 +693,87 @@ export function keyHintPlatform(): NodeJS.Platform {
 	return keyHintPlatformOverride ?? process.platform;
 }
 
-type Modifier = "ctrl" | "shift" | "alt" | "super";
+/** Modifier → [generic symbol, macOS symbol], in display order (⌃⌥⇧⌘, as macOS menus list them). */
+const MODIFIER_SYMBOLS: Record<string, readonly [SymbolKey, SymbolKey] | undefined> = {
+	ctrl: ["key.ctrl", "key.ctrlMac"],
+	alt: ["key.alt", "key.altMac"],
+	shift: ["key.shift", "key.shift"],
+	super: ["key.super", "key.superMac"],
+};
+const KEY_SYMBOLS: Record<string, SymbolKey | undefined> = {
+	esc: "key.esc",
+	escape: "key.esc",
+	enter: "key.enter",
+	return: "key.enter",
+	space: "key.space",
+	tab: "key.tab",
+	backspace: "key.backspace",
+	delete: "key.delete",
+	up: "key.up",
+	down: "key.down",
+	left: "key.left",
+	right: "key.right",
+};
 
-function isModifier(part: string): part is Modifier {
-	return part === "ctrl" || part === "shift" || part === "alt" || part === "super";
-}
-
-/**
- * Human label for a modifier, using each platform's own key names. `ctrl` and
- * `shift` are the same everywhere; `alt`/`super` become `Option`/`Cmd` on macOS.
- */
-export function modifierLabel(mod: Modifier, platform: NodeJS.Platform = keyHintPlatform()): string {
-	switch (mod) {
-		case "ctrl":
-			return "Ctrl";
-		case "shift":
-			return "Shift";
-		case "alt":
-			return platform === "darwin" ? "Option" : "Alt";
-		case "super":
-			return platform === "darwin" ? "Cmd" : "Super";
-	}
-}
-
-const KEY_LABELS: Record<string, string> = {
-	esc: "Esc",
-	escape: "Esc",
-	enter: "Enter",
-	return: "Enter",
-	space: "Space",
-	tab: "Tab",
-	backspace: "Backspace",
-	delete: "Delete",
+/** Keys without a keycap glyph; spelled out in every preset. */
+const KEY_WORDS: Record<string, string | undefined> = {
 	home: "Home",
 	end: "End",
 	pageup: "PgUp",
 	pagedown: "PgDn",
-	up: "Up",
-	down: "Down",
-	left: "Left",
-	right: "Right",
+	insert: "Ins",
 };
 
-function formatKeyPart(part: string, platform: NodeJS.Platform): string {
-	const lower = part.toLowerCase();
-	if (isModifier(lower)) return modifierLabel(lower, platform);
-	const label = KEY_LABELS[lower];
-	if (label) return label;
-	if (part.length === 1) return part.toUpperCase();
-	return `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
+function keySymbol(key: SymbolKey): string {
+	return typeof theme === "undefined" ? SYMBOL_PRESETS.ascii[key] : theme.symbol(key);
 }
 
-/** Format a key chord with human-readable, platform-aware modifier labels. */
-export function formatKeyHint(key: KeyId): string {
-	const platform = keyHintPlatform();
-	return key
-		.split("+")
-		.map(part => formatKeyPart(part, platform))
-		.join("+");
+const HAS_LETTER = /[A-Za-z0-9]/;
+
+/** A displayable key: a chord, or a bare modifier for "hold ⇧" style hints. */
+export type KeyName = KeyId | ModifierName;
+
+/**
+ * Format one key for display: `"ctrl+shift+c"` → `⌃⇧C` (macOS) / `Ctrl+⇧C`,
+ * `"escape"` → `⎋`, `"alt+up"` → `⌥↑` / `Alt+↑`, `"shift"` → `⇧`.
+ * A glyph modifier is followed by the preset's `key.joiner` (nothing in
+ * unicode, a space in nerd, whose icons blur together when adjacent); a word
+ * modifier takes a `+`. Modifiers
+ * render in canonical order whatever the binding says (`shift+ctrl+p` → `⌃⇧P`).
+ * A bare letter stays lowercase (`q`) since `Q` would read as ⇧Q; in a chord it
+ * is capitalized. Other keys are capitalized (`f5` → `F5`).
+ */
+export function formatKeyHint(key: KeyName): string {
+	const mac = keyHintPlatform() === "darwin";
+	// A trailing `+` is the plus key itself (`+`, `ctrl++`), not a separator.
+	const parts = key.endsWith("+") ? [...key.slice(0, -1).split("+").slice(0, -1), "+"] : key.split("+");
+	const base = parts.pop()!;
+	let out = "";
+	for (const modifier in MODIFIER_SYMBOLS) {
+		if (!parts.includes(modifier)) continue;
+		const label = keySymbol(MODIFIER_SYMBOLS[modifier]![mac ? 1 : 0]);
+		out += HAS_LETTER.test(label) ? `${label}+` : label + keySymbol("key.joiner");
+	}
+	const lower = base.toLowerCase();
+	const modifier = MODIFIER_SYMBOLS[lower];
+	const symbol = KEY_SYMBOLS[lower];
+	if (modifier) out += keySymbol(modifier[mac ? 1 : 0]);
+	else if (symbol !== undefined) out += keySymbol(symbol);
+	else if (KEY_WORDS[lower] !== undefined) out += KEY_WORDS[lower];
+	else if (base.length === 1) out += parts.length === 0 ? base : base.toUpperCase();
+	else out += base[0]!.toUpperCase() + base.slice(1);
+	return out;
 }
 
-/** Format alternative key chords as slash-separated human-readable hints. */
-export function formatKeyHints(keys: KeyId | KeyId[]): string {
-	const list = Array.isArray(keys) ? keys : [keys];
-	return list.map(formatKeyHint).join("/");
+/** Format alternative keys as a slash-separated hint (`["f5", "alt+r"]` → `F5/⌥R`). */
+export function formatKeyHints(keys: KeyName | readonly KeyName[]): string {
+	return typeof keys === "string" ? formatKeyHint(keys) : keys.map(formatKeyHint).join("/");
+}
+
+/** Format a double-tap gesture: `←←` with glyphs, `Left Left` with words. */
+export function formatDoubleTap(key: KeyName): string {
+	const label = formatKeyHint(key);
+	return `${label}${HAS_LETTER.test(label) ? " " : keySymbol("key.joiner")}${label}`;
 }
 
 export type { Keybinding, KeybindingsConfig, KeyId };

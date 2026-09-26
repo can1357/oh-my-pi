@@ -4,6 +4,8 @@ import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keyb
 import { OverlayPanel } from "../chrome/overlay-box";
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 
 const LOGOUT_SELECTOR_MAX_VISIBLE = 10;
 
@@ -84,7 +86,14 @@ export class LogoutAccountSelectorComponent extends OverlayPanel {
 		}
 
 		this.#listContainer.addChild(
-			new TruncatedText(theme.fg("muted", "↑/↓ select · ↵ log out account · Esc cancel"), 0, 0),
+			new TruncatedText(
+				theme.fg(
+					"muted",
+					`${editorKeys("tui.select.up", "tui.select.down")} select · ${formatKeyHint("enter")} log out account · ${editorKey("tui.select.cancel")} cancel`,
+				),
+				0,
+				0,
+			),
 		);
 	}
 

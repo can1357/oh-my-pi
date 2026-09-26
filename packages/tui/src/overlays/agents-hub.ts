@@ -29,6 +29,8 @@ import type { AgentSource } from "../tools/task";
 import { shortenPath } from "../render/render-utils";
 import { getEditorTheme, theme } from "../theme";
 import { matchesAppFollowUp, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	buildBrowserItems,
 	ModelBrowser,
@@ -980,7 +982,10 @@ export class AgentsHubComponent implements Component {
 			const { agent, property } = this.#assigning;
 			const what = property === "model" ? "model override" : `${property} model`;
 			return truncateToWidth(
-				theme.fg("accent", ` Picking ${what} for ${theme.bold(agent.name)} — Enter assigns, Esc cancels`),
+				theme.fg(
+					"accent",
+					` Picking ${what} for ${theme.bold(agent.name)} — ${formatKeyHint("enter")} assigns, ${editorKey("tui.select.cancel")} cancels`,
+				),
 				width,
 			);
 		}
@@ -1152,26 +1157,35 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		if (this.#strip) {
 			if (this.#strip.kind === "pattern") {
 				const property = this.#strip.property;
 				const values = property === "model" ? "a model pattern" : '"on", "off", or a model pattern';
-				return `Enter ${values} (role aliases like @smol and :level suffixes work; empty clears) · Esc back`;
+				return `Enter ${values} (role aliases like @smol and :level suffixes work; empty clears) · ${cancel} back`;
 			}
-			return this.#strip.property ? "←/→ choose · Enter apply · Esc back" : "←/→ choose · Enter open · Esc cancel";
+			const choose = formatKeyHints(["left", "right"]);
+			return this.#strip.property
+				? `${choose} choose · ${enter} apply · ${cancel} back`
+				: `${choose} choose · ${enter} open · ${cancel} cancel`;
 		}
 		if (this.#assigning) {
-			return "Enter pick · ↑/↓ models · type to search · Esc cancel";
+			return `${enter} pick · ${upDown} models · type to search · ${cancel} cancel`;
 		}
 		if (this.#createActive) {
-			if (this.#createSpec) return "Enter save · Tab scope · r regenerate · Esc cancel";
+			const tab = formatKeyHint("tab");
+			if (this.#createSpec)
+				return `${enter} save · ${tab} scope · ${formatKeyHint("r")} regenerate · ${cancel} cancel`;
 			if (this.#createGenerating) return "Generating…";
-			return "Ctrl+Q/Ctrl+Enter generate · Enter newline · Tab scope · Esc cancel";
+			const generate = formatKeyHints(boundKeys("app.message.followUp", ["ctrl+q", "ctrl+enter"]));
+			return `${generate} generate · ${enter} newline · ${tab} scope · ${cancel} cancel`;
 		}
 		if (this.#focus === "scope") {
-			return "↑/↓ scopes · →/Enter agents · Esc close";
+			return `${upDown} scopes · ${formatKeyHints(["right", "enter"])} agents · ${cancel} close`;
 		}
-		return "Enter configure · Space enable/disable · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
+		return `${enter} configure · ${formatKeyHint("space")} enable/disable · ${upDown} rows · type to search · ${formatKeyHint("ctrl+r")} reload · ${cancel} close`;
 	}
 
 	#renderFooter(width: number): string {

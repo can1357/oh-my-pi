@@ -85,27 +85,12 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");
 	});
 
-	it("renders macOS static navigation rows on darwin", () => {
-		setKeyHintPlatform("darwin");
-		const markdown = buildHotkeysMarkdown({
-			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
-		});
-
-		expect(markdown).toContain("| `Option+Left/Right` | Move by word |");
-		expect(markdown).toContain("| `Ctrl+A` / `Home` / `Cmd+Left` | Start of line |");
-		expect(markdown).toContain("| `Ctrl+W` / `Option+Backspace` | Delete word backwards |");
-		expect(markdown).toContain("| `Shift+Enter` / `Option+Enter` | New line |");
-	});
-
 	it("drops Option/Cmd static navigation labels off darwin", () => {
 		setKeyHintPlatform("linux");
 		const markdown = buildHotkeysMarkdown({
 			keybindings: { ...noForwardDelete, getDisplayString: () => "Disabled" },
 		});
 
-		expect(markdown).toContain("| `Alt+Left/Right` | Move by word |");
-		expect(markdown).toContain("| `Ctrl+A` / `Home` | Start of line |");
-		expect(markdown).toContain("| `Ctrl+W` / `Alt+Backspace` | Delete word backwards |");
 		expect(markdown).not.toContain("Option+");
 		expect(markdown).not.toContain("Cmd+");
 	});

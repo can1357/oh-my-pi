@@ -28,7 +28,8 @@ import {
 import type { SpaceHoldHandler } from "../space-hold";
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
-import { editorKey, rawKeyHint } from "../chrome/keybinding-hints";
+import { editorKey, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
+import { formatKeyHint } from "../app-keybindings";
 import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
 import { padToWidth } from "../render/utils";
 import { SplitPane } from "../components/layout/split-pane";
@@ -267,11 +268,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 				this.#focus = "answer";
 				this.#followLatest = true;
 			} else {
-				composer.notice = "Follow-up was not started. Your draft is kept; Enter to retry.";
+				composer.notice = `Follow-up was not started. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
 			}
 		} catch {
 			if (this.#composer === composer) {
-				composer.notice = "Could not start the follow-up. Your draft is kept; Enter to retry.";
+				composer.notice = `Could not start the follow-up. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
 			}
 		} finally {
 			this.#followUpPending = false;
@@ -507,15 +508,19 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const composer = this.#composer;
 		const latest = record ? getBtwLatestTurn(record) : undefined;
 		const actions = composer
-			? [rawKeyHint("Enter", this.#followUpPending ? "starting…" : "send"), rawKeyHint("Esc", "cancel")]
+			? [
+					keyHint("tui.input.submit", this.#followUpPending ? "starting…" : "send"),
+					keyHint("tui.select.cancel", "cancel"),
+				]
 			: [
-					rawKeyHint("Esc", latest?.status === "running" ? "cancel" : "close"),
-					rawKeyHint("Tab/Ctrl+/", "switch pane"),
+					keyHint("tui.select.cancel", latest?.status === "running" ? "cancel" : "close"),
+					rawKeyHint(["tab", "ctrl+/"], "switch pane"),
 				];
 		if (!composer) {
-			if (record && this.#canFollowUp(record)) actions.push(rawKeyHint("f/Enter", "follow up"));
+			if (record && this.#canFollowUp(record)) actions.push(rawKeyHint(["f", "enter"], "follow up"));
 			if (record && getBtwCopyText(record) !== undefined) {
-				if (this.#isCopied(record)) actions.push(theme.fg("success", "✓ copied · c to copy again"));
+				if (this.#isCopied(record))
+					actions.push(theme.fg("success", `✓ copied · ${formatKeyHint("c")} to copy again`));
 				else actions.push(rawKeyHint("c", inner < 40 ? "copy" : "copy answer"));
 			}
 		}
@@ -577,10 +582,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (showNavigation) {
 				lines.push(
 					row(
-						rawKeyHint(
-							`${editorKey("tui.select.up")}/${editorKey("tui.select.down")}`,
-							this.#focus === "list" ? "select" : "scroll",
-						),
+						theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) +
+							theme.fg("muted", ` ${this.#focus === "list" ? "select" : "scroll"}`),
 						width,
 					),
 				);

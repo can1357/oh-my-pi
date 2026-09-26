@@ -71,7 +71,8 @@ import {
 } from "../keybinding-matchers";
 import { optionMarker } from "../tools/ask";
 import { CountdownTimer } from "../chrome/countdown-timer";
-import { editorKey } from "../chrome/keybinding-hints";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { handleTabSwitchKey } from "../chrome/selector-helpers";
 
@@ -307,17 +308,6 @@ function renderCachedPreview(cache: PreviewRenderCache, preview: string, width: 
 		byWidth.set(width, rendered);
 	}
 	return rendered;
-}
-
-function pageKeysLabel(): string {
-	const pageUp = editorKey("tui.select.pageUp");
-	const pageDown = editorKey("tui.select.pageDown");
-	return `${pageUp === "pageup" ? "PgUp" : pageUp}/${pageDown === "pagedown" ? "PgDn" : pageDown}`;
-}
-
-function cancelKeyLabel(): string {
-	const [key = ""] = editorKey("tui.select.cancel").split("/");
-	return key === "escape" ? "Esc" : key;
 }
 
 function normalizedInlineInput(input: string): string {
@@ -767,24 +757,29 @@ export class AskDialogComponent implements Component {
 	}
 
 	#footerHintText(indicator: string): string {
-		const cancel = `${cancelKeyLabel()} cancel`;
+		const cancel = `${editorKey("tui.select.cancel")} cancel`;
+		const enter = formatKeyHint("enter");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const inputGuard = this.options.inputGuard;
 		if (inputGuard?.isBlocked()) return `${inputGuard.hint}${this.#expandHint()} · ${cancel}`;
 		if (this.#isSubmitTab()) {
 			const scroll = indicator ? ` ${indicator} scroll ·` : "";
-			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
+			return `${enter} submit · ${upDown} scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
 		const enterAction = this.#questions.length > 1 ? "next" : "submit";
-		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select · n note";
-		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
+		const action = question?.multi
+			? `${formatKeyHint("space")} toggle · ${enter} ${enterAction}`
+			: `${enter} select · ${formatKeyHint("n")} note`;
+		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])}` : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
-			return `${action} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}`;
+			const pageKeys = editorKeys("tui.select.pageUp", "tui.select.pageDown");
+			return `${action} · ${upDown}${tabs} · ${cancel}${expand} · ${pageKeys} ${indicator}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
-		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}${expand}`;
+		return `${action} · ${upDown} move${tabs} ·${scroll} ${cancel}${expand}`;
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
@@ -1051,7 +1046,7 @@ export class AskDialogComponent implements Component {
 			allLines.push(
 				theme.fg(
 					"warning",
-					`${unanswered} unanswered question${unanswered === 1 ? "" : "s"}; Enter still submits.`,
+					`${unanswered} unanswered question${unanswered === 1 ? "" : "s"}; ${formatKeyHint("enter")} still submits.`,
 				),
 			);
 			allLines.push("");

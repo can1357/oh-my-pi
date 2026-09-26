@@ -26,6 +26,8 @@ import {
 	matchesSelectUp,
 } from "../keybinding-matchers";
 import { CountdownTimer } from "../chrome/countdown-timer";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import { formatKeyHint } from "../app-keybindings";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { renderSegmentTrack } from "../chrome/segment-track";
 import { MenuSelection, getMenuWindow } from "../components/menu-selection";
@@ -264,7 +266,9 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.addChild(this.#listContainer);
 		}
 		this.addChild(new Spacer(1));
-		const controlsHint = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
+		const controlsHint =
+			opts?.helpText ??
+			`${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${editorKey("tui.select.cancel")} cancel`;
 		this.addChild(new Text(theme.fg("dim", controlsHint), 0, 0));
 		this.addChild(new Spacer(1));
 

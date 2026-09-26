@@ -11,7 +11,9 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../index";
-import { type KeybindingsManager } from "../app-keybindings";
+import { appKey, editorKey } from "../chrome/keybinding-hints";
+import { formatKeyHint, formatKeyHints, type KeybindingsManager } from "../app-keybindings";
+import type { Keybinding } from "../keybindings";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { type Theme } from "../theme/theme";
 import type {
@@ -157,7 +159,6 @@ export class AnnotationOverlay implements Component {
 	#textViewportDriven = false;
 	#textRenderedRowBySource: readonly number[] = [];
 	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, RenderedDiffBody>();
-	#externalEditorLabel: string;
 
 	readonly #tui: TUI;
 	readonly #theme: Theme;
@@ -253,7 +254,6 @@ export class AnnotationOverlay implements Component {
 		this.#editor.cursorOverride = " ";
 		this.#editor.setScrollbarVisible(true);
 		this.#editor.onSubmit = value => this.#commitAnnotation(value);
-		this.#externalEditorLabel = keybindings.getDisplayString("app.editor.external");
 		this.#resetSourceCursor();
 	}
 
@@ -326,6 +326,12 @@ export class AnnotationOverlay implements Component {
 		if (this.#focus === "files") this.#handleFiles(data);
 		else if (this.#focus === "diff") this.#handleDiff(data);
 		else this.#handleActions(data);
+	}
+
+	/** Primary key bound to `action` in this overlay's keybindings, formatted for footer hints. */
+	#key(action: Keybinding): string {
+		const [key] = this.#keybindings.getKeys(action);
+		return key ? formatKeyHint(key) : "";
 	}
 
 	#finish(result: CodeReviewOverlayResult | TextReviewOverlayResult | undefined): void {
@@ -962,14 +968,11 @@ export class AnnotationOverlay implements Component {
 		const options = chooser.entries
 			.slice(start, start + optionLimit)
 			.map((index, windowIndex) => this.#renderAnnotationChooserEntry(chooser, index, start + windowIndex, width));
+		const keysHint = `${this.#key("tui.select.up")}/${this.#key("tui.select.down")} choose · ${this.#key("tui.select.confirm")} edit · ${this.#key("tui.select.cancel")} cancel`;
 		const lines =
 			availableRows === 2
-				? [this.#theme.fg("dim", "Edit annotation · ↑↓ choose · enter edit · esc cancel"), ...options.slice(0, 1)]
-				: [
-						this.#theme.fg("dim", "Edit annotation · ↑↓ choose · enter edit · esc cancel"),
-						...options,
-						this.#theme.fg("dim", "↑↓ choose · enter edit · esc cancel"),
-					];
+				? [this.#theme.fg("dim", `Edit annotation · ${keysHint}`), ...options.slice(0, 1)]
+				: [this.#theme.fg("dim", `Edit annotation · ${keysHint}`), ...options, this.#theme.fg("dim", keysHint)];
 		return Number.isFinite(availableRows) ? lines.slice(0, availableRows) : lines;
 	}
 
@@ -1034,20 +1037,31 @@ export class AnnotationOverlay implements Component {
 				width,
 				Ellipsis.Unicode,
 			);
-			const hints = ["enter save", "shift+enter newline", "esc cancel"];
-			if (this.#externalEditorLabel) hints.push(`${this.#externalEditorLabel} editor`);
+			const hints = [
+				`${editorKey("tui.input.submit")} save`,
+				`${editorKey("tui.input.newLine")} newline`,
+				`${this.#key("tui.select.cancel")} cancel`,
+			];
+			const externalEditorKey = appKey(this.#keybindings, "app.editor.external");
+			if (externalEditorKey) hints.push(`${externalEditorKey} editor`);
 			this.#editor.focused = true;
 			return [caption, ...this.#editor.render(width), this.#theme.fg("dim", hints.join(" · "))];
 		}
+		const upDown = `${this.#key("tui.select.up")}/${this.#key("tui.select.down")}`;
+		const confirm = this.#key("tui.select.confirm");
+		const editNote = `${formatKeyHint("e")} edit note`;
 		const focusHelp =
 			this.#focus === "files"
-				? "↑↓ file · ⏎ diff · a/A file note · e edit note"
+				? `${upDown} file · ${confirm} diff · ${formatKeyHints(["a", "shift+a"])} file note · ${editNote}`
 				: this.#focus === "diff"
-					? this.#textSource
-						? "↑↓ line · ⇧ faster · pgup/pgdn · g/G ends · a line note · A text note · e edit note"
-						: "↑↓ line · ⇧ faster · pgup/pgdn · g/G ends · a line note · A file note · e edit note"
-					: "↑↓ select · ⏎ confirm";
-		return [this.#theme.fg("dim", `${focusHelp} · u undo · tab regions · esc cancel`)];
+					? `${upDown} line · ${formatKeyHint("shift")} faster · ${this.#key("tui.select.pageUp")}/${this.#key("tui.select.pageDown")} · ${formatKeyHints(["g", "shift+g"])} ends · ${formatKeyHint("a")} line note · ${formatKeyHint("shift+a")} ${this.#textSource ? "text" : "file"} note · ${editNote}`
+					: `${upDown} select · ${confirm} confirm`;
+		return [
+			this.#theme.fg(
+				"dim",
+				`${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions · ${this.#key("tui.select.cancel")} cancel`,
+			),
+		];
 	}
 
 	#ensureCursorVisible(renderedRowBySource: readonly number[]): void {

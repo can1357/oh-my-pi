@@ -6,6 +6,7 @@
 import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
@@ -300,7 +301,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	console.log(chalk.green(`\n${theme.status.success} Speech is ready`));
 	console.log(
 		chalk.dim(
-			"Enable speech-to-text via stt.enabled, then hold Space to talk (or bind app.stt.toggle); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.",
+			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} to talk (or bind app.stt.toggle); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
 		),
 	);
 }

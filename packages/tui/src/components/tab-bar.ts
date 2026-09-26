@@ -8,6 +8,7 @@
  * - Tab / Arrow Right: Next tab (wraps around)
  * - Shift+Tab / Arrow Left: Previous tab (wraps around)
  */
+import { formatKeyHint } from "../app-keybindings";
 import { matchesKey } from "../keys";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth } from "../utils";
@@ -219,7 +220,7 @@ export class TabBar implements Component {
 			// Navigation hint
 			if (this.showHint) {
 				chunks.push({ text: "  " });
-				chunks.push({ text: this.#theme.hint("(tab to cycle)") });
+				chunks.push({ text: this.#theme.hint(`(${formatKeyHint("tab")} to cycle)`) });
 			}
 			return chunks;
 		};

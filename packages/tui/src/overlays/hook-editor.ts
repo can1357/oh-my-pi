@@ -14,6 +14,8 @@ import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } fro
 import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField } from "../components/form";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { boundKeys, editorKey, interruptKey } from "../chrome/keybinding-hints";
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
@@ -81,9 +83,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#editor.setText(prefill);
 		}
 		// Hint
+		const followUpKeys = boundKeys("app.message.followUp", ["ctrl+q", "ctrl+enter"]);
+		const [primaryFollowUpKey = "ctrl+q"] = followUpKeys;
+		const externalEditorKey = editorKey("app.editor.external") || formatKeyHint("ctrl+g");
 		const hint = this.#promptStyle
-			? "enter or ctrl+q submit  esc cancel  ctrl+g external editor"
-			: "ctrl+q/ctrl+enter submit  esc cancel  ctrl+g external editor";
+			? `${formatKeyHint("enter")} or ${formatKeyHint(primaryFollowUpKey)} submit  ${formatKeyHint("escape")} cancel  ${externalEditorKey} external editor`
+			: `${formatKeyHints(followUpKeys)} submit  ${interruptKey()} cancel  ${externalEditorKey} external editor`;
 		this.#field = new FormField(this.#editor, {
 			theme: formTheme,
 			details:
