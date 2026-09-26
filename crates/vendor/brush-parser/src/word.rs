@@ -1067,8 +1067,25 @@ peg::parser! {
             $(!['0'..='9'] ['_' | '0'..='9' | 'a'..='z' | 'A'..='Z']+)
 
         pub(crate) rule command_substitution() -> WordPiece =
-            "$(" c:command() ")" { WordPiece::CommandSubstitution(c.to_owned()) } /
+            "$(" c:command_substitution_body() ")" { WordPiece::CommandSubstitution(c.to_owned()) } /
             "`" c:backquoted_command() "`" { WordPiece::BackquotedCommandSubstitution(c) }
+
+        // Delimits the body with the tokenizer's here-document-aware scan (the one that already
+        // produced this word) instead of `command()`: re-parsing the body as words let quotes and
+        // parentheses inside a here-document body end the match early or swallow the real `)`.
+        rule command_substitution_body() -> &'input str = #{|input, pos| {
+            let body = input.get(pos..).and_then(|rest| {
+                let len = crate::tokenizer::command_substitution_body_len(
+                    rest,
+                    &parser_options.tokenizer_options(),
+                )?;
+                rest.get(..len)
+            });
+            match body {
+                Some(body) => peg::RuleResult::Matched(pos + body.len(), body),
+                None => peg::RuleResult::Failed,
+            }
+        }}
 
         pub(crate) rule command() -> &'input str =
             $(command_piece()*)
@@ -1291,6 +1308,25 @@ mod tests {
     #[test]
     fn parse_command_sub_with_balanced_backticks() -> Result<()> {
         assert_ron_snapshot!(test_parse("\"$(cat <<'EOF'\n`hello`\nEOF\n)\"")?);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_sub_with_heredoc_hiding_parens_and_quotes() -> Result<()> {
+        // Word parsing of the heredoc body used to pair `'s c) ... d'` and let the body's `(`
+        // consume the real closer, demoting `$(` to text and the backticks to a live substitution.
+        for body in ["a (b's c) `touch pwned` d's", ")"] {
+            let inner = std::format!("cat <<'EOF'\n{body}\nEOF\n");
+            let word = std::format!("\"$({inner})\"");
+            let parsed = super::parse(&word, &ParserOptions::default())?;
+            let [WordPieceWithSource { piece: WordPiece::DoubleQuotedSequence(pieces), .. }] =
+                parsed.as_slice()
+            else {
+                anyhow::bail!("expected one double-quoted sequence, got {parsed:?}");
+            };
+            let pieces: Vec<&WordPiece> = pieces.iter().map(|p| &p.piece).collect();
+            assert_eq!(pieces, [&WordPiece::CommandSubstitution(inner)]);
+        }
         Ok(())
     }
 

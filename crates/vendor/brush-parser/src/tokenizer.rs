@@ -532,6 +532,31 @@ pub fn uncached_tokenize_str(
     Ok(tokens)
 }
 
+/// Returns the byte length of a `$(...)` command substitution's body, excluding the closing `)`.
+///
+/// `input` must start just past the `$(`. The body is delimited exactly as the tokenizer delimits
+/// it while scanning the enclosing word: nested parentheses, quoting, and here-documents are
+/// honored, so a `)` or quote inside a here-document body neither closes the substitution nor
+/// hides its real closer. Returns `None` if the substitution is unterminated.
+///
+/// The word grammar (`word.rs`) uses this instead of re-parsing the body as words, which knows
+/// nothing about here-documents.
+pub(crate) fn command_substitution_body_len(
+    input: &str,
+    options: &TokenizerOptions,
+) -> Option<usize> {
+    let mut reader = std::io::BufReader::new(input.as_bytes());
+    let mut tokenizer = Tokenizer::new(&mut reader, options);
+    let mut state = TokenParseState::new(&tokenizer.cross_state.cursor);
+    tokenizer
+        .consume_nested_construct(&mut state, ')', "(", 1)
+        .ok()?;
+
+    // The cursor counts consumed chars; the last one consumed is the closing `)`.
+    let closer = tokenizer.cross_state.cursor.index.checked_sub(1)?;
+    input.char_indices().nth(closer).map(|(offset, _)| offset)
+}
+
 impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     pub fn new(reader: &'a mut R, options: &TokenizerOptions) -> Self {
         Tokenizer {
@@ -786,10 +811,14 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             // Look for the specially specified terminating char.
             //
             } else if state.unquoted() && terminating_char == Some(c) {
-                result = state.delimit_current_token(
-                    TokenEndReason::SpecifiedTerminatingChar,
-                    &mut self.cross_state,
-                )?;
+                // A pending newline still ends as a newline: delimiting it may start a
+                // here-document body, which then owns `c` instead of `c` closing the construct.
+                let reason = if state.current_token() == "\n" {
+                    TokenEndReason::UnescapedNewLine
+                } else {
+                    TokenEndReason::SpecifiedTerminatingChar
+                };
+                result = state.delimit_current_token(reason, &mut self.cross_state)?;
             } else if state.in_operator() {
                 //
                 // We're in an operator. See if this character continues an operator, or if it
@@ -1536,6 +1565,16 @@ OTHER
 HERE2
 )"
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn tokenize_here_doc_body_starting_with_paren_in_command_substitution() -> Result<()> {
+        // The body's leading `)` used to close the substitution, cutting the word short.
+        let word = "\"$(cat <<'EOF'\n)\nEOF\n)\"";
+        let tokens = tokenize_str(&std::format!("echo {word}"))?;
+        let tokens: Vec<&str> = tokens.iter().map(Token::to_str).collect();
+        assert_eq!(tokens, ["echo", word]);
         Ok(())
     }
 
