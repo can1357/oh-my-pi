@@ -85,6 +85,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import type { TaskSnapshot } from "./snapshots";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
@@ -437,6 +438,8 @@ export interface ExecutorOptions {
 	assignment?: string;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
+	/** Immutable completed child history used for this spawn. */
+	sourceSnapshot?: TaskSnapshot;
 	/**
 	 * The session's active overall plan, handed off so subagents spawned during
 	 * plan execution share the same plan context as the main agent. Omitted when
@@ -3719,13 +3722,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
+			const sessionManagerPromise = options.sourceSnapshot
+				? SessionManager.forkFrom(options.sourceSnapshot.filePath, effectiveCwd, undefined, undefined, {
+						sessionFile: subtaskSessionFile,
 						suppressBreadcrumb: true,
+						resetInheritedCost: true,
+						// New per-call context can change the provider-facing system prompt.
+						inheritPromptCacheKey: false,
 					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -4062,6 +4073,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				toolNames !== undefined && !toolNames.includes("write")
 					? enabledSubagentTools.filter(name => name !== "write")
 					: enabledSubagentTools;
+			// A fork keeps the saved conversation, but never inherits stale grants
+			// or a different resolved model from its completed warm-up run.
+			if (
+				options.sourceSnapshot &&
+				(options.sourceSnapshot.resolvedModel !== progress.resolvedModel ||
+					[...options.sourceSnapshot.tools].sort().join("\0") !== [...persistedSubagentTools].sort().join("\0"))
+			) {
+				throw new Error("Snapshot model or tool configuration is incompatible with this task.");
+			}
 
 			session.sessionManager.appendSessionInit({
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),

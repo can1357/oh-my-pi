@@ -43,6 +43,7 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
+import { loadTaskSnapshot } from "./snapshots";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
 import type {
 	AgentProgress,
@@ -103,6 +104,8 @@ export interface StructuredSubagentRequest {
 	assignment: string;
 	context?: string;
 	agent?: string;
+	/** Reuse the immutable conversation branch of a completed task child. */
+	fromSnapshot?: string;
 	model?: string | string[];
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
@@ -696,6 +699,27 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		if (request.fromSnapshot !== undefined) {
+			const parentSessionFile = request.session.getSessionFile();
+			if (!parentSessionFile || policy.isIsolated) {
+				throw new StructuredSubagentError(
+					"preflight",
+					"Snapshot forks require a persisted parent and a shared workspace.",
+				);
+			}
+			const snapshot = await loadTaskSnapshot({ parentSessionFile, reference: request.fromSnapshot });
+			if (
+				snapshot.agentName !== policy.agentName ||
+				snapshot.cwd !== request.session.cwd ||
+				(snapshot.agentPrompt !== undefined && snapshot.agentPrompt !== policy.effectiveAgent.systemPrompt)
+			) {
+				throw new StructuredSubagentError(
+					"preflight",
+					"Snapshot agent definition or working directory is incompatible.",
+				);
+			}
+			baseOptions.sourceSnapshot = snapshot;
+		}
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};

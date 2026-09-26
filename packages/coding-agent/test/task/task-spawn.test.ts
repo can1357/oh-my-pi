@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,10 +23,12 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { loadTaskSnapshot } from "@oh-my-pi/pi-coding-agent/task/snapshots";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 
@@ -36,12 +39,16 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	sessionFile?: string;
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		settings: Settings.isolated(options.settings ?? {}),
-		getSessionFile: () => null,
+		getSessionFile: () => options.sessionFile ?? null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
@@ -156,6 +163,43 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	// A failed child must retain its error and cannot publish an apparently ready snapshot.
+	it("preserves a failed child's result without publishing a snapshot", async () => {
+		const directory = TempDir.createSync("@omp-task-snapshot-failure-");
+		try {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [taskAgent],
+				projectAgentsDir: null,
+			});
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+				makeResult(options.id, { exitCode: 1, error: "model unavailable", stderr: "model unavailable" }),
+			);
+			const parentSessionFile = path.join(directory.path(), "parent.jsonl");
+			const tool = await TaskTool.create(
+				createSession({
+					sessionFile: parentSessionFile,
+					settings: { "async.enabled": false },
+				}),
+			);
+
+			const result = await tool.execute("failed-warmup", {
+				context: "Warm up a subagent.",
+				tasks: [{ agent: "task", task: "Study the base.", saveSnapshotAs: "failed-checkpoint" }],
+			} as TaskParams);
+
+			expect(result.details?.results[0]?.error).toBe("model unavailable");
+			expect(result.content.find(part => part.type === "text")?.text).toContain("model unavailable");
+			expect(
+				result.content.some(part => part.type === "text" && part.text.includes("No snapshot was published")),
+			).toBe(true);
+			await expect(loadTaskSnapshot({ parentSessionFile, reference: "failed-checkpoint" })).rejects.toThrow(
+				"not found",
+			);
+		} finally {
+			directory.removeSync();
+		}
 	});
 
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {

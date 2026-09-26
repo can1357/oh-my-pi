@@ -10,6 +10,7 @@
   - `packages/coding-agent/src/task/discovery.ts` — discover project/user/plugin/bundled agents.
   - `packages/coding-agent/src/task/agents.ts` — bundled agent definitions and frontmatter parsing.
   - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
+  - `packages/coding-agent/src/task/snapshots.ts` — publish and load session-scoped immutable child-session snapshots.
   - `packages/coding-agent/src/registry/agent-lifecycle.ts` — idle-TTL parking and revival of finished subagents.
   - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
   - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
@@ -26,9 +27,9 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ name?, agent?, task, effort?, outputSchema?, schemaMode?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` exists only when `task.enableEffort=true` (default off).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ name?, agent?, task, effort?, outputSchema?, schemaMode?, saveSnapshotAs?, fromSnapshot?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` exists only when `task.enableEffort=true` (default off).
 
-- **Batch shape** (`task.batch` on): `{ context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules; there is no top-level agent field. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `agent`, `outputSchema`, and `schemaMode` are per item. `effort` is added only when its setting enables it; `isolated` additionally requires plan mode to be disabled.
+- **Batch shape** (`task.batch` on): `{ context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules; there is no top-level agent field. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `agent`, `outputSchema`, `schemaMode`, `saveSnapshotAs`, and `fromSnapshot` are per item. `effort` is added only when its setting enables it; `isolated` additionally requires plan mode to be disabled.
 - **Flat shape** (`task.batch` off): `{ ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each spawn's `task` references; subagents share the parent's `local://` root.
 
 | Field | Type | Required | Description |
@@ -41,6 +42,8 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 | `effort` | `"lo" \| "med" \| "hi"` | No | Present only with `task.enableEffort=true`. Per-spawn thinking effort, mapped onto the resolved model's supported range (lowest/middle/highest level it tops out at, e.g. `high`/`xhigh`/`max`). Overrides the agent's default selector, including `auto`; omitting it keeps the agent's configured selector — automatic per-prompt classification only for agents configured `auto` (e.g. the bundled `task`); `scout`/`sonic` configure `medium`. Item field in batch shape, top-level in flat shape. |
 | `outputSchema` | JSON Schema (`object \| boolean \| string \| null` at the coarse wire-validation layer) | No | Invocation-specific structured-output contract. Takes precedence over agent frontmatter `output` and the inherited parent session schema. Item field in batch shape, top-level in flat shape. |
 | `schemaMode` | `"permissive" \| "strict"` | No | Validation mode for the effective output schema. Overrides the parent session mode; defaults to `permissive`. Item field in batch shape, top-level in flat shape. |
+| `saveSnapshotAs` | `string` | No | Publish the successfully yielded child's session as an immutable snapshot under this parent session. The label must be unique within the parent session. Item field in batch shape, top-level in flat shape. |
+| `fromSnapshot` | `string` | No | Fork a fresh child session from a snapshot label or id in this parent session. Requires the same agent definition, resolved model, tools, and working directory as the saved session; cannot combine with `isolated: true`. New call context can differ. Item field in batch shape, top-level in flat shape. |
 | `isolated` | `boolean` | No | Run in an isolated workspace and return patches. Exists only when `task.isolation.enabled` is true and plan mode is disabled; per item in batch shape, top-level in flat shape. Isolated agents are torn down at completion — not revivable. |
 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
@@ -50,6 +53,10 @@ Users can tag models with `^` in the composer. The resulting session-local `m1`,
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
 There is no legacy per-call `schema` parameter. Use `outputSchema` and optional `schemaMode`; when absent, structured output falls back to the agent definition's `output` frontmatter and then the inherited parent session schema.
+
+For example, warm up `{ "agent": "reviewer", "task": "Study the spec and BASE commit without reviewing changes.", "saveSnapshotAs": "review-ready" }`. After it yields, start several `reviewer` items with `fromSnapshot: "review-ready"` and different tasks for correctness, failure paths, and tests. Each new child receives the saved warm-up branch and its new call context. Repeat with the same snapshot for the next full-PR review cycle; earlier reviews do not enter the new children.
+
+Publication occurs only after a successful terminal `yield`; failed, aborted, or unyielded jobs do not publish. Background jobs publish before their job result is delivered, so wait for completion before using the label. The result reports the opaque snapshot id and label. Snapshots persist in `task-snapshots/` beneath the parent session's artifacts directory, including copied child artifacts; they remain available after a parent session resume. They do not freeze the working tree or external `local://` files, so callers must provide current source references to each new task. There is no task snapshot list/delete surface; removing the parent session artifacts removes its snapshots.
 
 ## Outputs
 

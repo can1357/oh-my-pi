@@ -1,4 +1,9 @@
+/*
+ * Verifies task preflight rejects invalid child requests.
+ * A rejected request cannot reserve or start a background job.
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -9,6 +14,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -21,12 +27,13 @@ function createSession(options: {
 	manager: AsyncJobManager;
 	settings?: Record<string, unknown>;
 	spawns?: string | boolean;
+	sessionFile?: string;
 }): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		settings: Settings.isolated({ "async.enabled": true, ...options.settings }),
-		getSessionFile: () => null,
+		getSessionFile: () => options.sessionFile ?? null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
@@ -111,6 +118,30 @@ describe("task async preflight", () => {
 			expect(jobs.getJob(name)).toBeUndefined();
 		},
 	);
+
+	// A missing snapshot must fail before an async job can launch any subagent.
+	it("rejects a missing snapshot before registering a subagent job", async () => {
+		const directory = TempDir.createSync("@omp-snapshot-preflight-");
+		try {
+			mockDiscovery();
+			const jobs = manager();
+			const register = vi.spyOn(jobs, "register");
+			const tool = await TaskTool.create(
+				createSession({ manager: jobs, sessionFile: path.join(directory.path(), "parent.jsonl") }),
+			);
+
+			const result = await tool.execute("snapshot-preflight", {
+				context: "Analyze the complete change.",
+				tasks: [{ name: "MissingSnapshot", agent: "task", task: "Analyze it.", fromSnapshot: "unknown" }],
+			} as TaskParams);
+
+			expect(textOf(result)).toContain("Task snapshot not found: unknown");
+			expect(register).not.toHaveBeenCalled();
+			expect(jobs.getJob("MissingSnapshot")).toBeUndefined();
+		} finally {
+			directory.removeSync();
+		}
+	});
 
 	it("rejects an invalid async batch atomically before dispatching any item", async () => {
 		mockDiscovery();
