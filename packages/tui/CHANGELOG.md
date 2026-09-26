@@ -19,6 +19,7 @@
 ### Changed
 
 - Updated the settings selector so clearing an input field fully unsets the corresponding setting.
+- Changed labeled Markdown `http(s)` links to show only the clickable label when an OSC 8 hyperlink to the same URL is emitted, instead of repeating the URL in parentheses; resolved internal links keep the suffix ([#12966](https://github.com/can1357/oh-my-pi/pull/12966) by [@razshlomo](https://github.com/razshlomo))
 
 ### Fixed
 

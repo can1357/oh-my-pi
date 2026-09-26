@@ -6,7 +6,7 @@
  * permits it. Falls back to plain text when disabled.
  */
 import * as url from "node:url";
-import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
+import { hyperlinksUserOverride, setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -83,6 +83,16 @@ function buildFileUri(filePath: string, opts?: { line?: number; col?: number }):
  */
 export function isHyperlinkEnabled(): boolean {
 	return resolveHyperlinkMode(hyperlinkMode);
+}
+
+/**
+ * True only when OSC 8 is on because the terminal was detected to render it, not
+ * because `always` or `PI_FORCE_HYPERLINKS=1` forced emission. Callers that drop
+ * visible text on the assumption the terminal reveals the link target need this.
+ */
+export function isHyperlinkRenderingDetected(): boolean {
+	if (hyperlinkMode !== "auto" || hyperlinksUserOverride() === true) return false;
+	return resolveHyperlinkMode("auto");
 }
 
 function resolveHyperlinkMode(mode: HyperlinkMode): boolean {

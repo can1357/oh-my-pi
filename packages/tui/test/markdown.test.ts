@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import {
 	autolinkSchemeScanIndex,
@@ -8,6 +8,7 @@ import {
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
+import * as hyperlinkModule from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -1515,7 +1516,7 @@ bar`,
 				.flatMap(line => [...line.visible].filter((_, index) => line.targets[index] === issueUrl))
 				.join("");
 			expect(linkedText).toContain("#5860");
-			expect(linkedText).toContain(issueUrl);
+			expect(lines.map(line => line.visible).join("\n")).not.toContain(issueUrl);
 			expect(new Set(lines.flatMap(line => line.targets).filter(target => target !== null))).toEqual(
 				new Set([issueUrl]),
 			);
@@ -1566,16 +1567,38 @@ bar`,
 			);
 		});
 
-		it("should show URL for explicit markdown links with different text", () => {
-			const markdown = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);
+		it("hides the URL of labeled links when OSC 8 carries the target", () => {
+			const detected = spyOn(hyperlinkModule, "isHyperlinkRenderingDetected").mockReturnValue(true);
+			const lines = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.map(inspectHyperlinks);
+			expect(
+				lines
+					.map(line => line.visible)
+					.join("\n")
+					.trim(),
+			).toBe("click here");
+			const linked = lines
+				.flatMap(line => [...line.visible].filter((_, i) => line.targets[i] === "https://example.com"))
+				.join("");
+			expect(linked).toBe("click here");
+			detected.mockRestore();
+		});
 
-			const lines = markdown.render(80);
-			const plainLines = lines.map(stripTerminalSequences);
-			const joinedPlain = plainLines.join(" ");
+		it("keeps the URL of labeled links when OSC 8 is forced rather than detected", () => {
+			const detected = spyOn(hyperlinkModule, "isHyperlinkRenderingDetected").mockReturnValue(false);
+			const output = new Markdown("[forced link](https://example.org)", 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.join("\n");
+			expect(stripTerminalSequences(output).trim()).toBe("forced link (https://example.org)");
+			detected.mockRestore();
+		});
 
-			// Should show both link text and URL
-			expect(joinedPlain.includes("click here"), "Should contain link text").toBeTruthy();
-			expect(joinedPlain.includes("(https://example.com)"), "Should show URL in parentheses").toBeTruthy();
+		it("keeps the URL of labeled links whose OSC 8 target is resolved to a different URI", () => {
+			const theme = { ...defaultMarkdownTheme, resolveLink: () => "file:///tmp/42.txt" };
+			const output = new Markdown("[Artifact](artifact://42)", 0, 0, theme).render(80).join("\n");
+			expect(stripTerminalSequences(output).trim()).toBe("Artifact (artifact://42)");
+			expect(output).toContain("\x1b]8;;file:///tmp/42.txt\x07");
 		});
 
 		it("should show URL for explicit mailto links with different text", () => {
@@ -1591,6 +1614,19 @@ bar`,
 				joinedPlain.includes("(mailto:test@example.com)"),
 				"Should show mailto URL in parentheses",
 			).toBeTruthy();
+		});
+
+		it("shows the URL of labeled links in parentheses when hyperlinks are off", () => {
+			terminalState.hyperlinks = false;
+			try {
+				const output = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme)
+					.render(80)
+					.join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe("click here (https://example.com)");
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			} finally {
+				terminalState.hyperlinks = true;
+			}
 		});
 
 		it("does not autolink www. glued to a path separator (issue #5652)", () => {
