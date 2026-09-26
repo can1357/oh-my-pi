@@ -1642,6 +1642,87 @@ bar`,
 			expect(protoOut.includes("\x1b]8;;")).toBe(false);
 			expect(stripTerminalSequences(protoOut)).toContain("proto");
 		});
+
+		describe("GitHub issue/PR refs", () => {
+			const repoTheme = { ...defaultMarkdownTheme, githubRepo: "can1357/oh-my-pi" };
+
+			/** Visible text plus each run of characters sharing one OSC 8 target. */
+			function linkedRuns(
+				text: string,
+				theme: typeof defaultMarkdownTheme = repoTheme,
+			): { visible: string; links: Array<[string, string]> } {
+				const { visible, targets } = inspectHyperlinks(new Markdown(text, 0, 0, theme).render(120).join("\n"));
+				const links: Array<[string, string]> = [];
+				for (let i = 0; i < visible.length; i++) {
+					const target = targets[i];
+					if (target === null) continue;
+					if (i > 0 && targets[i - 1] === target) links[links.length - 1]![0] += visible[i];
+					else links.push([visible[i]!, target]);
+				}
+				return { visible: visible.trimEnd(), links };
+			}
+
+			it("links bare and qualified refs without changing their visible text", () => {
+				const text = "Fixed in #3460 via foo/bar.js#12, see **#7**.";
+				const { visible, links } = linkedRuns(text);
+				expect(visible).toBe("Fixed in #3460 via foo/bar.js#12, see #7.");
+				expect(links).toEqual([
+					["#3460", "https://github.com/can1357/oh-my-pi/issues/3460"],
+					["foo/bar.js#12", "https://github.com/foo/bar.js/issues/12"],
+					["#7", "https://github.com/can1357/oh-my-pi/issues/7"],
+				]);
+			});
+
+			it("leaves bare refs plain when the session repo is unknown", () => {
+				const { visible, links } = linkedRuns("See #3460 and foo/bar#12", defaultMarkdownTheme);
+				expect(visible).toBe("See #3460 and foo/bar#12");
+				expect(links).toEqual([["foo/bar#12", "https://github.com/foo/bar/issues/12"]]);
+			});
+
+			it("never links refs in code, inside links, or glued to other text", () => {
+				const { links } = linkedRuns("`#1` [see #2](https://x.test) C#3 file.ts#4 a/b/c#5 #6x #0 #7-8");
+				expect(links).toEqual([
+					["see #2", "https://x.test"],
+					["(https://x.test)", "https://x.test"],
+				]);
+			});
+
+			it("keeps all-digit hex colours as swatches instead of bare refs", () => {
+				const { visible, links } = linkedRuns("Use #111111 or #12345678 for #3460, not foo/bar#111111");
+				expect(visible).toContain("#111111");
+				expect(links).toEqual([
+					["#3460", "https://github.com/can1357/oh-my-pi/issues/3460"],
+					["foo/bar#111111", "https://github.com/foo/bar/issues/111111"],
+				]);
+			});
+
+			it("emits no escape sequences when hyperlinks are disabled", () => {
+				terminalState.hyperlinks = false;
+				try {
+					const output = new Markdown("See #3460 and foo/bar#12", 0, 0, repoTheme).render(80).join("\n");
+					expect(output.includes("\x1b]8;")).toBe(false);
+					expect(stripTerminalSequences(output).trimEnd()).toBe("See #3460 and foo/bar#12");
+				} finally {
+					terminalState.hyperlinks = true;
+				}
+			});
+
+			it("streams refs byte-identical to a cold render as digits arrive", () => {
+				// Refs grow digit by digit and can end up glued (11 digits) mid-stream;
+				// every streamed frame must link exactly what a cold render links.
+				const full = "Fixed in #1234567890 and #12345678901 today";
+				const streaming = new Markdown("", 0, 0, repoTheme);
+				streaming.transientRenderCache = true;
+				for (let len = 1; len <= full.length; len++) {
+					const slice = full.slice(0, len);
+					clearRenderCache();
+					streaming.setText(slice);
+					const frame = streaming.render(80);
+					clearRenderCache();
+					expect(frame).toEqual(new Markdown(slice, 0, 0, repoTheme).render(80));
+				}
+			});
+		});
 	});
 
 	describe("HTML-like tags in text", () => {

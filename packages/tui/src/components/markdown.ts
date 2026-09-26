@@ -1355,6 +1355,8 @@ export interface MarkdownTheme {
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
+	/** Session GitHub repo (`owner/repo`) that bare `#N` refs link to; undefined leaves them plain. */
+	githubRepo?: string;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -1386,6 +1388,8 @@ export interface MarkdownTheme {
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
+	/** Inside a link label: the link owns the OSC 8 target, so GitHub refs stay plain. */
+	inLink?: boolean;
 }
 
 type ListToken = Token & { items: Array<{ tokens?: Token[] }>; ordered: boolean; start?: number };
@@ -1403,6 +1407,39 @@ function formatHyperlink(text: string, target: string): string {
 	}
 
 	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
+}
+
+// GitHub issue/PR refs: `owner/repo#N` or bare `#N`, not
+// glued to a word, path, entity, or longer run (`C#3`, `file.ts#4`,
+// `a/b/c#5`, `#6x`, `#0`).
+const GITHUB_REF_REGEX = /(?<![\w./#&-])(?:([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+))?#([1-9]\d{0,9})(?![\w-])/g;
+
+/**
+ * Wrap GitHub refs in a plain-text run in OSC 8 links without changing their
+ * visible text: `owner/repo#N` always, bare `#N` only when `repo` is known.
+ * `/issues/N` is deliberate — GitHub redirects it to the PR when N is one.
+ * Everything between refs goes through `renderPlain` unchanged.
+ */
+function renderTextWithGithubRefs(
+	text: string,
+	repo: string | undefined,
+	applyText: (t: string) => string,
+	renderPlain: (t: string) => string,
+): string {
+	if (!TERMINAL.hyperlinks || !text.includes("#")) return renderPlain(text);
+	let result = "";
+	let last = 0;
+	for (const match of text.matchAll(GITHUB_REF_REGEX)) {
+		const slug = match[1] ?? repo;
+		// A bare all-digit `#111111` is a hex colour; the swatch keeps it.
+		if (!slug || (!match[1] && classifyHexColor(match[2]!, true))) continue;
+		if (match.index > last) result += renderPlain(text.slice(last, match.index));
+		result += formatHyperlink(applyText(match[0]), `https://github.com/${slug}/issues/${match[2]}`);
+		last = match.index + match[0].length;
+	}
+	if (last === 0) return renderPlain(text);
+	if (last < text.length) result += renderPlain(text.slice(last));
+	return result;
 }
 
 function isAsciiTextSizingPayload(text: string): boolean {
@@ -3189,8 +3226,12 @@ export class Markdown implements Component {
 					// Text tokens in list items can have nested tokens for inline formatting
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.#renderInlineTokens(token.tokens, resolvedStyleContext);
-					} else {
+					} else if (resolvedStyleContext.inLink) {
 						result += renderTextWithSwatches(text, applyTextWithNewlines, swatchGlyph);
+					} else {
+						result += renderTextWithGithubRefs(text, this.#theme.githubRepo, applyText, plain =>
+							renderTextWithSwatches(plain, applyTextWithNewlines, swatchGlyph),
+						);
 					}
 					break;
 				}
@@ -3224,7 +3265,7 @@ export class Markdown implements Component {
 
 				case "link": {
 					markHtmlItemWhenContent(token.text);
-					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const linkText = this.#renderInlineTokens(token.tokens || [], { ...resolvedStyleContext, inLink: true });
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
