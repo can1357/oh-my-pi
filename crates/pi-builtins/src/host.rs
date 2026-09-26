@@ -143,20 +143,22 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 
 fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
-		OpenFile::File(file) => file.metadata().ok().map(Metadata::from),
+		// `Metadata::from_file` keeps the handle identity a Windows path stat
+		// drops; without it `path_is_stdout` can never match on Windows.
+		OpenFile::File(file) => Metadata::from_file(file).ok(),
 		OpenFile::Vfs(file) => file.metadata().ok(),
 		OpenFile::Stdout(stdout) => {
 			#[cfg(unix)]
 			{
 				use std::os::fd::AsFd;
 				let handle = stdout.as_fd().try_clone_to_owned().ok()?;
-				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
 			}
 			#[cfg(windows)]
 			{
 				use std::os::windows::io::AsHandle;
 				let handle = stdout.as_handle().try_clone_to_owned().ok()?;
-				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
 			}
 			#[cfg(not(any(unix, windows)))]
 			{
@@ -487,7 +489,17 @@ impl Host {
 			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
 			.as_ref()
 			.is_some_and(|stdout| {
-				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
+				if !stdout.is_file() {
+					return false;
+				}
+				// Windows path stats do not carry a file index, so compare an
+				// open handle there. On Unix, stat is sufficient and avoids
+				// blocking while probing a FIFO or other non-regular path.
+				#[cfg(windows)]
+				let candidate = self.fs().open(path).and_then(|file| file.metadata());
+				#[cfg(not(windows))]
+				let candidate = self.fs().metadata(path);
+				candidate.is_ok_and(|candidate| stdout.same_file(&candidate))
 			})
 	}
 
