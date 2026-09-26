@@ -24,7 +24,7 @@ const REENCODED_CTRL_XTERM = /\x1b\[27;5;(\d+)~/g;
 function decodeReencodedCtrlByte(match: string, code: string): string {
 	const cp = Number(code);
 	if (cp >= 97 && cp <= 122) return String.fromCharCode(cp - 96); // a-z → Ctrl+A..Ctrl+Z
-	if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 64); // A-Z → Ctrl+A..Ctrl+Z
+	if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 96); // A-Z → Ctrl+A..Ctrl+Z (Correction: 64 should be 96 for same base)
 	return match;
 }
 
@@ -38,6 +38,14 @@ export function decodeReencodedPasteControls(text: string): string {
 	return text
 		.replace(REENCODED_CTRL_CSI_U, decodeReencodedCtrlByte)
 		.replace(REENCODED_CTRL_XTERM, decodeReencodedCtrlByte);
+}
+
+/**
+ * Heuristic to detect multiline input that wasn't bracketed.
+ * If the input contains newlines, treat it as a paste to prevent premature submission.
+ */
+export function isMultiline(text: string): boolean {
+	return text.includes("\r") || text.includes("\n");
 }
 
 /**
@@ -91,7 +99,12 @@ export class BracketedPasteHandler {
 			data = data.replace(PASTE_START, "");
 		}
 
-		if (!this.#active) return { handled: false };
+		if (!this.#active) {
+			if (isMultiline(data)) {
+				return { handled: true, pasteContent: data, remaining: "" };
+			}
+			return { handled: false };
+		}
 
 		this.#buffer += data;
 
