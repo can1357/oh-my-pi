@@ -202,6 +202,27 @@ Also exposed:
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
 
+### Runtime setting overrides
+
+Settings are addressed through typed registry handles (see "Definitions" in [config-usage.md](./config-usage.md#definitions-srcconfigregistryts)); the string-path `settings.get`/`set`/`override` methods were removed in 18.3. Extensions resolve a handle by id with `lookup(id)` (and enumerate them with `all()`) from the `@oh-my-pi/pi-coding-agent/config/registry` subpath, then pass `pi.pi.settings` as the scope:
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+
+export default function (pi: ExtensionAPI) {
+  const recap = lookup("recap.enabled");
+  // Defer to the user: pin a default only when no env var or settings layer configures it.
+  if (recap && !recap.isConfigured(pi.pi.settings)) recap.override(pi.pi.settings, false);
+}
+```
+
+- `override(scope, value)` writes the in-memory runtime layer; it is never persisted and outranks project, global, and `--config` layers (only the setting's environment variable beats it). A value the definition rejects throws, e.g. `Invalid value for recap.enabled: "nope" (expected a boolean)`.
+- `clearOverride(scope)` releases the override, restoring the persisted/default value.
+- `isConfigured(scope)` / `provenance(scope)` tell a user-configured value from the default (`"env" | "runtime" | "overlay" | "project" | "global" | "default"`).
+- `get(scope)` reads the effective value; `listen(scope, cb)` observes changes. Writes go through the settings store, so change listeners and live effects fire.
+- `lookup` returns `undefined` for an unknown id.
+
 ### Message delivery semantics
 
 `pi.sendMessage(message, options)` supports:
