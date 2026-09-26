@@ -93,3 +93,55 @@ describe("HTML export keyboard shortcuts", () => {
 		});
 	});
 });
+
+describe("export tree collapse", () => {
+	function extractFunctionBody(source: string, signature: string): string {
+		const start = source.indexOf(signature);
+		expect(start).toBeGreaterThanOrEqual(0);
+		const bodyStart = source.indexOf("{", start) + 1;
+		let depth = 1;
+		for (let i = bodyStart; i < source.length; i++) {
+			const ch = source[i];
+			if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) return source.slice(bodyStart, i);
+			}
+		}
+		throw new Error(`${signature} did not close`);
+	}
+
+	function hideCollapsed(collapsed: string[], tree: Array<[string, string | null]>): string[] {
+		const body = extractFunctionBody(templateJs, "function hideCollapsedDescendants(flatNodes)");
+		const run = new Function("flatNodes", "collapsedNodeIds", body);
+		const flatNodes = tree.map(([id, parentId]) => ({ node: { entry: { id, parentId } } }));
+		const kept = run(flatNodes, new Set(collapsed)) as Array<{ node: { entry: { id: string } } }>;
+		return kept.map(flatNode => flatNode.node.entry.id);
+	}
+
+	// root ─┬─ a ── a2 ── a3
+	//       └─ b
+	const tree: Array<[string, string | null]> = [
+		["root", null],
+		["a", "root"],
+		["a2", "a"],
+		["a3", "a2"],
+		["b", "root"],
+	];
+
+	it("hides a collapsed node's whole subtree, not just its children", () => {
+		expect(hideCollapsed(["a"], tree)).toEqual(["root", "a", "b"]);
+	});
+
+	it("keeps the collapsed node itself, so the fold stays reversible", () => {
+		expect(hideCollapsed(["root"], tree)).toEqual(["root"]);
+	});
+
+	it("leaves sibling branches alone", () => {
+		expect(hideCollapsed(["b"], tree)).toEqual(["root", "a", "a2", "a3", "b"]);
+	});
+
+	it("is a no-op with nothing collapsed", () => {
+		expect(hideCollapsed([], tree)).toEqual(["root", "a", "a2", "a3", "b"]);
+	});
+});
