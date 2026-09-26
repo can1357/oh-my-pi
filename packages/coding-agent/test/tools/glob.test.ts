@@ -69,16 +69,17 @@ describe("GlobTool.execute", () => {
 		}
 	});
 
-	test("returns matches for a limit above the native u32 range", async () => {
-		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-u32-"));
+	test("rejects a large limit instead of collecting unbounded matches", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-large-"));
 		try {
-			await Promise.all(["a.txt", "b.txt"].map(filename => Bun.write(path.join(cwd, filename), "")));
-			const result = await new GlobTool(createSession(cwd)).execute("glob-limit-u32", {
-				path: "*.txt",
-				limit: 2 ** 32,
-				gitignore: false,
-			});
-			expect(result.details?.files?.toSorted()).toEqual(["a.txt", "b.txt"]);
+			await Bun.write(path.join(cwd, "a.txt"), "");
+			await expect(
+				new GlobTool(createSession(cwd)).execute("glob-limit-large", {
+					path: "*.txt",
+					limit: 1_000_000,
+					gitignore: false,
+				}),
+			).rejects.toThrow(/Limit cannot exceed 1000;.*partition the pattern/);
 		} finally {
 			await removeWithRetries(cwd);
 		}
