@@ -527,6 +527,90 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 	});
 });
 
+describe("UiHelpers.renderInitialMessages — passive tool context", () => {
+	it("attaches one dim context line to the last tool card in the batch", async () => {
+		const firstId = "context-first";
+		const secondId = "context-second";
+		const firstResult = "FIRST RESULT";
+		const secondResult = "SECOND RESULT";
+		const transcript = transcriptWith([
+			{
+				...assistantToolCall(firstId, "contract_probe", { value: "first" }),
+				content: [
+					{ type: "toolCall", id: firstId, name: "contract_probe", arguments: { value: "first" } },
+					{ type: "toolCall", id: secondId, name: "contract_probe", arguments: { value: "second" } },
+				],
+			},
+			{
+				role: "toolResult",
+				toolCallId: firstId,
+				toolName: "contract_probe",
+				content: [{ type: "text", text: firstResult }],
+				isError: false,
+				timestamp: 2,
+			},
+			{
+				role: "toolResult",
+				toolCallId: secondId,
+				toolName: "contract_probe",
+				content: [{ type: "text", text: secondResult }],
+				isError: false,
+				timestamp: 3,
+			},
+			{
+				role: "developer",
+				content: [{ type: "text", text: "Use\tboth results\nbefore continuing." }],
+				attribution: "agent",
+				passiveToolContext: true,
+				timestamp: 4,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
+		expect(rendered).toContain(firstResult);
+		expect(rendered).toContain(secondResult);
+		expect(rendered.match(/Context:/g)).toHaveLength(1);
+		expect(rendered).toContain("Context: Use both results before continuing.");
+		expect(rendered.indexOf("Context:")).toBeGreaterThan(rendered.indexOf(secondResult));
+	});
+});
+
+it("does not attach orphaned passive context across a non-tool boundary", async () => {
+	const toolCallId = "old-tool";
+	const transcript = transcriptWith([
+		assistantToolCall(toolCallId, "contract_probe", {}),
+		{
+			role: "toolResult",
+			toolCallId,
+			toolName: "contract_probe",
+			content: [{ type: "text", text: "old result" }],
+			isError: false,
+			timestamp: 2,
+		},
+		{
+			role: "user",
+			content: [{ type: "text", text: "new turn" }],
+			attribution: "user",
+			timestamp: 3,
+		},
+		{
+			role: "developer",
+			content: [{ type: "text", text: "orphaned context" }],
+			attribution: "agent",
+			passiveToolContext: true,
+			timestamp: 4,
+		},
+	]);
+	const { ctx, chatContainer } = makeRenderCtx(transcript);
+
+	await new UiHelpers(ctx).renderInitialMessages();
+
+	expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).not.toContain("Context:");
+});
+
 describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 	it("hides replayed tool cards without discarding them from the persisted transcript", async () => {
 		const toolCallId = "replayed-hidden-tool";

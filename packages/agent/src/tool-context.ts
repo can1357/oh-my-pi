@@ -35,15 +35,26 @@ export function joinAdditionalContext(values: Iterable<string | undefined>): str
 	return kept.length > 0 ? kept.join("\n\n") : undefined;
 }
 
+/** Developer message emitted specifically for passive tool context. */
+export type PassiveToolContextMessage = Extract<AgentMessage, { role: "developer" }> & {
+	passiveToolContext: true;
+};
+
+/** Narrow an agent message to passive tool context without inspecting its text. */
+export function isPassiveToolContextMessage(message: AgentMessage): message is PassiveToolContextMessage {
+	return message.role === "developer" && message.passiveToolContext === true;
+}
+
 /**
  * Build the developer message that carries passive tool context to the next
  * provider request. Emitted after the tool results it belongs to.
  */
-export function createAdditionalContextMessage(text: string): AgentMessage {
+export function createAdditionalContextMessage(text: string): PassiveToolContextMessage {
 	return {
 		role: "developer",
 		content: [{ type: "text", text }],
 		attribution: "agent",
+		passiveToolContext: true,
 		timestamp: Date.now(),
 	};
 }

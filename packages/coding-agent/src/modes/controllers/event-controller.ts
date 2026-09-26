@@ -1,3 +1,4 @@
+import { isPassiveToolContextMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -138,6 +139,11 @@ export class EventController {
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#toolTimelineComponents = new Map<string, Component>();
+	// Whether a tool batch is open for passive context: set when a tool settles,
+	// cleared by any non-tool message so context never lands on an earlier,
+	// unrelated card. The target is the batch's last card in call order,
+	// matching transcript replay.
+	#passiveContextBatchOpen = false;
 	// Stable identity for a streamed tool call while its assistant message is
 	// live: maps the tool-call block's position in the streaming message to the
 	// id last seen at that position. A streamed id can CHANGE across cumulative
@@ -957,6 +963,9 @@ export class EventController {
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
+		if (event.message.role !== "toolResult" && !isPassiveToolContextMessage(event.message)) {
+			this.#passiveContextBatchOpen = false;
+		}
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
 			const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 			if (this.#renderedCustomMessages.has(signature)) {
@@ -1040,11 +1049,19 @@ export class EventController {
 			}
 			this.ctx.ui.requestRender(true);
 		} else if (event.message.role === "developer") {
-			// A run-initiating synthetic developer prompt (auto-continue, or a
-			// queued follow-up drained inside the current run — plan approval, /goal)
-			// starts fresh work without a new agent_start: clear the preceding user
-			// prompt's anchor so its rows don't inherit the old turn's span.
-			if (event.message.synthetic) {
+			if (isPassiveToolContextMessage(event.message)) {
+				const target = this.#passiveContextBatchOpen
+					? [...this.#toolTimelineComponents.values()].at(-1)
+					: undefined;
+				if (target instanceof ToolExecutionComponent || target instanceof ReadToolGroupComponent) {
+					target.setAdditionalContext(textContent(event.message.content));
+					this.ctx.ui.requestRender();
+				}
+			} else if (event.message.synthetic) {
+				// A run-initiating synthetic developer prompt (auto-continue, or a
+				// queued follow-up drained inside the current run — plan approval, /goal)
+				// starts fresh work without a new agent_start: clear the preceding user
+				// prompt's anchor so its rows don't inherit the old turn's span.
 				// A deliberate operator action (`.`, `c` continue shortcut) is the
 				// turn's own prompt: anchor the delta to it instead of clearing.
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
@@ -1862,6 +1879,7 @@ export class EventController {
 		// message_end; consume the completion instead of recreating/updating UI.
 		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
 		this.#executionStartedCallIds.delete(event.toolCallId);
+		this.#passiveContextBatchOpen = true;
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
 		// terminal failure stays visible. Remember it so `#handleAutoRetryStart`

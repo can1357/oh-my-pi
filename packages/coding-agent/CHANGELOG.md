@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Passive context emitted after a tool batch now appears as one dim line on the batch's final tool card instead of remaining invisible or creating a separate transcript row ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

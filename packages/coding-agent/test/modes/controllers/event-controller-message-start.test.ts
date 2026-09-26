@@ -1,9 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { DeveloperMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -160,6 +162,83 @@ describe("EventController message_start (user role)", () => {
 		expect(addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
 		await pending;
+	});
+
+	it("attaches live passive context to the latest tool card without a message row", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		try {
+			const ctx = createInteractiveModeContext();
+			const controller = new EventController(ctx);
+			const toolCallId = "passive-context-live";
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId,
+				toolName: "bash",
+				args: { command: "printf done" },
+			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "done" }] },
+				isError: false,
+			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+			const context: DeveloperMessage = {
+				role: "developer",
+				content: [{ type: "text", text: "Treat this result as authoritative." }],
+				attribution: "agent",
+				passiveToolContext: true,
+				timestamp: Date.now(),
+			};
+
+			await controller.handleEvent({ type: "message_start", message: context });
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("Context: Treat this result as authoritative.");
+			expect(ctx.addMessageToChat).not.toHaveBeenCalledWith(context);
+		} finally {
+			resetSettingsForTest();
+		}
+	});
+
+	it("does not attach live passive context across a non-tool message", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		try {
+			const ctx = createInteractiveModeContext();
+			const controller = new EventController(ctx);
+			const toolCallId = "passive-context-stale";
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId,
+				toolName: "bash",
+				args: { command: "printf done" },
+			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "done" }] },
+				isError: false,
+			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+			await controller.handleEvent({ type: "message_start", message: createUserMessage("steer") });
+
+			await controller.handleEvent({
+				type: "message_start",
+				message: {
+					role: "developer",
+					content: [{ type: "text", text: "orphaned context" }],
+					attribution: "agent",
+					passiveToolContext: true,
+					timestamp: Date.now(),
+				} satisfies DeveloperMessage,
+			});
+
+			expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).not.toContain("Context:");
+		} finally {
+			resetSettingsForTest();
+		}
 	});
 });
 

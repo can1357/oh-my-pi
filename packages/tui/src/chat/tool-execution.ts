@@ -35,6 +35,13 @@ import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-contai
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
 }
+
+/** Render passive tool context as one sanitized, dim transcript line. */
+export function renderToolAdditionalContext(context: string, width: number): string {
+	const oneLine = replaceTabs(sanitizeText(context)).replace(/\s+/g, " ").trim();
+	if (!oneLine) return "";
+	return truncateToWidth(theme.fg("dim", `↳ Context: ${oneLine}`), width);
+}
 type DisplaceableToolName = "wait" | "todo";
 
 function isTodoToolDetails(details: unknown): details is TodoToolDetails {
@@ -174,6 +181,7 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
+	setAdditionalContext(context: string): void;
 	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
@@ -243,7 +251,7 @@ let toolExecutionInstanceSeq = 0;
 export class ToolExecutionComponent extends Container {
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
-	// Which container the constructor mounted: bespoke/built-in renderers use
+	#additionalContextText: WidthAwareText;
 	// #contentBox, everything else the generic #contentText fallback.
 	#usesContentBox = false;
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
@@ -257,6 +265,7 @@ export class ToolExecutionComponent extends Container {
 	#allocation = Number.POSITIVE_INFINITY;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
+	#additionalContext: string | undefined;
 	#showImages: boolean;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
@@ -367,6 +376,14 @@ export class ToolExecutionComponent extends Container {
 		// lines and keep their tight spacing — only tinted lines survive.
 		this.#contentBox = new Box(0, 1);
 		this.#contentText = new WidthAwareText(contentWidth => this.#renderDefaultCard(contentWidth), 1, 1);
+		this.#additionalContextText = new WidthAwareText(
+			contentWidth =>
+				this.#additionalContext === undefined
+					? ""
+					: renderToolAdditionalContext(this.#additionalContext, contentWidth),
+			1,
+			0,
+		);
 
 		// Use Box for custom tools or built-in tools with rich renderers.
 		const hasCustomRenderer = !!(tool?.renderCall || tool?.renderResult);
@@ -376,6 +393,7 @@ export class ToolExecutionComponent extends Container {
 		} else {
 			this.addChild(this.#contentText);
 		}
+		this.addChild(this.#additionalContextText);
 		// Tool blocks are visually distinct cards (background-tinted or framed),
 		// so keep their horizontal padding even when the user enables tight layout.
 		this.setIgnoreTight(true);
@@ -471,6 +489,14 @@ export class ToolExecutionComponent extends Container {
 		}));
 		this.#displayInputVersion++;
 		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	setAdditionalContext(context: string): void {
+		if (context === this.#additionalContext) return;
+		this.#additionalContext = context;
+		this.#blockVersion++;
+		this.#additionalContextText.invalidate();
 		this.#ui.requestRender();
 	}
 

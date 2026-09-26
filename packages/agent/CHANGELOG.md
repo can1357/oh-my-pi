@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Passive tool context developer messages now carry a presentation marker so host UIs can show their provenance without inspecting instruction text ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

@@ -5136,6 +5136,10 @@ describe("agentLoop passive additionalContext", () => {
 			"developer",
 			"assistant",
 		]);
+		const persistedContext = messages.find(
+			(message): message is Extract<AgentMessage, { role: "developer" }> => message.role === "developer",
+		);
+		expect(persistedContext?.passiveToolContext).toBe(true);
 		const contextEventIndex = events.findIndex(
 			event => event.type === "message_start" && event.message.role === "developer",
 		);
