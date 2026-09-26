@@ -329,6 +329,7 @@ describe("RpcInputDispatcher", () => {
 						queuedMessageCount: 0,
 						hasPendingAsyncWork: false,
 						isSettled: true,
+						queuedMessages: { steering: [], followUp: [] },
 						todoPhases: [],
 					},
 				};
