@@ -27,6 +27,11 @@
  *      then publish the resolved tarball with `npm publish` — see
  *      `packAndPublish` for why npm and not `bun publish`.
  *
+ * Steps 1–2 run serially in dependency order: they rewrite manifests other
+ * packages resolve through. Step 3 runs concurrently (`PUBLISH_CONCURRENCY`);
+ * every package runs to completion, output is printed per package, and the
+ * process exits non-zero listing the packages that failed.
+ *
  * Intended for CI. Mutates `package.json` in place — if you run this
  * locally, expect a dirty working tree and `git restore` after.
  */
@@ -35,11 +40,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import {
-	type GeneratedLeafPackage,
-	generateNpmPackages,
-	LEAF_TARGETS,
-} from "../packages/natives/scripts/gen-npm-packages.ts";
+import { generateNpmPackages, LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { fixEmitExtensions } from "./fix-emit-extensions.ts";
 
 export interface PublishPackage {
@@ -63,6 +64,11 @@ export interface PublishPackage {
 	 * without a build; publish swaps in the `prepack` bundle.
 	 */
 	publishBin?: Readonly<Record<string, string>>;
+	/**
+	 * Packages sharing a lock never run `bun pm pack` concurrently. Needed when
+	 * one package's `prepack` rewrites files another package ships.
+	 */
+	packLock?: string;
 }
 
 type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
@@ -144,6 +150,14 @@ export function npmDistTag(version: string): string {
 	return "latest";
 }
 
+/**
+ * coding-agent's `prepack` (`gen:bundle` → stats `gen:stats`) deletes and
+ * rebuilds `packages/stats/dist/client` and fills
+ * `packages/stats/src/embedded-client.generated.txt` until it resets it; the
+ * stats tarball ships both, so the two packs must not overlap.
+ */
+const STATS_CLIENT_LOCK = "stats-client";
+
 export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/wire", kind: "typescript" },
@@ -160,9 +174,15 @@ export const packages: PublishPackage[] = [
 		preBuild: [["bun", "run", "build"]],
 		extraFiles: ["dist/client"],
 		extraTypeConfigs: ["tsconfig.publish.client.json"],
+		packLock: STATS_CLIENT_LOCK,
 	},
 	{ dir: "packages/agent", kind: "typescript" },
-	{ dir: "packages/coding-agent", kind: "typescript", publishBin: { omp: "dist/cli.js" } },
+	{
+		dir: "packages/coding-agent",
+		kind: "typescript",
+		publishBin: { omp: "dist/cli.js" },
+		packLock: STATS_CLIENT_LOCK,
+	},
 ];
 
 function rewriteSrcToTypes(value: string): string {
@@ -354,21 +374,55 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
-async function packAndPublish(dir: string, name: string, version: string): Promise<void> {
+/** Collects one package's output so concurrent publishes print as whole blocks. */
+export type PublishLog = (line: string) => void;
+
+/** Runs `fn` exclusively among callers sharing `key`; unkeyed callers never wait. */
+export type KeyedMutex = <T>(key: string | undefined, fn: () => Promise<T>) => Promise<T>;
+
+export function createKeyedMutex(): KeyedMutex {
+	const tails = new Map<string, Promise<void>>();
+	return async (key, fn) => {
+		if (key === undefined) return fn();
+		const previous = tails.get(key) ?? Promise.resolve();
+		const { promise: released, resolve: release } = Promise.withResolvers<void>();
+		tails.set(key, released);
+		await previous;
+		try {
+			return await fn();
+		} finally {
+			release();
+		}
+	};
+}
+
+/** A prepared package whose manifest is final and whose tarball can be packed. */
+interface PublishTarget {
+	dir: string;
+	name: string;
+	version: string;
+	packLock?: string;
+}
+
+async function packAndPublish(target: PublishTarget, log: PublishLog, packLocks: KeyedMutex): Promise<void> {
+	const { dir, name, version } = target;
 	if (isDryRun) {
-		console.log(
+		log(
 			`DRY RUN bun pm pack && npm publish --access public --tag ${npmDistTag(version)} (${path.relative(repoRoot, dir)})`,
 		);
 		return;
 	}
-	console.log(`Publishing ${name}…`);
+	log(`Publishing ${name}…`);
 	const packDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pack-"));
 	try {
-		const packed = await $`bun pm pack --quiet --destination ${packDir}`.cwd(dir).quiet().nothrow();
+		// The tarball lands in a private temp dir, so the lock only needs to cover packing.
+		const packed = await packLocks(target.packLock, () =>
+			$`bun pm pack --quiet --destination ${packDir}`.cwd(dir).quiet().nothrow(),
+		);
 		const packOutput = `${packed.stdout.toString()}${packed.stderr.toString()}`.trim();
 		if (packed.exitCode !== 0) {
-			if (packOutput) console.log(packOutput);
-			process.exit(packed.exitCode ?? 1);
+			if (packOutput) log(packOutput);
+			throw new Error(`bun pm pack exited with ${packed.exitCode}`);
 		}
 		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
 		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
@@ -378,19 +432,19 @@ async function packAndPublish(dir: string, name: string, version: string): Promi
 		// Fail open on lookup errors; only a confirmed published version may skip publishing.
 		const preflight = await $`npm view ${`${packedTarball.name}@${packedTarball.version}`} version`.quiet().nothrow();
 		if (preflight.exitCode === 0 && preflight.stdout.toString().trim()) {
-			console.log(`Skipping ${packedTarball.name} (version already published)`);
+			log(`Skipping ${packedTarball.name} (version already published)`);
 			return;
 		}
 		const result = await $`npm publish ${packedTarball.path} --access public --tag ${tag}`.quiet().nothrow();
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
-		if (output) console.log(output);
+		if (output) log(output);
 		if (result.exitCode !== 0) {
 			// A concurrent publisher may win after the preflight.
 			if (isVersionAlreadyPublished(output)) {
-				console.log(`Skipping ${packedTarball.name} (version already published)`);
+				log(`Skipping ${packedTarball.name} (version already published)`);
 				return;
 			}
-			process.exit(result.exitCode ?? 1);
+			throw new Error(`npm publish exited with ${result.exitCode}`);
 		}
 	} finally {
 		await fs.rm(packDir, { recursive: true, force: true });
@@ -408,11 +462,45 @@ export function isVersionAlreadyPublished(output: string): boolean {
 	);
 }
 
-async function publishGeneratedLeafPackage(leaf: GeneratedLeafPackage): Promise<void> {
-	await packAndPublish(leaf.dir, leaf.manifest.name, leaf.manifest.version);
+export interface PublishJob {
+	name: string;
+	run(log: PublishLog): Promise<void>;
 }
 
-async function publishNativeLeafPackage(tag: string): Promise<void> {
+/**
+ * Run jobs with at most `concurrency` in flight. A failing job never stops its
+ * siblings, so one bad package cannot strand the rest of the set unpublished.
+ * Each job's output is buffered and written as one block when it settles.
+ * Returns the names of failed jobs in input order.
+ */
+export async function runPublishJobs(
+	jobs: readonly PublishJob[],
+	concurrency: number,
+	write: (block: string) => void = block => process.stdout.write(block),
+): Promise<string[]> {
+	const failed = new Set<PublishJob>();
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		while (next < jobs.length) {
+			const job = jobs[next++];
+			const lines: string[] = [];
+			try {
+				await job.run(line => lines.push(line));
+			} catch (err) {
+				failed.add(job);
+				lines.push(`FAILED ${job.name}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			write(`── ${job.name} ──\n${lines.map(line => `${line}\n`).join("")}`);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, jobs.length)) }, worker));
+	return jobs.filter(job => failed.has(job)).map(job => job.name);
+}
+
+/** Bounded so concurrent `bun pm pack` prepack builds do not starve the runner. */
+const PUBLISH_CONCURRENCY = 6;
+
+async function publishNativeLeafPackage(tag: string): Promise<string[]> {
 	const pkg = packages.find(candidate => candidate.kind === "native");
 	if (!pkg) throw new Error("No native package configured");
 	const pkgDir = path.join(repoRoot, pkg.dir);
@@ -427,47 +515,64 @@ async function publishNativeLeafPackage(tag: string): Promise<void> {
 	});
 	const leaf = leaves[0];
 	if (!leaf) throw new Error(`No native leaf generated for ${tag}`);
-	await publishGeneratedLeafPackage(leaf);
+	const target: PublishTarget = { dir: leaf.dir, name: leaf.manifest.name, version: leaf.manifest.version };
+	const packLocks = createKeyedMutex();
+	return runPublishJobs([{ name: target.name, run: log => packAndPublish(target, log, packLocks) }], 1);
 }
 
-async function publishNativePackage(pkg: PublishPackage): Promise<void> {
-	const pkgDir = path.join(repoRoot, pkg.dir);
-	const manifest = await prepareNativeCorePackage(pkgDir, !isDryRun);
-	const name = manifest.name ?? path.basename(pkg.dir);
-	const version = manifest.version;
-	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
+async function prepareNativePackage(pkg: PublishPackage): Promise<PackageManifest> {
+	const manifest = await prepareNativeCorePackage(path.join(repoRoot, pkg.dir), !isDryRun);
 	if (isDryRun) {
 		console.log(`DRY RUN native core manifest rewrite (${pkg.dir})`);
 		console.log(
 			JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"),
 		);
 	}
-	await packAndPublish(pkgDir, name, version);
+	return manifest;
 }
 
-async function publishPackage(pkg: PublishPackage): Promise<void> {
-	if (pkg.kind === "native") {
-		await publishNativePackage(pkg);
-		return;
+/**
+ * Prepare every package serially in declared (dependency) order — manifest
+ * rewrites change what later packages' type emits resolve — then pack and
+ * publish concurrently. Returns the failed package names/dirs.
+ */
+async function publishWorkspacePackages(): Promise<string[]> {
+	const failed: string[] = [];
+	const prepared: { target: PublishTarget; prepack: boolean }[] = [];
+	for (const pkg of packages) {
+		try {
+			const manifest = pkg.kind === "native" ? await prepareNativePackage(pkg) : await preparePackage(pkg);
+			const name = manifest.name ?? path.basename(pkg.dir);
+			const version = manifest.version;
+			if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
+			if (manifest.private) {
+				console.log(`Skipping ${name} (private)`);
+				continue;
+			}
+			prepared.push({
+				target: { dir: path.join(repoRoot, pkg.dir), name, version, packLock: pkg.packLock },
+				prepack: typeof (manifest.scripts as JsonObject | undefined)?.prepack === "string",
+			});
+		} catch (err) {
+			console.error(`FAILED preparing ${pkg.dir}: ${err instanceof Error ? err.message : String(err)}`);
+			failed.push(pkg.dir);
+		}
 	}
-	const pkgDir = path.join(repoRoot, pkg.dir);
-	const manifest = await preparePackage(pkg);
-	const name = manifest.name ?? path.basename(pkg.dir);
-	const version = manifest.version;
-	if (typeof version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
-	if (manifest.private) {
-		console.log(`Skipping ${name} (private)`);
-		return;
-	}
-	await packAndPublish(pkgDir, name, version);
+	// Packages with a prepack build (coding-agent's CLI bundle) dominate wall time; start them first.
+	const ordered = prepared.toSorted((a, b) => Number(b.prepack) - Number(a.prepack));
+	const packLocks = createKeyedMutex();
+	const jobs = ordered.map(({ target }) => ({
+		name: target.name,
+		run: (log: PublishLog) => packAndPublish(target, log, packLocks),
+	}));
+	failed.push(...(await runPublishJobs(jobs, PUBLISH_CONCURRENCY)));
+	return failed;
 }
 
 if (import.meta.main) {
-	if (nativeLeafTag) {
-		await publishNativeLeafPackage(nativeLeafTag);
-	} else {
-		for (const pkg of packages) {
-			await publishPackage(pkg);
-		}
+	const failed = nativeLeafTag ? await publishNativeLeafPackage(nativeLeafTag) : await publishWorkspacePackages();
+	if (failed.length > 0) {
+		console.error(`Failed to publish ${failed.length} package(s): ${failed.join(", ")}`);
+		process.exit(1);
 	}
 }
