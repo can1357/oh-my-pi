@@ -41,12 +41,11 @@ const expectedFixtureSkillOrder: string[] = [
 ];
 
 /**
- * Disable every named built-in skill source. Used by `loadSkills` option tests
- * that need to isolate a custom directory or assert "no built-in leakage". Tests
+ * Disable every ambient skill source. Used by `loadSkills` option tests that
+ * need to isolate a custom directory or assert "no built-in leakage". Tests
  * MUST spread this in: the discovery surface only ignores `~/.<dir>/skills/*` if
- * every provider toggle resolves to false, otherwise stray skills from the
- * developer's real `$HOME` (e.g. `~/.agents/skills/<name>/SKILL.md`) leak into
- * the assertion.
+ * every provider toggle resolves to false, and `explicit-only` prevents enabled
+ * user OMP plugin packages from contributing their manifest-declared skills.
  */
 const DISABLE_ALL_BUILTIN_SKILLS = {
 	enableCodexUser: false,
@@ -56,6 +55,12 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 	enablePiProject: false,
 	enableAgentsUser: false,
 	enableAgentsProject: false,
+	extensionRoots: {
+		explicit: [],
+		configured: [],
+		configuredLevel: "user",
+		mode: "explicit-only",
+	},
 } as const;
 
 describe("skills", () => {
