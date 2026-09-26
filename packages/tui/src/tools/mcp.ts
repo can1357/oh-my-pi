@@ -276,6 +276,13 @@ export interface MCPToolDetails {
 	isError?: boolean;
 	/** Raw content from MCP response */
 	rawContent?: MCPContent[];
+	/**
+	 * MCP `structuredContent` as produced, unserialized. The rendered text also
+	 * echoes it as a fenced JSON block so the model sees it; this field is the
+	 * machine-readable copy for programmatic callers (e.g. the eval `tool.*`
+	 * bridge), which cannot recover the object from that envelope reliably.
+	 */
+	structuredContent?: Record<string, unknown>;
 	/** Structured metadata from the MCP response */
 	mcpMeta?: Record<string, unknown>;
 	/** Provider ID (e.g., "claude", "mcp-json") */

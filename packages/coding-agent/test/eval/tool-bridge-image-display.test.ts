@@ -38,6 +38,34 @@ describe("bridged tool image display", () => {
 		expect(value).toEqual({ text: "1024x768 png", images: "(1 image displayed)" });
 	});
 
+	it("keeps the data-channel fields while surfacing image blocks", async () => {
+		// Surfacing rebuilds the value around the image note; the fields a cell reads
+		// as data must survive that rebuild (Python's prelude does the same in
+		// `_surface_bridged_tool_images`, so both runtimes hand a cell one shape).
+		const { hooks, displays } = collect(async () => ({
+			text: "1024x768 png",
+			content: [
+				{ type: "text", text: "1024x768 png" },
+				{ type: "image", mimeType: "image/png" },
+			],
+			structured: { width: 1024 },
+			meta: { truncation: { direction: "tail" } },
+			images: [{ mimeType: "image/png", data: PNG_BASE64 }],
+		}));
+		const value = await runtime.run("await tool.read({ path: 'img.png' })", undefined, hooks);
+		expect(displays).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
+		expect(value).toEqual({
+			text: "1024x768 png",
+			content: [
+				{ type: "text", text: "1024x768 png" },
+				{ type: "image", mimeType: "image/png" },
+			],
+			structured: { width: 1024 },
+			meta: { truncation: { direction: "tail" } },
+			images: "(1 image displayed)",
+		});
+	});
+
 	it("returns image-free bridge values untouched", async () => {
 		const { hooks, displays } = collect(async () => ({ text: "plain", details: { lines: 3 } }));
 		const value = await runtime.run("await tool.read({ path: 'file.txt' })", undefined, hooks);

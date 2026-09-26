@@ -71,7 +71,15 @@ describe("eval prelude runtime", () => {
 		expect(first.displayOutputs).toContainEqual({ type: "image", mimeType: "image/png", data: IMAGE_DATA });
 		expect(first.displayOutputs).toContainEqual({
 			type: "json",
-			data: { text: "host-v1", details: { version: "v1" }, images: "(1 image displayed)" },
+			data: {
+				text: "host-v1",
+				content: [
+					{ type: "text", text: "host-v1" },
+					{ type: "image", mimeType: "image/png" },
+				],
+				details: { version: "v1" },
+				images: "(1 image displayed)",
+			},
 		});
 		expect(calls).toHaveLength(1);
 
@@ -84,7 +92,15 @@ describe("eval prelude runtime", () => {
 		const replaced = await executeJs("await fixture.invoke({ value: 3 })", options);
 		expect(replaced.displayOutputs).toContainEqual({
 			type: "json",
-			data: { text: "host-v2", details: { version: "v2" }, images: "(1 image displayed)" },
+			data: {
+				text: "host-v2",
+				content: [
+					{ type: "text", text: "host-v2" },
+					{ type: "image", mimeType: "image/png" },
+				],
+				details: { version: "v2" },
+				images: "(1 image displayed)",
+			},
 		});
 		expect(calls).toHaveLength(2);
 

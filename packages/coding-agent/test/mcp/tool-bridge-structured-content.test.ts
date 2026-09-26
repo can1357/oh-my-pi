@@ -49,6 +49,18 @@ describe("MCP bridge structuredContent", () => {
 		expect(text).toContain("Inspect a claimable issue with get_work_context.");
 	});
 
+	it("keeps structuredContent reachable as an object on details, not only as the text echo", async () => {
+		// The rendered text is a display channel: the payload and its fence share one
+		// string, so a programmatic caller (eval `tool.*`) cannot cut it apart. This
+		// field is the copy that survives as data.
+		const payload = { items: [{ id: 7 }], next_cursor: null };
+		const built = await build({ content: [{ type: "text", text: "issues listed" }], structuredContent: payload });
+
+		expect(built.details?.structuredContent).toEqual(payload);
+		// The model path still carries the echo.
+		expect(built.content.map(block => (block.type === "text" ? block.text : "")).join("\n")).toContain("next_cursor");
+	});
+
 	it("does not duplicate structuredContent already echoed verbatim in a text block", async () => {
 		const payload = { lease_token: "abc123", expires_in: 900 };
 		const text = await modelText({
@@ -62,8 +74,12 @@ describe("MCP bridge structuredContent", () => {
 	});
 
 	it("leaves results without structuredContent untouched", async () => {
-		const text = await modelText({ content: [{ type: "text", text: "plain result" }] });
+		const built = await build({ content: [{ type: "text", text: "plain result" }] });
+		const text = built.content.map(block => (block.type === "text" ? block.text : `[${block.type}]`)).join("\n");
+
 		expect(text).toBe("plain result");
+		// Nothing is fabricated for a server that returned no structured payload.
+		expect(built.details?.structuredContent).toBeUndefined();
 	});
 });
 
