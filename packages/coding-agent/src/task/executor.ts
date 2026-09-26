@@ -1078,6 +1078,15 @@ export function createSubagentSettings(
 		// Subagents run unadvised by default; runSubprocess opts a spawn back in
 		// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
 		"advisor.enabled": false,
+		// A subagent assignment is one turn: its tool loop ends only when the run
+		// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
+		// after the run is over and `maintainContextMidRun` is the only proactive
+		// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
+		// interactive preference — keep compaction boundaries on real user turns —
+		// that has no counterpart here, so inheriting `false` left hours-long
+		// worker runs sailing past the configured threshold until the provider
+		// rejected the context (#13211). A per-spawn override still wins.
+		"compaction.midTurnEnabled": true,
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;

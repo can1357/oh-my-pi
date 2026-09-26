@@ -69,7 +69,7 @@ Compaction/context maintenance can run in six ways:
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
 3. **Automatic incomplete-output recovery**: after a same-model assistant message ends with `stopReason === "length"` (OpenAI/Codex `response.incomplete`).
 4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
-5. **Mid-turn threshold maintenance**: before the next provider request when a tool-loop turn crosses the threshold and `compaction.midTurnEnabled !== false`.
+5. **Mid-turn threshold maintenance**: before the next provider request when a tool-loop turn crosses the threshold and `compaction.midTurnEnabled !== false`. Subagent sessions always run this check: `createSubagentSettings` pins `compaction.midTurnEnabled` on for the child because a whole assignment is one turn, so post-turn maintenance would only fire after the run already ended.
 6. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
 
 ### Compaction shape (visual)
@@ -493,7 +493,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
-- `compaction.midTurnEnabled` = `true`
+- `compaction.midTurnEnabled` = `true`; a `false` value applies to the session that configured it, not to spawned subagents — each subagent keeps mid-run checks so its single-turn assignment still compacts at the configured threshold.
 - `compaction.handoffSaveToDisk` = `false`
 - The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it as a compaction entry on the current session (no new session is created); `/handoff` does the same manually.
 - `compaction.remoteEndpoint` = `undefined`

@@ -15,6 +15,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -97,6 +98,8 @@ describe("AgentSession mid-run threshold compaction", () => {
 			configureAgent?: (agent: Agent) => void;
 			toolResultDetails?: unknown;
 			tool?: AgentTool;
+			/** Derive the session's settings from the resolved parent settings (subagent chains). */
+			wrapSettings?: (parent: Settings) => Settings;
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -108,7 +111,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const modelRegistry = sharedModelRegistry;
-		const settings = Settings.isolated({
+		const parentSettings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.methodOrder": ["soft"],
 			"compaction.autoContinue": true,
@@ -120,6 +123,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			"todo.reminders": false,
 			...settingsOverride,
 		});
+		const settings = options.wrapSettings?.(parentSettings) ?? parentSettings;
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 
 		const mockBashTool: AgentTool = options.tool ?? {
@@ -781,6 +785,35 @@ describe("AgentSession mid-run threshold compaction", () => {
 	it("does not compact mid-run during active goal mode when disabled", async () => {
 		const { session } = await createHarness({ "compaction.midTurnEnabled": false });
 		session.setGoalModeState(activeGoalState());
+		const compactSpy = mockCompaction("SHOULD-NOT-RUN");
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	// A subagent assignment is a single turn: post-turn `checkCompaction` only runs
+	// once the run is already over, so mid-run maintenance is its only proactive
+	// compaction. Inheriting the parent's interactive `midTurnEnabled: false` left
+	// long worker runs uncompacted until provider overflow (#13211).
+	it("compacts mid-run in a subagent session even when the parent disabled mid-turn compaction", async () => {
+		const { session, observedContexts } = await createHarness(
+			{ "compaction.midTurnEnabled": false },
+			{ wrapSettings: parent => createSubagentSettings(parent) },
+		);
+		const compactSpy = mockCompaction("SUBAGENT-MID-RUN-COMPACTED");
+
+		await session.prompt("work on the release");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts[1].join("\n")).toContain("SUBAGENT-MID-RUN-COMPACTED");
+	});
+
+	it("lets a per-spawn override disable mid-run compaction for one subagent", async () => {
+		const { session } = await createHarness(
+			{},
+			{ wrapSettings: parent => createSubagentSettings(parent, { "compaction.midTurnEnabled": false }) },
+		);
 		const compactSpy = mockCompaction("SHOULD-NOT-RUN");
 
 		await session.prompt("work on the release");
