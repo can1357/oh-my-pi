@@ -2242,6 +2242,25 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			await this.#storage.drain();
 		});
+		if (this.#diskFailure) {
+			// A synchronous rewrite (`flushSync`) against a deferred-publish
+			// backend (any indexed/SQL storage) can conflict purely locally with
+			// a still-unconfirmed prior publish for the same path:
+			// `writeTextSync` is typed `(): void` and so cannot await a same-path
+			// publish already in flight before checking its size precondition
+			// (`IndexedSessionStorage#assertExpectedSize`), unlike
+			// `writeTextAtomic`. Two back-to-back synchronous rewrites for one
+			// path -- the final turn's message persist, then the session-exit
+			// bookkeeping entry `AgentSession#recordSessionExit` writes at
+			// dispose -- routinely land within that window over a real network
+			// round trip (never over an effectively-instant backend), latching
+			// `#diskFailure` before the backend ever sees the second write. The
+			// `drain()` just above lets the original, unconflicted publish
+			// actually confirm, so the authoritative body this manager holds
+			// now has a real chance of writing cleanly with the now-current
+			// size token; retry once before treating the transcript as lost.
+			await this.recoverPersistenceFromCurrentState().catch(() => undefined);
+		}
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -2316,19 +2335,58 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
-		await this.#scheduleDiskWork(async () => {
-			const hadWriter = this.#writer !== undefined;
-			await this.#closeWriterHandle();
-			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
-				this.#fileIsCurrent = true;
-		});
+		// A prior synchronous rewrite (`flushSync`) can have latched
+		// `#diskFailure` purely locally, against this manager's OWN
+		// still-unconfirmed publish for the same path: `writeTextSync` cannot
+		// await a same-path publish already in flight before checking its size
+		// precondition (`IndexedSessionStorage#assertExpectedSize`), unlike
+		// `writeTextAtomic`. The closing/draining work below must run despite
+		// that latch (`ignorePriorError`) so the still-outstanding publish this
+		// same manager queued gets the chance to actually confirm; otherwise
+		// close() rejects before the drain that could resolve it ever runs,
+		// which is indistinguishable from a genuine backend outage to every
+		// caller (`AgentSession#doDispose`, and both print-mode and rpc-mode's
+		// shutdown, all reject the same latched error and report the
+		// transcript lost).
+		await this.#scheduleDiskWork(
+			async () => {
+				const hadWriter = this.#writer !== undefined;
+				await this.#closeWriterHandle();
+				if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+					this.#fileIsCurrent = true;
+			},
+			{ ignorePriorError: true },
+		);
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
 		// a fire-and-forget publish is still on the wire.
-		await this.#scheduleDiskWork(async () => {
-			await this.#storage.drain();
-		});
+		await this.#scheduleDiskWork(
+			async () => {
+				await this.#storage.drain();
+			},
+			{ ignorePriorError: true },
+		);
+		if (this.#diskFailure && this.#sessionFile) {
+			// The drain just above let this manager's own in-flight publish
+			// confirm (or fail for a genuine reason). `seal()` -- already
+			// raised by the caller ahead of close() -- disables the ordinary
+			// mid-life repair path (`#authoritativelyRewriteCurrentStateLocked`
+			// returns without writing once `#released`), on purpose: a revived
+			// session must never race a stale event handler's rewrite. But
+			// close() IS the terminal write it owns, so issue the one
+			// catch-up rewrite directly, with the now-current confirmed size
+			// token, instead of leaving a self-resolvable conflict latched.
+			const operationError = this.#diskFailure;
+			try {
+				const body = this.#fileBody();
+				await this.#storage.writeTextAtomic(this.#sessionFile, body, { expectedSize: this.#expectedDiskSize });
+				this.#recordFullRewrite(body);
+				this.#clearDiskError();
+			} catch (error) {
+				this.#latchIndeterminate(operationError, [toError(error)]);
+			}
+		}
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 

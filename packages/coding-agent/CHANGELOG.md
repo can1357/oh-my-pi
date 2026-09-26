@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `session.dispose()` reporting a session's final assistant message and its session-exit bookkeeping entry as unrecoverably lost when the exit record's synchronous rewrite raced this manager's own still-unconfirmed publish to a deferred-publish backend (any indexed/SQL session storage); `close()` now drains past that self-conflict and issues one terminal catch-up rewrite instead of giving up before the pending publish had a chance to land.
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
