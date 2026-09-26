@@ -639,9 +639,10 @@ export interface StreamOptions {
 	 */
 	fallbackCreditRedemption?: AnthropicFallbackCreditHandle;
 	/**
-	 * Anthropic subscription slow-mode state machine (Claude Code `/low-priority`).
-	 * Consulted only for first-party OAuth `anthropic` requests: stamps
-	 * `anthropic-usage-limit: slow` while active and decides capacity waits.
+	 * Anthropic subscription usage-limit state machine (wrap-up allowance and
+	 * Claude Code's `/low-priority`). Consulted only for first-party OAuth
+	 * `anthropic` requests: stamps `anthropic-usage-limit: slow` while active,
+	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
 }
