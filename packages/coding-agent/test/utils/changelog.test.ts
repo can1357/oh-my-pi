@@ -15,7 +15,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
-import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
+import { lookup } from "../../src/config/registry";
+import { Settings } from "../../src/config/settings";
 import {
 	CHANGELOG_COMMAND_USAGE,
 	type ChangelogEntry,
@@ -35,6 +36,8 @@ import {
 	writeLastChangelogVersion,
 } from "../../src/utils/changelog";
 
+import { cfgStartupChangelogMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const CURRENT_VERSION = "2.0.0";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
@@ -53,11 +56,11 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 
 describe("startup changelog mode settings", () => {
 	test("defaults to a summary", () => {
-		expect(Settings.isolated().get("startup.changelogMode")).toBe("summary");
+		expect(cfgStartupChangelogMode.get(Settings.isolated())).toBe("summary");
 	});
 
 	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
-		expect(Object.hasOwn(SETTINGS_SCHEMA, "collapseChangelog")).toBe(false);
+		expect(lookup("collapseChangelog")).toBeUndefined();
 
 		await withTempAgentDir(async agentDir => {
 			const configPath = path.join(agentDir, "config.yml");
@@ -67,7 +70,7 @@ describe("startup changelog mode settings", () => {
 			] as const) {
 				await Bun.write(configPath, `collapseChangelog: ${legacyValue}\n`);
 				const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
-				expect(settings.get("startup.changelogMode")).toBe(expectedMode);
+				expect(cfgStartupChangelogMode.get(settings)).toBe(expectedMode);
 			}
 		});
 	});
@@ -79,7 +82,7 @@ describe("startup changelog mode settings", () => {
 				"collapseChangelog: false\nstartup:\n  changelogMode: hidden\n",
 			);
 			const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
-			expect(settings.get("startup.changelogMode")).toBe("hidden");
+			expect(cfgStartupChangelogMode.get(settings)).toBe("hidden");
 		});
 	});
 });

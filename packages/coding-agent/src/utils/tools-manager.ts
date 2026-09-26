@@ -192,9 +192,18 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 	return data.tag_name.replace(/^v/, "");
 }
 
-/** Download a tool asset without handing the streaming Response to Bun.write. */
-export async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
-	const downloadSignal = ptree.combineSignals(signal, TOOL_DOWNLOAD_TIMEOUT_MS);
+/**
+ * Download a tool asset without handing the streaming Response to Bun.write.
+ * `timeoutMs` bounds the whole transfer (default 2 minutes; raise it for
+ * large model weights).
+ */
+export async function downloadFile(
+	url: string,
+	dest: string,
+	signal?: AbortSignal,
+	timeoutMs = TOOL_DOWNLOAD_TIMEOUT_MS,
+): Promise<void> {
+	const downloadSignal = ptree.combineSignals(signal, timeoutMs);
 	let response: Response;
 	try {
 		response = await fetch(url, {

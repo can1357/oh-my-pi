@@ -7,7 +7,9 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import { extractUriScheme } from "../../internal-urls/parse";
+import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
 import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
@@ -134,40 +136,27 @@ interface TextMessageLike {
 
 const ACP_TEXT_LIMIT = 4_000;
 
-/**
- * Device name when the call is an `xd://` device dispatch riding the
- * read/write transport (`write xd://<tool>` executes the mounted tool,
- * `read xd://` is discovery). Returns `undefined` for plain file paths.
- */
-function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
-	if (toolName !== "write" && toolName !== "read") return undefined;
+/** Declared spec of the registered scheme a `write` call targets; undefined for file paths and other tools. */
+function writeTargetSpec(toolName: string, args: unknown): SchemeSpec | undefined {
+	if (toolName !== "write") return undefined;
 	const path = extractStringProperty<PathContainer>(args, "path");
 	if (!path) return undefined;
-	return parseXdUrl(path)?.name ?? undefined;
+	const router = InternalUrlRouter.instance();
+	const scheme = extractUriScheme(path);
+	return scheme && router.canHandle(path) ? router.spec(scheme) : undefined;
 }
 
-/** Peer-to-peer messages stay off the external ACP session stream. */
+/** Peer-to-peer messages (coordination-scoped writes) stay off the external ACP session stream. */
 function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
-	return (
-		toolName === "write" &&
-		typeof args === "object" &&
-		args !== null &&
-		typeof Reflect.get(args, "path") === "string" &&
-		/^agent:\/\//i.test(Reflect.get(args, "path"))
-	);
+	return writeTargetSpec(toolName, args)?.write?.scope === "coordination";
 }
 
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
-	// An xd:// device write executes the mounted tool — "edit" would make ACP
-	// clients render it as a file modification to a nonexistent path (and
-	// auto-approve it under edit-tier policies). Reads stay "read": listing
-	// devices or fetching docs is discovery.
-	if (
-		toolName === "write" &&
-		(xdevDispatchDevice(toolName, args) ||
-			/^proc:\/\//i.test(extractStringProperty<PathContainer>(args, "path") ?? ""))
-	)
-		return "execute";
+	// A device write (xd:// tool dispatch, proc:// control) executes something —
+	// "edit" would make ACP clients render it as a file modification to a
+	// nonexistent path (and auto-approve it under edit-tier policies). Reads
+	// stay "read": listing devices or fetching docs is discovery.
+	if (writeTargetSpec(toolName, args)?.backing === "device") return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";

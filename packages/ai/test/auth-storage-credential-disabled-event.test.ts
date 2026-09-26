@@ -7,6 +7,7 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { logger } from "@oh-my-pi/pi-utils";
 
 // Env vars short-circuit AuthStorage.keys.get before the OAuth refresh path runs; suppress
 // them for every test in this file so the credential-disable code path can be exercised.
@@ -20,6 +21,16 @@ const expiredOAuth = () =>
 		refresh: "stale-refresh",
 		expires: Date.now() - 60_000,
 	}) as const;
+
+/** Account identity an OAuth login records; the disable event must carry it back out. */
+const identityOf = (email: string) => ({
+	email,
+	accountId: `acct-${email}`,
+	orgId: `org-${email}`,
+	orgName: `Org of ${email}`,
+});
+
+const expiredOAuthFor = (email: string) => ({ ...expiredOAuth(), ...identityOf(email) });
 
 const failOAuthRefresh = (message = 'HTTP 400 invalid_grant {"error":"invalid_grant"}'): void => {
 	// AuthStorage now refreshes through `refreshOAuthToken` before formatting
@@ -157,6 +168,51 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(events).toHaveLength(1);
 			expect(events[0]?.provider).toBe("anthropic");
 			expect(events[0]?.disabledCause).toContain("invalid_grant");
+		});
+
+		test("names the disabled row and account, and logs the disable", async () => {
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.credentials.set("anthropic", [expiredOAuthFor("alice@example.com")]);
+			failOAuthRefresh();
+
+			await authStorage.keys.get("anthropic", "session-disabled-identity");
+
+			const expected = {
+				provider: "anthropic",
+				disabledCause: expect.stringContaining("invalid_grant"),
+				credentialId: 1,
+				...identityOf("alice@example.com"),
+			};
+			expect(events).toEqual([expected]);
+			expect(warn).toHaveBeenCalledWith("Auth credential disabled", expected);
+		});
+
+		test("names the disabled row and account when a credential is disabled by id", async () => {
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			const events: CredentialDisabledEvent[] = [];
+			const authStorage = openStorage({
+				onCredentialDisabled: event => {
+					events.push(event);
+				},
+			});
+			await authStorage.credentials.set("anthropic", [expiredOAuthFor("bob@example.com")]);
+
+			await disableCredential(authStorage, 1);
+
+			const expected = {
+				provider: "anthropic",
+				disabledCause: "oauth refresh failed: invalid_grant",
+				credentialId: 1,
+				...identityOf("bob@example.com"),
+			};
+			expect(events).toEqual([expected]);
+			expect(warn).toHaveBeenCalledWith("Auth credential disabled", expected);
 		});
 
 		test("does not fire for transient (non-definitive) refresh failures", async () => {

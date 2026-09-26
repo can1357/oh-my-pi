@@ -17,6 +17,8 @@ import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/rende
 import { CollabHost, CollabHostStoppedError } from "./host";
 import type { CollabAccess } from "./registry";
 
+import { cfgCollabAutoStart, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
+
 export type CollabAutoStart = "off" | CollabAccess;
 
 const SESSION_SWITCH_REASON =
@@ -63,7 +65,7 @@ export class CollabController {
 	}
 
 	get autoStartMode(): CollabAutoStart {
-		return this.#ctx.settings.get("collab.autoStart");
+		return cfgCollabAutoStart.get(this.#ctx.settings);
 	}
 
 	/**
@@ -183,7 +185,7 @@ export class CollabController {
 	}
 
 	#resolveRelayUrl(relay?: string): string {
-		const input = relay?.trim() || this.#ctx.settings.get("collab.relayUrl") || "";
+		const input = relay?.trim() || cfgCollabRelayUrl.get(this.#ctx.settings) || "";
 		if (!input) {
 			throw new Error(
 				"No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com",
@@ -213,7 +215,7 @@ export class CollabController {
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
 		const relayUrl = this.#resolveRelayUrl(relay);
-		const webUrl = this.#ctx.settings.get("collab.webUrl") || "";
+		const webUrl = cfgCollabWebUrl.get(this.#ctx.settings) || "";
 		this.#observeSessionChanges();
 		const previous = this.#host;
 		const host = new CollabHost(this.#ctx, {

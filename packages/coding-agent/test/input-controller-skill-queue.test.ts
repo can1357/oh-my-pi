@@ -815,7 +815,7 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 		viewSession: session,
 		compactionQueuedMessages: [],
 		keybindings: {
-			getDisplayString: (_action: string) => "Alt+Up",
+			getKeys: (_action: string) => ["alt+up"],
 		},
 		updatePendingMessagesDisplay,
 		locallySubmittedUserSignatures: new Set<string>(),

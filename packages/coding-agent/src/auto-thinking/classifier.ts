@@ -1,7 +1,8 @@
 /**
  * Per-prompt difficulty classifier for the `auto` thinking level.
  *
- * Asks one {@link ChoiceQuestion} about the user's request and maps the
+ * Asks one {@link ChoiceQuestion} about the user's request (plus, for
+ * task-spawned turns, the delegator's `complexity` rationale) and maps the
  * chosen level to a concrete {@link Effort}, clamped into the active model's
  * supported range (never below {@link Effort.Low}). The judge comes from the
  * live `judge` role chain. A local on-device candidate gets the coarser
@@ -15,10 +16,14 @@ import { type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-question.md" with { type: "text" };
+import levelQuestionTemplate from "../prompts/system/auto-thinking-level-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge } from "../judgment";
 import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
+import { prompt } from "@oh-my-pi/pi-utils";
+
+import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
@@ -51,16 +56,14 @@ const MAX_CRITERION =
 /** Full-ladder question up to `xhigh`. */
 const LEVEL_QUESTION: ChoiceQuestion<Exclude<Level, "max">> = {
 	type: "choice",
-	instructions:
-		"The state is a user's request to a coding agent. Choose the reasoning effort this turn needs, judging inherent task difficulty rather than phrasing politeness or verbosity. If torn between levels, choose the lower one.",
+	instructions: prompt.render(levelQuestionTemplate),
 	criteria: LEVEL_CRITERIA,
 };
 
 /** Full-ladder question offering `max`; used only when the target model exposes that tier. */
 const LEVEL_QUESTION_WITH_MAX: ChoiceQuestion<Level> = {
 	type: "choice",
-	instructions:
-		"The state is a user's request to a coding agent. Choose the reasoning effort this turn needs, judging inherent task difficulty rather than phrasing politeness or verbosity. If torn between levels, choose the lower one, except between xhigh and max: a request meeting the max conditions takes max.",
+	instructions: prompt.render(levelQuestionTemplate, { withMax: true }),
 	criteria: { ...LEVEL_CRITERIA, max: MAX_CRITERION },
 };
 
@@ -74,6 +77,14 @@ const BUCKET_QUESTION: ChoiceQuestion<Bucket> = {
 		hard: "Deep, multi-file, ambiguous, or tricky debugging or design.",
 	},
 };
+
+/** The turn to classify. */
+export interface DifficultyInput {
+	/** The prompt text the agent is about to act on. */
+	request: string;
+	/** Delegating agent's terse rationale for why the task is simple or complex (task `complexity` field). */
+	complexity?: string;
+}
 
 export interface ClassifyDifficultyDeps {
 	settings: Settings;
@@ -92,18 +103,18 @@ export interface ClassifyDifficultyDeps {
  * `ultrathink` reaches {@link Effort.Max}.
  */
 function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
-	if (deps.settings.get("providers.autoThinkingMaxEffort") !== Effort.Max) return Effort.XHigh;
+	if (cfgProvidersAutoThinkingMaxEffort.get(deps.settings) !== Effort.Max) return Effort.XHigh;
 	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
 
 /**
- * Classify `promptText` and return a concrete effort clamped to `deps.model`,
+ * Classify `input` and return a concrete effort clamped to `deps.model`,
  * or `undefined` when the model has no controllable effort surface (auto has
  * nothing to pick — the caller leaves the prior reasoning level in place).
  * @throws when the backend cannot produce a usable classification.
  */
 export async function classifyDifficulty(
-	promptText: string,
+	input: DifficultyInput,
 	deps: ClassifyDifficultyDeps,
 ): Promise<Effort | undefined> {
 	const judge = resolveJudge({
@@ -114,7 +125,10 @@ export async function classifyDifficulty(
 		metadataResolver: deps.metadataResolver,
 		onUsage: deps.onUsage,
 	});
-	const state = { request: preprocessTinyMessage(promptText) };
+	// Field order is prompt-visible: the rationale follows the request it describes.
+	const state: Record<string, string> = { request: preprocessTinyMessage(input.request) };
+	const complexity = input.complexity?.trim();
+	if (complexity) state.complexity = preprocessTinyMessage(complexity);
 	const options = { signal: deps.signal };
 	const classified = await judge.withCandidate(async (candidate, kind) => {
 		// The 3-bucket local question cannot select `max`, so its ceiling stays at

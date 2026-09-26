@@ -12,13 +12,13 @@
 use std::{
 	collections::HashSet,
 	ffi::{OsStr, OsString},
-	fs::File,
 	io::{BufRead, BufReader, Write},
 	sync::atomic::{AtomicBool, Ordering},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use pi_vfs::File;
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -203,7 +203,7 @@ fn open_input(name: &OsStr, host: &Host) -> Result<Option<File>, Error> {
 		return Ok(None);
 	}
 	let path = host.resolve(name);
-	let file = File::open(path).map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
+	let file = host.fs().open(path).map_err(|err| input_failure(name, &err))?;
 	Ok(Some(file))
 }
 
@@ -223,7 +223,7 @@ fn each_line(
 		line.clear();
 		let n = reader
 			.read_until(b'\n', &mut line)
-			.map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
+			.map_err(|err| input_failure(name, &err))?;
 		if n == 0 {
 			return Ok(());
 		}
@@ -255,8 +255,14 @@ fn write_line(out: &mut impl Write, line: &[u8]) -> Result<(), Error> {
 		.map_err(|err| Error::Msg(err.to_string()))
 }
 
-fn input_error(name: &OsStr, err: &str) -> String {
-	format!("{}: {}", name.to_string_lossy(), err)
+/// Classifies an input failure; a cancelled provider operation is the shell
+/// abort itself, not an error in `name`.
+fn input_failure(name: &OsStr, err: &std::io::Error) -> Error {
+	if pi_vfs::is_cancelled(err) {
+		Error::Cancelled
+	} else {
+		Error::Msg(format!("{}: {err}", name.to_string_lossy()))
+	}
 }
 
 /// Creates the `combine` builtin registration.

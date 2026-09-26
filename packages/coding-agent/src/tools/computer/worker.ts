@@ -78,12 +78,12 @@ export type NativeDesktopSessionFactory = (
 	options: DesktopSessionOptions,
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { app?: string; title?: string };
-type DeliveryOptions = { delivery?: string };
+type WindowFilter = { id?: string; app?: string; title?: string };
+type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
-type ClickOptions = DeliveryOptions & { button?: string; count?: number; modifiers?: string[] };
-type DragOptions = DeliveryOptions & { modifiers?: string[] };
-type ScrollOptions = DeliveryOptions & { dx?: number; dy?: number };
+type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
+type DragOptions = InputOptions & { modifiers?: string[] };
+type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -146,13 +146,13 @@ async function nativeCall<T>(signal: AbortSignal, call: () => Promise<T>): Promi
 	}
 }
 
-function pointerOptions(options?: ClickOptions | DragOptions | DeliveryOptions): PointerOptions | undefined {
+function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions | undefined {
 	if (!options) return undefined;
 	const mapped: PointerOptions = {};
 	if ("button" in options && options.button !== undefined) mapped.button = options.button;
 	if ("count" in options && options.count !== undefined) mapped.count = options.count;
 	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
-	if (options.delivery !== undefined) mapped.deliveryMode = options.delivery;
+	if (options.takeover !== undefined) mapped.takeover = options.takeover;
 	return mapped;
 }
 
@@ -170,6 +170,7 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
+		(filter.id === undefined || window.id === filter.id) &&
 		(!app || window.app.toLocaleLowerCase().includes(app)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
@@ -286,7 +287,7 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
 	}
 
-	async click(options?: DeliveryOptions): Promise<void> {
+	async click(options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
@@ -377,13 +378,13 @@ class Win {
 		);
 	}
 
-	async type(text: string, options?: DeliveryOptions): Promise<void> {
+	async type(text: string, options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "type");
 		await nativeCall(context.signal, () => this.#session.typeText(this.id, text, pointerOptions(options)));
 	}
 
-	async press(chord: string | string[], options?: DeliveryOptions): Promise<void> {
+	async press(chord: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		await nativeCall(context.signal, () =>

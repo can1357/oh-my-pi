@@ -1,4 +1,5 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 
 export const acpHelp = {
 	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
@@ -16,7 +17,7 @@ export const authGatewayHelp = {
 
 export const benchHelp = {
 	description:
-		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
+		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads, or single-user vs parallel load (--detailed)",
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
@@ -96,7 +97,11 @@ export const modelsHelp = { description: "List, search, and refresh available mo
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
 
 export const playHelp = {
-	description: "Replay a /record session recording in the terminal (space pauses, q quits)",
+	description: `Replay a /record session recording in the terminal (${formatKeyHint("space")} pauses, ${formatKeyHint("q")} quits)`,
+} satisfies CommandMetadata;
+
+export const predictHelp = {
+	description: "Type a prompt and compare every word-completion engine's ghost text live",
 } satisfies CommandMetadata;
 
 export const psHelp = {

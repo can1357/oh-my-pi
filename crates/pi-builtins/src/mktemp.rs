@@ -3,10 +3,6 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::fs;
-#[cfg(unix)]
-use std::os::unix::prelude::PermissionsExt;
 use std::{
 	env,
 	ffi::{OsStr, OsString},
@@ -20,11 +16,11 @@ use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
 };
+use pi_vfs::{BlockingFs, TempOptions};
 use rand::{
 	RngExt as _, SeedableRng as _,
 	rngs::{self, SmallRng},
 };
-use tempfile::Builder;
 use thiserror::Error;
 use uucore::display::Quotable;
 
@@ -51,9 +47,6 @@ const FALLBACK_TMPDIR: &str = "/tmp";
 
 #[derive(Error, Debug)]
 enum MkTempError {
-	#[error("could not persist file {}", .0.quote())]
-	Persist(PathBuf),
-
 	#[error("with --suffix, template {} must end in X", .0.quote())]
 	MustEndInX(String),
 
@@ -200,29 +193,28 @@ impl Params {
 			None => return Err(MkTempError::TooFewXs(template_str)),
 		};
 
-		// Combine the option directory and the template prefix, then split the
-		// parent directory from the final file-name component.
+		// Split the template prefix into its directory part (through the last
+		// separator) and the file-name prefix, then place the directory part
+		// under the option directory. Splitting the template itself keeps an
+		// empty file-name prefix distinct from the option directory's last
+		// component, which matters for URL directories.
 		let tmpdir = options.tmpdir;
-		let prefix_from_option = tmpdir.clone().unwrap_or_default();
 		let prefix_from_template = &template_str[..i];
-		let prefix_path = Path::new(&prefix_from_option).join(prefix_from_template);
 		if options.treat_as_template && prefix_from_template.contains(MAIN_SEPARATOR) {
 			return Err(MkTempError::PrefixContainsDirSeparator(template_str));
 		}
 		if tmpdir.is_some() && Path::new(prefix_from_template).is_absolute() {
 			return Err(MkTempError::InvalidTemplate(template_str.into()));
 		}
-		let (directory, prefix) = {
-			let prefix_str = prefix_path.to_string_lossy();
-			if prefix_str.ends_with(MAIN_SEPARATOR) {
-				(prefix_path, String::new())
-			} else {
-				let directory = prefix_path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-				let prefix = prefix_path
-					.file_name()
-					.map_or_else(String::new, |f| f.to_string_lossy().into_owned());
-				(directory, prefix)
-			}
+		let (template_dir, prefix) = match prefix_from_template.rfind(MAIN_SEPARATOR) {
+			Some(pos) => prefix_from_template.split_at(pos + MAIN_SEPARATOR.len_utf8()),
+			None => ("", prefix_from_template),
+		};
+		let prefix = prefix.to_owned();
+		let directory = match tmpdir {
+			Some(tmpdir) if template_dir.is_empty() => tmpdir,
+			Some(tmpdir) => pi_vfs::join_path(&tmpdir, Path::new(template_dir)),
+			None => PathBuf::from(template_dir),
 		};
 
 		// Combine a suffix embedded in the template with `--suffix`.
@@ -465,59 +457,45 @@ fn dry_exec(tmpdir: &Path, prefix: &str, rand: usize, suffix: &str) -> PathBuf {
 	}
 	// Every byte was mapped into the ASCII alphanumeric range.
 	let buf = String::from_utf8(buf).unwrap();
-	tmpdir.join(buf)
+	pi_vfs::join_path(tmpdir, Path::new(&buf))
 }
 
-/// Creates a temporary directory with owner-only permissions.
-fn make_temp_dir(
+/// Creates a temporary file (owner-only, `0o600`) or directory (`0o700`)
+/// with `create_new` semantics in `dir` on the shell's filesystem.
+fn make_temp(
+	fs: &BlockingFs,
 	dir: &Path,
 	display_dir: &Path,
 	prefix: &str,
 	rand: usize,
 	suffix: &str,
+	make_dir: bool,
 ) -> Result<PathBuf, MkTempError> {
-	let mut builder = Builder::new();
-	builder.prefix(prefix).rand_bytes(rand).suffix(suffix);
-	#[cfg(not(windows))]
-	builder.permissions(fs::Permissions::from_mode(0o700));
-
-	match builder.tempdir_in(dir) {
-		Ok(directory) => Ok(directory.keep()),
-		Err(err) if err.kind() == ErrorKind::NotFound => {
+	let options = TempOptions::new().prefix(prefix).random_len(rand).suffix(suffix);
+	let created = if make_dir {
+		fs.create_temp_dir(dir, &options)
+	} else {
+		fs.create_temp(dir, &options).and_then(|(path, file)| match file.close() {
+			Ok(()) => Ok(path),
+			Err(error) => {
+				// The name is never printed, so nobody else could remove it.
+				let _ = fs.for_cleanup().remove_file(&path);
+				Err(error)
+			},
+		})
+	};
+	created.map_err(|err| {
+		if err.kind() == ErrorKind::NotFound {
+			let kind = if make_dir { "directory" } else { "file" };
 			let filename = format!("{prefix}{}{suffix}", "X".repeat(rand));
-			Err(MkTempError::NotFound(
-				"directory".to_string(),
-				display_dir.join(filename),
-			))
-		},
-		Err(err) => Err(err.into()),
-	}
-}
-
-/// Creates a temporary file with owner-only permissions.
-fn make_temp_file(
-	dir: &Path,
-	display_dir: &Path,
-	prefix: &str,
-	rand: usize,
-	suffix: &str,
-) -> Result<PathBuf, MkTempError> {
-	let mut builder = Builder::new();
-	builder.prefix(prefix).rand_bytes(rand).suffix(suffix);
-	match builder.tempfile_in(dir) {
-		Ok(file) => file.keep().map(|(_, path)| path).map_err(|err| {
-			let path = err.file.path();
-			let display_path = path
-				.file_name()
-				.map_or_else(|| display_dir.to_path_buf(), |name| display_dir.join(name));
-			MkTempError::Persist(display_path)
-		}),
-		Err(err) if err.kind() == ErrorKind::NotFound => {
-			let filename = format!("{prefix}{}{suffix}", "X".repeat(rand));
-			Err(MkTempError::NotFound("file".to_string(), display_dir.join(filename)))
-		},
-		Err(err) => Err(err.into()),
-	}
+			MkTempError::NotFound(
+				kind.to_string(),
+				pi_vfs::join_path(display_dir, Path::new(&filename)),
+			)
+		} else {
+			err.into()
+		}
+	})
 }
 
 fn exec(
@@ -531,13 +509,9 @@ fn exec(
 	// Only the filesystem-facing form is resolved. The returned path retains
 	// the spelling implied by the user's operands, which scripts consume.
 	let resolved_dir = host.resolve(dir);
-	let created = if make_dir {
-		make_temp_dir(&resolved_dir, dir, prefix, rand, suffix)?
-	} else {
-		make_temp_file(&resolved_dir, dir, prefix, rand, suffix)?
-	};
-	let filename = created.file_name().expect("tempfile path has a file name");
-	Ok(dir.join(filename))
+	let created = make_temp(host.fs(), &resolved_dir, dir, prefix, rand, suffix, make_dir)?;
+	let filename = pi_vfs::file_name(&created).expect("temporary path has a file name");
+	Ok(pi_vfs::join_path(dir, Path::new(&*filename)))
 }
 
 /// Reads the shell's temporary-directory variable, falling back to the platform

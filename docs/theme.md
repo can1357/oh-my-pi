@@ -182,7 +182,7 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Current defaults from settings schema:
+Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
 - `theme.dark = "titanium"`
 - `theme.light = "light"`

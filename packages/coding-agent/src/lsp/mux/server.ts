@@ -649,10 +649,17 @@ export class LspMuxServer {
 		this.#sessions.delete(session);
 		const server = session.server;
 		if (server) {
+			// Teardown writes are best-effort: the language server may already
+			// have exited (crash or mux restart) and writing its stdin then
+			// rejects. #writeServer already logs those failures — a rejection
+			// escaping here runs from the socket "close" handler with no caller
+			// to catch it, and the unhandled rejection would kill the daemon.
+			const writeBestEffort = (message: RpcMessage): Promise<void> =>
+				this.#writeServer(server, message).catch(() => {});
 			let cleanup: Promise<void> | undefined;
 			for (const uri of session.openUris) {
 				server.documents.delete(uri);
-				cleanup = this.#writeServer(server, {
+				cleanup = writeBestEffort({
 					jsonrpc: "2.0",
 					method: "textDocument/didClose",
 					params: { textDocument: { uri } },
@@ -662,7 +669,7 @@ export class LspMuxServer {
 			for (const [muxId, pending] of server.pending) {
 				if (pending.session !== session) continue;
 				pending.drop = true;
-				await this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
+				await writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
 			}
 			server.initializeWaiters.delete(session);
 			server.sessions.delete(session);

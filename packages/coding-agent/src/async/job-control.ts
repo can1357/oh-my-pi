@@ -29,13 +29,14 @@ import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
  * Drops missing ids and ids owned by other agents, preventing cross-agent inspection.
+ * An unowned caller (`ownerId` undefined) sees only unowned jobs.
  */
 export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: string | undefined): AsyncJob[] {
 	const out: AsyncJob[] = [];
 	for (const id of ids) {
 		const job = manager.getJob(id);
 		if (!job) continue;
-		if (ownerId && job.ownerId !== ownerId) continue;
+		if (job.ownerId !== ownerId) continue;
 		out.push(job);
 	}
 	return out;
@@ -49,7 +50,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
  */
 export function undeliveredJobs(manager: AsyncJobManager, ownerId: string | undefined): AsyncJob[] {
 	return manager
-		.getAllJobs(ownerId ? { ownerId } : undefined)
+		.getAllJobs({ ownerId })
 		.filter(
 			job =>
 				(job.status === "completed" || job.status === "failed") &&
@@ -83,7 +84,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 	const covered = new Set<string>();
 	const manager = session.asyncJobManager;
 	if (manager) {
-		for (const job of manager.getRunningJobs(selfId ? { ownerId: selfId } : undefined)) {
+		for (const job of manager.getRunningJobs({ ownerId: selfId })) {
 			covered.add(job.id);
 			if (job.agentId) covered.add(job.agentId);
 		}
@@ -368,11 +369,10 @@ export async function executeCancel(
 	ownerId: string | undefined,
 	ids: string[],
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const ownerFilter = ownerId ? { ownerId } : undefined;
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
 		const existing = manager.getJob(id);
-		if (!existing || (ownerId && existing.ownerId !== ownerId)) {
+		if (!existing || existing.ownerId !== ownerId) {
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
@@ -396,7 +396,7 @@ export async function executeCancel(
 			);
 			continue;
 		}
-		const cancelled = manager.cancel(id, ownerFilter);
+		const cancelled = manager.cancel(id, { ownerId });
 		cancelOutcomes.push(
 			cancelled
 				? { id, status: "cancelled", message: `Cancelled background job ${id}.` }
@@ -412,8 +412,8 @@ export async function executeCancel(
  * is the only kill path for a keep-alive subagent that was budget-aborted, went
  * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
  * of a broker restart (issue #6315). Scoped to the caller's own descendants so
- * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
- * target any sub. Never touches Main, the caller, or advisor transcripts.
+ * cross-agent kills stay impossible; an unowned caller (no owner id) reaches
+ * only parentless subs. Never touches Main, the caller, or advisor transcripts.
  */
 export async function cancelAgentRegistration(
 	session: ToolSession,
@@ -428,7 +428,7 @@ export async function cancelAgentRegistration(
 	if (id === ownerId) {
 		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 	}
-	if (ownerId && ref.parentId !== ownerId) {
+	if (ref.parentId !== ownerId) {
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
 	}
 	const lifecycle = session.agentLifecycle?.();
@@ -450,14 +450,4 @@ export async function cancelAgentRegistration(
 		};
 	}
 	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, dropped registration).` };
-}
-
-/** `jobs`: read-only snapshot of every job plus the jobless running-agent roster. */
-export function executeJobsSnapshot(
-	session: ToolSession,
-	manager: AsyncJobManager,
-	ownerId: string | undefined,
-): AgentToolResult<CoordinationDetails> {
-	const jobs = manager.getAllJobs(ownerId ? { ownerId } : undefined);
-	return buildJobResult(session, manager, "jobs", jobs, [], runningAgentsOutsideJobs(session));
 }

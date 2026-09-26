@@ -58,6 +58,21 @@ provider "anthropic" {
 		revision ">=3.7 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}
+		// Server-side refusal fallback chain (opt-in via
+		// `providers.anthropic.serverSideFallback`). Targets must be in the
+		// model's `allowed_fallback_models` on GET /v1/models/{id}; Fable 5 and
+		// 5.1 publish ["claude-opus-4-8", "claude-opus-5"] (2026-09-24).
+		// `claude-opus-5-5` is rejected with a 400 (#13059).
+		family "fable" {
+			server-side-fallback-models "claude-opus-5"
+			// Fallback-credit redemption targets: the refused model's permitted
+			// fallback targets. Fable 5 and 5.1 → Opus 4.8 and Opus 5
+			// (https://platform.claude.com/docs/en/build-with-claude/fallback-credit).
+			fallback-credit-targets "claude-opus-4-8" "claude-opus-5"
+		}
+		family "mythos" {
+			server-side-fallback-models "claude-opus-5"
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "*20240229" "claude-3-7-sonnet-20250219" {

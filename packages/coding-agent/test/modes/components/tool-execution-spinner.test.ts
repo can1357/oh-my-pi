@@ -362,7 +362,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -518,7 +518,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -716,7 +716,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],
@@ -901,7 +901,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
-				settings: { get: () => "" },
+				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
 					messages: [],

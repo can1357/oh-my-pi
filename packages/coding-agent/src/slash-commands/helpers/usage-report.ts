@@ -3,7 +3,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
-import { reportMatchesActiveAccount } from "./active-oauth-account";
+import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
@@ -26,31 +26,29 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
+function formatUsageReportAccount(
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	limit: UsageLimit,
+	index: number,
+): string {
+	const codex = report.provider === "openai-codex";
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
-	const org =
-		typeof metaOrgName === "string" && metaOrgName
-			? metaOrgName
-			: typeof metaOrgId === "string" && metaOrgId
-				? metaOrgId
-				: undefined;
-	// Two subscriptions (orgs) can share one email — suffix the org so the rows
-	// are tellable apart.
+	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+	const label = (identity: string, includeOrg: boolean): string => {
+		if (codex) return formatCodexUsageReportLabel(report, peers, identity);
+		return includeOrg && typeof org === "string" && org && org !== identity ? `${identity} (${org})` : identity;
+	};
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return org ? `${email} (${org})` : email;
-	// Guard metadata values for truthiness before using, then fall back to scope.
-	// ?? won't help here: empty string is not null/undefined, so it would suppress
-	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
+	if (typeof email === "string" && email) return label(email, true);
+	// Empty metadata must not hide a valid scoped identity.
 	const metaAccountId = report.metadata?.accountId;
 	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
-	if (typeof accountId === "string" && accountId) {
-		return org && org !== accountId ? `${accountId} (${org})` : accountId;
-	}
+	if (typeof accountId === "string" && accountId) return label(accountId, true);
 	const metaProjectId = report.metadata?.projectId;
 	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
 }
 
 function renderUsageReports(
@@ -93,15 +91,17 @@ function renderUsageReports(
 						: typeof report.metadata?.accountId === "string"
 							? report.metadata.accountId
 							: "account";
-				const resetOrg =
-					typeof report.metadata?.orgName === "string" && report.metadata.orgName
-						? report.metadata.orgName
-						: typeof report.metadata?.orgId === "string"
-							? report.metadata.orgId
-							: undefined;
-				const rawResetLabel =
-					resetOrg && resetOrg !== resetIdentity ? `${resetIdentity} (${resetOrg})` : resetIdentity;
-				const resetLabel = sanitizeText(rawResetLabel.replace(/[\r\n\t]+/g, " "));
+				let resetLabel: string;
+				if (report.provider === "openai-codex") {
+					resetLabel = formatCodexUsageReportLabel(report, providerReports, resetIdentity);
+				} else {
+					const orgName = report.metadata?.orgName;
+					const orgId = report.metadata?.orgId;
+					const org =
+						typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
+					const raw = org && org !== resetIdentity ? `${resetIdentity} (${org})` : resetIdentity;
+					resetLabel = sanitizeText(raw.replace(/[\r\n\t]+/g, " "));
+				}
 				const availability =
 					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
@@ -125,7 +125,9 @@ function renderUsageReports(
 			}
 			if (report.limits.length === 0) {
 				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				lines.push(`- ${email}: no limits reported`);
+				const label =
+					report.provider === "openai-codex" ? formatCodexUsageReportLabel(report, providerReports, email) : email;
+				lines.push(`- ${label}: no limits reported`);
 				continue;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
@@ -139,7 +141,7 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, providerReports, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {

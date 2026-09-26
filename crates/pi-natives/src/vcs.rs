@@ -68,15 +68,12 @@ fn path_string(path: impl AsRef<Path>) -> String {
 }
 fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
 	signal.and_then(|value| {
-		let aborted = value
-			.coerce_to_object()
-			.and_then(|object| object.get_named_property::<bool>("aborted"))
-			.unwrap_or(false);
-		let signal = AbortSignal::from_unknown(value).ok()?;
 		let token = CancellationToken::new();
-		if aborted {
+		if task::signal_aborted(&value) {
 			token.cancel();
+			return Some(token);
 		}
+		let signal = AbortSignal::from_unknown(value).ok()?;
 		let abort = token.clone();
 		signal.on_abort(move || abort.cancel());
 		Some(token)

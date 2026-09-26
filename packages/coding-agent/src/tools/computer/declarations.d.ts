@@ -1,25 +1,23 @@
-/** Input delivery: `background` targets the window without focusing it; `foreground` briefly activates it. */
-type ComputerDelivery = "background" | "foreground";
-
 /** Options shared by every native input helper. */
-interface ComputerDeliveryOptions {
-	delivery?: ComputerDelivery;
+interface ComputerInputOptions {
+	/** Omit by default: window input then never focuses the target or moves the pointer. `true` briefly activates the target and posts real input; only after a `BackgroundUnavailable` or a verified no-op. */
+	takeover?: boolean;
 }
 
 /** Options for pointer clicks. */
-interface ComputerClickOptions extends ComputerDeliveryOptions {
+interface ComputerClickOptions extends ComputerInputOptions {
 	button?: "left" | "right" | "middle";
 	count?: number;
 	modifiers?: string[];
 }
 
 /** Options for pointer drags. */
-interface ComputerDragOptions extends ComputerDeliveryOptions {
+interface ComputerDragOptions extends ComputerInputOptions {
 	modifiers?: string[];
 }
 
 /** Options for wheel scrolling; `dx`/`dy` are scroll units at the pointer position. */
-interface ComputerScrollOptions extends ComputerDeliveryOptions {
+interface ComputerScrollOptions extends ComputerInputOptions {
 	dx?: number;
 	dy?: number;
 }
@@ -44,8 +42,9 @@ interface ComputerAxQuery {
 	limit?: number;
 }
 
-/** Window filter matched against the owning app name and title. */
+/** Window filter: exact opaque `id`, or case-insensitive substrings of the owning app name and title. */
 interface ComputerWindowFilter {
+	id?: string;
 	app?: string;
 	title?: string;
 }
@@ -99,7 +98,8 @@ interface ComputerCapabilities {
 	ax: boolean;
 	/** Whether input can target a background window. */
 	backgroundWindowInput: boolean;
-	deliveryModes: string[];
+	/** Whether window input accepts `takeover: true`. */
+	takeover: boolean;
 	capturePermission: string;
 	inputPermission: string;
 	axPermission: string;
@@ -127,7 +127,7 @@ interface ComputerElement {
 	/** Perform the element's native press action; needs no screenshot. */
 	press(): Promise<void>;
 	/** Click the element's center with native input. */
-	click(options?: ComputerDeliveryOptions): Promise<void>;
+	click(options?: ComputerInputOptions): Promise<void>;
 	focus(): Promise<void>;
 	parent(): Promise<ComputerElement | null>;
 	children(): Promise<ComputerElement[]>;
@@ -141,9 +141,9 @@ interface ComputerInputTarget {
 	move(x: number, y: number): Promise<void>;
 	drag(points: Array<[number, number]>, options?: ComputerDragOptions): Promise<void>;
 	scroll(x: number, y: number, options?: ComputerScrollOptions): Promise<void>;
-	type(text: string, options?: ComputerDeliveryOptions): Promise<void>;
+	type(text: string, options?: ComputerInputOptions): Promise<void>;
 	/** Key chord such as `"cmd+shift+p"` or `["cmd", "shift", "p"]`. */
-	press(chord: string | string[], options?: ComputerDeliveryOptions): Promise<void>;
+	press(chord: string | string[], options?: ComputerInputOptions): Promise<void>;
 }
 
 /** Window handle resolved by `window`/`focusedWindow`; identity fields are a snapshot taken at resolution. */

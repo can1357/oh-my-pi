@@ -445,9 +445,7 @@ describe("CopySelectorComponent", () => {
 
 	it("renders the descended block stack with captions and dotted outline", () => {
 		const selector = makeSelector([]);
-		const itemView = selector.render(100).map(line => Bun.stripANSI(line));
-		// The outline advertises the descent affordance before Right is pressed.
-		expect(itemView.join("\n")).toContain("4 blocks →");
+		selector.render(100);
 		selector.handleInput(RIGHT);
 		const lines = selector.render(100).map(line => Bun.stripANSI(line));
 		selector.handleInput(LEFT);

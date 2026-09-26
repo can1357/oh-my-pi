@@ -3,7 +3,9 @@ import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-util
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
-import type { SettingValue } from "../config/settings";
+import type { SettingValueOf } from "../config/registry";
+
+import type { cfgStartupChangelogMode } from "../modes/settings";
 
 export interface ChangelogEntry {
 	major: number;
@@ -440,7 +442,7 @@ export function selectStartupChangelog(
  * erase knowledge of a newer version the user has already seen.
  */
 export async function resolveStartupChangelogForDisplay(options: {
-	mode: SettingValue<"startup.changelogMode">;
+	mode: SettingValueOf<typeof cfgStartupChangelogMode>;
 	currentVersion: string;
 	changelogPath?: string;
 	agentDir?: string;

@@ -71,8 +71,14 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Manages files opened and accessible via redirection operators.
 	open_files: openfiles::OpenFiles,
 
-	/// The current working directory.
+	/// The current working directory. May be a virtual (`scheme://`) path
+	/// served by [`Shell::filesystem`].
 	working_dir: PathBuf,
+
+	/// Filesystem through which all shell-owned path access goes (redirects,
+	/// `cd`, tests, globbing, sourcing, command lookup). Native by default.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	filesystem: pi_vfs::Fs,
 
 	/// The shell environment, containing shell variables.
 	env: ShellEnvironment,
@@ -157,6 +163,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			traps: self.traps.clone(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
+			filesystem: self.filesystem.clone(),
 			env: self.env.clone(),
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
@@ -223,7 +230,18 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			args: options.shell_args.unwrap_or_default(),
 			version: options.shell_version,
 			product_display_str: options.shell_product_display_str,
-			working_dir: options.working_dir.map_or_else(std::env::current_dir, Ok)?,
+			// A deleted process working directory must not make shell creation
+			// fail outright (ENOENT from `current_dir`): fall back to $HOME and
+			// then `/` so an embedding host can recover by setting an explicit
+			// working directory afterwards. Other current-directory errors still
+			// propagate to preserve the shell's established error contract.
+			// Stored in long form so 8.3 short-name spellings (e.g. `ADMINI~1`)
+			// share one identity with their long spelling on Windows.
+			working_dir: crate::sys::fs::expand_to_long_path(&initial_working_dir(
+				options.working_dir,
+				std::env::current_dir(),
+			)?),
+			filesystem: options.filesystem.unwrap_or_default(),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,
@@ -250,14 +268,6 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		// Set any provided variables.
 		for (var_name, var_value) in options.vars {
 			shell.env.set_global(var_name, var_value)?;
-		}
-
-		// Set up history, if relevant. Do NOT fail if we can't load history.
-		if shell.options.enable_command_history {
-			shell.history = shell
-				.load_history()
-				.unwrap_or_default()
-				.or_else(|| Some(crate::history::History::default()));
 		}
 
 		Ok(shell)
@@ -536,6 +546,18 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		self.key_bindings = key_bindings;
 	}
 
+	/// Returns the filesystem the shell resolves user paths through.
+	pub fn filesystem(&self) -> &pi_vfs::Fs {
+		&self.filesystem
+	}
+
+	/// Replaces the filesystem the shell resolves user paths through. Takes
+	/// effect for subsequent operations; files already open stay bound to the
+	/// filesystem that opened them.
+	pub fn set_filesystem(&mut self, filesystem: pi_vfs::Fs) {
+		self.filesystem = filesystem;
+	}
+
 	/// Returns the shell's current working directory.
 	pub fn working_dir(&self) -> &Path {
 		&self.working_dir
@@ -553,7 +575,86 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	}
 }
 
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns a copy of this shell at the same depth and call stack (not a
+	/// subshell) for running a builtin off the async runtime. The copy has an
+	/// empty job table: jobs own their processes, so they never leave this
+	/// shell. Adopt its final state with [`Self::settle_lease`]; if it is never
+	/// settled, this shell is unchanged.
+	pub(crate) fn lease(&self) -> Self {
+		let mut lease = self.clone();
+		lease.depth = self.depth;
+		lease.call_stack = self.call_stack.clone();
+		lease
+	}
+
+	/// Adopts the state a builtin left in a [`Self::lease`], keeping this
+	/// shell's jobs and taking over any jobs the builtin started.
+	pub(crate) fn settle_lease(&mut self, mut lease: Self) {
+		let started = std::mem::take(&mut lease.jobs);
+		lease.jobs = std::mem::take(&mut self.jobs);
+		*self = lease;
+		for job in started.jobs {
+			self.jobs.add_as_current(job);
+		}
+	}
+}
+
 #[cfg(feature = "serde")]
 fn default_error_formatter<EF: extensions::ErrorFormatter>() -> EF {
 	EF::default()
+}
+
+/// Resolve the shell's initial working directory. An embedder-provided path
+/// always wins; otherwise the process cwd is used. A cwd that no longer exists
+/// (deleted underneath a long-running host — ENOENT from `current_dir`) falls
+/// back to `$HOME`, then `/`, instead of failing shell creation entirely. Other
+/// current-directory errors propagate unchanged.
+fn initial_working_dir(
+	explicit: Option<PathBuf>,
+	process_cwd: std::io::Result<PathBuf>,
+) -> std::io::Result<PathBuf> {
+	match explicit {
+		Some(path) => Ok(path),
+		None => match process_cwd {
+			Ok(path) => Ok(path),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(std::env::var_os("HOME")
+				.map(PathBuf::from)
+				.unwrap_or_else(|| PathBuf::from("/"))),
+			Err(err) => Err(err),
+		},
+	}
+}
+
+#[cfg(test)]
+mod initial_working_dir_tests {
+	use super::initial_working_dir;
+	use std::path::PathBuf;
+
+	#[test]
+	fn explicit_path_wins() {
+		let p = PathBuf::from("/explicit/cwd");
+		assert_eq!(
+			initial_working_dir(Some(p.clone()), Ok(PathBuf::from("/process"))).expect("explicit cwd"),
+			p
+		);
+	}
+
+	#[test]
+	fn deleted_process_cwd_falls_back_to_home() {
+		let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
+		let err = std::io::Error::from_raw_os_error(2); // ENOENT: cwd deleted
+		assert_eq!(
+			initial_working_dir(None, Err(err)).expect("deleted cwd fallback"),
+			home,
+			"shell creation must survive a deleted process cwd"
+		);
+	}
+
+	#[test]
+	fn non_not_found_process_cwd_errors_propagate() {
+		let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+		let error = initial_working_dir(None, Err(err)).expect_err("permission error must propagate");
+		assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+	}
 }

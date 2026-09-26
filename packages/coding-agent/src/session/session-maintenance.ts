@@ -65,7 +65,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
-import type { CompactionSettings as ConfiguredCompactionSettings, Settings } from "../config/settings";
+import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
@@ -86,7 +86,7 @@ import {
 	resolveSpeculationMethod,
 } from "./compaction-methods";
 import {
-	assistantTurnProducedOutput,
+	assistantTurnDelivered,
 	convertToLlm,
 	invalidateConvertToLlmArrayCache,
 	stripImagesFromMessage,
@@ -105,6 +105,17 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
+
+import {
+	type CompactionSettings,
+	cfgCompaction,
+	cfgCompactionAutoContinue,
+	cfgCompactionEnabled,
+	cfgCompactionMethodOrder,
+	cfgContextPromotionEnabled,
+	cfgSnapcompactShape,
+} from "./context-settings";
+import { cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -133,18 +144,18 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 };
 
 /**
- * Consecutive `response.incomplete` (length-stop) recoveries that produce no
- * actionable output before recovery gives up. A model that keeps returning an
- * empty `length` turn (seen with `zai/glm-4.5-flash`, #10594) would otherwise
- * re-trigger compaction + `shake-retry` forever, persisting an empty assistant
- * turn on every attempt. Mirrors the empty-stop / unexpected-stop retry caps in
- * {@link TurnRecovery}; any turn that produces actionable output resets the
- * counter, so legitimate multi-step recoveries are never cut short.
+ * Consecutive `response.incomplete` (length-stop) recoveries that deliver no
+ * text or tool call before recovery gives up. A model that keeps returning an
+ * empty or reasoning-only `length` turn (seen with `zai/glm-4.5-flash`, #10594)
+ * would otherwise retry forever, persisting a dead assistant turn on every
+ * attempt. Mirrors the empty-stop / unexpected-stop retry caps in
+ * {@link TurnRecovery}; any delivered turn ({@link assistantTurnDelivered})
+ * resets the counter, so legitimate multi-step recoveries are never cut short.
  */
 export const INCOMPLETE_RECOVERY_MAX_RETRIES = 3;
 
 /** Whether a configured preference list contains at least one automatic method. */
-function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): boolean {
+function hasConfiguredCompactionMethod(settings: CompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
 }
 
@@ -176,7 +187,7 @@ function isCompactionMethodUsable(
 	candidate: CompactionMethod,
 	reason: "overflow" | "threshold" | "idle" | "incomplete",
 	model: Model | undefined,
-	settings: ConfiguredCompactionSettings,
+	settings: CompactionSettings,
 	excludeMedia = false,
 ): boolean {
 	return candidate === "remote"
@@ -199,7 +210,7 @@ function isCompactionMethodUsable(
 function hasUsableCompactionMethod(
 	reason: "overflow" | "threshold" | "idle" | "incomplete",
 	model: Model | undefined,
-	settings: ConfiguredCompactionSettings,
+	settings: CompactionSettings,
 	excludeMedia = false,
 ): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
@@ -394,7 +405,8 @@ export interface SessionMaintenanceHost {
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
-	preferWebsockets: boolean | undefined;
+	/** Live `providers.openaiWebsockets` hint for provider calls. */
+	preferWebsockets(): boolean | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
@@ -452,6 +464,8 @@ export interface SessionMaintenanceHost {
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(reason?: string): void;
+	/** Re-aligns advisors after an in-place prune their own contexts already cover (no re-prime). */
+	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
@@ -512,6 +526,14 @@ export class SessionMaintenance {
 	#midTurnDeadEndPendingPrePrompt = false;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
+	/**
+	 * {@link #nativeSpeculationKey} of the session and model whose native
+	 * speculative compaction failed for a reason a retry would hit again (an
+	 * exhausted output budget, a tool call, a refusal). Until a compaction
+	 * commits, speculation does not re-send the request and the threshold pass
+	 * falls back to the next method instead.
+	 */
+	#failedNativeSpeculation: string | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
@@ -543,7 +565,7 @@ export class SessionMaintenance {
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
 	#usesExperimentalContextManagement(): boolean {
 		return (
-			this.#host.settings.getGroup("compaction").experimentalContextManagement === true &&
+			cfgCompaction.get(this.#host.settings).experimentalContextManagement === true &&
 			this.#host.hasExperimentalContextRolloverTools()
 		);
 	}
@@ -555,7 +577,7 @@ export class SessionMaintenance {
 	 */
 	#maybeQueueExperimentalNotesReminder(contextTokens: number, contextWindow: number): void {
 		if (!this.#usesExperimentalContextManagement()) return;
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (!settings.enabled || this.isCompacting || this.#host.isGeneratingHandoff()) return;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return;
@@ -636,7 +658,7 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
+				pruneUseless: cfgCompaction.get(this.#host.settings).dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
@@ -652,7 +674,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
+		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -672,7 +694,7 @@ export class SessionMaintenance {
 	 * provider prompt cache.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
+		const { supersedeReads, dropUseless } = cfgCompaction.get(this.#host.settings);
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -698,7 +720,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
+		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -963,7 +985,7 @@ export class SessionMaintenance {
 
 	/** One-shot, artifact-backed mechanical reduction for a pre-output Responses body-read timeout. */
 	async shakeForRequestBodyReadTimeout(generation: number): Promise<boolean> {
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (!settings.enabled || !resolveCompactionMethodOrder(settings.methodOrder).includes("shake")) return false;
 		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		if (!isCurrent()) return false;
@@ -1096,7 +1118,7 @@ export class SessionMaintenance {
 				resumeInterruptedTurn =
 					(interruptedActiveTurn || inheritedResume) &&
 					options?.suppressContinuation !== true &&
-					this.#host.settings.get("compaction.autoContinue") !== false;
+					cfgCompactionAutoContinue.get(this.#host.settings) !== false;
 				interruptedTurnGeneration = this.#host.promptGeneration();
 			}
 			const activeModel = this.#model;
@@ -1118,7 +1140,7 @@ export class SessionMaintenance {
 				return result;
 			}
 
-			const compactionSettings = this.#host.settings.getGroup("compaction");
+			const compactionSettings = cfgCompaction.get(this.#host.settings);
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			let selectedMethod: CompactionMethod | undefined;
@@ -1219,7 +1241,7 @@ export class SessionMaintenance {
 			// only selects snapcompact for an undirected manual compaction.
 			const wantsSnapcompact = compactionPrep.kind !== "fromHook" && selectedMethod === "snapcompact";
 			const snapcompactReady = wantsSnapcompact;
-			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
+			const snapcompactShapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 			let snapcompactShape: snapcompact.Shape | undefined;
 			// Claude refuses inputs that reproduce its own reasoning as text
 			// ("reasoning_extraction"), and the snapcompact archive is replayed as
@@ -1521,7 +1543,7 @@ export class SessionMaintenance {
 		onCommitted: () => void,
 	): Promise<CompactionResult> {
 		const entries = this.#host.sessionManager.getBranch();
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
 		if (!preparation)
 			throw new ManualCompactionNoOpError("Nothing to compact (session too small or already rolled over)");
@@ -1624,7 +1646,7 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -1964,7 +1986,7 @@ export class SessionMaintenance {
 		const entries = this.#host.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const preparation = prepareCompaction(
 			entries,
 			resolveMethodSettings(compactionSettings, "handoff"),
@@ -2003,7 +2025,7 @@ export class SessionMaintenance {
 	 */
 	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return;
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (this.#usesExperimentalContextManagement()) {
 			this.#maybeQueueExperimentalNotesReminder(contextTokens, contextWindow);
 			return;
@@ -2035,6 +2057,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return;
+		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
 
@@ -2042,6 +2065,9 @@ export class SessionMaintenance {
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const model = this.#model;
+		// Keyed now: the session can switch before the run settles.
+		const nativeKey = model && this.#nativeSpeculationKey(model);
 		this.#speculation = run;
 		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
 			logger.debug("Speculative compaction failed", {
@@ -2049,7 +2075,26 @@ export class SessionMaintenance {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			if (this.#speculation === run) this.#speculation = undefined;
+			// Keyed by the live model even when a compaction-model candidate made the
+			// failing request: every consumer checks the live model, and a false hit
+			// only moves this cycle to the next configured method. Errors with no
+			// HTTP status classify by message text, so an unrecognised transient
+			// failure costs the same single early fallback.
+			if (
+				method === "remote" &&
+				model &&
+				!controller.signal.aborted &&
+				error instanceof NativeCompactionError &&
+				!AIError.retriable(AIError.classify(error.cause, model.api))
+			) {
+				this.#failedNativeSpeculation = nativeKey;
+			}
 		});
+	}
+
+	/** Identity of `model`'s native speculation in the current session. */
+	#nativeSpeculationKey(model: Model): string {
+		return `${this.#host.sessionManager.getSessionId()}/${model.provider}/${model.id}`;
 	}
 
 	/**
@@ -2071,7 +2116,7 @@ export class SessionMaintenance {
 	 */
 	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (this.#usesExperimentalContextManagement()) return false;
 		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
 			return false;
@@ -2081,6 +2126,7 @@ export class SessionMaintenance {
 		if (!model) return false;
 		const method = resolveSpeculationMethod(model, settings);
 		if (!method) return false;
+		if (method === "remote" && this.#failedNativeSpeculation === this.#nativeSpeculationKey(model)) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
 			thresholdTokens + resolveSpeculationLeadTokens(thresholdTokens),
@@ -2113,7 +2159,7 @@ export class SessionMaintenance {
 		};
 		const model = this.#model;
 		if (!model) return clear();
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
@@ -2214,7 +2260,7 @@ export class SessionMaintenance {
 	): boolean {
 		const model = this.#model;
 		if (!model) return false;
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (
 			armed.result.preserveData &&
 			!remotePreserveReusable(armed.result.preserveData, model, resolveMethodSettings(settings, armed.method))
@@ -2285,7 +2331,7 @@ export class SessionMaintenance {
 			run.controller.abort();
 			return undefined;
 		}
-		const settings = this.#host.settings.getGroup("compaction");
+		const settings = cfgCompaction.get(this.#host.settings);
 		if (settings.asyncEnabled === false) return undefined;
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
 		if (!this.#armedSpeculationValid(run.armed, triggerContextTokens, pendingContextTokens)) {
@@ -2335,6 +2381,8 @@ export class SessionMaintenance {
 						: this.#projectCompactedContextTokens(args),
 			},
 		);
+		// A committed compaction starts a new cycle; native compaction gets a fresh try.
+		this.#failedNativeSpeculation = undefined;
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -2446,7 +2494,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
@@ -2528,7 +2576,7 @@ export class SessionMaintenance {
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const experimentalNewContextRequest =
 			this.#usesExperimentalContextManagement() && this.#host.takeExperimentalContextRolloverRequest(context);
 
@@ -2670,9 +2718,10 @@ export class SessionMaintenance {
 	 * 1. Input overflow + promotion: promote to larger model, retry without maintenance.
 	 * 2. Input overflow + no promotion target: run context maintenance, auto-retry on same model.
 	 * 3. Output incomplete (stopReason === "length", e.g. `response.incomplete`): the
-	 *    model burned its output budget without producing an actionable deliverable
-	 *    (reasoning-only or truncated). Drop the dead turn, try promotion, otherwise
-	 *    run compaction/handoff and retry.
+	 *    model exhausted its output budget. Try promotion; otherwise compact and
+	 *    retry when the context is over threshold (the window, not the output cap,
+	 *    ran out), retry as-is when the turn produced nothing actionable, and
+	 *    keep a truncated deliverable with a warning otherwise.
 	 * 4. Threshold: context over threshold, run context maintenance (no auto-retry).
 	 *
 	 * @param assistantMessage The assistant message to check
@@ -2698,10 +2747,11 @@ export class SessionMaintenance {
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
-		// A turn that produced actionable output means the incomplete-recovery loop
-		// broke through: clear the counter so a later isolated `length` stop starts
-		// fresh rather than inheriting a stale count from an earlier loop.
-		if (assistantTurnProducedOutput(assistantMessage)) this.#incompleteRecoveryAttempts = 0;
+		// A delivered turn means the incomplete-recovery loop broke through: clear
+		// the counter so a later isolated `length` stop starts fresh rather than
+		// inheriting a stale count from an earlier loop. Signed reasoning alone does
+		// not count, or a model burning every budget on thinking retries forever.
+		if (assistantTurnDelivered(assistantMessage)) this.#incompleteRecoveryAttempts = 0;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -2762,7 +2812,7 @@ export class SessionMaintenance {
 		// already complaining about (#11482).
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
-		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
+		const payloadCompactionSettings = cfgCompaction.get(this.#host.settings);
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
@@ -2932,7 +2982,7 @@ export class SessionMaintenance {
 			assistantMessage.stopReason === "error" &&
 			this.#model &&
 			contextWindow > 0 &&
-			this.#host.settings.getGroup("contextPromotion").enabled
+			cfgContextPromotionEnabled.get(this.#host.settings)
 		) {
 			const failedModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
 			const failedWindow = failedModel?.contextWindow ?? 0;
@@ -2963,12 +3013,35 @@ export class SessionMaintenance {
 		}
 
 		// Case 3: Output-side incomplete — `response.incomplete` from OpenAI Responses
-		// (and Codex) maps to stopReason === "length". The model burned its
-		// `max_output_tokens` budget on reasoning/text and emitted no actionable
-		// deliverable. Same recovery class as overflow: promotion if available,
-		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so a
-		// reachable handoff preference may run.
+		// (and Codex), Anthropic `max_tokens` / `model_context_window_exceeded`, all
+		// map to stopReason === "length". Promotion if available; compaction only
+		// when the window is what ran out, since shrinking the input cannot raise an
+		// output cap. Unlike overflow, the *input* is fine, so a reachable handoff
+		// preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
+			const incompleteCompactionSettings = cfgCompaction.get(this.#host.settings);
+			const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
+			// Unknown windows keep compacting: there is no evidence the window had room.
+			const windowExhausted =
+				contextWindow <= 0 ||
+				incompleteContextTokens > resolveThresholdTokens(contextWindow, incompleteCompactionSettings);
+			if (!windowExhausted && assistantTurnDelivered(assistantMessage)) {
+				// The output cap truncated a real deliverable with the window still open:
+				// neither a larger window nor compaction buys output room, and a retry
+				// would regenerate the same truncation. Keep it and let the user steer.
+				logger.warn("response.incomplete: output cap reached below compaction threshold; keeping truncated turn", {
+					model: `${assistantMessage.provider}/${assistantMessage.model}`,
+					contextTokens: incompleteContextTokens,
+					outputTokens: assistantMessage.usage.output,
+				});
+				this.#host.emitNotice(
+					"warning",
+					`Response hit the ${assistantMessage.provider}/${assistantMessage.model} output limit (${assistantMessage.usage.output} tokens) and was truncated.`,
+					"compaction",
+				);
+				return COMPACTION_CHECK_NONE;
+			}
+
 			// Same active-context vs persisted-history split as the overflow path
 			// above: clear the dead turn from agent state so it cannot be replayed,
 			// but keep it on the branch unless promotion or compaction actually runs.
@@ -2989,7 +3062,6 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
-			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
 			if (
 				incompleteCompactionSettings.enabled &&
 				(this.#usesExperimentalContextManagement() || hasConfiguredCompactionMethod(incompleteCompactionSettings))
@@ -3011,7 +3083,7 @@ export class SessionMaintenance {
 					// journal entry and revives the discarded length turn. Persist the branch
 					// marker/rewrite before blocking further continuation.
 					if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
-					const finalError = `Compaction recovery gave up after ${attempts} consecutive empty \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model}; the model produced no output. Try switching models or raising the model's max output tokens.`;
+					const finalError = `Length-stop recovery gave up after ${attempts} consecutive \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model} with no text or tool call. Try switching models or raising the model's max output tokens.`;
 					logger.warn("response.incomplete recovery cap reached; halting retries", {
 						model: `${assistantMessage.provider}/${assistantMessage.model}`,
 						attempts,
@@ -3020,6 +3092,18 @@ export class SessionMaintenance {
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				}
 				this.#incompleteRecoveryAttempts++;
+				if (!windowExhausted) {
+					// Nothing delivered and the window still has room: compaction would
+					// only rewrite history the next attempt does not need shrunk.
+					await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					logger.debug("Retrying response.incomplete without compaction (below threshold)", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						contextTokens: incompleteContextTokens,
+						attempt: this.#incompleteRecoveryAttempts,
+					});
+					this.#host.scheduleAgentContinue({ source: "incomplete-retry", delayMs: 100, generation });
+					return COMPACTION_CHECK_CONTINUATION;
+				}
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
@@ -3045,7 +3129,7 @@ export class SessionMaintenance {
 			? undefined
 			: await this.#pruneStaleToolResults();
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		if (
 			!compactionSettings.enabled ||
 			(!this.#usesExperimentalContextManagement() && !hasConfiguredCompactionMethod(compactionSettings))
@@ -3105,7 +3189,7 @@ export class SessionMaintenance {
 			postMaintenanceContextTokens,
 			maintenanceTokensFreed,
 			shouldCompact: shouldThresholdCompact,
-			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
+			contextPromotionEnabled: cfgContextPromotionEnabled.get(this.#host.settings) === true,
 		});
 		if (shouldThresholdCompact) {
 			// Grace band: a live (or just-started) background speculation absorbs
@@ -3163,8 +3247,7 @@ export class SessionMaintenance {
 	 * ({@link runPrePromptCompactionIfNeeded}).
 	 */
 	async #promoteContextModel(): Promise<boolean> {
-		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
-		if (!promotionSettings.enabled) return false;
+		if (!cfgContextPromotionEnabled.get(this.#host.settings)) return false;
 		const currentModel = this.#model;
 		if (!currentModel) return false;
 		const contextWindow = currentModel.contextWindow ?? 0;
@@ -3308,7 +3391,7 @@ export class SessionMaintenance {
 						sessionId: this.#host.sessionId(),
 						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets,
+						preferWebsockets: this.#host.preferWebsockets(),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
 						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
@@ -3484,7 +3567,7 @@ export class SessionMaintenance {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
+		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3657,7 +3740,7 @@ export class SessionMaintenance {
 	#compactionCreatedHeadroom(): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
@@ -3706,7 +3789,7 @@ export class SessionMaintenance {
 		const storedExcludedTokens = activeExcludedMessage
 			? this.#tokenizer.countMessage(activeExcludedMessage, { excludeEncryptedReasoning: true })
 			: 0;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const residualTokens = compactionContextTokens(
 			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
 			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
@@ -3762,7 +3845,7 @@ export class SessionMaintenance {
 		// a threshold-derived frame budget.
 		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
 			this.#host.sessionManager.getBranch(),
-			resolveMethodSettings(this.#host.settings.getGroup("compaction"), "snapcompact"),
+			resolveMethodSettings(cfgCompaction.get(this.#host.settings), "snapcompact"),
 			signal,
 		);
 		if (frameRescue !== undefined && options.hasProgress()) return true;
@@ -3851,7 +3934,7 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#host.settings.revision,
 		);
-		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
+		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3936,7 +4019,7 @@ export class SessionMaintenance {
 		const fileOps = snapcompact.createFileOps();
 		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
-		const shapeSetting = this.#host.settings.get("snapcompact.shape");
+		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 		const shape = snapcompact.resolveShapeForText(archiveText, this.#model, shapeSetting);
 		let result: snapcompact.CompactionResult;
 		try {
@@ -3985,6 +4068,7 @@ export class SessionMaintenance {
 				}),
 			},
 		);
+		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
@@ -4062,7 +4146,7 @@ export class SessionMaintenance {
 			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.
 		const explicitNewContextRequest = options.explicitNewContextRequest === true;
@@ -4101,6 +4185,30 @@ export class SessionMaintenance {
 				)
 			)
 				continue;
+			// Re-sending a native request that just failed for good only delays the
+			// fallback. Skip it while a later method can still run.
+			const liveModel = this.#model;
+			if (
+				candidate === "remote" &&
+				liveModel &&
+				this.#failedNativeSpeculation === this.#nativeSpeculationKey(liveModel) &&
+				methods
+					.slice(index + 1)
+					.some(next =>
+						isCompactionMethodUsable(
+							next,
+							reason,
+							liveModel,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
+					)
+			) {
+				logger.debug("Skipping native compaction after a failed speculative attempt", {
+					model: `${liveModel.provider}/${liveModel.id}`,
+				});
+				continue;
+			}
 			method = candidate;
 			methodIndex = index;
 			break;
@@ -4520,7 +4628,7 @@ export class SessionMaintenance {
 					preparation.previousPreserveData,
 					preparation.previousSummary,
 				);
-				const shapeSetting = this.#host.settings.get("snapcompact.shape");
+				const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 				const shape = snapcompact.resolveShapeForText(probeText, this.#model, shapeSetting);
 				const renderScan = snapcompact.scanRenderability(probeText, { shape });
 				if (!renderScan.isSafe) {
@@ -4656,7 +4764,7 @@ export class SessionMaintenance {
 						? candidate => canUseLiveProviderNativeCompaction(candidate, liveModel, effectiveSettings)
 						: undefined,
 				);
-				const retrySettings = this.#host.settings.getGroup("retry");
+				const retrySettings = cfgRetry.get(this.#host.settings);
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
@@ -4708,7 +4816,7 @@ export class SessionMaintenance {
 									sessionId: this.#host.sessionId(),
 									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,
-									preferWebsockets: this.#host.preferWebsockets,
+									preferWebsockets: this.#host.preferWebsockets(),
 									codexCompaction,
 									// This loop already retries the whole compaction attempt on
 									// transient errors, so the summarization oneshots must not
@@ -5167,7 +5275,7 @@ export class SessionMaintenance {
 			// without that pre-shake savings, shake can advance to the next preference
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
-			const compactionSettings = this.#host.settings.getGroup("compaction");
+			const compactionSettings = cfgCompaction.get(this.#host.settings);
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
@@ -5295,16 +5403,16 @@ export class SessionMaintenance {
 	 */
 	setAutoCompactionEnabled(enabled: boolean, persist = false): void {
 		if (persist) {
-			this.#host.settings.set("compaction.enabled", enabled);
-			this.#host.settings.clearOverride("compaction.enabled");
+			cfgCompactionEnabled.set(this.#host.settings, enabled);
+			cfgCompactionEnabled.clearOverride(this.#host.settings);
 		} else {
-			this.#host.settings.override("compaction.enabled", enabled);
+			cfgCompactionEnabled.override(this.#host.settings, enabled);
 		}
-		if (enabled && resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length === 0) {
+		if (enabled && resolveCompactionMethodOrder(cfgCompactionMethodOrder.get(this.#host.settings)).length === 0) {
 			if (persist) {
-				this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+				cfgCompactionMethodOrder.set(this.#host.settings, [...DEFAULT_COMPACTION_METHOD_ORDER]);
 			} else {
-				this.#host.settings.override("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+				cfgCompactionMethodOrder.override(this.#host.settings, [...DEFAULT_COMPACTION_METHOD_ORDER]);
 			}
 		}
 	}
@@ -5312,8 +5420,8 @@ export class SessionMaintenance {
 	/** Whether automatic maintenance has an enabled method to run. */
 	get autoCompactionEnabled(): boolean {
 		return (
-			this.#host.settings.get("compaction.enabled") &&
-			resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length > 0
+			cfgCompactionEnabled.get(this.#host.settings) &&
+			resolveCompactionMethodOrder(cfgCompactionMethodOrder.get(this.#host.settings)).length > 0
 		);
 	}
 }

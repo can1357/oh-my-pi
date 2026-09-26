@@ -23,6 +23,8 @@ import { Ellipsis, replaceTabs, TERMINAL, truncateToWidth, visibleWidth } from "
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
+import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
@@ -34,6 +36,9 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "./tool-errors";
+
+import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { cfgSpeechEnabled } from "../tts/settings";
 
 // =============================================================================
 // Types
@@ -436,9 +441,8 @@ async function askSingleQuestion(
 			timeoutTriggered = true;
 		};
 		let navigationAction: "back" | "forward" | undefined;
-		const helpText = navigation
-			? "up/down navigate  enter select  ←/→ question  esc cancel"
-			: "up/down navigate  enter select  esc cancel";
+		const questionHint = navigation ? `${formatKeyHints(["left", "right"])} question  ` : "";
+		const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${questionHint}${editorKey("tui.select.cancel")} cancel`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
 		const dialogSignal =
@@ -786,7 +790,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	/** Send terminal notification when ask tool is waiting for input */
 	#sendAskNotification(): void {
 		if (!this.session.hasUI) return;
-		const method = this.session.settings.get("ask.notify");
+		const method = cfgAskNotify.get(this.session.settings);
 		if (method === "off") return;
 		TERMINAL.sendNotification({
 			title: "omp",
@@ -898,8 +902,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
-		const timeoutSeconds = this.session.settings.get("ask.timeout");
+		// `ask.timeout` is in seconds (0 = disabled); convert to ms
+		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
@@ -916,7 +920,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
-		if (this.session.settings.get("speech.enabled")) {
+		if (cfgSpeechEnabled.get(this.session.settings)) {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 

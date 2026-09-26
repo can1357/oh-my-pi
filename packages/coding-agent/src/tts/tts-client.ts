@@ -11,7 +11,7 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { tinyModelEnvKey, tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import { isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
 import type { TtsProgressEvent, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
@@ -192,6 +192,8 @@ export class TtsClient {
 	#progressListeners = new Set<(event: TtsProgressEvent) => void>();
 	#nextRequestId = 0;
 	#refed = false;
+	/** {@link tinyModelEnvKey} the current worker was spawned under. */
+	#workerEnvKey: string | undefined;
 	#spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> = spawnTtsWorker) {
@@ -359,9 +361,15 @@ export class TtsClient {
 	}
 
 	#ensureWorker(): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-		if (this.#worker) return this.#worker;
+		const envKey = tinyModelEnvKey();
+		if (this.#worker) {
+			if (this.#workerEnvKey === envKey || this.#pending.size > 0) return this.#worker;
+			// Device/dtype changed while idle: retire the worker so the respawn uses the new env.
+			void this.terminate();
+		}
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
+		this.#workerEnvKey = envKey;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		return worker;

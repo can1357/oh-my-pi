@@ -217,7 +217,7 @@ impl ParsedPointerOptions {
 			button:    MouseButton::parse(options.button.as_deref())?,
 			count:     options.count.unwrap_or(1).max(1),
 			modifiers: parse_modifiers(options.modifiers.as_deref().unwrap_or_default())?,
-			mode:      DeliveryMode::parse(options.delivery_mode.as_deref()),
+			mode:      DeliveryMode::from_takeover(options.takeover),
 		})
 	}
 }
@@ -535,18 +535,10 @@ impl Worker {
 				let x = bounds.x + bounds.width / 2.0;
 				let y = bounds.y + bounds.height / 2.0;
 				let windows = self.backend()?.windows()?;
-				let window = windows
-					.into_iter()
-					.find(|w| {
-						x >= f64::from(w.x)
-							&& x < f64::from(w.x + w.width as i32)
-							&& y >= f64::from(w.y)
-							&& y < f64::from(w.y + w.height as i32)
-					})
-					.ok_or_else(|| {
-						DesktopError::window_not_found(format!("no window contains {reference}"))
-					})?;
-				let target = Target::Window(window.id);
+				// Desktop refs and parent traversal can leave the snapshot's
+				// original window; only the live element can establish ownership.
+				let window_id = self.ax()?.window_id(&h, &windows)?;
+				let target = Target::Window(window_id);
 				self.backend()?.pointer(
 					&target,
 					PointerEvent::Click {
@@ -1081,6 +1073,7 @@ mod capture_tests {
 
 	use super::*;
 	use crate::desktop::{
+		ax::{AxBounds, AxHandle, AxProps},
 		backend::{AxBackend, Backend},
 		error::ErrorCode,
 		keys::KeyName,
@@ -1092,6 +1085,9 @@ mod capture_tests {
 	/// `AtSpiAx` path. Exists to exercise `Worker::process` without a display.
 	struct FakeWaylandBackend {
 		window: DesktopWindow,
+		overlap: Option<DesktopWindow>,
+		window_present: bool,
+		clicks: Arc<Mutex<Vec<String>>>,
 	}
 
 	impl FakeWaylandBackend {
@@ -1108,7 +1104,71 @@ mod capture_tests {
 					height:  48,
 					focused: true,
 				},
+				overlap: None,
+				window_present: true,
+				clicks: Arc::new(Mutex::new(Vec::new())),
 			}
+		}
+	}
+
+	impl AxBackend for FakeWaylandBackend {
+		fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
+			Ok(AxHandle::Test(1))
+		}
+
+		fn window_id(&mut self, _: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
+			windows
+				.iter()
+				.find(|window| window.id == self.window.id)
+				.map(|window| window.id.clone())
+				.ok_or_else(|| DesktopError::window_not_found("the element's window closed"))
+		}
+
+		fn props(&mut self, _: &AxHandle) -> CoreResult<AxProps> {
+			Ok(AxProps {
+				role: "button".to_string(),
+				native_role: "button".to_string(),
+				title: None,
+				value: None,
+				description: None,
+				enabled: true,
+				focused: false,
+				bounds: Some(AxBounds { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }),
+				actions: Vec::new(),
+				child_count: 0,
+			})
+		}
+
+		fn children(&mut self, _: &AxHandle) -> CoreResult<Vec<AxHandle>> {
+			unreachable!("tree traversal not exercised")
+		}
+
+		fn parent(&mut self, _: &AxHandle) -> CoreResult<Option<AxHandle>> {
+			unreachable!("tree traversal not exercised")
+		}
+
+		fn perform(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
+			unreachable!("semantic actions not exercised")
+		}
+
+		fn set_value(&mut self, _: &AxHandle, _: &str) -> CoreResult<()> {
+			unreachable!("text input not exercised")
+		}
+
+		fn focus(&mut self, _: &AxHandle) -> CoreResult<()> {
+			unreachable!("focus not exercised")
+		}
+
+		fn element_at(&mut self, _: f64, _: f64) -> CoreResult<Option<AxHandle>> {
+			unreachable!("hit testing not exercised")
+		}
+
+		fn focused_element(&mut self) -> CoreResult<Option<AxHandle>> {
+			unreachable!("focus not exercised")
+		}
+
+		fn attributes(&mut self, _: &AxHandle) -> CoreResult<Vec<(String, String)>> {
+			unreachable!("attributes not exercised")
 		}
 	}
 
@@ -1127,7 +1187,12 @@ mod capture_tests {
 		}
 
 		fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-			Ok(vec![self.window.clone()])
+			Ok(self
+				.overlap
+				.iter()
+				.chain(self.window_present.then_some(&self.window))
+				.cloned()
+				.collect())
 		}
 
 		fn capture(
@@ -1151,12 +1216,13 @@ mod capture_tests {
 
 		fn pointer(
 			&mut self,
-			_: &Target,
+			target: &Target,
 			_: PointerEvent,
 			_: &FrameGeometry,
 			_: DeliveryMode,
 		) -> CoreResult<()> {
-			unreachable!("pointer not exercised")
+			self.clicks.lock().push(target.key().to_string());
+			Ok(())
 		}
 
 		fn type_text(&mut self, _: &Target, _: &str, _: DeliveryMode) -> CoreResult<()> {
@@ -1172,7 +1238,7 @@ mod capture_tests {
 		}
 
 		fn ax(&mut self) -> Option<&mut dyn AxBackend> {
-			None
+			Some(self)
 		}
 	}
 
@@ -1183,6 +1249,51 @@ mod capture_tests {
 			frames:       HashMap::new(),
 			capabilities: Arc::new(Mutex::new(DesktopCapabilities::unavailable())),
 		}
+	}
+
+	fn overlapping_backend() -> FakeWaylandBackend {
+		let mut backend = FakeWaylandBackend::new();
+		backend.overlap = Some(DesktopWindow {
+			id: "unrelated-overlay".to_string(),
+			..backend.window.clone()
+		});
+		backend
+	}
+
+	fn click_reference(worker: &mut Worker, origin: &str) -> CoreResult<Response> {
+		let generation = worker.registry.current_generation(origin);
+		let reference = worker.registry.register(origin, generation, AxHandle::Test(1));
+		let (reply, _rx) = flume::bounded(1);
+		worker.process(&Request::AxClick {
+			reference,
+			options: ParsedPointerOptions::parse(None)?,
+			reply,
+		})
+	}
+
+	#[test]
+	fn ax_click_targets_element_owner_despite_overlapping_or_snapshot_windows() {
+		let backend = overlapping_backend();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		// A desktop ref has no snapshot owner; a traversed ref can retain a
+		// snapshot origin different from its live native window.
+		click_reference(&mut worker, "desktop").expect("desktop element click");
+		click_reference(&mut worker, "unrelated-overlay").expect("traversed element click");
+		assert_eq!(*clicks.lock(), [WAYLAND_ID, WAYLAND_ID]);
+	}
+
+	#[test]
+	fn ax_click_never_retargets_a_closed_owner_to_an_overlapping_window() {
+		let mut backend = overlapping_backend();
+		backend.window_present = false;
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let Err(error) = click_reference(&mut worker, WAYLAND_ID) else {
+			panic!("closed element window must refuse input");
+		};
+		assert_eq!(error.code, ErrorCode::WindowNotFound);
+		assert!(clicks.lock().is_empty(), "no input may reach the overlapping window");
 	}
 
 	fn capture_request(target: Target) -> Request {

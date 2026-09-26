@@ -12,6 +12,8 @@ import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 
+import { cfgLaunchEnabled } from "../tools/settings";
+
 export interface ServiceReady {
 	log?: string;
 	port?: number;
@@ -61,8 +63,12 @@ export function waitForOwnedServiceCompletion(session: ToolSession, signal?: Abo
 	return promise;
 }
 
+function serviceOwner(session: ToolSession): string | null | undefined {
+	return session.getSessionId?.() ?? session.getAgentId?.();
+}
+
 function track(session: ToolSession, daemon: DaemonSnapshot): void {
-	const owner = session.getAgentId?.() ?? session.getSessionId?.();
+	const owner = serviceOwner(session);
 	if (daemon.owner !== owner) return;
 	const services = serviceState(session).owned;
 	if (TERMINAL_STATES[daemon.state]) services.delete(daemon.name);
@@ -70,7 +76,7 @@ function track(session: ToolSession, daemon: DaemonSnapshot): void {
 }
 
 function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
-	const owner = session.getAgentId?.() ?? session.getSessionId?.();
+	const owner = serviceOwner(session);
 	if (!owner) return;
 	const clients = serviceState(session).subscribed;
 	if (clients.has(client)) return;
@@ -90,6 +96,8 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		for (const listener of serviceState(session).listeners) listener();
 	});
 	session.registerSessionChangeCallback?.(() => {
+		// The previous session stays resumable (`/resume`, fork parent), so keep its
+		// completions queued in the broker for replay when that session id re-subscribes.
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
@@ -106,7 +114,7 @@ async function request(
 	subscribe(session, client);
 	const result = await client.request(operation, signal);
 	if (result.op === "list") {
-		const owner = session.getAgentId?.() ?? session.getSessionId?.();
+		const owner = serviceOwner(session);
 		serviceState(session).owned.clear();
 		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
 	} else if ("daemon" in result) track(session, result.daemon);
@@ -181,7 +189,7 @@ export async function startService(
 	readyTimedOut: boolean;
 	log: string;
 }> {
-	if (!session.settings.get("launch.enabled")) throw new ToolError("Service launch is disabled in this session.");
+	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
 		throw new ToolError("Service name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 	const ready = params.ready;
@@ -217,7 +225,7 @@ export async function startService(
 	};
 	const result = await request(
 		session,
-		{ op: "start", spec, owner: session.getAgentId?.() ?? session.getSessionId?.() ?? undefined, replace: true },
+		{ op: "start", spec, owner: serviceOwner(session) ?? undefined, replace: true },
 		signal,
 	);
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");

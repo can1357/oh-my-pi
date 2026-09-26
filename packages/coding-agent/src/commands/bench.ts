@@ -14,7 +14,10 @@ export default class Bench extends Command {
 	};
 
 	static flags = {
-		runs: Flags.integer({ description: "Requests per model (default: 10 chat, 5 prefill/generation, 9 mix)" }),
+		runs: Flags.integer({
+			description:
+				"Requests per model (default: 10 chat, 5 prefill/generation, 9 mix); with --detailed, per phase (default: 4)",
+		}),
 		"max-tokens": Flags.integer({
 			description: "Max output tokens per request (default: chat 512, prefill 64, generation 2048, cache 64)",
 		}),
@@ -25,14 +28,20 @@ export default class Bench extends Command {
 			options: ["chat", "prefill", "generation", "mix"],
 		}),
 		"prefill-bytes": Flags.integer({
-			description: "Synthetic input size for prefill challenges (default: 32768)",
+			description: "Synthetic input size for prefill challenges (default: 32768, capped by the context window)",
+		}),
+		detailed: Flags.boolean({
+			description:
+				"Run single-user (1 concurrent), parallel (--par concurrent, with aggregate tok/s and scaling), and prefill phases per model",
 		}),
 		"service-tier": Flags.string({
 			description: "Service tier applied per model family (default: configured `tier.*` settings; `none` omits it)",
 			options: SERVICE_TIER_OPENAI_VALUES,
 		}),
 		json: Flags.boolean({ description: "Output JSON" }),
-		par: Flags.integer({ description: "Execute runs with N parallel queries/requests (default: 4)" }),
+		par: Flags.integer({
+			description: "Execute runs with N parallel queries/requests (default: 4); --detailed's parallel phase width",
+		}),
 		cache: Flags.boolean({
 			description: "Run independent cold/warm prompt-cache pairs (not supported for openai-codex-responses)",
 		}),
@@ -51,6 +60,7 @@ export default class Bench extends Command {
 		"# Rotate chat, prefill, and generation challenges in one run\n  omp bench opus sonnet --profile mix",
 		"# Isolate prompt-ingestion speed with a 64 KiB cache-busted input\n  omp bench opus sonnet --profile prefill --prefill-bytes 65536",
 		"# Isolate sustained decode throughput\n  omp bench opus sonnet --profile generation",
+		"# Compare single-user vs 8 concurrent users, plus prefill speed\n  omp bench apple --detailed --par 8",
 		"# Force priority serving tier\n  omp bench openai-codex/gpt-5.5:low --runs 10 --service-tier priority",
 		"# Measure one cold/warm prompt-cache pair\n  omp bench openai/gpt-5.6 --cache --json",
 	];
@@ -65,6 +75,7 @@ export default class Bench extends Command {
 				prompt: flags.prompt,
 				profile: flags.profile,
 				prefillBytes: flags["prefill-bytes"],
+				detailed: flags.detailed,
 				serviceTier: flags["service-tier"],
 				json: flags.json,
 				par: flags.par,

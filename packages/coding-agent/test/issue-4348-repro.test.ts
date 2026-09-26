@@ -65,7 +65,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 		updateEditorTopBorder: vi.fn(),
 		ui: { requestRender: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => chatContainer.clear(),
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		toolOutputExpanded: false,
 		hideThinkingBlock: false,
 		focusedAgentId: undefined,

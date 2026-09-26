@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as os from "node:os";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -11,29 +12,21 @@ function makeSession(bridge: ClientBridge): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
-		settings: {
-			get(key: string) {
-				if (key === "async.enabled") return false;
-				if (key === "bash.autoBackground.enabled") return false;
-				if (key === "bash.autoBackground.thresholdMs") return 60_000;
-				if (key === "bashInterceptor.enabled") return false;
-				if (key === "astGrep.enabled") return false;
-				if (key === "astEdit.enabled") return false;
-				if (key === "grep.enabled") return false;
-				if (key === "glob.enabled") return false;
-				return undefined;
-			},
-			getBashInterceptorRules() {
-				return [];
-			},
-			getShellConfig() {
-				// Fixed bash shell keeps the wrap assertions cross-platform: the fix
-				// must reuse the resolved shell (Git Bash on Windows, `$SHELL` on
-				// POSIX) instead of collapsing to `cmd.exe` — that's the contract
-				// this test defends.
-				return { shell: "/bin/bash", args: ["-l", "-c"], env: {}, prefix: undefined };
-			},
-		},
+		// Fixed bash shell keeps the wrap assertions cross-platform: the fix
+		// must reuse the resolved shell (Git Bash on Windows, `$SHELL` on
+		// POSIX) instead of collapsing to `cmd.exe` — that's the contract
+		// this test defends.
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bash.autoBackground.thresholdMs": 60_000,
+			"bashInterceptor.enabled": false,
+			"astGrep.enabled": false,
+			"astEdit.enabled": false,
+			"grep.enabled": false,
+			"glob.enabled": false,
+			shellPath: "/bin/bash",
+		}),
 		getClientBridge: () => bridge,
 	} as unknown as ToolSession;
 }

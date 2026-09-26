@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	HL_FILE_HASH_LENGTH,
@@ -6,43 +6,34 @@ import {
 	HL_FILE_PREFIX,
 	HL_FILE_SUFFIX,
 } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import {
-	type LocalProtocolOptions,
-	resolveLocalRoot,
-	resolveLocalUrlToPath,
-	resolveVaultUrlToPath,
-} from "../internal-urls";
+import { isEnoent } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "../internal-urls";
+import { sessionResolveContext } from "../internal-urls/context";
 import type { ToolSession } from ".";
-import { normalizeLocalScheme, resolveToCwd } from "./path-utils";
+import { resolveToCwd } from "./path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-const VAULT_SCHEME_PREFIX = "vault:";
-const LOCAL_SCHEME_PREFIX = "local:";
 const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
 
-/** Resolve the `local://` options the session uses, preferring its own
- *  {@link LocalProtocolOptions} (the mapping `read`/`write`/`eval` resolve
- *  through) over the bare `getArtifactsDir`/`getSessionId` pair. Subagents and
- *  multi-session hosts (cmux/ACP, embedded SDK) pin `local://` to a parent/foreign
- *  root via `localProtocolOptions`; the sandbox root the plan-mode guard derives
- *  must match where the artifact actually lives, or it rejects a legitimate plan
- *  edit (and tag-based path recovery onto the sandbox would miss it). */
-export function planLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
-	return (
-		session.localProtocolOptions ?? {
-			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-			getSessionId: () => session.getSessionId?.() ?? null,
+/** Where a write to `absolutePath` lands: its deepest existing ancestor realpathed, with
+ *  the missing tail re-appended. `undefined` when the path goes through a dangling
+ *  symlink (the write would follow it somewhere unknowable) or cannot be inspected. */
+async function canonicalWritePath(absolutePath: string): Promise<string | undefined> {
+	const tail: string[] = [];
+	for (let current = absolutePath; ; current = path.dirname(current)) {
+		try {
+			return path.join(await fs.realpath(current), ...tail);
+		} catch (error) {
+			if (!isEnoent(error)) return undefined;
 		}
-	);
-}
-
-/** Resolve the absolute path of the session's `local://` artifact sandbox.
- *  Returns `null` when the session has no artifact wiring (e.g. tests). */
-function localSandboxRoot(session: ToolSession): string | null {
-	try {
-		return path.resolve(resolveLocalRoot(planLocalProtocolOptions(session)));
-	} catch {
-		return null;
+		try {
+			await fs.lstat(current);
+			return undefined;
+		} catch (error) {
+			if (!isEnoent(error)) return undefined;
+		}
+		if (path.dirname(current) === current) return undefined;
+		tail.unshift(path.basename(current));
 	}
 }
 
@@ -81,52 +72,49 @@ export function unwrapHashlineHeaderPath(targetPath: string): string {
 /** True when `targetPath` resolves into the session-local artifact sandbox.
  *  Routes through {@link resolvePlanPath} so the guard and the eventual write
  *  always agree on the absolute target (including bracketed hashline headers,
- *  `local://` URLs, and bare absolute paths). Files inside the sandbox are not
+ *  internal URLs, and bare absolute paths). Files inside the sandbox are not
  *  part of the working tree, so plan mode treats them as freely writable
  *  scratch/plan space — and tag-based path recovery may rebind onto them. */
-export function targetsLocalSandbox(session: ToolSession, targetPath: string): boolean {
-	const root = localSandboxRoot(session);
-	if (!root) return false;
+export async function targetsLocalSandbox(
+	session: ToolSession,
+	targetPath: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const roots = InternalUrlRouter.instance().sandboxRoots(sessionResolveContext(session, { signal }));
+	if (roots.length === 0) return false;
 	let resolved: string;
 	try {
-		resolved = resolvePlanPath(session, targetPath);
+		resolved = await resolvePlanPath(session, targetPath, signal);
 	} catch {
 		return false;
 	}
 	if (!path.isAbsolute(resolved)) return false;
-	const absolute = path.resolve(resolved);
-	if (isWithinRoot(absolute, root)) return true;
-	// Compare realpath-normalized forms so that `/tmp/…` vs `/private/tmp/…`
-	// (macOS) and other symlink-collapsed roots both resolve to the same
-	// sandbox identity.
-	try {
-		const realRoot = fs.realpathSync.native(root);
-		if (isWithinRoot(absolute, realRoot)) return true;
-		const realParent = fs.realpathSync.native(path.dirname(absolute));
-		return isWithinRoot(path.join(realParent, path.basename(absolute)), realRoot);
-	} catch {
-		return false;
+	// Compare where the write actually lands (symlinked ancestors, `/tmp` vs
+	// `/private/tmp` on macOS) against the equally canonicalized roots.
+	const target = await canonicalWritePath(path.resolve(resolved));
+	if (target === undefined) return false;
+	for (const root of roots) {
+		const realRoot = await canonicalWritePath(root);
+		if (realRoot !== undefined && isWithinRoot(target, realRoot)) return true;
 	}
+	return false;
 }
 
 /**
- * Resolve a write/edit target to its absolute filesystem path, honoring the
- * `local://` and `vault://` schemes. Plain paths resolve against the session cwd.
- * Bracketed hashline headers (`[path#TAG]`) are unwrapped first so the inner
- * filesystem path drives resolution — keeping the plan-mode guard and the
- * eventual write in lockstep.
+ * Resolve a write/edit target to its absolute filesystem path. Internal URLs
+ * locate through their scheme handler (the entry need not exist yet); URLs no
+ * local file backs throw the router's uniform error. Plain paths resolve
+ * against the session cwd. Bracketed hashline headers (`[path#TAG]`) are
+ * unwrapped first so the inner filesystem path drives resolution — keeping the
+ * plan-mode guard and the eventual write in lockstep. Locating uses the session's
+ * read context (same `local://` mapping), and `signal` aborts a vault root lookup.
  */
-export function resolvePlanPath(session: ToolSession, targetPath: string): string {
-	const unwrapped = unwrapHashlineHeaderPath(targetPath);
-	const normalized = normalizeLocalScheme(unwrapped);
-	if (normalized.startsWith(LOCAL_SCHEME_PREFIX)) {
-		return resolveLocalUrlToPath(normalized, planLocalProtocolOptions(session));
+export async function resolvePlanPath(session: ToolSession, targetPath: string, signal?: AbortSignal): Promise<string> {
+	const router = InternalUrlRouter.instance();
+	const normalized = router.normalize(unwrapHashlineHeaderPath(targetPath));
+	if (router.canHandle(normalized)) {
+		return router.requireLocal(normalized, "write", sessionResolveContext(session, { signal }), { create: true });
 	}
-
-	if (normalized.startsWith(VAULT_SCHEME_PREFIX)) {
-		return resolveVaultUrlToPath(normalized);
-	}
-
 	return resolveToCwd(normalized, session.cwd);
 }
 
@@ -136,11 +124,11 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
  * where the plan and any scratch notes live); anything that would touch the
  * working tree — or rename/delete a file — is rejected.
  */
-export function enforcePlanModeWrite(
+export async function enforcePlanModeWrite(
 	session: ToolSession,
 	targetPath: string,
-	options?: { move?: string; op?: "create" | "update" | "delete" },
-): void {
+	options?: { move?: string; op?: "create" | "update" | "delete"; signal?: AbortSignal },
+): Promise<void> {
 	const state = session.getPlanModeState?.();
 	if (!state?.enabled) return;
 
@@ -152,7 +140,7 @@ export function enforcePlanModeWrite(
 		throw new ToolError("Plan mode: deleting files is not allowed.");
 	}
 
-	if (targetsLocalSandbox(session, targetPath)) return;
+	if (await targetsLocalSandbox(session, targetPath, options?.signal)) return;
 
 	throw new ToolError(
 		"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md file instead.",

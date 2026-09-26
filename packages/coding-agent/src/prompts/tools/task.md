@@ -11,6 +11,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name. `outputSchema` overrides agent/session schemas.
+`complexity`: why the task is simple or complex, ≤12 words (`one-line rename, no callers`; `cross-module race, no repro`); sets child thinking depth.
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by complexity.
 {{/if}}`schemaMode`: default permissive warns after retries; strict fails.
@@ -19,7 +20,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.
 
 # Format
-{{#if batchEnabled}}`context`: shared (`# Goal`, `# Constraints`, `# Contract` interfaces); NEVER repeat per task.
+{{#if batchEnabled}}`context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
 {{/if}}`task`: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).
 
 # Available Agents

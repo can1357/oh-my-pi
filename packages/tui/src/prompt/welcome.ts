@@ -3,9 +3,13 @@ import type { Component } from "../tui";
 import { padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { theme } from "../theme/theme";
+import { formatDoubleTap, formatKeyHint, formatKeyHints, type KeyName } from "../app-keybindings";
+import { editorKey } from "../chrome/keybinding-hints";
+import { getKeybindings, type Keybinding } from "../keybindings";
 import tipsText from "./tips.txt" with { type: "text" };
 
-/** Tips embedded at build time, one per line; blanks dropped. */
+/** Tips embedded at build time, one per line; blanks dropped. Key placeholders
+ *  (see {@link expandTipKeys}) stay raw until render time. */
 const TIPS: readonly string[] = tipsText
 	.split("\n")
 	.map(line => line.trim())
@@ -76,6 +80,35 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	}
 	return out + reset;
 }
+
+/** Key placeholders in tips.txt: `{key:shift+tab}`, `{keys:up,down}`, `{tap:left}`, `{action:tui.editor.undo}`. */
+const TIP_KEY_PLACEHOLDER = /\{(key|keys|tap|action):([^}]+)\}/g;
+
+const MODIFIER_NAMES: Record<string, true | undefined> = { ctrl: true, shift: true, alt: true, super: true };
+
+/** A `+`-joined chord whose leading parts are modifiers (`ctrl+o`, `shift`, `left`). */
+function isKeyName(key: string): key is KeyName {
+	const parts = key.split("+");
+	return parts.every((part, i) => part.length > 0 && (i === parts.length - 1 || MODIFIER_NAMES[part] === true));
+}
+
+function isKeybinding(action: string): action is Keybinding {
+	return action in getKeybindings().getResolvedBindings();
+}
+
+/** Expand tip key placeholders through the key formatter; malformed ones stay verbatim. */
+function expandTipKeys(tip: string): string {
+	return tip.replace(TIP_KEY_PLACEHOLDER, (placeholder, kind: string, value: string) => {
+		if (kind === "action") return isKeybinding(value) ? editorKey(value) : placeholder;
+		const keys = value.split(",");
+		if (!keys.every(isKeyName)) return placeholder;
+		if (kind === "keys") return formatKeyHints(keys);
+		const [key] = keys;
+		if (key === undefined) return placeholder;
+		return kind === "tap" ? formatDoubleTap(key) : formatKeyHint(key);
+	});
+}
+
 export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
 	const label = "Tip: ";
 	const labelWidth = visibleWidth(label);
@@ -83,7 +116,7 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	if (bodyBudget < 8) return [];
 
 	const isNew = NEW_TIP_MARKER.test(tip);
-	const body = isNew ? tip.replace(NEW_TIP_MARKER, "") : tip;
+	const body = expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip);
 
 	const wrappedBody = wrapTextWithAnsi(replaceTabs(body), bodyBudget);
 	if (wrappedBody.length === 0) return [];

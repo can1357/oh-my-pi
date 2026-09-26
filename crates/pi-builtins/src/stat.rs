@@ -46,35 +46,32 @@ pub(crate) fn stat_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(any(unix, windows))]
 mod imp {
-	#[cfg(unix)]
-	use std::os::unix::fs::{FileTypeExt, MetadataExt};
 	use std::{
 		borrow::Cow,
 		cell::OnceCell,
 		ffi::{OsStr, OsString},
-		fs::{self, FileType, Metadata},
 		io::Write,
 		path::Path,
 	};
 
 	use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
+	use pi_vfs::{BlockingFs, FileType, Metadata, StatFs};
 	use thiserror::Error;
-	#[cfg(windows)]
-	use uucore::time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec};
-	use uucore::display::Quotable;
-
-	use crate::host::{self, Host, Utility, matches_parser};
+	use uucore::{
+		display::Quotable,
+		time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec},
+	};
 	#[cfg(unix)]
 	use uucore::{
 		entries,
-		fs::{display_permissions, major, minor},
-		fsext::{
-			FsMeta, MetadataTimeField, StatFs, metadata_get_time, pretty_filetype, pretty_fstype,
-			read_fs_list, statfs,
-		},
+		fs::{major, minor},
+		fsext::{MetadataTimeField, pretty_filetype, pretty_fstype, read_fs_list},
 		libc::mode_t,
-		time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec},
 	};
+
+	#[cfg(unix)]
+	use crate::fsmeta::{display_permissions, metadata_get_time};
+	use crate::host::{self, Host, Utility, matches_parser};
 
 	const ABOUT: &str = "Display file or file system status.";
 	const USAGE: &str = "stat [OPTION]... FILE...";
@@ -594,7 +591,7 @@ for details about the options it supports.";
 
 		if file_type.is_symlink() {
 			let quoted_display_name = quote_file_name(display_name, &quoting_style);
-			match fs::read_link(resolved) {
+			match host.fs().read_link(resolved) {
 				Ok(dst) => {
 					let quoted_dst = quote_file_name(&dst.to_string_lossy(), &quoting_style);
 					Ok(format!("{quoted_display_name} -> {quoted_dst}"))
@@ -614,7 +611,39 @@ for details about the options it supports.";
 		}
 	}
 
-	#[cfg(unix)]
+	/// A numeric field the backend may not report; unknown values print as
+	/// GNU's `?` rather than a made-up number.
+	fn unsigned(value: Option<u64>) -> OutputType<'static> {
+		value.map_or(OutputType::Unknown, OutputType::Unsigned)
+	}
+
+	fn unsigned_hex(value: Option<u64>) -> OutputType<'static> {
+		value.map_or(OutputType::Unknown, OutputType::UnsignedHex)
+	}
+
+	/// Human-readable file system type for `%T`: the magic number's GNU name
+	/// where one is known, else the name the backend reports.
+	fn fs_type_name(stats: &StatFs) -> String {
+		#[cfg(unix)]
+		if let Some(magic) = stats.fs_type {
+			let pretty = pretty_fstype(magic);
+			return match &stats.fs_type_name {
+				Some(name) if pretty.starts_with("UNKNOWN") => name.clone(),
+				_ => pretty.into_owned(),
+			};
+		}
+		stats.fs_type_name.clone().unwrap_or_else(|| "?".to_string())
+	}
+
+	/// Renders an I/O error like `strerror`, without Rust's ` (os error N)`.
+	fn io_msg(error: &std::io::Error) -> String {
+		let mut message = error.to_string();
+		if let Some(position) = message.find(" (os error ") {
+			message.truncate(position);
+		}
+		message
+	}
+
 	fn process_token_filesystem(
 		out: &mut dyn Write,
 		t: &Token,
@@ -629,29 +658,29 @@ for details about the options it supports.";
 			Token::Directive { flag, width, precision, format } => {
 				let output = match format {
 					// free blocks available to non-superuser
-					'a' => OutputType::Unsigned(meta.avail_blocks()),
+					'a' => OutputType::Unsigned(meta.blocks_available),
 					// total data blocks in file system
-					'b' => OutputType::Unsigned(meta.total_blocks()),
+					'b' => OutputType::Unsigned(meta.blocks),
 					// total file nodes in file system
-					'c' => OutputType::Unsigned(meta.total_file_nodes()),
+					'c' => OutputType::Unsigned(meta.files),
 					// free file nodes in file system
-					'd' => OutputType::Unsigned(meta.free_file_nodes()),
+					'd' => OutputType::Unsigned(meta.files_free),
 					// free blocks in file system
-					'f' => OutputType::Unsigned(meta.free_blocks()),
+					'f' => OutputType::Unsigned(meta.blocks_free),
 					// file system ID in hex
-					'i' => OutputType::UnsignedHex(meta.fsid()),
+					'i' => unsigned_hex(meta.fsid),
 					// maximum length of filenames
-					'l' => OutputType::Unsigned(meta.namelen()),
+					'l' => unsigned(meta.name_max),
 					// file name
 					'n' => OutputType::Str(display_name.to_string()),
 					// block size (for faster transfers)
-					's' => OutputType::Unsigned(meta.io_size()),
+					's' => OutputType::Unsigned(meta.io_size),
 					// fundamental block size (for block counts)
-					'S' => OutputType::Integer(meta.block_size()),
+					'S' => OutputType::Integer(meta.block_size as i64),
 					// file system type in hex
-					't' => OutputType::UnsignedHex(meta.fs_type() as u64),
+					't' => unsigned_hex(meta.fs_type.map(|magic| magic as u64)),
 					// file system type in human readable form
-					'T' => OutputType::Str(pretty_fstype(meta.fs_type()).into()),
+					'T' => OutputType::Str(fs_type_name(meta)),
 					_ => OutputType::Unknown,
 				};
 
@@ -1121,12 +1150,10 @@ for details about the options it supports.";
 			self.time_format.as_deref().unwrap_or(PRETTY_DATETIME_FORMAT)
 		}
 
+		/// Host mount point containing `p`; only meaningful for paths the
+		/// injected filesystem serves from the native host.
 		#[cfg(unix)]
-		fn find_mount_point<P: AsRef<Path>>(
-			&self,
-			p: P,
-			host: &mut Host,
-		) -> Option<&OsString> {
+		fn find_mount_point(&self, p: &Path, host: &mut Host) -> Option<&OsString> {
 			if !self.mount_list_needed {
 				return None;
 			}
@@ -1146,7 +1173,7 @@ for details about the options it supports.";
 				}
 			});
 
-			let path = p.as_ref().canonicalize().ok()?;
+			let path = host.fs().canonicalize(p).ok()?;
 			mount_list
 				.as_ref()?
 				.iter()
@@ -1156,7 +1183,7 @@ for details about the options it supports.";
 		#[cfg(unix)]
 		fn exec(&self, host: &mut Host) -> i32 {
 			let mut stdin_is_fifo = false;
-			if let Ok(md) = fs::metadata("/dev/stdin") {
+			if let Ok(md) = host.fs().metadata(host.resolve("/dev/stdin")) {
 				stdin_is_fifo = md.file_type().is_fifo();
 			}
 
@@ -1195,7 +1222,7 @@ for details about the options it supports.";
 						// access rights in human readable form
 						'A' => OutputType::Str(display_permissions(meta, true)),
 						// number of blocks allocated (see %B)
-						'b' => OutputType::Unsigned(meta.blocks()),
+						'b' => unsigned(meta.blocks()),
 
 						// the size in bytes of each block reported by %b
 						// FIXME: blocksize differs on various platform
@@ -1205,28 +1232,31 @@ for details about the options it supports.";
 						// upstream's non-SELinux fallback string.
 						'C' => OutputType::Str("unsupported for this operating system".to_string()),
 						// device number in decimal
-						'd' if flag.major => OutputType::Unsigned(major(meta.dev() as _) as u64),
-						'd' if flag.minor => OutputType::Unsigned(minor(meta.dev() as _) as u64),
-						'd' => OutputType::Unsigned(meta.dev()),
+						'd' if flag.major => unsigned(meta.dev().map(|dev| major(dev as _) as u64)),
+						'd' if flag.minor => unsigned(meta.dev().map(|dev| minor(dev as _) as u64)),
+						'd' => unsigned(meta.dev()),
 						// device number in hex
-						'D' => OutputType::UnsignedHex(meta.dev()),
+						'D' => unsigned_hex(meta.dev()),
 						// raw mode in hex
 						'f' => OutputType::UnsignedHex(meta.mode() as u64),
 						// file type
 						'F' => OutputType::Str(pretty_filetype(meta.mode() as mode_t, meta.len())),
 						// group ID of owner
-						'g' => OutputType::Unsigned(meta.gid() as u64),
+						'g' => unsigned(meta.gid().map(u64::from)),
 						// group name of owner
-						'G' => {
-							let group_name =
-								entries::gid2grp(meta.gid()).unwrap_or_else(|_| "UNKNOWN".to_owned());
-							OutputType::Str(group_name)
+						'G' => match meta.gid() {
+							Some(gid) => OutputType::Str(
+								entries::gid2grp(gid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
+							),
+							None => OutputType::Unknown,
 						},
 						// number of hard links
-						'h' => OutputType::Unsigned(meta.nlink()),
+						'h' => unsigned(meta.nlink()),
 						// inode number
-						'i' => OutputType::Unsigned(meta.ino()),
-						// mount point
+						'i' => unsigned(meta.ino()),
+						// mount point: the host mount table says nothing about paths
+						// served by another filesystem, so those print GNU's `?`.
+						'm' if !host.fs().is_native_local(resolved) => OutputType::Unknown,
 						'm' => match self.find_mount_point(resolved, host) {
 							Some(s) => OutputType::OsStr(s),
 							None => OutputType::Str(String::new()),
@@ -1240,60 +1270,45 @@ for details about the options it supports.";
 							OutputType::Str(file_name)
 						},
 						// optimal I/O transfer size hint
-						'o' => OutputType::Unsigned(meta.blksize()),
+						'o' => unsigned(meta.blksize()),
 						// total size, in bytes
 						's' => OutputType::Integer(meta.len() as i64),
 						// major device type in hex, for character/block device special
 						// files
-						't' => OutputType::UnsignedHex(major(meta.rdev() as _) as u64),
+						't' => unsigned_hex(meta.rdev().map(|rdev| major(rdev as _) as u64)),
 						// minor device type in hex, for character/block device special
 						// files
-						'T' => OutputType::UnsignedHex(minor(meta.rdev() as _) as u64),
+						'T' => unsigned_hex(meta.rdev().map(|rdev| minor(rdev as _) as u64)),
 						// user ID of owner
-						'u' => OutputType::Unsigned(meta.uid() as u64),
+						'u' => unsigned(meta.uid().map(u64::from)),
 						// user name of owner
-						'U' => {
-							let user_name =
-								entries::uid2usr(meta.uid()).unwrap_or_else(|_| "UNKNOWN".to_owned());
-							OutputType::Str(user_name)
+						'U' => match meta.uid() {
+							Some(uid) => OutputType::Str(
+								entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
+							),
+							None => OutputType::Unknown,
 						},
 
 						// time of file birth, human-readable; - if unknown
 						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, self.time_fmt())),
 						// time of file birth, seconds since Epoch; 0 if unknown
-						'W' => {
-							let (sec, nsec) = metadata_get_time(meta, MetadataTimeField::Birth)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
+						'W' => epoch_time(meta, MetadataTimeField::Birth),
 						// time of last access, human-readable
 						'x' => OutputType::Str(pretty_time(meta, MetadataTimeField::Access, self.time_fmt())),
 						// time of last access, seconds since Epoch
-						'X' => {
-							let (sec, nsec) = metadata_get_time(meta, MetadataTimeField::Access)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
+						'X' => epoch_time(meta, MetadataTimeField::Access),
 						// time of last data modification, human-readable
 						'y' => OutputType::Str(pretty_time(meta, MetadataTimeField::Modification, self.time_fmt())),
 						// time of last data modification, seconds since Epoch
-						'Y' => {
-							let (sec, nsec) = metadata_get_time(meta, MetadataTimeField::Modification)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
+						'Y' => epoch_time(meta, MetadataTimeField::Modification),
 						// time of last status change, human-readable
 						'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change, self.time_fmt())),
 						// time of last status change, seconds since Epoch
-						'Z' => {
-							let (sec, nsec) = metadata_get_time(meta, MetadataTimeField::Change)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
-						'R' => OutputType::UnsignedHex(meta.rdev()),
-						'r' if flag.major => OutputType::Unsigned(major(meta.rdev() as _) as u64),
-						'r' if flag.minor => OutputType::Unsigned(minor(meta.rdev() as _) as u64),
-						'r' => OutputType::Unsigned(meta.rdev()),
+						'Z' => epoch_time(meta, MetadataTimeField::Change),
+						'R' => unsigned_hex(meta.rdev()),
+						'r' if flag.major => unsigned(meta.rdev().map(|rdev| major(rdev as _) as u64)),
+						'r' if flag.minor => unsigned(meta.rdev().map(|rdev| minor(rdev as _) as u64)),
+						'r' => unsigned(meta.rdev()),
 						_ => OutputType::Unknown,
 					};
 					print_it(&mut host.stdout, &output, flag, width, precision);
@@ -1312,7 +1327,7 @@ for details about the options it supports.";
 						writeln!(&mut host.stderr, "stat: {}", StatError::StdinFilesystemMode);
 					return 1;
 				}
-				if let Ok(p) = Path::new("/dev/stdin").canonicalize() {
+				if let Ok(p) = host.fs().canonicalize(host.resolve("/dev/stdin")) {
 					p.into_os_string()
 				} else {
 					OsString::from("/dev/stdin")
@@ -1324,7 +1339,7 @@ for details about the options it supports.";
 			// operand as typed for `%n` and error messages.
 			let resolved = host.resolve(&file);
 			if self.show_fs {
-				match statfs(resolved.as_os_str()) {
+				match host.fs().stat_fs(&resolved) {
 					Ok(meta) => {
 						let tokens = &self.default_tokens;
 
@@ -1339,8 +1354,8 @@ for details about the options it supports.";
 							&mut host.stderr,
 							"stat: {}",
 							StatError::CannotReadFilesystemInfo {
-								file: display_name.quote().to_string(),
-								error,
+								file:  display_name.quote().to_string(),
+								error: io_msg(&error),
 							}
 						);
 						return 1;
@@ -1349,9 +1364,9 @@ for details about the options it supports.";
 			} else {
 				let follow_symbolic_links = self.follow || stdin_is_fifo && display_name == "-";
 				let result = if follow_symbolic_links {
-					fs::metadata(&resolved)
+					host.fs().metadata(&resolved)
 				} else {
-					fs::symlink_metadata(&resolved)
+					host.fs().symlink_metadata(&resolved)
 				};
 				match result {
 					Ok(meta) => {
@@ -1791,13 +1806,14 @@ for details about the options it supports.";
 			let display_name = file.to_string_lossy();
 			let resolved = host.resolve(file);
 			let result = if follow {
-				fs::metadata(&resolved)
+				host.fs().metadata(&resolved)
 			} else {
-				fs::symlink_metadata(&resolved)
+				host.fs().symlink_metadata(&resolved)
 			};
 			match result {
 				Ok(meta) => {
-					let _ = writeln!(host.stdout, "{}", bsd_shell_line(&meta, &resolved));
+					let line = bsd_shell_line(&meta, &resolved, host.fs());
+					let _ = writeln!(host.stdout, "{line}");
 				},
 				Err(e) => {
 					let _ = writeln!(&mut host.stderr, "stat: {}", StatError::CannotStat {
@@ -1811,10 +1827,19 @@ for details about the options it supports.";
 		ret
 	}
 
+	/// A `stat -s` value; fields the backend does not report print `?`.
+	fn shell_field<T: std::fmt::Display>(value: Option<T>) -> String {
+		value.map_or_else(|| "?".to_string(), |value| value.to_string())
+	}
+
 	#[cfg(unix)]
-	fn bsd_shell_line(meta: &Metadata, _resolved: &Path) -> String {
+	fn bsd_shell_line(meta: &Metadata, _resolved: &Path, _fs: &BlockingFs) -> String {
+		// BSD file flags exist only on native macOS metadata.
 		#[cfg(target_os = "macos")]
-		let flags = std::os::macos::fs::MetadataExt::st_flags(meta);
+		let flags = shell_field(
+			meta.native()
+				.map(std::os::macos::fs::MetadataExt::st_flags),
+		);
 		#[cfg(not(target_os = "macos"))]
 		let flags = 0u32;
 		let birth = metadata_get_time(meta, MetadataTimeField::Birth)
@@ -1823,38 +1848,46 @@ for details about the options it supports.";
 			"st_dev={} st_ino={} st_mode=0{:o} st_nlink={} st_uid={} st_gid={} st_rdev={} \
 			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={birth} st_blksize={} \
 			 st_blocks={} st_flags={flags}",
-			meta.dev(),
-			meta.ino(),
+			shell_field(meta.dev()),
+			shell_field(meta.ino()),
 			meta.mode(),
-			meta.nlink(),
-			meta.uid(),
-			meta.gid(),
-			meta.rdev(),
+			shell_field(meta.nlink()),
+			shell_field(meta.uid()),
+			shell_field(meta.gid()),
+			shell_field(meta.rdev()),
 			meta.len(),
-			meta.atime(),
-			meta.mtime(),
-			meta.ctime(),
-			meta.blksize(),
-			meta.blocks(),
+			shell_field(meta.atime()),
+			shell_field(meta.mtime()),
+			shell_field(meta.ctime()),
+			shell_field(meta.blksize()),
+			shell_field(meta.blocks()),
 		)
 	}
 
 	#[cfg(windows)]
-	fn bsd_shell_line(meta: &Metadata, resolved: &Path) -> String {
-		let ids = win::handle_info(resolved, !meta.file_type().is_symlink());
-		let (dev, ino, nlink) = ids.map_or((0, 0, 1), |i| (i.volume_serial, i.file_index, i.links));
-		let sec = |field| win::md_time(meta, field).map_or(0, |t| system_time_to_sec(t).0);
+	fn bsd_shell_line(meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> String {
+		let follow = !meta.file_type().is_symlink();
+		let id = fs.file_id(resolved, follow).ok();
+		let nlink = fs.link_count(resolved, follow).ok();
+		let sec = |field| win::md_time(meta, field).map(|t| system_time_to_sec(t).0);
 		format!(
-			"st_dev={dev} st_ino={ino} st_mode=0{:o} st_nlink={nlink} st_uid=0 st_gid=0 st_rdev=0 \
-			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={} st_blksize=4096 \
+			"st_dev={} st_ino={} st_mode=0{:o} st_nlink={} st_uid={} st_gid={} st_rdev={} \
+			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={} st_blksize={} \
 			 st_blocks={} st_flags=0",
+			shell_field(id.map(|id| id.dev())),
+			shell_field(id.map(|id| id.ino())),
 			win::synth_mode(meta),
+			shell_field(nlink),
+			shell_field(meta.uid()),
+			shell_field(meta.gid()),
+			shell_field(meta.rdev()),
 			meta.len(),
-			sec(win::TimeField::Access),
-			sec(win::TimeField::Modification),
-			sec(win::TimeField::Change),
-			sec(win::TimeField::Birth),
-			win::allocated_size(resolved, meta.len()).div_ceil(512),
+			shell_field(sec(win::TimeField::Access)),
+			shell_field(sec(win::TimeField::Modification)),
+			shell_field(sec(win::TimeField::Change)),
+			sec(win::TimeField::Birth).unwrap_or(0),
+			shell_field(meta.blksize()),
+			shell_field(fs.allocated_size(resolved).ok().map(|size| size.div_ceil(512))),
 		)
 	}
 
@@ -1880,7 +1913,7 @@ for details about the options it supports.";
 		if !(fmt.contains('%') || fmt.chars().any(char::is_whitespace)) {
 			return None;
 		}
-		if host.resolve(files[0]).symlink_metadata().is_ok() {
+		if host.fs().symlink_metadata(host.resolve(files[0])).is_ok() {
 			return None;
 		}
 		let translated = translate_bsd_format(&fmt, false).ok()?;
@@ -2013,6 +2046,22 @@ for details about the options it supports.";
 
 	const PRETTY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%N %z";
 
+	/// Seconds since the Epoch for `%W`/`%X`/`%Y`/`%Z`. An unknown birth time
+	/// is GNU's `0`; other unknown times print `?`.
+	#[cfg(unix)]
+	fn epoch_time(meta: &Metadata, md_time_field: MetadataTimeField) -> OutputType<'static> {
+		match metadata_get_time(meta, md_time_field) {
+			Some(time) => {
+				let (sec, nsec) = system_time_to_sec(time);
+				OutputType::Timestamp { sec, nsec }
+			},
+			None if matches!(md_time_field, MetadataTimeField::Birth) => {
+				OutputType::Timestamp { sec: 0, nsec: 0 }
+			},
+			None => OutputType::Unknown,
+		}
+	}
+
 	#[cfg(unix)]
 	fn pretty_time(meta: &Metadata, md_time_field: MetadataTimeField, fmt: &str) -> String {
 		if let Some(time) = metadata_get_time(meta, md_time_field) {
@@ -2133,15 +2182,14 @@ for details about the options it supports.";
 			);
 		}
 	}
-	/// file-status path is Unix-only (`std::os::unix`); this reimplements the
-	/// GNU directives on top of `std::fs::Metadata`, direct
-	/// `GetFileInformationByHandle` queries (inode / link count / device),
-	/// and the Win32 volume APIs for `--file-system` mode.
+	/// Windows `stat`: the upstream file-status path is Unix-only, so this
+	/// reimplements the GNU directives on top of the injected filesystem's
+	/// metadata, file identity, link count, allocation, and volume queries.
 	#[cfg(windows)]
 	mod win {
-		use std::{
-			ffi::OsStr, fs::Metadata, os::windows::fs::MetadataExt, path::Path, time::SystemTime,
-		};
+		use std::time::SystemTime;
+
+		use pi_vfs::Metadata;
 
 		/// `FILE_ATTRIBUTE_READONLY`.
 		const READONLY: u32 = 0x0000_0001;
@@ -2164,7 +2212,7 @@ for details about the options it supports.";
 		}
 
 		/// Resolve a [`TimeField`] to the corresponding [`SystemTime`], or
-		/// `None` when the platform cannot supply it.
+		/// `None` when the filesystem cannot supply it.
 		pub fn md_time(md: &Metadata, field: TimeField) -> Option<SystemTime> {
 			match field {
 				TimeField::Access => md.accessed().ok(),
@@ -2173,11 +2221,16 @@ for details about the options it supports.";
 			}
 		}
 
-		/// Synthesize a POSIX-style `st_mode` from Windows attributes: the file
-		/// type bits plus a best-effort permission mask (read-only files/dirs
-		/// drop their write bits; directories and symlinks are traversable).
+		/// POSIX-style `st_mode`. Host files synthesize it from Windows
+		/// attributes: the file type bits plus a best-effort permission mask
+		/// (read-only files/dirs drop their write bits; directories and
+		/// symlinks are traversable). Providers without Windows attributes
+		/// report their own mode.
 		pub fn synth_mode(md: &Metadata) -> u32 {
-			let readonly = md.file_attributes() & READONLY != 0;
+			let Some(attributes) = md.file_attributes() else {
+				return md.mode();
+			};
+			let readonly = attributes & READONLY != 0;
 			let ft = md.file_type();
 			if ft.is_symlink() {
 				S_IFLNK | 0o777
@@ -2217,178 +2270,9 @@ for details about the options it supports.";
 			}
 			s
 		}
-
-		/// On-disk allocated size in bytes for `%b`, honoring sparse and
-		/// compressed files via `GetCompressedFileSizeW`. `Metadata::len()` is
-		/// the logical size, which overstates allocation for sparse files, so
-		/// the compressed/allocated size is queried directly. Falls back to
-		/// `logical` when the query fails.
-		pub fn allocated_size(path: &Path, logical: u64) -> u64 {
-			use std::os::windows::ffi::OsStrExt;
-
-			use windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW;
-
-			const INVALID_FILE_SIZE: u32 = u32::MAX;
-
-			let wide: Vec<u16> = path
-				.as_os_str()
-				.encode_wide()
-				.chain(std::iter::once(0))
-				.collect();
-			let mut high: u32 = 0;
-			// SAFETY: `wide` is NUL-terminated and `high` is a valid `&mut u32`.
-			let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
-			// A low dword of INVALID_FILE_SIZE is ambiguous (a real 4 GiB-1 low
-			// word or an error); MSDN says to disambiguate via GetLastError.
-			if low == INVALID_FILE_SIZE
-				&& std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0
-			{
-				return logical;
-			}
-			(u64::from(high) << 32) | u64::from(low)
-		}
-
-		/// Per-file identity numbers for `%d`/`%D`/`%h`/`%i`: volume serial,
-		/// hard-link count, and NTFS file index.
-		pub struct HandleInfo {
-			pub volume_serial: u64,
-			pub links:         u64,
-			pub file_index:    u64,
-		}
-
-		/// Query [`HandleInfo`] via `GetFileInformationByHandle`, the stable
-		/// replacement for std's unstable `windows_by_handle` metadata
-		/// extensions. `follow_links` mirrors how the caller's metadata was
-		/// obtained, so a `--no-dereference` stat reports the link itself.
-		/// Returns `None` when the file cannot be opened or queried.
-		pub fn handle_info(path: &Path, follow_links: bool) -> Option<HandleInfo> {
-			use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-
-			use windows_sys::Win32::Storage::FileSystem::{
-				BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-				FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
-			};
-
-			// `FILE_FLAG_BACKUP_SEMANTICS` is required to open directories;
-			// `access_mode(0)` asks for metadata access only.
-			let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
-			if !follow_links {
-				flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-			}
-			let file = std::fs::OpenOptions::new()
-				.access_mode(0)
-				.custom_flags(flags)
-				.open(path)
-				.ok()?;
-			// SAFETY: zeroed BY_HANDLE_FILE_INFORMATION is a valid out
-			// buffer, and the handle stays open across the call.
-			let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-			if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
-				return None;
-			}
-			Some(HandleInfo {
-				volume_serial: u64::from(info.dwVolumeSerialNumber),
-				links:         u64::from(info.nNumberOfLinks),
-				file_index:    (u64::from(info.nFileIndexHigh) << 32)
-					| u64::from(info.nFileIndexLow),
-			})
-		}
-
-		/// File-system status collected for `stat --file-system` on Windows.
-		pub struct StatFs {
-			pub fs_type:      String,
-			pub serial:       u64,
-			pub name_len:     u64,
-			pub cluster_size: u64,
-			pub total_blocks: u64,
-			pub free_blocks:  u64,
-		}
-
-		/// Query volume information for the file's containing volume via Win32.
-		/// Returns a human-readable error string on failure (mapped to the GNU
-		/// "cannot read file system information" message by the caller).
-		pub fn statfs(path: &Path) -> Result<StatFs, String> {
-			use std::os::windows::ffi::OsStrExt;
-
-			use windows_sys::Win32::Storage::FileSystem::{
-				GetDiskFreeSpaceW, GetVolumeInformationW, GetVolumePathNameW,
-			};
-
-			fn wide(s: &OsStr) -> Vec<u16> {
-				s.encode_wide().chain(std::iter::once(0)).collect()
-			}
-
-			fn wide_to_string(buf: &[u16]) -> String {
-				let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-				String::from_utf16_lossy(&buf[..len])
-			}
-
-			let file_wide = wide(path.as_os_str());
-			// Resolve the mount root (e.g. `C:\`) that owns the path.
-			let mut root = [0u16; 260];
-			// SAFETY: `file_wide` is NUL-terminated and `root` is a valid
-			// mutable buffer whose capacity is passed as `root.len()`.
-			if unsafe { GetVolumePathNameW(file_wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) }
-				== 0
-			{
-				return Err(std::io::Error::last_os_error().to_string());
-			}
-
-			let mut fs_name = [0u16; 260];
-			let mut serial: u32 = 0;
-			let mut max_component: u32 = 0;
-			let mut flags: u32 = 0;
-			// SAFETY: `root` is a NUL-terminated path; the serial/flag out
-			// params are valid `&mut u32`; `fs_name` is a valid buffer sized by
-			// `fs_name.len()`; the volume-name buffer is null with size 0.
-			if unsafe {
-				GetVolumeInformationW(
-					root.as_ptr(),
-					std::ptr::null_mut(),
-					0,
-					&mut serial,
-					&mut max_component,
-					&mut flags,
-					fs_name.as_mut_ptr(),
-					fs_name.len() as u32,
-				)
-			} == 0
-			{
-				return Err(std::io::Error::last_os_error().to_string());
-			}
-
-			let mut sectors_per_cluster: u32 = 0;
-			let mut bytes_per_sector: u32 = 0;
-			let mut free_clusters: u32 = 0;
-			let mut total_clusters: u32 = 0;
-			// SAFETY: `root` is a NUL-terminated path and every out param is a
-			// valid `&mut u32`.
-			if unsafe {
-				GetDiskFreeSpaceW(
-					root.as_ptr(),
-					&mut sectors_per_cluster,
-					&mut bytes_per_sector,
-					&mut free_clusters,
-					&mut total_clusters,
-				)
-			} == 0
-			{
-				return Err(std::io::Error::last_os_error().to_string());
-			}
-
-			let cluster_size = u64::from(sectors_per_cluster) * u64::from(bytes_per_sector);
-			Ok(StatFs {
-				fs_type: wide_to_string(&fs_name),
-				serial: u64::from(serial),
-				name_len: u64::from(max_component),
-				cluster_size,
-				total_blocks: u64::from(total_clusters),
-				free_blocks: u64::from(free_clusters),
-			})
-		}
 	}
 
-	/// `std::fs::Metadata` timestamp through the shared datetime format.
+	/// Metadata timestamp through the shared datetime format.
 	#[cfg(windows)]
 	fn pretty_time(meta: &Metadata, field: win::TimeField, fmt: &str) -> String {
 		if let Some(time) = win::md_time(meta, field) {
@@ -2405,49 +2289,6 @@ for details about the options it supports.";
 			}
 		}
 		"-".to_string()
-	}
-
-	#[cfg(windows)]
-	fn process_token_filesystem(
-		out: &mut dyn Write,
-		t: &Token,
-		meta: &win::StatFs,
-		display_name: &str,
-	) {
-		match *t {
-			Token::Byte(byte) => write_raw_byte(out, byte),
-			Token::Char(c) => {
-				let _ = write!(out, "{c}");
-			},
-			Token::Directive { flag, width, precision, format } => {
-				let output = match format {
-					// free blocks available to non-superuser
-					'a' => OutputType::Unsigned(meta.free_blocks),
-					// total data blocks in file system
-					'b' => OutputType::Unsigned(meta.total_blocks),
-					// total / free file nodes (not tracked on Windows)
-					'c' | 'd' => OutputType::Unsigned(0),
-					// free blocks in file system
-					'f' => OutputType::Unsigned(meta.free_blocks),
-					// file system ID in hex (volume serial number)
-					'i' => OutputType::UnsignedHex(meta.serial),
-					// maximum length of filenames
-					'l' => OutputType::Unsigned(meta.name_len),
-					// file name
-					'n' => OutputType::Str(display_name.to_string()),
-					// block size (for faster transfers)
-					's' => OutputType::Unsigned(meta.cluster_size),
-					// fundamental block size (for block counts)
-					'S' => OutputType::Integer(meta.cluster_size as i64),
-					// file system type in hex (no numeric magic on Windows)
-					't' => OutputType::UnsignedHex(0),
-					// file system type in human readable form
-					'T' => OutputType::Str(meta.fs_type.clone()),
-					_ => OutputType::Unknown,
-				};
-				print_it(out, &output, flag, width, precision);
-			},
-		}
 	}
 
 	#[cfg(windows)]
@@ -2477,10 +2318,12 @@ for details about the options it supports.";
 				},
 				Token::Directive { flag, width, precision, format } => {
 					let mode = win::synth_mode(meta);
-					// `%d`/`%D`/`%h`/`%i` need a fresh handle query; skip it for
-					// every other directive.
-					let ids = matches!(format, 'd' | 'D' | 'h' | 'i')
-						.then(|| win::handle_info(resolved, !meta.file_type().is_symlink()))
+					let follow = !meta.file_type().is_symlink();
+					// `%d`/`%D`/`%i` need a fresh identity query (volume serial and
+					// NTFS file index for host files); skip it for every other
+					// directive.
+					let id = matches!(format, 'd' | 'D' | 'i')
+						.then(|| host.fs().file_id(resolved, follow).ok())
 						.flatten();
 					let output = match format {
 						// access rights in octal
@@ -2488,32 +2331,33 @@ for details about the options it supports.";
 						// access rights in human readable form
 						'A' => OutputType::Str(win::perms_string(mode)),
 						// number of blocks allocated (512-byte units, see %B)
-						'b' => {
-							OutputType::Unsigned(win::allocated_size(resolved, meta.len()).div_ceil(512))
-						},
+						'b' => unsigned(
+							host.fs()
+								.allocated_size(resolved)
+								.ok()
+								.map(|size| size.div_ceil(512)),
+						),
 						// the size in bytes of each block reported by %b
 						'B' => OutputType::Unsigned(512),
 						// SELinux security context string (unsupported)
 						'C' => OutputType::Str("unsupported for this operating system".to_string()),
-						// device number: Windows volume serial number
-						'd' if flag.major || flag.minor => OutputType::Unsigned(0),
-						'd' => OutputType::Unsigned(ids.as_ref().map_or(0, |ids| ids.volume_serial)),
+						// device number: a volume serial has no major/minor split
+						'd' if flag.major || flag.minor => OutputType::Unknown,
+						'd' => unsigned(id.map(|id| id.dev())),
 						// device number in hex
-						'D' => {
-							OutputType::UnsignedHex(ids.as_ref().map_or(0, |ids| ids.volume_serial))
-						},
+						'D' => unsigned_hex(id.map(|id| id.dev())),
 						// raw mode in hex
 						'f' => OutputType::UnsignedHex(u64::from(mode)),
 						// file type
 						'F' => OutputType::Str(win::file_type_str(mode, meta.len())),
-						// group ID of owner (not modeled on Windows)
-						'g' => OutputType::Unsigned(0),
-						// group name of owner
+						// group ID of owner
+						'g' => unsigned(meta.gid().map(u64::from)),
+						// group name of owner (no group database on Windows)
 						'G' => OutputType::Str("UNKNOWN".to_string()),
 						// number of hard links
-						'h' => OutputType::Unsigned(ids.as_ref().map_or(1, |ids| ids.links)),
+						'h' => unsigned(host.fs().link_count(resolved, follow).ok()),
 						// inode number (NTFS file index)
-						'i' => OutputType::Unsigned(ids.as_ref().map_or(0, |ids| ids.file_index)),
+						'i' => unsigned(id.map(|id| id.ino())),
 						// mount point (not resolved on Windows)
 						'm' => OutputType::Str(String::new()),
 						// file name
@@ -2527,14 +2371,14 @@ for details about the options it supports.";
 							host,
 						)?),
 						// optimal I/O transfer size hint
-						'o' => OutputType::Unsigned(4096),
+						'o' => unsigned(meta.blksize()),
 						// total size, in bytes
 						's' => OutputType::Integer(meta.len() as i64),
-						// device type (no special files on Windows)
-						't' | 'T' => OutputType::UnsignedHex(0),
-						// user ID of owner (not modeled on Windows)
-						'u' => OutputType::Unsigned(0),
-						// user name of owner
+						// device major/minor: no `dev_t` split on Windows
+						't' | 'T' => OutputType::Unknown,
+						// user ID of owner
+						'u' => unsigned(meta.uid().map(u64::from)),
+						// user name of owner (no user database on Windows)
 						'U' => OutputType::Str("UNKNOWN".to_string()),
 						// time of file birth, human-readable; - if unknown
 						'w' => OutputType::Str(pretty_time(meta, win::TimeField::Birth, self.time_fmt())),
@@ -2568,9 +2412,8 @@ for details about the options it supports.";
 								.map_or((0, 0), system_time_to_sec);
 							OutputType::Timestamp { sec, nsec }
 						},
-						// rdev (no device special files on Windows)
-						'R' => OutputType::UnsignedHex(0),
-						'r' => OutputType::Unsigned(0),
+						'R' => unsigned_hex(meta.rdev()),
+						'r' => unsigned(meta.rdev()),
 						_ => OutputType::Unknown,
 					};
 					print_it(&mut host.stdout, &output, flag, width, precision);
@@ -2585,9 +2428,12 @@ for details about the options it supports.";
 			// and error messages.
 			let resolved = host.resolve(file);
 			if self.show_fs {
-				let result = fs::metadata(&resolved)
-					.map_err(|error| error.to_string())
-					.and_then(|_| win::statfs(&resolved));
+				// Volume queries succeed for missing paths; stat the file first so
+				// those report the file's own error.
+				let result = host
+					.fs()
+					.metadata(&resolved)
+					.and_then(|_| host.fs().stat_fs(&resolved));
 				match result {
 					Ok(meta) => {
 						for t in &self.default_tokens {
@@ -2599,8 +2445,8 @@ for details about the options it supports.";
 							&mut host.stderr,
 							"stat: {}",
 							StatError::CannotReadFilesystemInfo {
-								file: display_name.quote().to_string(),
-								error,
+								file:  display_name.quote().to_string(),
+								error: io_msg(&error),
 							}
 						);
 						return 1;
@@ -2608,9 +2454,9 @@ for details about the options it supports.";
 				}
 			} else {
 				let result = if self.follow {
-					fs::metadata(&resolved)
+					host.fs().metadata(&resolved)
 				} else {
-					fs::symlink_metadata(&resolved)
+					host.fs().symlink_metadata(&resolved)
 				};
 				match result {
 					Ok(meta) => {

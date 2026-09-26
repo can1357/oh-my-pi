@@ -19,9 +19,11 @@ import {
 import { YAML } from "bun";
 import {
 	type AuthAccountPolicies,
+	type AuthCredentialStore,
 	AuthStorage,
 	type AuthStorageOptions,
 	DEFAULT_USAGE_RESERVE_PCT,
+	SqliteAuthCredentialStore,
 } from "../auth-storage";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
@@ -363,23 +365,32 @@ export async function resolveAuthBrokerConfig(
 	return { url, token };
 }
 
-/**
- * Create an AuthStorage instance, using the broker when configured and falling
- * back to the local SQLite store otherwise. This is the single source of truth
- * for the TUI and the catalog generator.
- */
-export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
-	const agentDir = options.agentDir ?? getAgentDir();
-	const brokerConfig = await resolveAuthBrokerConfig({
-		agentDir,
-		configValueResolver: options.configValueResolver,
-	});
-	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
-		agentDir,
-		accountPolicies: options.accountPolicies,
-		usageReservePct: options.authStorageOptions?.defaultReservePct,
-	});
+export interface OpenAuthCredentialStoreOptions {
+	/** Broker to connect to; `null` opens the local SQLite store under `agentDir`. */
+	brokerConfig: AuthBrokerClientConfig | null;
+	agentDir?: string;
+	cachePath?: string;
+	sourceLabel?: string;
+	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
+	accountPool?: AuthBrokerAccountPool;
+}
 
+/** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
+export interface OpenedAuthCredentialStore {
+	store: AuthCredentialStore;
+	sourceLabel: string;
+}
+
+/**
+ * Open the credential store {@link discoverAuthStorage} would use for
+ * `brokerConfig`: the remote broker store (fails fast when the broker has no
+ * usable snapshot) or the local SQLite store. Also feeds
+ * {@link AuthStorage.replaceStore} when broker settings change at runtime.
+ */
+export async function openAuthCredentialStore(
+	options: OpenAuthCredentialStoreOptions,
+): Promise<OpenedAuthCredentialStore> {
+	const brokerConfig = options.brokerConfig;
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
@@ -437,22 +448,41 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 			onSnapshot: persist,
 			accountPool,
 		});
-		const storage = new AuthStorage(store, {
-			...options.authStorageOptions,
-			configValueResolver: options.configValueResolver,
-			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
-			accountPolicies,
-			defaultReservePct,
-		});
-		await storage.credentials.reload();
-		return storage;
+		return { store, sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}` };
 	}
 
-	const dbPath = getAgentDbPath(agentDir);
-	const storage = await AuthStorage.create(dbPath, {
+	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());
+	const store = await SqliteAuthCredentialStore.open(dbPath);
+	return { store, sourceLabel: options.sourceLabel ?? `local ${dbPath}` };
+}
+
+/**
+ * Create an AuthStorage instance, using the broker when configured and falling
+ * back to the local SQLite store otherwise. This is the single source of truth
+ * for the TUI and the catalog generator.
+ */
+export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const brokerConfig = await resolveAuthBrokerConfig({
+		agentDir,
+		configValueResolver: options.configValueResolver,
+	});
+	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+		agentDir,
+		accountPolicies: options.accountPolicies,
+		usageReservePct: options.authStorageOptions?.defaultReservePct,
+	});
+	const { store, sourceLabel } = await openAuthCredentialStore({
+		brokerConfig,
+		agentDir,
+		cachePath: options.cachePath,
+		sourceLabel: options.sourceLabel,
+		accountPool: options.accountPool,
+	});
+	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
-		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+		sourceLabel,
 		accountPolicies,
 		defaultReservePct,
 	});

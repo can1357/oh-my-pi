@@ -238,6 +238,39 @@ describe("BtwController", () => {
 		expect(controller.handlesBranchKey()).toBe(true);
 	});
 
+	it("asks the focused subagent session and refuses to branch its answer into main", async () => {
+		const mainTurn = vi.fn(async () => ({ replyText: "Main", assistantMessage: createAssistantMessage("Main") }));
+		const focusedTurn = vi.fn(async () => ({
+			replyText: "Worker answer",
+			assistantMessage: createAssistantMessage("Worker answer"),
+		}));
+		const focusedSession = {
+			...makeFakeSession(focusedTurn),
+			sessionManager: {
+				getLeafId: () => "worker-leaf",
+				getSessionId: () => "worker-session",
+				getArtifactsDir: () => undefined,
+				ensureOnDisk: async () => {},
+			},
+		} as unknown as InteractiveModeContext["session"];
+		const ctx = Object.assign(makeCtx(makeFakeSession(mainTurn)), {
+			focusedAgentId: "Worker",
+			viewSession: focusedSession,
+		});
+		const controller = new BtwController(ctx);
+
+		await controller.start("What is the worker doing?");
+		await drainBtwRequest();
+
+		expect(focusedTurn).toHaveBeenCalledTimes(1);
+		expect(mainTurn).not.toHaveBeenCalled();
+		expect(controller.canCopy()).toBe(true);
+		expect(controller.canBranch()).toBe(false);
+		expect(controller.handlesBranchKey()).toBe(false);
+		expect(await controller.handleBranch()).toBe(false);
+		expect(ctx.handleBtwBranch).not.toHaveBeenCalled();
+	});
+
 	it("refuses branch when the loaded session changed but the leaf id still matches", async () => {
 		const assistantMessage = createAssistantMessage("Answer");
 		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));

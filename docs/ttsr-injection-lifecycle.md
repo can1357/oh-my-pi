@@ -22,8 +22,9 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 At session creation, `createAgentSession()` loads discovered rules, constructs a `TtsrManager`, and buckets rules through `bucketRules(...)`:
 
 ```ts
-const ttsrSettings = settings.getGroup("ttsr");
-const ttsrManager = new TtsrManager(ttsrSettings);
+const ttsrSettings = cfgTtsr.get(settings);
+// Live source: enable/repeat/interrupt/context changes apply on the next check.
+const ttsrManager = new TtsrManager(() => cfgTtsr.get(settings));
 const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd });
 const { rulebookRules, alwaysApplyRules } = bucketRules(
   rulesResult.items,

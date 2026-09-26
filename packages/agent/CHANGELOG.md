@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [18.3.2] - 2026-09-25
+
+### Fixed
+
+- Fixed tool calls that put their payload in the intent field `i` (for example a file body in `write`) silently running with the leftover arguments; they now fail with an error telling the model to retry ([#13140](https://github.com/can1357/oh-my-pi/issues/13140), [#13141](https://github.com/can1357/oh-my-pi/pull/13141) by [@radkawar](https://github.com/radkawar))
+- Fixed the Anthropic compaction failure log omitting why no compaction block came back; it now names the stop reason ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added live steering support for Codex WebSocket transports, allowing users to provide input while a response is in progress.
+- Added passive tool-call context support, allowing hooks and tools to supply additional context for subsequent model processing.
+- Improved context-window handling by automatically adjusting output-token limits and supporting models that truncate output at the context-window limit.
+
+### Changed
+
+- Improved prompt token counting for requests with anchored prefixes by using provider-reported usage and limiting local estimation to new message content.
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

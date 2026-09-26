@@ -8,6 +8,9 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool, getEvalDocTopics, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
+import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 function makeSession(opts: {
 	spawns?: string | null;
 	backends?: Record<string, boolean>;
@@ -16,9 +19,8 @@ function makeSession(opts: {
 	maxRecursionDepth?: number;
 	readActive?: boolean;
 }): ToolSession {
-	const settings = Settings.isolated();
-	for (const [key, value] of Object.entries(opts.backends ?? {})) settings.set(key as never, value);
-	if (opts.maxRecursionDepth !== undefined) settings.set("task.maxRecursionDepth", opts.maxRecursionDepth);
+	const settings = Settings.isolated(opts.backends);
+	if (opts.maxRecursionDepth !== undefined) cfgTaskMaxRecursionDepth.set(settings, opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
 		hasUI: false,
@@ -221,5 +223,16 @@ describe("eval tool dynamic schema", () => {
 		const jsOnly = new EvalTool(makeSession({ backends: { "eval.py": false, "eval.js": true } }));
 		expect(wireCellFields(jsOnly).languages).toEqual(["js"]);
 		expect(jsOnly.examples.every(example => "call" in example && example.call.language === "js")).toBe(true);
+	});
+
+	it("follows eval.py changes made after construction on the next schema read", () => {
+		const session = makeSession({});
+		const tool = new EvalTool(session);
+		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
+		cfgEvalPy.set(session.settings, false);
+		expect(wireCellFields(tool).languages).toEqual(["js"]);
+		expect(tool.examples.some(example => "call" in example && example.call.language === "py")).toBe(false);
+		cfgEvalPy.set(session.settings, true);
+		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
 	});
 });

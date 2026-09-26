@@ -13,13 +13,13 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("accepts {agent, task}", () => {
-		const parsed = taskSchema({ agent: "scout", task: "Map the auth module." });
+	it("accepts {agent, task, complexity}", () => {
+		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", complexity: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 	});
 
 	it("defaults agent to `task` when omitted", () => {
-		const parsed = taskSchema({ task: "Map the auth module." });
+		const parsed = taskSchema({ task: "Map the auth module.", complexity: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.agent).toBe("task");
@@ -27,7 +27,7 @@ describe("task schema (single-spawn)", () => {
 	});
 
 	it("requires task", () => {
-		const parsed = taskSchema({ agent: "scout" });
+		const parsed = taskSchema({ agent: "scout", complexity: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
 	});
 
@@ -37,7 +37,7 @@ describe("task schema (single-spawn)", () => {
 			batchEnabled: false,
 			evalToolsEnabled: false,
 		});
-		const parsed = schema({ agent: "scout", task: "Map the auth module.", tools: ["word_count"] });
+		const parsed = schema({ agent: "scout", task: "Map the auth module.", complexity: "c", tools: ["word_count"] });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
 			expect("tools" in parsed).toBe(false);
@@ -49,6 +49,7 @@ describe("task schema (single-spawn)", () => {
 		const parsed = taskSchema({
 			agent: "scout",
 			task: "Map the auth module.",
+			complexity: "c",
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],

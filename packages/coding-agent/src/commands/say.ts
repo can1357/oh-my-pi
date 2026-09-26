@@ -23,6 +23,8 @@ import { shutdownTtsClient, ttsClient } from "../tts/tts-client";
 import { resolveLocalSpeechModelId } from "../tts/vocalizer";
 import { encodeWav } from "../tts/wav";
 
+import { cfgTtsLocalVoice } from "../tts/settings";
+
 export default class Say extends Command {
 	static description = commandHelp.description;
 	static args = {
@@ -51,7 +53,7 @@ export default class Say extends Command {
 
 		const settings = await Settings.init({ cwd: getProjectDir() });
 		const model = flags.model ?? (await this.#resolveDefaultModel(settings));
-		const voice = flags.voice ?? settings.get("tts.localVoice");
+		const voice = flags.voice ?? cfgTtsLocalVoice.get(settings);
 
 		let exitCode = 0;
 		const unsubscribe = ttsClient.onProgress(event => {

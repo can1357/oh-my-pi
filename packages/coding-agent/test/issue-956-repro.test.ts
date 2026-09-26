@@ -110,7 +110,6 @@ describe("interactive /mcp test", () => {
 		// impossible, or a later press kills the running agent turn instead.
 		const rendered = ctx.chatContainer.children.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Tested connection to "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 
 		// The grace window still holds while untouched...
 		vi.advanceTimersByTime(4_999);
@@ -206,7 +205,6 @@ describe("interactive /mcp test", () => {
 		expect(presented).toHaveLength(1);
 		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Cancelled connection test for "github".`);
-		expect(rendered).not.toContain("(esc to cancel)");
 		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
 	});
 

@@ -155,6 +155,15 @@ function bootRegistry(storage: AuthStorage): ModelRegistry {
 	});
 }
 
+/**
+ * Refresh only lm-studio discovery. A full `refresh("online")` also rebuilds
+ * every built-in catalog and its SQLite cache synchronously on this event loop,
+ * which delays the in-process server's reply; on a loaded CI runner that
+ * pushed the 10s discovery timeout ahead of the 401 this suite asserts on.
+ */
+const refreshLmStudio = (registry: ModelRegistry): Promise<void> =>
+	registry.refreshDiscoverableProviders(["lm-studio"], "online");
+
 const lmModels = (registry: ModelRegistry): string[] =>
 	registry
 		.getAll()
@@ -171,7 +180,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		await storage.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => LM_KEY });
 
 		const registry = bootRegistry(storage);
-		await registry.refresh("online");
+		await refreshLmStudio(registry);
 
 		const requests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(requests.length).toBeGreaterThan(0);
@@ -210,7 +219,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		}
 
 		const registry = bootRegistry(storage);
-		await registry.refresh("online");
+		await refreshLmStudio(registry);
 
 		// Against an auth-required server the keyless assumption fails: the
 		// bare requests are rejected and the rejection must surface as an
@@ -239,7 +248,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// Fresh setup: no login ever performed.
 		const fresh = await bootStorage("keyless-fresh");
 		const freshRegistry = bootRegistry(fresh);
-		await freshRegistry.refresh("online");
+		await refreshLmStudio(freshRegistry);
 
 		const freshRequests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(freshRequests.length).toBeGreaterThan(0);
@@ -257,7 +266,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		const placeholder = await bootStorage("keyless-placeholder");
 		await placeholder.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
 		const placeholderRegistry = bootRegistry(placeholder);
-		await placeholderRegistry.refresh("online");
+		await refreshLmStudio(placeholderRegistry);
 
 		const placeholderRequests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(placeholderRequests.length).toBeGreaterThan(0);

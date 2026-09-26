@@ -169,4 +169,98 @@ describe("renderUsageReports content", () => {
 		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
 		expect(output.match(/Gemini/g)).toHaveLength(2);
 	});
+	it("shows the current Codex plan in interactive account and reset rows without a single-account UUID", () => {
+		const now = Date.now();
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "codex-weekly",
+					label: "Weekly",
+					scope: { provider: "openai-codex", accountId: "workspace-id" },
+					amount: { usedFraction: 0.25, unit: "percent" },
+				},
+			],
+			metadata: {
+				email: "user@example.test",
+				accountId: "workspace-id",
+				orgId: "workspace-id",
+				orgName: "free",
+				planType: "prolite",
+			},
+			resetCredits: { availableCount: 1 },
+		};
+		const output = stripVTControlCharacters(
+			renderUsageReports([report], theme, now, 98, () => ({
+				email: "user@example.test",
+				accountId: "workspace-id",
+				orgId: "workspace-id",
+				orgName: "free",
+			})),
+		);
+		expect(output).toContain("in use by this session: user@example.test (prolite)");
+		expect(output).toContain("user@example.test (prolite): 1 saved reset");
+		expect(output).toMatch(/^  ● user@example\.test \(prolite\)/m);
+		expect(output).not.toContain("workspace-id");
+		expect(output).not.toContain("(free)");
+	});
+
+	it("distinguishes same-email Codex accounts even if one has no current plan or limits", () => {
+		const now = Date.now();
+		const reports: UsageReport[] = ["workspace-one", "workspace-two"].map((orgId, index) => ({
+			provider: "openai-codex",
+			fetchedAt: now,
+			limits: [],
+			metadata: {
+				email: "shared@example.test",
+				orgId,
+				orgName: "free",
+				...(index === 0 ? { planType: "prolite" } : {}),
+			},
+		}));
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
+		expect(output).toContain("shared@example.test (workspace-one) (prolite) -- no limits");
+		expect(output).toContain("shared@example.test (workspace-two) -- no limits");
+		expect(output).not.toContain("(free)");
+	});
+
+	it("keeps colliding Codex accounts distinct in quota columns", () => {
+		const reports: UsageReport[] = ["workspace-one", "workspace-two"].map(orgId => ({
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "weekly",
+					label: "Weekly",
+					scope: { provider: "openai-codex", accountId: orgId },
+					amount: { usedFraction: 0.25, unit: "percent" },
+				},
+			],
+			metadata: { email: "shared@example.test", orgId, orgName: "free", planType: "prolite" },
+		}));
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+		expect(output).toMatch(
+			/^  shared@example\.test \(workspace-one\) \(prolite\) +shared@example\.test \(workspace-two\) \(prolite\)$/m,
+		);
+		expect(output).not.toContain("(free)");
+	});
+	it("marks the matching legacy Codex workspace active when accounts share an email", () => {
+		const reports: UsageReport[] = ["workspace-one", "workspace-two"].map(accountId => ({
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [],
+			metadata: { email: "shared@example.test", accountId, orgName: "free" },
+			resetCredits: { availableCount: 1 },
+		}));
+		const output = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), 120, () => ({
+				email: "shared@example.test",
+				accountId: "workspace-two",
+			})),
+		);
+		expect(output).toContain("in use by this session: shared@example.test (workspace-two)");
+		expect(output).toContain("shared@example.test (workspace-two): 1 saved reset (active)");
+		expect(output).toContain("shared@example.test (workspace-one): 1 saved reset\n");
+	});
 });

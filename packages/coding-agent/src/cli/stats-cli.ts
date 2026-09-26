@@ -4,6 +4,7 @@
  * Handles `omp stats` subcommand for viewing AI usage statistics.
  */
 
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -103,7 +104,7 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	// Open browser
 	openPath(url);
 
-	console.log("Press Ctrl+C to stop\n");
+	console.log(`Press ${formatKeyHint("ctrl+c")} to stop\n`);
 
 	// Keep process running
 	process.on("SIGINT", () => {

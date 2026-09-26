@@ -13,11 +13,8 @@ use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
 };
-use uucore::{
-	display::Quotable,
-	fs::{MissingHandling, ResolveMode, canonicalize, make_path_relative_to},
-	line_ending::LineEnding,
-};
+use pi_vfs::{BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, relative_path};
+use uucore::{display::Quotable, line_ending::LineEnding};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
 
@@ -257,7 +254,7 @@ fn prepare_relative_options(
 	let relative_to = canonicalize_relative_option(relative_to, host, can_mode, resolve_mode)?;
 	let relative_base = canonicalize_relative_option(relative_base, host, can_mode, resolve_mode)?;
 	if let (Some(base), Some(to)) = (relative_base.as_deref(), relative_to.as_deref())
-		&& !to.starts_with(base)
+		&& !is_within(to, base)
 	{
 		return Ok((None, None));
 	}
@@ -273,7 +270,7 @@ fn canonicalize_relative_option(
 ) -> Result<Option<PathBuf>, PathIoError> {
 	match relative {
 		None => Ok(None),
-		Some(path) => canonicalize_relative(&host.resolve(&path), can_mode, resolve_mode)
+		Some(path) => canonicalize_relative(host.fs(), &host.resolve(&path), can_mode, resolve_mode)
 			.map(Some)
 			.map_err(|err| (path, err)),
 	}
@@ -281,15 +278,36 @@ fn canonicalize_relative_option(
 
 /// Make a `relative-to` or `relative-base` path value absolute.
 fn canonicalize_relative(
+	filesystem: &BlockingFs,
 	path: &Path,
 	can_mode: MissingHandling,
 	resolve: ResolveMode,
 ) -> io::Result<PathBuf> {
-	let absolute = canonicalize(path, can_mode, resolve)?;
-	if can_mode == MissingHandling::Existing && !absolute.is_dir() {
-		absolute.read_dir()?; // Raise a not-a-directory error.
+	let (absolute, namespace) =
+		canonicalize_path(filesystem, path, &CanonicalizeOptions::new(can_mode, resolve))?;
+	if can_mode == MissingHandling::Existing && !namespace.is_dir(&absolute) {
+		namespace.read_dir(&absolute)?; // Raise a not-a-directory error.
 	}
 	Ok(absolute)
+}
+
+/// Canonicalizes `path`, returning the result with the filesystem it names.
+///
+/// A provider path that aliases a host file (`skill://name/SKILL.md`) is
+/// canonicalized on the host, so the physical location is printed rather than
+/// the alias.
+fn canonicalize_path(
+	filesystem: &BlockingFs,
+	path: &Path,
+	options: &CanonicalizeOptions,
+) -> io::Result<(PathBuf, BlockingFs)> {
+	match filesystem.backing_path(path)? {
+		Some(backing) => {
+			let native = BlockingFs::native();
+			Ok((native.canonicalize_with(backing, options)?, native))
+		},
+		None => Ok((filesystem.canonicalize_with(path, options)?, filesystem.clone())),
+	}
 }
 
 /// Resolve a path to an absolute form and print it.
@@ -305,7 +323,8 @@ fn resolve_path(
 	relative_base: Option<&Path>,
 	host: &mut Host,
 ) -> io::Result<()> {
-	let absolute = canonicalize(host.resolve(path), can_mode, resolve)?;
+	let (absolute, _) =
+		canonicalize_path(host.fs(), &host.resolve(path), &CanonicalizeOptions::new(can_mode, resolve))?;
 	let output_path = process_relative(absolute, relative_base, relative_to);
 	let bytes = os_bytes(output_path.as_os_str())
 		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is not valid Unicode"))?;
@@ -319,22 +338,29 @@ fn resolve_path(
 /// With only `relative_to`, the result is relative to it. With only
 /// `relative_base`, descendants are relative to it. With both, descendants of
 /// `relative_base` are relative to `relative_to`; other paths remain absolute.
+/// Paths under a different root than the directory they would be relative to
+/// (another `scheme://`, or a URL and a host path) also remain absolute.
 fn process_relative(
 	path: PathBuf,
 	relative_base: Option<&Path>,
 	relative_to: Option<&Path>,
 ) -> PathBuf {
 	if let Some(base) = relative_base {
-		if path.starts_with(base) {
-			make_path_relative_to(path, relative_to.unwrap_or(base))
+		if is_within(&path, base) {
+			relative_path(&path, relative_to.unwrap_or(base)).unwrap_or(path)
 		} else {
 			path
 		}
 	} else if let Some(to) = relative_to {
-		make_path_relative_to(path, to)
+		relative_path(&path, to).unwrap_or(path)
 	} else {
 		path
 	}
+}
+
+/// Whether `path` is `base` or lies beneath it, under the same root.
+fn is_within(path: &Path, base: &Path) -> bool {
+	relative_path(path, base).is_some_and(|relative| !relative.starts_with(".."))
 }
 
 fn io_error_message(error: &io::Error) -> String {
