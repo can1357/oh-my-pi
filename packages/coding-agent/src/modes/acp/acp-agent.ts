@@ -1464,6 +1464,12 @@ export class AcpAgent implements Agent {
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
 		}
+		if (
+			(event.type === "message_end" && event.message.role === "assistant") ||
+			event.type === "auto_compaction_end"
+		) {
+			await this.#emitUsageUpdate(record);
+		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
 		if (event.type === "agent_end") {
@@ -2170,28 +2176,35 @@ export class AcpAgent implements Agent {
 	}
 
 	async #emitEndOfTurnUpdates(record: ManagedSessionRecord): Promise<void> {
-		const sessionId = record.session.sessionId;
-
-		const contextUsage = record.session.getContextUsage();
-		if (contextUsage) {
-			const usageStats = record.session.sessionManager.getUsageStatistics();
-			await this.#connection.sessionUpdate({
-				sessionId,
-				update: {
-					sessionUpdate: "usage_update",
-					size: contextUsage.contextWindow,
-					used: contextUsage.tokens ?? 0,
-					cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
-				},
-			});
-		}
+		await this.#emitUsageUpdate(record);
 
 		await this.#connection.sessionUpdate({
-			sessionId,
+			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "session_info_update",
 				title: record.session.sessionName,
 				updatedAt: new Date().toISOString(),
+			},
+		});
+	}
+
+	/**
+	 * Send the current context figure as `usage_update` (issue #12667). Also
+	 * called after each assistant message and each auto-compaction so long
+	 * prompts don't leave ACP clients meter-blind for hours; the schema allows
+	 * the notification mid-prompt and the end-of-turn send stays as-is.
+	 */
+	async #emitUsageUpdate(record: ManagedSessionRecord): Promise<void> {
+		const contextUsage = record.session.getContextUsage();
+		if (!contextUsage) return;
+		const usageStats = record.session.sessionManager.getUsageStatistics();
+		await this.#connection.sessionUpdate({
+			sessionId: record.session.sessionId,
+			update: {
+				sessionUpdate: "usage_update",
+				size: contextUsage.contextWindow,
+				used: contextUsage.tokens ?? 0,
+				cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
 			},
 		});
 	}
