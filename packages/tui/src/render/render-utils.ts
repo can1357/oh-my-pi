@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
+import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
@@ -876,22 +877,42 @@ function defaultHomeDir(): string {
 	return cachedHomeDir;
 }
 
-const homePatternCache = new Map<string, RegExp>();
-function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
+interface HomePattern {
+	leading: RegExp;
+	embedded: RegExp;
+}
+
+const homePatternCache = new Map<string, HomePattern>();
+function homePatternFor(homeDir: string, windowsStyle: boolean): HomePattern {
 	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
 	let pattern = homePatternCache.get(key);
 	if (pattern === undefined) {
-		const escapedHome = windowsStyle
-			? homeDir
-					.replaceAll("/", "\\")
-					.split("\\")
-					.map(part => RegExp.escape(part))
-					.join("[\\\\/]")
-			: RegExp.escape(homeDir);
-		pattern = new RegExp(
-			`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
-			windowsStyle ? "gi" : "g",
-		);
+		let escapedHome = RegExp.escape(homeDir);
+		if (windowsStyle) {
+			// Query only home, once per cached pattern: descendants need not exist,
+			// and rendering must neither resolve junctions nor probe output paths.
+			const parts = homeDir.replaceAll("/", "\\").split("\\");
+			const longHome = expandWindowsLongPath(homeDir);
+			const aliases = [longHome, getWindowsShortPath(longHome)]
+				.map(alias => alias.replaceAll("/", "\\").split("\\"))
+				.filter(alias => alias.length === parts.length);
+			escapedHome = parts
+				.map((part, index) => {
+					// Each component may independently use its long or short spelling.
+					const names = [...new Set([part, ...aliases.map(alias => alias[index]!)])].map(name =>
+						RegExp.escape(name),
+					);
+					return names.length === 1 ? names[0]! : `(?:${names.join("|")})`;
+				})
+				.join("[\\\\/]");
+		}
+		pattern = {
+			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, windowsStyle ? "i" : ""),
+			embedded: new RegExp(
+				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
+				windowsStyle ? "gi" : "g",
+			),
+		};
 		if (homePatternCache.size >= 16) homePatternCache.clear();
 		homePatternCache.set(key, pattern);
 	}
@@ -904,15 +925,12 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		return "";
 	}
 	const home = homeDir ?? defaultHomeDir();
+	if (!home) return filePath;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
-	const hasHomePrefix = windowsStyle
-		? filePath.toLowerCase().startsWith(home.toLowerCase())
-		: filePath.startsWith(home);
-	if (home && hasHomePrefix) {
-		const suffix = filePath.slice(home.length);
-		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
-			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
-		}
+	const match = homePatternFor(home, windowsStyle).leading.exec(filePath);
+	if (match) {
+		const suffix = filePath.slice(match[0].length);
+		return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
 	}
 	return filePath;
 }
@@ -924,7 +942,7 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSep
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
 	const textWithShortenedHome = text.replace(
-		homePattern,
+		homePattern.embedded,
 		(match, boundary: string | undefined, candidate: string | undefined) =>
 			candidate === undefined ? match : `${boundary}~`,
 	);

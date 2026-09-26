@@ -45,6 +45,14 @@ const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
 
+### Lazy Windows path helpers
+
+Import `expandWindowsLongPath` and `getWindowsShortPath` from
+`@oh-my-pi/pi-natives/path` when importing a module must not load the native addon.
+The addon loads only when a helper is called on Windows; other platforms preserve
+the input path without loading it. These helpers change long/8.3 spellings without
+resolving symlinks or junctions.
+
 ## Building
 
 ```bash

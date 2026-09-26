@@ -1,7 +1,8 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import * as natives from "@oh-my-pi/pi-natives/path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
@@ -181,6 +182,56 @@ describe("shortenPath", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
+	});
+});
+
+describe("Windows home aliases", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("shortens mixed long and 8.3 home components without rewriting nonexistent descendants", () => {
+		const home = String.raw`C:\User Profiles\Render Alias Home`;
+		const shortHome = String.raw`C:\USERPR~1\RENDER~1`;
+		vi.spyOn(natives, "expandWindowsLongPath").mockReturnValue(home);
+		vi.spyOn(natives, "getWindowsShortPath").mockReturnValue(shortHome);
+
+		expect(shortenPath(String.raw`c:/USERPR~1/Render Alias Home/not-created/FILE~1.txt`, home)).toBe(
+			"~/not-created/FILE~1.txt",
+		);
+		expect(shortenPath(shortHome, home)).toBe("~");
+	});
+
+	it("recognizes a long path when the supplied home uses its short spelling", () => {
+		const home = String.raw`C:\Users\Reverse Alias Home`;
+		const shortHome = String.raw`C:\Users\REVERS~1`;
+		vi.spyOn(natives, "expandWindowsLongPath").mockReturnValue(home);
+		vi.spyOn(natives, "getWindowsShortPath").mockReturnValue(shortHome);
+
+		expect(shortenPath(`${home}\\not-created\\new.txt`, shortHome)).toBe("~/not-created/new.txt");
+	});
+
+	it("preserves short-home prefix siblings and URL paths", () => {
+		const home = String.raw`C:\Users\Boundary Alias Home`;
+		const shortHome = String.raw`C:\Users\BOUNDA~1`;
+		vi.spyOn(natives, "expandWindowsLongPath").mockReturnValue(home);
+		vi.spyOn(natives, "getWindowsShortPath").mockReturnValue(shortHome);
+		const sibling = `${shortHome}-other\\file.txt`;
+		const url = `https://example.com/${shortHome.replaceAll("\\", "/")}/file.txt`;
+
+		expect(shortenPath(sibling, home)).toBe(sibling);
+		expect(shortenEmbeddedPaths(`"${sibling}" ${url}`, home)).toBe(`"${sibling}" ${url}`);
+	});
+
+	it("shortens home aliases in errors while respecting native separator preservation", () => {
+		const home = String.raw`C:\Users\Embedded Alias Home`;
+		const shortHome = String.raw`C:\Users\EMBEDD~1`;
+		vi.spyOn(natives, "expandWindowsLongPath").mockReturnValue(home);
+		vi.spyOn(natives, "getWindowsShortPath").mockReturnValue(shortHome);
+		const error = `Cannot write "${shortHome}\\not-created\\FILE~1.txt"`;
+
+		expect(shortenEmbeddedPaths(error, home)).toBe('Cannot write "~/not-created/FILE~1.txt"');
+		expect(shortenEmbeddedPaths(error, home, true)).toBe(String.raw`Cannot write "~\not-created\FILE~1.txt"`);
 	});
 });
 
