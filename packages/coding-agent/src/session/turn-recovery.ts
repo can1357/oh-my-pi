@@ -2459,12 +2459,33 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
+			// When the provider explicitly asked for a wait (retry-after header
+			// surfaced as `retry-after-ms=` in the error message), honor it on
+			// the same model/credential instead of drilling to a cold
+			// cross-provider fallback (cache bust + billed request) mid-window.
+			// The chain still engages after the budget exhausts.
+			//
+			// Capacity errors are the exception. A 429 quota window clears on its
+			// own and the same model is worth waiting for; a 503 "no capacity" or
+			// "hosted inference unavailable" is the route being down, and its
+			// retry-after is a guess at when that ends. Parking on it spends the
+			// whole budget on a model that cannot serve — a live outage burned ten
+			// attempts on `runinfra/deepseek-v4-pro` this way, with retry-after
+			// windows up to 38895ms, and never reached the OpenRouter leg.
+			const capacityUnavailable = rateLimitReason === "MODEL_CAPACITY_EXHAUSTED";
+			// A wait longer than `retry.maxDelayMs` is not worth parking on: the
+			// same path would abort the session after one attempt (#12421), so
+			// walk the chain instead.
+			const retryAfterFits =
+				parsedRetryAfterMs !== undefined &&
+				(retrySettings.maxDelayMs <= 0 || parsedRetryAfterMs <= retrySettings.maxDelayMs);
 			if (
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && classifierRefusal)
+				!(retryBudgetExhausted && classifierRefusal) &&
+				!(retryAfterFits && !retryBudgetExhausted && !capacityUnavailable)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
