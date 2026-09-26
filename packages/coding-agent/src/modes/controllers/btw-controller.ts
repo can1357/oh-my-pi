@@ -24,6 +24,8 @@ interface BtwRequest {
 	leafId: string | null;
 	sessionId: string;
 	session: InteractiveModeContext["session"];
+	/** Manager of the view that asked; the request outlives focus changes. */
+	sessionManager: InteractiveModeContext["sessionManager"];
 	store: BtwHistoryStore;
 	record: BtwHistoryRecord;
 	history?: readonly BtwHistoryTurn[];
@@ -71,6 +73,7 @@ export class BtwController {
 	#storePromise: Promise<BtwHistoryStore> | undefined;
 	#storeSessionId: string | undefined;
 	#storeArtifactsDir: string | undefined;
+	#storeScope: string | undefined;
 	#historyPanel: BtwHistoryPanel | undefined;
 	#historyOverlay: OverlayHandle | undefined;
 	readonly #writes = new Set<Promise<boolean>>();
@@ -81,6 +84,11 @@ export class BtwController {
 	/** /btw asks about the transcript on screen: the focused agent's session, else main. */
 	get #sessionManager(): InteractiveModeContext["sessionManager"] {
 		return this.ctx.focusedAgentId ? this.ctx.viewSession.sessionManager : this.ctx.sessionManager;
+	}
+
+	/** Focused agents share main's artifacts directory; scope their history by session id. */
+	get #historyScope(): string | undefined {
+		return this.ctx.focusedAgentId ? this.#sessionManager.getSessionId() : undefined;
 	}
 
 	/** Whether the inline panel owns Escape. */
@@ -209,6 +217,8 @@ export class BtwController {
 			this.#transitionCount === 0 &&
 			request !== undefined &&
 			this.#isActiveRequest(request) &&
+			// Follow-ups reopen the request's own history; leaving its view parks them.
+			request.sessionId === this.#sessionManager.getSessionId() &&
 			getBtwLatestTurn(request.record).status === "complete"
 		);
 	}
@@ -247,6 +257,7 @@ export class BtwController {
 			this.#storePromise = undefined;
 			this.#storeSessionId = undefined;
 			this.#storeArtifactsDir = undefined;
+			this.#storeScope = undefined;
 		} finally {
 			this.#transitionCount--;
 		}
@@ -305,18 +316,25 @@ export class BtwController {
 	async #loadHistory(): Promise<BtwHistoryStore> {
 		const sessionId = this.#sessionManager.getSessionId();
 		const artifactsDir = this.#sessionManager.getArtifactsDir() ?? undefined;
-		if (this.#storeSessionId !== sessionId || this.#storeArtifactsDir !== artifactsDir) {
+		const scope = this.#historyScope;
+		if (
+			this.#storeSessionId !== sessionId ||
+			this.#storeArtifactsDir !== artifactsDir ||
+			this.#storeScope !== scope
+		) {
 			await this.dispose();
 			if (
 				this.#sessionManager.getSessionId() !== sessionId ||
-				(this.#sessionManager.getArtifactsDir() ?? undefined) !== artifactsDir
+				(this.#sessionManager.getArtifactsDir() ?? undefined) !== artifactsDir ||
+				this.#historyScope !== scope
 			) {
 				throw new Error("The session changed while opening BTW history.");
 			}
 			this.#storeSessionId = sessionId;
 			this.#storeArtifactsDir = artifactsDir;
+			this.#storeScope = scope;
 		}
-		this.#storePromise ??= BtwHistoryStore.open(artifactsDir);
+		this.#storePromise ??= BtwHistoryStore.open(artifactsDir, scope);
 		const pending = this.#storePromise;
 		try {
 			const store = await pending;
@@ -425,6 +443,7 @@ export class BtwController {
 				leafId,
 				sessionId,
 				session: viewSession,
+				sessionManager: this.#sessionManager,
 				store,
 				record,
 				history,
@@ -559,7 +578,7 @@ export class BtwController {
 				// checkpoint; terminal failures must survive removal from #writes.
 				if (request.persisted) this.#failedWrites.set(request, toError(error));
 				logger.error("BTW history save failed", { error });
-				if (request.sessionId === this.#sessionManager.getSessionId()) {
+				if (request.sessionId === request.sessionManager.getSessionId()) {
 					this.ctx.showError(sanitizeErrorLine(`Could not save /btw history: ${toError(error).message}`));
 				}
 				return false;
@@ -682,7 +701,8 @@ export class BtwController {
 		this.#lastSessionId = undefined;
 	}
 
+	/** The request is current and its own session is still loaded, whichever view is on screen. */
 	#isActiveRequest(request: BtwRequest): boolean {
-		return this.#activeRequest === request && request.sessionId === this.#sessionManager.getSessionId();
+		return this.#activeRequest === request && request.sessionId === request.sessionManager.getSessionId();
 	}
 }
