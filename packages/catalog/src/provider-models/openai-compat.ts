@@ -4439,8 +4439,8 @@ const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses"
  * text-only model with no limits. Only ids that classify into the
  * `muse-spark` family with a revision qualify. The template's explicit
  * `thinking` is dropped: only reviewed seed rows may advertise `max` (1.3
- * standard), so an unknown revision takes the provider's five-tier ladder
- * from `providers/meta.kdl` at build time.
+ * standard and contributor), so an unknown revision takes the provider's
+ * five-tier ladder from `providers/meta.kdl` at build time.
  */
 function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
 	const identity = classifyModel("meta", id, { lenient: true });
