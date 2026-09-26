@@ -114,8 +114,18 @@ async function readRegisteredProjects(root: string): Promise<string[]> {
 	}
 }
 
+/**
+ * Claude Code encodes a project cwd into its `projects/` directory name by
+ * replacing path separators with `-`. On Windows the drive colon (and any
+ * other segment-invalid char) must be replaced as well (`C:\Users\x` →
+ * `C--Users-x`), or the encoded name is not a valid path segment.
+ */
+function encodeProjectDir(project: string): string {
+	return process.platform === "win32" ? project.replaceAll(/[:<>"|?*\\/]/g, "-") : project.replaceAll(path.sep, "-");
+}
+
 function projectCwd(encoded: string, registered: readonly string[]): string {
-	const exact = registered.find(project => project.replaceAll(path.sep, "-") === encoded);
+	const exact = registered.find(project => encodeProjectDir(project) === encoded);
 	if (exact) return exact;
 	if (!encoded.startsWith("-")) return encoded;
 	return encoded.replaceAll("-", path.sep);
