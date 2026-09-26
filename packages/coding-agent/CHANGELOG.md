@@ -376,6 +376,7 @@
 - Preserved MCP `structuredContent` in live tool-result details so evaluation callers can consume server data without reparsing model-facing JSON; spilled results continue to retain an artifact reference without duplicating the payload in session history.
 - Fixed Collab hosts becoming unable to reclaim a room after a brief network interruption; hosts now retry room recovery without losing guests or queued updates.
 - Fixed one-shot commands that stopped before completing, such as `omp config set` on a fresh Windows profile, incorrectly exiting successfully without output; they now report failure with diagnostic guidance.
+- Added marketplace plugin installation scope selection, letting users choose project-level or user-level installation before confirming the action ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ## [18.3.2] - 2026-09-25
 
@@ -462,7 +463,6 @@
 - Fixed memory backend failures to identify the affected item and underlying storage error.
 - Fixed `write xd://<tool>` validation behavior so devices can return precise schema-mismatch responses.
 - Added `additionalContext` to extension and hook `tool_call` results, plus `ctx.addAdditionalContext()` for registered tools, to pass trusted instructions to the model after a tool call without changing its result ([#11998](https://github.com/can1357/oh-my-pi/pull/11998) by [@H4vC](https://github.com/H4vC))
-- Added marketplace plugin installation scope selection, letting users choose project-level or user-level installation before confirming the action ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ## [18.3.0] - 2026-09-24
 

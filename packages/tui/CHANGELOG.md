@@ -213,6 +213,7 @@
 ### Removed
 
 - Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+- Added an interactive Confirm/Cancel screen to the marketplace plugin selector ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ## [18.3.1] - 2026-09-25
 
@@ -237,9 +238,6 @@
 - Fixed dimmed blockquote styling after inline code spans.
 - Fixed rendering of tool calls and results for top-level extension and MCP tools invoked through `xd://` links.
 - Fixed file links in pending Read and Write cards so they open the correct local targets, including paths in the home directory, archives, and databases.
-### Added
-
-- Added an interactive Confirm/Cancel screen to the marketplace plugin selector ([#13001](https://github.com/can1357/oh-my-pi/pull/13001) by [@aksalatdev](https://github.com/aksalatdev)).
 
 ## [18.3.0] - 2026-09-24
 
@@ -251,8 +249,6 @@
 - Added supervised bash service rendering with status, readiness, and output information.
 - Added a fullscreen annotation overlay for diffs and text, including multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added Daybreak-enabled account listings to the usage dashboard.
-- Added a fullscreen annotation overlay for diffs and text, with multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
-- Added Daybreak-enabled account listing to usage dashboard overlay
 
 ### Changed
 
