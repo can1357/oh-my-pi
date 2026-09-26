@@ -2,7 +2,7 @@ interface AdaptedDesktopCapabilities {
 	readonly [key: string]: unknown;
 	readonly ax: boolean;
 	readonly backgroundWindowInput: boolean;
-	readonly deliveryModes: readonly string[];
+	readonly takeover: boolean;
 	readonly axPermission: string;
 }
 
@@ -14,10 +14,10 @@ interface AdaptedDesktopSession {
 		target: string,
 		x: number,
 		y: number,
-		options?: { button?: string; count?: number; modifiers?: string[]; deliveryMode?: string },
+		options?: { button?: string; count?: number; modifiers?: string[]; takeover?: boolean },
 	): Promise<void>;
-	typeText(target: string, text: string, options?: { deliveryMode?: string }): Promise<void>;
-	keyChord(target: string, keys: string[], options?: { deliveryMode?: string }): Promise<void>;
+	typeText(target: string, text: string, options?: { takeover?: boolean }): Promise<void>;
+	keyChord(target: string, keys: string[], options?: { takeover?: boolean }): Promise<void>;
 	close(): Promise<void>;
 }
 
