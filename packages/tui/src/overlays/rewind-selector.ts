@@ -384,15 +384,19 @@ export class RewindSelectorComponent implements Component {
 
 	/**
 	 * Visible main-path target indices whose rendered text contains every
-	 * whitespace-separated query word as a whole word (case-insensitive: `ls`
-	 * matches `ls -la` but not `tools`); all visible targets for an empty query.
+	 * whitespace-separated Latin query word as a whole word (case-insensitive:
+	 * `ls` matches `ls -la` but not `tools`). Other scripts match substrings so
+	 * a Chinese query can find text inside a sentence without spaces.
+	 * All visible targets match an empty query.
 	 * Matching the rendered rows keeps results honest: collapsed tool output
 	 * only matches once Ctrl+O expands it.
 	 */
 	#filterMatches(): number[] {
 		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-		const patterns = words.map(
-			word => new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u"),
+		const patterns = words.map(word =>
+			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
+				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
+				: new RegExp(RegExp.escape(word), "u"),
 		);
 		const matches: number[] = [];
 		for (let index = 0; index < this.#targets.length; index++) {
