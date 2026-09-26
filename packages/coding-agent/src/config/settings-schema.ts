@@ -1387,7 +1387,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			group: "Thinking",
 			label: "Tool-Call Loop Guard",
-			description: "Detect consecutive identical tool calls across turns and inject a corrective steer",
+			description: "Detect repeated tool-call patterns across turns and inject a corrective steer",
 		},
 	},
 
@@ -1398,7 +1398,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			group: "Thinking",
 			label: "Tool-Call Loop Threshold",
-			description: "Consecutive identical tool calls required before the corrective steer is injected",
+			description: "Consecutive repeated tool-call patterns required before the corrective steer is injected",
 		},
 	},
 
