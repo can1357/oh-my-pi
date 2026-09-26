@@ -5,6 +5,7 @@
 ### Added
 
 - Added `TextPredictor` N-API binding for high-performance ghost-text completion engine management
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown.
 
 ### Changed
 

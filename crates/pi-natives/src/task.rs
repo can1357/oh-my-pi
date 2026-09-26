@@ -92,8 +92,7 @@ impl From<()> for CancelToken {
 /// Invalid values are tolerated so optional cancellation never rejects an
 /// otherwise valid native operation.
 pub fn signal_aborted(signal: &Unknown) -> bool {
-	signal
-		.coerce_to_object()
+	Object::from_unknown(signal.clone())
 		.and_then(|object| object.get_named_property::<bool>("aborted"))
 		.unwrap_or(false)
 }
