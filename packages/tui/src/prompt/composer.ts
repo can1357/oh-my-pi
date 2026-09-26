@@ -634,7 +634,9 @@ export class Composer implements TerminalFrameProvider {
 			// retires first so transcript prefixes can follow in order.
 			const renderedHeader = this.#header.render(width);
 			if (renderedHeader.length > 0) {
-				const liveRows = transcript.liveRowCount(width);
+				// Only the comparison below reads the height, so the walk stops at
+				// the budget instead of rendering every replayed block (#12933).
+				const liveRows = transcript.liveRowCount(width, Math.max(0, rows - renderedHeader.length - chromeRows));
 				if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
 				this.#offeredHistory = {
 					id: this.#nextHistoryId++,
