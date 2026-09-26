@@ -704,28 +704,45 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
 
-		describe("classification disabled (issue #12540)", () => {
-			it("emits stall-batched Enter keystrokes as submits instead of one paste", () => {
-				// A UI event-loop stall drains the pty backlog in one read, byte-
-				// identical to an unbracketed multiline paste. When the terminal
-				// confirms bracketed-paste support the heuristic is off, so every
-				// batched Enter stays a submit rather than a coalesced newline.
-				buffer.setRawPasteClassification(false);
+		describe("event-loop stall probe (issues #12540, #13344)", () => {
+			let loopBlocked = false;
+
+			beforeEach(() => {
+				buffer.destroy();
+				loopBlocked = false;
+				buffer = new StdinBuffer({ timeout: 10, isLoopBlocked: () => loopBlocked });
+				buffer.on("data", (sequence: string) => {
+					emittedSequences.push(sequence);
+				});
+				buffer.on("paste", (data: string) => {
+					emittedPaste.push(data);
+				});
+			});
+
+			it("coalesces an input-method commit arriving on a responsive loop", () => {
+				// Ghostty delivers IME/dictation commits as typed text, never
+				// bracketed; each interior CR would otherwise submit one line.
+				processInput("1. do xxx\r2. do yyy\r3. do zzz");
+				expect(emittedPaste).toEqual(["1. do xxx\r2. do yyy\r3. do zzz"]);
+				expect(emittedSequences).toEqual([]);
+			});
+
+			it("replays a burst a stall drained in one read as keys so each Enter submits", () => {
+				loopBlocked = true;
 				processInput("aaa\rbbb\rccc");
 				expect(emittedPaste).toEqual([]);
 				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
 			});
 
-			it("flushes a candidate already held by the classification window as keys", async () => {
-				// The first break-bearing read arms the fixed window; disabling the
-				// heuristic mid-window must replay the held bytes as keystrokes, not
-				// drop them or later emit them as a paste.
-				processInput("hello\r");
-				expect(emittedSequences).toEqual([]);
+			it("replays a stall backlog split across same-tick reads as keys", () => {
+				// The first read arms the classification window; the stall keeps
+				// its timer from firing, so the third read completes the burst.
+				loopBlocked = true;
+				processInput("aaa\r");
+				processInput("bbb\r");
+				processInput("ccc");
 				expect(emittedPaste).toEqual([]);
-				buffer.setRawPasteClassification(false);
-				expect(emittedPaste).toEqual([]);
-				expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
+				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
 			});
 		});
 	});

@@ -300,3 +300,40 @@ describe("LoopWatchdog long-block classification", () => {
 		expect(warnSpy).toHaveBeenCalledTimes(1);
 	});
 });
+
+/**
+ * Contract: `blockedRecently()` tells the input parser whether stdin bytes may be
+ * a stall-drained keystroke backlog — true while the probe tick is overdue by more
+ * than `thresholdMs` (the stall has not let the tick run yet) and for `thresholdMs`
+ * after a tick observed a block, false otherwise and whenever the watchdog is stopped.
+ */
+describe("LoopWatchdog.blockedRecently", () => {
+	test("reports an in-progress stall, holds for thresholdMs after it, then clears", () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness(); // intervalMs=250, thresholdMs=250
+
+		wd.start(); // deadline at 250
+		setNow(400); // 150ms late: ordinary scheduling jitter, not a stall
+		expect(wd.blockedRecently()).toBe(false);
+
+		setNow(560); // 310ms late and the tick has not run: stall in progress
+		expect(wd.blockedRecently()).toBe(true);
+
+		fireTick(); // tick observes the block at 560; next deadline 810
+		setNow(600);
+		expect(wd.blockedRecently()).toBe(true);
+
+		setNow(811); // 251ms after the observed block, tick on time
+		expect(wd.blockedRecently()).toBe(false);
+	});
+
+	test("reports false once stopped, even with an overdue tick", () => {
+		const { wd, setNow } = harness();
+
+		wd.start();
+		setNow(10_000);
+		expect(wd.blockedRecently()).toBe(true);
+		wd.stop();
+		expect(wd.blockedRecently()).toBe(false);
+	});
+});

@@ -64,6 +64,8 @@ export class LoopWatchdog {
 	#expected = 0;
 	#expectedCpu = 0;
 	#wasBlocked = false;
+	// Monotonic time of the last tick that observed a block (-Infinity: none).
+	#lastBlockAt = Number.NEGATIVE_INFINITY;
 	#running = false;
 	// Bumped by stop(); each scheduled tick captures the generation it was armed
 	// under and no-ops if it no longer matches, so a start()→stop()→start() cycle
@@ -100,9 +102,25 @@ export class LoopWatchdog {
 	stop(): void {
 		this.#running = false;
 		this.#wasBlocked = false;
+		this.#lastBlockAt = Number.NEGATIVE_INFINITY;
 		this.#generation++;
 		this.#handle?.cancel?.();
 		this.#handle = undefined;
+	}
+
+	/**
+	 * Whether the loop is blocked right now (the probe tick is overdue) or a block
+	 * ended within the last `thresholdMs`. `StdinBuffer` asks before coalescing an
+	 * unbracketed multiline burst: keystrokes a stall batched into one read must
+	 * stay individual keys (#12540), while an input-method commit or raw paste
+	 * arriving on a responsive loop is one insert (#13344). Always false while
+	 * stopped.
+	 */
+	blockedRecently(): boolean {
+		if (!this.#running) return false;
+		const now = this.#now();
+		if (now - this.#lastBlockAt <= this.#thresholdMs) return true;
+		return this.#isBlock(now - this.#expected, this.#cpuNow() - this.#expectedCpu);
 	}
 
 	#armTick(): void {
@@ -113,19 +131,24 @@ export class LoopWatchdog {
 		this.#handle.unref?.();
 	}
 
+	/** An overshoot past `thresholdMs`, unless it is a long gap the process spent no CPU on (system sleep). */
+	#isBlock(blockedMs: number, cpuMs: number): boolean {
+		if (blockedMs <= this.#thresholdMs) return false;
+		return blockedMs <= this.#sleepMs || cpuMs >= blockedMs * CPU_BUSY_RATIO;
+	}
+
 	#tick(generation: number): void {
 		if (!this.#running || generation !== this.#generation) return;
-		const blockedMs = this.#now() - this.#expected;
+		const now = this.#now();
+		const blockedMs = now - this.#expected;
 		const cpuMs = this.#cpuNow() - this.#expectedCpu;
 		// Consume the recent phase every tick (block or not) so attribution is
 		// scoped to the just-elapsed interval and never carries a stale phase
 		// forward to a later, phase-less block.
 		const phase = takeRecentLoopPhase();
-		if (blockedMs > this.#thresholdMs) {
-			if (blockedMs > this.#sleepMs && cpuMs < blockedMs * CPU_BUSY_RATIO) {
-				// A long gap the process did not spend CPU on: it was suspended.
-				this.#wasBlocked = false;
-			} else if (!this.#wasBlocked) {
+		if (this.#isBlock(blockedMs, cpuMs)) {
+			this.#lastBlockAt = now;
+			if (!this.#wasBlocked) {
 				this.#wasBlocked = true;
 				logger.warn("ui.loop-blocked", {
 					blockedMs: Math.round(blockedMs),
@@ -134,6 +157,7 @@ export class LoopWatchdog {
 				});
 			}
 		} else {
+			// No block, or a suspended process (system sleep) rather than a stall.
 			this.#wasBlocked = false;
 		}
 		this.#armTick();

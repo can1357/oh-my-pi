@@ -456,6 +456,13 @@ export interface TerminalStartOptions {
 	 * echoes even while module loading blocks the event loop.
 	 */
 	deferInput?: boolean;
+	/**
+	 * Event-loop stall probe forwarded to the input parser, so keystrokes a
+	 * stall batched into one read stay individual keys while an unbracketed
+	 * multiline insert (IME/dictation commit, raw paste) on a responsive loop
+	 * coalesces into one paste. See `StdinBufferOptions.isLoopBlocked`.
+	 */
+	isLoopBlocked?: () => boolean;
 }
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
@@ -719,6 +726,7 @@ export class ProcessTerminal implements Terminal {
 	#modifyOtherKeysActive = false;
 	#modifyOtherKeysTimeout?: Timer;
 	#stdinBuffer?: StdinBuffer;
+	#isLoopBlocked?: () => boolean;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
@@ -910,6 +918,7 @@ export class ProcessTerminal implements Terminal {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
+		this.#isLoopBlocked = options?.isLoopBlocked;
 		// The host terminal's cursor visibility is unknown until we write it.
 		this.#cursorVisible = undefined;
 
@@ -1067,11 +1076,6 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
-		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
-		// pastes; once confirmed, the unbracketed raw-paste heuristic in
-		// StdinBuffer is disabled so keystrokes an event-loop stall batches into
-		// one read are never misclassified as a paste (#12540).
-		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
@@ -1141,7 +1145,7 @@ export class ProcessTerminal implements Terminal {
 		// escape split across stdin reads (laggy ssh/tmux links) leaks as
 		// literal typed text if the flush fires between the fragments. 10ms
 		// proved too tight for split escapes (#1238 covered only probe replies).
-		this.#stdinBuffer = new StdinBuffer({ timeout: 50 });
+		this.#stdinBuffer = new StdinBuffer({ timeout: 50, isLoopBlocked: this.#isLoopBlocked });
 
 		// Kitty protocol response pattern: \x1b[?<flags>u
 		const kittyResponsePattern = /^\x1b\[\?(\d+)u$/;
@@ -1761,11 +1765,6 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
-		// Confirmed bracketed-paste support makes the unbracketed raw-paste
-		// heuristic pure downside — turn it off so stall-batched keystrokes are
-		// not misread as a paste (#12540). `supported` is only true here after an
-		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
-		if (mode === 2004 && supported) this.#stdinBuffer?.setRawPasteClassification(false);
 	}
 
 	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {

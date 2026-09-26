@@ -876,7 +876,9 @@ export class TUI extends Container {
 	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
-	// budget is genuinely starved. Armed in start(), disarmed in stop().
+	// budget is genuinely starved. Its `blockedRecently()` also tells the input
+	// parser stall-batched keystrokes apart from multiline inserts. Armed in
+	// start(), disarmed in stop().
 	#watchdog: LoopWatchdog;
 
 	// Transient alternate-screen state for a fullscreen overlay. While active, the
@@ -1326,7 +1328,7 @@ export class TUI extends Container {
 				this.#beginResizeAltPaint();
 			},
 			() => this.stop(),
-			{ deferInput: this.#inputDeferred },
+			{ deferInput: this.#inputDeferred, isLoopBlocked: () => this.#watchdog.blockedRecently() },
 		);
 		if (this.#stopped) return;
 		this.#cancelPostmortemRestore?.();
