@@ -1,15 +1,21 @@
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
-import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
+import {
+	getOrCreateClient,
+	refreshFile,
+	sendRequest,
+	supportsDocumentDiagnostics,
+	waitForProjectLoaded,
+} from "./client";
 import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
 import { resolveFormatOptions } from "./format-options";
-import { isProjectAwareLspServer } from "./servers";
+import { isMethodNotFoundError, isProjectAwareLspServer } from "./servers";
 import type {
 	Diagnostic,
 	Location,
@@ -240,6 +246,131 @@ function requestDocumentDiagnostics(
 		});
 }
 
+function supportsTypescriptDiagnostics(client: LspClient): boolean {
+	const provider = client.serverCapabilities?.executeCommandProvider;
+	return (
+		isRecord(provider) && Array.isArray(provider.commands) && provider.commands.includes("typescript.tsserverRequest")
+	);
+}
+
+function supportsTailwindProjectLookup(client: LspClient): boolean {
+	return (
+		path.basename(client.config.command).replace(/\.(cmd|exe)$/i, "") === "tailwindcss-language-server" &&
+		Boolean(client.serverCapabilities?.colorProvider)
+	);
+}
+
+/** Request-capable servers establish readiness in their replies, not a progress timer. */
+export function needsDiagnosticProjectWait(client: LspClient): boolean {
+	return (
+		isProjectAwareLspServer(client.config) &&
+		!supportsDocumentDiagnostics(client) &&
+		!supportsTypescriptDiagnostics(client) &&
+		!supportsTailwindProjectLookup(client)
+	);
+}
+
+function typescriptPosition(value: unknown): Position {
+	if (
+		!isRecord(value) ||
+		typeof value.line !== "number" ||
+		!Number.isInteger(value.line) ||
+		value.line < 1 ||
+		typeof value.offset !== "number" ||
+		!Number.isInteger(value.offset) ||
+		value.offset < 1
+	) {
+		throw new Error("Invalid TypeScript diagnostic position");
+	}
+	return { line: value.line - 1, character: value.offset - 1 };
+}
+
+function typescriptDiagnostic(value: unknown): Diagnostic {
+	if (!isRecord(value) || typeof value.text !== "string") {
+		throw new Error("Invalid TypeScript diagnostic");
+	}
+	const severity =
+		value.category === "error"
+			? 1
+			: value.category === "warning"
+				? 2
+				: value.category === "message"
+					? 3
+					: value.category === "suggestion"
+						? 4
+						: undefined;
+	if (severity === undefined || (value.code !== undefined && typeof value.code !== "number")) {
+		throw new Error("Invalid TypeScript diagnostic category or code");
+	}
+	const diagnostic: Diagnostic = {
+		range: { start: typescriptPosition(value.start), end: typescriptPosition(value.end) },
+		message: value.text,
+		severity,
+		code: value.code,
+		source: typeof value.source === "string" && value.source ? value.source : "typescript",
+	};
+	if (value.reportsUnnecessary || value.reportsDeprecated) {
+		diagnostic.tags = [];
+		if (value.reportsUnnecessary) diagnostic.tags.push(1);
+		if (value.reportsDeprecated) diagnostic.tags.push(2);
+	}
+	if (value.relatedInformation !== undefined) {
+		if (!Array.isArray(value.relatedInformation)) throw new Error("Invalid TypeScript related information");
+		diagnostic.relatedInformation = value.relatedInformation.flatMap(item => {
+			if (!isRecord(item) || typeof item.message !== "string") {
+				throw new Error("Invalid TypeScript related information");
+			}
+			if (item.span === undefined) return [];
+			if (!isRecord(item.span) || typeof item.span.file !== "string") {
+				throw new Error("Invalid TypeScript related span");
+			}
+			return [
+				{
+					message: item.message,
+					location: {
+						uri: fileToUri(item.span.file),
+						range: { start: typescriptPosition(item.span.start), end: typescriptPosition(item.span.end) },
+					},
+				},
+			];
+		});
+	}
+	return diagnostic;
+}
+
+async function requestTypescriptDiagnostics(
+	client: LspClient,
+	uri: string,
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
+): Promise<Diagnostic[]> {
+	const deadline = Date.now() + timeoutMs;
+	const settings = client.config.settings?.diagnostics;
+	const ignoredCodes = isRecord(settings) && Array.isArray(settings.ignoredCodes) ? settings.ignoredCodes : [];
+	const reports = await Promise.all(
+		["syntacticDiagnosticsSync", "semanticDiagnosticsSync", "suggestionDiagnosticsSync"].map(async command => {
+			const response = await sendRequest(
+				client,
+				"workspace/executeCommand",
+				{
+					command: "typescript.tsserverRequest",
+					// tsserver takes a filesystem path; the server only rewrites a URI to
+					// the open document's path, so a URI fails for a document we have not
+					// opened yet.
+					arguments: [command, { file: uriToFile(uri), includeLinePosition: false }],
+				},
+				signal,
+				Math.max(1, deadline - Date.now()),
+			);
+			if (!isRecord(response) || response.success !== true || !Array.isArray(response.body)) {
+				throw new Error(`TypeScript ${command} did not return a diagnostic report`);
+			}
+			return response.body.map(typescriptDiagnostic).filter(diagnostic => !ignoredCodes.includes(diagnostic.code));
+		}),
+	);
+	return reports.flat();
+}
+
 function isProvisionalColdPublish(
 	client: LspClient,
 	published: PublishedDiagnostics,
@@ -261,7 +392,47 @@ export async function waitForDiagnostics(
 	options: WaitForDiagnosticsOptions = {},
 ): Promise<Diagnostic[]> {
 	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
+	if (supportsTypescriptDiagnostics(client)) {
+		// The server suppresses repeated empty pushes; explicit replies also include
+		// semantic and suggestion diagnostics rather than settling on an early syntax push.
+		const version = expectedDocumentVersion ?? client.openFiles.get(uri)?.version;
+		const diagnostics = await requestTypescriptDiagnostics(client, uri, signal, timeoutMs);
+		throwIfAborted(signal);
+		if (client.openFiles.get(uri)?.version !== version) {
+			throw new Error("Document changed while TypeScript diagnostics were running");
+		}
+		client.diagnostics.set(uri, { diagnostics, version: version ?? null });
+		client.diagnosticsVersion++;
+		return diagnostics;
+	}
 	const deadline = Date.now() + timeoutMs;
+	if (supportsTailwindProjectLookup(client)) {
+		try {
+			// documentColor awaits Tailwind's project discovery. getProject's null
+			// also means "still initializing", so use the no-op sort lookup instead.
+			await sendRequest(
+				client,
+				"textDocument/documentColor",
+				{ textDocument: { uri } },
+				signal,
+				Math.max(1, deadline - Date.now()),
+			);
+			const project = await sendRequest(
+				client,
+				"@/tailwindCSS/sortSelection",
+				{ uri, classLists: [] },
+				signal,
+				Math.max(1, deadline - Date.now()),
+			);
+			if (isRecord(project) && project.error === "no-project") {
+				throwIfAborted(signal);
+				return [];
+			}
+		} catch (error) {
+			if (!isMethodNotFoundError(error)) throw error;
+			// Older servers without the extension still use their published reports.
+		}
+	}
 	let pullAttempted = false;
 	let pullResultPromise: Promise<PullDiagnosticsOutcome> | undefined;
 	let pulled: Diagnostic[] | undefined;
@@ -344,7 +515,7 @@ export async function waitForDiagnostics(
 		if (pullFailure !== undefined) {
 			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
 		}
-		return [];
+		throw new Error("Timed out waiting for fresh diagnostics");
 	}
 	client.diagnostics.set(uri, {
 		diagnostics: pulled,
@@ -462,13 +633,16 @@ export async function getDiagnosticsForFile(
 				// Default: use LSP
 				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal);
 				throwIfAborted(boundSignal);
-				if (isProjectAwareLspServer(serverConfig)) {
+				let minVersion = minVersions?.get(serverName);
+				let expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
+				if (needsDiagnosticProjectWait(client)) {
 					await waitForProjectLoaded(client, boundSignal);
 					throwIfAborted(boundSignal);
+					minVersion = client.diagnosticsVersion;
+					await refreshFile(client, absolutePath, boundSignal);
+					expectedDocumentVersion = client.openFiles.get(uri)?.version;
 				}
 				// Content already synced + didSave sent, wait for fresh diagnostics
-				const minVersion = minVersions?.get(serverName);
-				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
 				const diagnostics = await waitForDiagnostics(client, uri, {
 					timeoutMs: waitBudgetMs,
 					signal: boundSignal,
