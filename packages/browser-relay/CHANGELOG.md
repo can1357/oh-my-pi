@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- Fixed orphaned debugger attachments and the Chrome debugging infobar surviving relay outages or extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed reconnect races that could lose, duplicate, or misclassify recovered browser-relay attachments ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed browser relay support for multiple browser instances, such as Chrome and Edge, connected simultaneously. Tabs and relay requests now remain associated with the correct browser, while extensions without an instance identifier continue to use the existing single-browser behavior.
 - Fixed browser relay support when multiple browser instances, such as Chrome and Edge, are connected simultaneously, ensuring tabs and relay requests remain associated with the correct browser while preserving single-browser compatibility for extensions without an instance identifier.
 
 ## [18.0.7] - 2026-08-26
