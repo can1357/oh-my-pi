@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `skills.compressDescriptions` (default `true`). Set it to `false` to render skill descriptions in the system prompt exactly as authored, without the 100-character preview, the `skill-descriptions.db` cache, or background compression calls to the smol model ([#13291](https://github.com/can1357/oh-my-pi/issues/13291))
+- Added `skills.compressDescriptions` (default `true`). Set it to `false` to render skill descriptions in the system prompt exactly as authored, without the 100-character preview, the `skill-descriptions.db` cache, or background compression calls to the smol model ([#13291](https://github.com/can1357/oh-my-pi/issues/13291), [#13385](https://github.com/can1357/oh-my-pi/pull/13385) by [@mttzzz](https://github.com/mttzzz))
 
 ## [18.3.2] - 2026-09-25
 
