@@ -1,0 +1,27 @@
+// Factory Droid subscription proxy: its shipped CLI model registry is a
+// credential-scoped static snapshot in discovery/factory-droid-models.ts.
+// Runtime discovery narrows that snapshot with account flags and org policy;
+// do not enroll it in generation-time discovery or freeze one account's roster.
+provider "factory-droid" {
+	default-model "kimi-k3"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// Droid Core's Chat Completions routes accept their full advertised output
+	// caps. Scope this to the shipped Completions families; GPT/Grok use the
+	// Responses route and retain their own output-limit policy.
+	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "qwen3.8-max" "minimax-m3" {
+		clamp-output-to-model-max #true
+	}
+	// The CLI's GPT Responses request omits max_output_tokens, and the proxy
+	// ignores callers' output cap on these routes. Grok keeps its cap.
+	models "gpt-*" {
+		omit-max-output-tokens #true
+	}
+	// Factory's Gemini generationConfig also omits maxOutputTokens, so user
+	// caps cannot be honored on either the Gemini family or Garnet preview.
+	models "gemini-*" "garnet-07-15" {
+		omit-max-output-tokens #true
+	}
+	// FACTORY_API_KEY is a control-plane key, not a subscription proxy token.
+	// Inference uses the local Droid WorkOS session; never borrow that env key.
+}

@@ -64,6 +64,7 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
 	};
 }
 
@@ -84,6 +85,7 @@ export function mergeRefreshedUsageCredential(
 		apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
 		orgId: refreshed.orgId ?? credential.orgId,
 		orgName: refreshed.orgName ?? credential.orgName,
+		region: refreshed.region ?? credential.region,
 	};
 }
 
@@ -185,6 +187,7 @@ export class UsageService implements UsageApi {
 			apiEndpoint: next.apiEndpoint ?? entry.credential.apiEndpoint,
 			orgId: next.orgId ?? entry.credential.orgId,
 			orgName: next.orgName ?? entry.credential.orgName,
+			region: next.region ?? entry.credential.region,
 		});
 	}
 

@@ -1,3 +1,4 @@
+import { isRecord } from "../utils";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_CLIENT_VERSION } from "../wire/codex";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
@@ -10,6 +11,8 @@ import {
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	/** Factory account residency controls proxy host and serving rotations. */
+	region?: string;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -17,6 +20,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
+	"factory-droid": true,
 	// Both SingularityAPI rosters are issued per key, so the namespace must be
 	// resolved with the credential (`hydrateCredentialScopedModelCaches`) rather
 	// than from the synchronous, credential-less startup read.
@@ -166,6 +170,33 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
+		}
+		case "factory-droid": {
+			// WorkOS access tokens rotate, but the proxy roster belongs to the
+			// external organization and user. Keep residency in the namespace too.
+			// Opaque credentials (including test keys) retain credential isolation.
+			const token = options.apiKey ?? "";
+			let credentialScope = `bearer\u0000${token}`;
+			const parts = token.split(".");
+			if (parts.length === 3 && parts.every(Boolean)) {
+				try {
+					const claims: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+					if (
+						isRecord(claims) &&
+						!Array.isArray(claims) &&
+						typeof claims.external_org_id === "string" &&
+						claims.external_org_id.trim() &&
+						typeof claims.sub === "string" &&
+						claims.sub.trim()
+					) {
+						credentialScope = `account\u0000${claims.external_org_id}\u0000${claims.sub}`;
+					}
+				} catch {
+					// Non-JWT credentials continue to hash the opaque bearer.
+				}
+			}
+			const scope = `${credentialScope}\u0000${options.region === "eu" ? "eu" : "global"}`;
+			return `factory-droid:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

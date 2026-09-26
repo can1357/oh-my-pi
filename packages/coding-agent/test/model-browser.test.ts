@@ -2,10 +2,12 @@ import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { FactoryDroidCredits } from "@oh-my-pi/pi-catalog/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
+	formatCostPair,
 	buildSearchAffinity,
 	rankModelItems,
 	ModelBrowser,
@@ -437,5 +439,39 @@ describe("ModelBrowser native model metadata", () => {
 		expect(detailRow).toContain("$100/0.001 per M");
 		expect(tinyRow).toContain("$0.0000001/0.001");
 		expect(rows.every(line => Bun.stringWidth(line) <= 100)).toBe(true);
+	});
+});
+
+describe("Factory Droid credits badge", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	/** A Factory Droid row: upstream list price as `cost`, Standard Credits as the badge. */
+	function makeDroidModel(id: string, credits: FactoryDroidCredits): Model {
+		return {
+			...makeModel("factory-droid", id),
+			cost: { input: 1.25, output: 10, cacheRead: 0, cacheWrite: 0 },
+			factoryDroidCredits: credits,
+		};
+	}
+
+	test("displays upstream list price and the base credit multiplier", () => {
+		const model = makeDroidModel("claude-opus-5", { input: 2, output: 2 });
+		expect(formatCostPair(model)).toBe("$1.25/10 2×");
+		expect(formatCostPair(makeModel("openai", "gpt-5"))).toBe("free");
+	});
+
+	test("does not advertise a credit-billed model with unknown list prices as free", () => {
+		const paid = makeDroidModel("preview-credit-model", { input: 2, output: 10 });
+		paid.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const browser = makeBrowser([paid], []);
+		const rows = browser.render(120).map(line => Bun.stripANSI(line));
+		const paidRow = rows.find(row => row.includes("preview-credit-model"));
+
+		expect(paidRow).toContain("2×");
+		expect(paidRow).not.toContain("free");
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
 	});
 });

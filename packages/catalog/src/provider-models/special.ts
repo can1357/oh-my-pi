@@ -4,6 +4,8 @@ import { apiRouteFor } from "../compat/behavior";
 import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../discovery/factory-droid";
+import { FACTORY_DROID_MODELS, resolveFactoryDroidRotation } from "../discovery/factory-droid-models";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
@@ -366,6 +368,40 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 const devinDiscovery = once(() => import("../discovery/devin"));
 
 // ---------------------------------------------------------------------------
+// Factory Droid
+// ---------------------------------------------------------------------------
+
+export interface FactoryDroidModelManagerConfig {
+	apiKey?: string;
+	/** Account residency region from the stored OAuth credential, when known. */
+	region?: string;
+	fetch?: FetchImpl;
+}
+
+export function factoryDroidModelManagerOptions(
+	config: FactoryDroidModelManagerConfig = {},
+): ModelManagerOptions<"factory-droid-agent"> {
+	return {
+		providerId: "factory-droid",
+		cacheProviderId: resolveModelCacheProviderId("factory-droid", config),
+		// No model-listing endpoint exists. The registry is the offline seed;
+		// without live org policy, explicit-opt-in models must stay hidden.
+		// Known account residency still constrains its host and rotations.
+		staticModels: FACTORY_DROID_MODELS.filter(
+			model => !model.requiresExplicitOptIn && resolveFactoryDroidRotation(model, config.region).length > 0,
+		).map(model => buildFactoryDroidModel(model, resolveFactoryDroidRotation(model, config.region), config.region)),
+		dynamicModelsAuthoritative: true,
+		// Region rejections are scoped by the current serving edge in discovery;
+		// a cache from another edge cannot be reused in an online refresh.
+		fetchDynamicModels: () => fetchFactoryDroidModels(config),
+		// Discovery encodes the request's serving region; a cache written from
+		// one network must not be replayed from another.
+		alwaysRefetchDynamicModels: true,
+	};
+}
+
+// ---------------------------------------------------------------------------
+
 // Synthetic role providers
 // ---------------------------------------------------------------------------
 
@@ -415,7 +451,6 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
-
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

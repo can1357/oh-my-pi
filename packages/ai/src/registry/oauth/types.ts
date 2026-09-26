@@ -20,6 +20,13 @@ export type OAuthCredentials = {
 	/** Human-readable organization name for display (may embed the email). */
 	orgName?: string;
 	/**
+	 * Account residency region (e.g. `"eu"`), when the provider is
+	 * region-partitioned. Captured at login; refreshed identity may update it
+	 * when the account migrates, while failed lookups preserve the stored value.
+	 * Catalog discovery uses it to filter region-restricted models.
+	 */
+	region?: string;
+	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token

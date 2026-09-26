@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
@@ -16,12 +17,13 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 	test("generates a title for the positional initial message", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cli-title-"));
 		const agentDir = path.join(root, "agent");
+		const xdgDir = path.join(root, "xdg");
 		const outputPath = path.join(root, "probe.json");
 		try {
 			await fs.mkdir(agentDir, { recursive: true });
 			await Bun.write(
 				path.join(agentDir, "config.yml"),
-				"setupVersion: 1\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\nproviders:\n  tinyModel: online\n",
+				`setupVersion: ${CURRENT_SETUP_VERSION}\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\nproviders:\n  tinyModel: online\n`,
 			);
 			const command = [
 				JSON.stringify(process.execPath),
@@ -34,12 +36,22 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 				JSON.stringify("implement X"),
 			].join(" ");
 			const proc = Bun.spawn(["timeout", "10s", "script", "-q", "-c", command, "/dev/null"], {
-				cwd: repoRoot,
+				cwd: root,
 				stdout: "pipe",
 				stderr: "pipe",
 				env: {
 					...process.env,
-					HOME: root,
+					// Keep Bun's warm transpilation cache under the real HOME. A fresh
+					// HOME forces a full CLI graph transpilation (~12s) past the 10s guard.
+					XDG_CONFIG_HOME: xdgDir,
+					XDG_DATA_HOME: xdgDir,
+					XDG_STATE_HOME: xdgDir,
+					XDG_CACHE_HOME: xdgDir,
+					OMP_PROFILE: "",
+					PI_PROFILE: "",
+					PI_CONFIG_DIR: path.relative(os.homedir(), root),
+					PI_CONFIG_FILES: "",
+					OMP_SKIP_SETUP: "1",
 					NO_COLOR: "1",
 					OMP_TITLE_PROBE_PATH: outputPath,
 					PI_CODING_AGENT_DIR: agentDir,

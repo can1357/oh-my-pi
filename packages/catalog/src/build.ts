@@ -122,6 +122,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.supportsAssistantPrefill;
 	}
+	// The same KDL output-cap contract gates host options and the Responses
+	// transport. Materialize it because the transport consumes the model field.
+	if (typeof catalog.omitMaxOutputTokens === "boolean" && model.omitMaxOutputTokens === undefined) {
+		model.omitMaxOutputTokens = catalog.omitMaxOutputTokens;
+	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;

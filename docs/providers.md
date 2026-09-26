@@ -6,6 +6,22 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
+## Factory Droid
+
+The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.
+
+1. Run `omp login factory-droid` or `/login factory-droid` in an interactive session.
+2. Open the printed `auth.factory.ai/device` link in your browser, enter the displayed device code, and approve the login.
+3. Select a model, for example `factory-droid/kimi-k3`, and send a prompt. The stored WorkOS session refreshes automatically. `omp auth-broker login factory-droid` supports broker-backed credentials.
+
+Use subscription OAuth for this provider. It does not discover credentials from an installed Droid CLI or read `FACTORY_API_KEY`; Factory's separate API-key products are not part of this integration.
+
+The bundled catalog follows Droid CLI 0.228.0, including GPT-6 Sol/Luna, Opus 5.5, Inkling, Mistral Medium 3.5, Qwen3.8 Max, and DeepSeek V4.1 Flash. It contains concrete CLI models, not the Factory Auto Model router or app-only Flex variants. Account feature flags, hard-deprecation gates, organization policy (including explicit opt-in requirements), and serving region narrow this snapshot. New model IDs require a catalog update; refreshing only updates availability and routing. Account and residency scopes have separate caches. Offline or failed discovery can retain a cached snapshot, which is not a guarantee of current entitlement; consent-gated models are excluded from unauthenticated static seeds.
+
+Requests use Chat Completions, Responses, Anthropic Messages, or native Gemini `generateContent` according to each catalog entry. MiniMax M3 uses Chat Completions while M2.7 retains Anthropic Messages; both draw from the Core pool. Mistral-routed reasoning is decoded and replayed as typed content parts. GPT models retain their supported `max` effort instead of downgrading it to `xhigh`. The integration supplies Droid-compatible identity headers and a short Droid system prefix without moving OMP's instructions into user messages. These gateway contracts are version-sensitive.
+
+`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows base credit multipliers; dollar figures are upstream list-price references, not Factory billing. Models without a dollar reference display their credit rate rather than `free`. Factory GPT and Gemini routes omit output-token caps, so bounded ephemeral turns reject a `maxTokens` request instead of silently running uncapped.
+
 ## How `omp` decides a provider is available
 
 At startup the model registry assembles its catalog from four sources, in order:
@@ -144,6 +160,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
+| `factory-droid`                  | none — `/login factory-droid` (WorkOS device code) is the credential source                              |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |

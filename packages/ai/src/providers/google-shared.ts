@@ -125,20 +125,27 @@ export function isThinkingPart(part: Pick<Part, "thought" | "thoughtSignature">)
  * Retain thought signatures during streaming.
  *
  * Some backends only send `thoughtSignature` on the first delta for a given part/block; later deltas may omit it.
- * This helper preserves the last non-empty signature for the current block.
+ * This helper preserves the last non-empty signature for the current block (first non-empty when `firstWins`).
  *
  * Note: this does NOT merge or move signatures across distinct response parts. It only prevents
  * a signature from being overwritten with `undefined` within the same streamed block.
  */
-export function retainThoughtSignature(existing: string | undefined, incoming: string | undefined): string | undefined {
-	if (typeof incoming === "string" && incoming.length > 0) return incoming;
+export function retainThoughtSignature(
+	existing: string | undefined,
+	incoming: string | undefined,
+	firstWins = false,
+): string | undefined {
+	if (typeof incoming === "string" && incoming.length > 0) {
+		if (firstWins && typeof existing === "string" && existing.length > 0) return existing;
+		return incoming;
+	}
 	return existing;
 }
 
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
-const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;

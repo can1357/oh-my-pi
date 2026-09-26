@@ -79,6 +79,7 @@ import {
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
+	factoryDroidModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
 	localModelManagerOptions,
 	typesafeModelManagerOptions,
@@ -107,6 +108,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	deepinfra: config => deepinfraModelManagerOptions(config),
 	deepseek: config => deepseekModelManagerOptions(config),
 	devin: config => devinModelManagerOptions(config),
+	"factory-droid": config => factoryDroidModelManagerOptions(config),
 	"cline-pass": config => clinePassModelManagerOptions(config),
 	firepass: config => firepassModelManagerOptions(config),
 	fireworks: config => fireworksModelManagerOptions(config),

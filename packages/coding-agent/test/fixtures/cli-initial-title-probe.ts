@@ -13,9 +13,10 @@ AgentSession.prototype.generateTitle = (firstMessage: string): Promise<string | 
 };
 
 AgentSession.prototype.prompt = async function (): Promise<boolean> {
-	void Bun.sleep(100).then(async () => {
-		await Bun.write(outputPath, JSON.stringify({ generatedFrom, sessionName: this.sessionName }));
-		process.exit(0);
+	this.sessionManager.onSessionNameChanged(() => {
+		void Bun.write(outputPath, JSON.stringify({ generatedFrom, sessionName: this.sessionName })).then(() =>
+			process.exit(0),
+		);
 	});
 	return true;
 };

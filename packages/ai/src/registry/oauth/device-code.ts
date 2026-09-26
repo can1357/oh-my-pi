@@ -17,8 +17,8 @@ export type OAuthDeviceCodePollResult<T> =
 
 /** Options for polling an RFC 8628-style OAuth device-code flow. */
 export interface OAuthDeviceCodeFlowOptions<T> {
-	/** Poll the provider once and classify the response. */
-	poll(): OAuthDeviceCodePollResult<T> | Promise<OAuthDeviceCodePollResult<T>>;
+	/** Poll the provider once and classify the response. Signal includes caller cancellation and device-code expiry. */
+	poll(signal?: AbortSignal): OAuthDeviceCodePollResult<T> | Promise<OAuthDeviceCodePollResult<T>>;
 	/** Provider-requested polling cadence; defaults to RFC 8628's five seconds. */
 	intervalSeconds?: number;
 	/** Provider-issued expiry window for the device code. */
@@ -65,10 +65,26 @@ export async function pollOAuthDeviceCodeFlow<T>(options: OAuthDeviceCodeFlowOpt
 		if (options.signal?.aborted) {
 			throw new AIError.LoginCancelledError(DEVICE_FLOW_CANCEL_MESSAGE);
 		}
-		const result = await options.poll();
+		const deadlineSignal = Number.isFinite(deadline)
+			? AbortSignal.timeout(Math.max(0, deadline - Date.now()))
+			: undefined;
+		const pollSignal =
+			options.signal && deadlineSignal
+				? AbortSignal.any([options.signal, deadlineSignal])
+				: (options.signal ?? deadlineSignal);
+		let result: OAuthDeviceCodePollResult<T>;
+		try {
+			result = await options.poll(pollSignal);
+		} catch (error) {
+			if (options.signal?.aborted) throw new AIError.LoginCancelledError(DEVICE_FLOW_CANCEL_MESSAGE);
+			if (Date.now() >= deadline) break;
+			throw error;
+		}
+		if (options.signal?.aborted) throw new AIError.LoginCancelledError(DEVICE_FLOW_CANCEL_MESSAGE);
 		if (result.status === "complete") {
 			return result.value;
 		}
+		if (Date.now() >= deadline) break;
 		if (result.status === "failed") {
 			throw new AIError.OAuthError(result.message, { kind: "polling" });
 		}

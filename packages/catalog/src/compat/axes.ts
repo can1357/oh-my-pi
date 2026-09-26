@@ -101,6 +101,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
 	"max-tokens-field": wire("maxTokensField", ["openai"], "scalar", ["max_completion_tokens", "max_tokens"]),
+	"mistral-reasoning-content-parts": wire("mistralReasoningContentParts", ["openai"]),
 	"native-kimi-k3-reasoning": wire("nativeKimiK3Reasoning", ["openai"]),
 	"omit-reasoning-effort": wire("omitReasoningEffort", OAI),
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),

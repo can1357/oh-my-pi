@@ -49,6 +49,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
 		orgId: refreshed.orgId ?? current.orgId,
+		region: refreshed.region ?? current.region,
 		orgName: refreshed.orgName ?? current.orgName,
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 	};

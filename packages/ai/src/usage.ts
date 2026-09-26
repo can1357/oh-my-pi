@@ -377,6 +377,8 @@ export interface UsageCredential {
 	/** Human-readable organization name for display. */
 	orgName?: string;
 	enterpriseUrl?: string;
+	/** Account residency used for region-aware provider routing. */
+	region?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
 }

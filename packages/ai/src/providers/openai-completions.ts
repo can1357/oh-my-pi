@@ -65,6 +65,7 @@ import type {
 	ChatCompletionContentPartText,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
+	ChatCompletionMistralThinkingPart,
 	ChatCompletionTool,
 	ChatCompletionToolMessageParam,
 } from "./openai-chat-wire";
@@ -881,6 +882,7 @@ const streamOpenAICompletionsOnce = (
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
+					responseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
@@ -892,6 +894,10 @@ const streamOpenAICompletionsOnce = (
 					clearTimeout(requestTimeout);
 				}
 			};
+			// droid CLI parity: cache-read details can arrive on the
+			// `fireworks-cached-prompt-tokens` response header when the SSE body
+			// omits `cached_tokens`; captured here for the usage parser.
+			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await createCompletionsStream();
@@ -1204,7 +1210,13 @@ const streamOpenAICompletionsOnce = (
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
-				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal, output.timestamp);
+				output.usage = parseChunkUsage(
+					rawUsage,
+					model,
+					premiumRequestsTotal,
+					output.timestamp,
+					parseFireworksCachedPromptTokens(responseHeaders),
+				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1308,7 +1320,17 @@ const streamOpenAICompletionsOnce = (
 						}
 					}
 
-					if (foundReasoningField) {
+					// Mistral's native reasoning is embedded in content parts.
+					// When a chunk also carries a top-level reasoning alias, prefer
+					// the typed parts to avoid replaying the same thinking twice.
+					const mistralContent: unknown = model.compat.mistralReasoningContentParts
+						? choice.delta.content
+						: undefined;
+					const mistralParts = Array.isArray(mistralContent)
+						? (mistralContent as Array<{ type?: unknown; text?: unknown; thinking?: unknown } | null>)
+						: undefined;
+					// Array parts carry the authoritative content, including thinking.
+					if (foundReasoningField && !mistralParts) {
 						appendThinkingDelta(
 							foundReasoningDelta,
 							foundReasoningField,
@@ -1316,8 +1338,31 @@ const streamOpenAICompletionsOnce = (
 						);
 						suppressHealedThinking = true;
 					}
+					if (mistralParts) {
+						for (const part of mistralParts) {
+							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
+								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
+									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
+										appendThinkingDelta(inner.text, "mistral-content-parts");
+										suppressHealedThinking = true;
+									}
+								}
+							} else if (part?.type === "text" && typeof part.text === "string") {
+								if (streamMarkupHealing) {
+									const hasStructuredToolCalls =
+										Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
+									const events = hasStructuredToolCalls
+										? streamMarkupHealing.feedEventsWithoutCalls(part.text)
+										: streamMarkupHealing.feedEvents(part.text);
+									for (const event of events) emitHealingEvent(event, suppressHealedThinking);
+								} else {
+									appendProcessedText(part.text);
+								}
+							}
+						}
+					}
 
-					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
+					const normalizedDeltaText = mistralParts ? "" : normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
 						if (!firstTokenTime) firstTokenTime = performance.now();
 						const hasStructuredToolCalls =
@@ -2006,11 +2051,22 @@ function buildParams(
 	};
 }
 
+/** droid CLI parity: the Factory completions route can report prompt-cache
+ * hits via the `fireworks-cached-prompt-tokens` response header when the SSE
+ * body omits `cached_tokens`. Returns a positive count or undefined. */
+function parseFireworksCachedPromptTokens(headers: Headers | undefined): number | undefined {
+	const raw = headers?.get("fireworks-cached-prompt-tokens");
+	if (!raw) return undefined;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
 	premiumRequests: number | undefined,
 	timestamp?: number,
+	cachedTokensHeader?: number,
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -2033,15 +2089,26 @@ export function parseChunkUsage(
 	const completionReasoningTokens = completionTokenDetails?.reasoning_tokens;
 	const cacheWriteTokens = promptTokenDetails?.cache_write_tokens;
 	const outputTokens = typeof completionTokens === "number" ? completionTokens : 0;
+	// droid CLI parity: the Factory completions route can report prompt-cache
+	// hits only through the `fireworks-cached-prompt-tokens` response header
+	// when the body omits `cached_tokens` (the CLI's transport reads it as a
+	// fallback for exactly that case). Body fields win when present.
+	const bodyCachedTokens = firstPositiveNumber(
+		cachedTokens,
+		promptCacheHitTokens,
+		promptTokenCachedTokens,
+		cachedContentTokenCount,
+	);
+	const resolvedCachedTokens =
+		bodyCachedTokens > 0
+			? bodyCachedTokens
+			: typeof cachedTokensHeader === "number" && cachedTokensHeader > 0
+				? cachedTokensHeader
+				: 0;
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: typeof promptTokens === "number" ? promptTokens : 0,
 		outputTokens,
-		cachedTokens: firstPositiveNumber(
-			cachedTokens,
-			promptCacheHitTokens,
-			promptTokenCachedTokens,
-			cachedContentTokenCount,
-		),
+		cachedTokens: resolvedCachedTokens,
 		reasoningTokens: typeof completionReasoningTokens === "number" ? completionReasoningTokens : 0,
 		cacheWriteOpenRouter: typeof cacheWriteTokens === "number" ? cacheWriteTokens : undefined,
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
@@ -2278,7 +2345,20 @@ export function convertMessages(
 			const thinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 			// Filter out empty thinking blocks to avoid API validation errors
 			const nonEmptyThinkingBlocks = thinkingBlocks.filter(b => b.thinking && b.thinking.trim().length > 0);
-			if (nonEmptyThinkingBlocks.length > 0) {
+			if (compat.mistralReasoningContentParts && nonEmptyThinkingBlocks.length > 0) {
+				// Mistral Medium 3.5 reads thinking from ordered content parts,
+				// not a top-level reasoning_content field. Preserve boundaries
+				// across mixed thinking/text and tool-call assistant turns.
+				const parts: Array<ChatCompletionContentPartText | ChatCompletionMistralThinkingPart> = [];
+				for (const block of msg.content) {
+					if (block.type === "thinking" && block.thinking.trim()) {
+						parts.push({ type: "thinking", thinking: [{ type: "text", text: block.thinking.toWellFormed() }] });
+					} else if (block.type === "text" && block.text.trim()) {
+						parts.push({ type: "text", text: block.text.toWellFormed() });
+					}
+				}
+				assistantMsg.content = parts;
+			} else if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
 					const thinkingText = nonEmptyThinkingBlocks
 						.map(b => renderDemotedThinking(model.id, b.thinking))
@@ -2419,8 +2499,10 @@ export function convertMessages(
 			}
 			// Tier 2: When the provider requires reasoning_content but there are genuinely no
 			// thinking blocks at all (e.g. proxy stripped reasoning_content from the response),
-			// emit an empty string. The field must be present; an empty string is the most honest
-			// representation of "no reasoning was captured."
+			// emit the configured fallback (empty string by default — the most honest
+			// representation of "no reasoning was captured"). Providers that validate
+			// the exact value opt in via `syntheticReasoningContentFallback` (the droid
+			// proxy's DeepSeek family requires a single space).
 			if (
 				needsReasoningField &&
 				!hasReasoningField &&
@@ -2428,7 +2510,7 @@ export function convertMessages(
 				!compat.allowsSyntheticReasoningContentForToolCalls
 			) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-				assistantMsg[reasoningField] = "";
+				assistantMsg[reasoningField] = compat.syntheticReasoningContentFallback ?? "";
 				hasReasoningField = true;
 			}
 			// Tier 3: For providers that accept synthetic placeholders (Kimi, OpenRouter).
