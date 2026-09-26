@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use crate::{
 	diff_string::{CompactDiffOptions, build_compact_diff_preview},
-	engine::{EditMode, FileOp, HeaderKind, ModeEngine, PreviewFile, StagedFile},
+	engine::{EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, StagedFile},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	notebook,
@@ -130,6 +130,8 @@ pub struct Session {
 	/// Generation the last preview was computed for.
 	previewed:       u32,
 	final_pass_done: bool,
+	/// Apply began: URL answers provided from here on belong to apply.
+	applying:        bool,
 }
 
 impl Session {
@@ -150,6 +152,7 @@ impl Session {
 			generation: 0,
 			previewed: 0,
 			final_pass_done: false,
+			applying: false,
 		}
 	}
 
@@ -201,10 +204,49 @@ impl Session {
 	}
 
 	/// Record the host answer for `url`; clears cached reads/resolutions for
-	/// it and makes [`Self::preview_pending`] true.
+	/// it and makes [`Self::preview_pending`] true. Answers provided before
+	/// the apply phase serve previews only.
 	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
 		self.files.provide(url, resolution);
 		self.generation += 1;
+	}
+
+	/// Enter the apply phase (idempotent) and list the internal URL targets
+	/// the finished arguments name — section paths and move destinations,
+	/// deduped in payload order — so the host can answer them all in one
+	/// pass before [`Self::apply`] instead of one staging retry per URL.
+	/// Entering the phase drops every preview-time answer: those were
+	/// resolved before approval and without the call's abort signal. Empty
+	/// while the arguments are incomplete.
+	pub fn begin_apply_url_targets(&mut self) -> Vec<String> {
+		self.begin_apply();
+		let snapshot = self.args.snapshot();
+		if !snapshot.complete {
+			return Vec::new();
+		}
+		let inspection = self.engine.inspect(&snapshot);
+		let moves = inspection.file_ops.iter().filter_map(|op| match op {
+			FileOpIntent::Move { to, .. } => Some(to),
+			FileOpIntent::Delete { .. } => None,
+		});
+		let policy = &self.config.policy;
+		let mut targets: Vec<String> = Vec::new();
+		for authored in inspection.paths.iter().chain(moves) {
+			if let Some(url) = policy.url_target(authored)
+				&& !targets.iter().any(|known| *known == url)
+			{
+				targets.push(url.into_owned());
+			}
+		}
+		targets
+	}
+
+	/// Switch to the apply phase once, forgetting preview-time URL answers.
+	fn begin_apply(&mut self) {
+		if !self.applying {
+			self.applying = true;
+			self.files.forget_urls();
+		}
 	}
 
 	/// Compute the preview for the current buffer. While streaming, trailing
@@ -235,7 +277,8 @@ impl Session {
 	/// failure aborts before the first write), enforce the plan-mode guard
 	/// for every file, then write in payload order. A writer failure aborts
 	/// the loop; files already written stay written and the error is
-	/// returned verbatim.
+	/// returned verbatim. URL targets never reuse preview-time answers (see
+	/// [`Self::begin_apply_url_targets`]).
 	///
 	/// # Errors
 	/// Staging and plan-mode failures, all raised before the first write —
@@ -246,6 +289,7 @@ impl Session {
 		request: ApplyRequest,
 		writer: &dyn EditWriter,
 	) -> EditResult<ApplyOutcome> {
+		self.begin_apply();
 		self.files.clear();
 		let snapshot = self.args.snapshot();
 		if !snapshot.complete {

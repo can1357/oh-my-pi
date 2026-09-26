@@ -23,7 +23,7 @@
  * Declaration order is significant: the settings panel lists a tab's settings in registration order
  * (sections follow `TAB_GROUPS`), and `config/all-settings.ts` imports every domain in that order.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, parseFlag } from "@oh-my-pi/pi-utils";
 import type { AnyUiMetadata, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import type { SettingProvenance, Settings } from "./settings";
 
@@ -64,8 +64,9 @@ export interface UiArray extends UiBase {
 
 /**
  * Environment variable that, when set, takes precedence over every settings layer. Default parsing
- * follows the setting's type: booleans accept `1/true/yes/on` and `0/false/no/off`, numbers any
- * finite number, enums a listed value, strings any non-blank text; other text counts as unset.
+ * follows the setting's type: booleans follow `parseFlag` (empty is unset; `1`, `y`, `true`, `yes`,
+ * `on`, all lower- or upper-case, are true; any other text is false), numbers any finite number,
+ * enums a listed value, strings any non-blank text; other text counts as unset.
  */
 export type SettingEnv<T> =
 	| string
@@ -74,10 +75,11 @@ export type SettingEnv<T> =
 			/** Maps the raw variable to a value; `undefined` means "not set". Defaults to the type parser. */
 			parse?: (raw: string) => T | undefined;
 			/**
-			 * The variable only replaces the default: any settings layer that configures the value wins
-			 * over it (for env vars documented as fallbacks of a config key).
+			 * The variable only replaces the default (env vars documented as fallbacks of a config key):
+			 *  - `true`: any settings layer configuring a non-null value wins over it.
+			 *  - `"blank"`: likewise, but a configured empty/whitespace string also yields to the variable.
 			 */
-			fallback?: true;
+			fallback?: true | "blank";
 	  };
 
 /** Protocol host that re-applies a setting's default instead of the user's persisted preference. */
@@ -178,8 +180,10 @@ export type DefinitionValue<D> = D extends { type: "boolean"; default: undefined
 	? boolean | undefined
 	: D extends { type: "boolean" }
 		? boolean
-		: D extends { type: "string" }
-			? string | undefined
+		: D extends { type: "string"; default: infer V }
+			? undefined extends V
+				? string | undefined
+				: string
 			: D extends { type: "number"; default: undefined }
 				? number | undefined
 				: D extends { type: "number" }
@@ -210,9 +214,6 @@ function settingsOf(scope: ScopeLike): Settings {
 	return "settings" in scope ? scope.settings : scope;
 }
 
-/** Layer a handle write targets: persisted global config, or a runtime-only override. */
-export type SettingLayer = "global" | "override";
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Handles
 // ═══════════════════════════════════════════════════════════════════════════
@@ -225,14 +226,6 @@ export interface ValueCacheEntry {
 	revision: number;
 	inputs: readonly unknown[];
 	value: unknown;
-}
-
-/** Options for {@link Derived.listen}. */
-export interface ListenOptions<T> {
-	/** Also invoke the callback once, synchronously, with the current value (as both `value` and `previous`). */
-	immediate?: boolean;
-	/** Change detection; defaults to `Bun.deepEquals`. */
-	equals?: (a: T, b: T) => boolean;
 }
 
 /** Next {@link Derived.slot}; handles and derivations form a closed, module-level set. */
@@ -252,11 +245,14 @@ export abstract class Derived<T> {
 	/** Leaf settings this value depends on (change notifications subscribe to these). */
 	abstract get sources(): readonly AnySetting[];
 
-	/** Current input values for `settings`; the derivation recomputes only when one changes identity. */
-	protected abstract inputs(settings: Settings): readonly unknown[];
+	/**
+	 * Registry plumbing: current input values for `settings`; the derivation recomputes only when
+	 * one changes identity. Read values through {@link get}.
+	 */
+	abstract inputs(settings: Settings): readonly unknown[];
 
-	/** Computes the value from `inputs` (as returned by {@link inputs}). */
-	protected abstract compute(inputs: readonly unknown[], settings: Settings): T;
+	/** Registry plumbing: computes the value from `inputs` (as returned by {@link inputs}). */
+	abstract compute(inputs: readonly unknown[], settings: Settings): T;
 
 	/** Latest value in `scope`. */
 	get(scope: ScopeLike): T {
@@ -274,9 +270,7 @@ export abstract class Derived<T> {
 			const value = this.compute(inputs, settings);
 			// Keep identity stable across equal recomputations so downstream derivations and
 			// listeners comparing by identity don't churn on unrelated layer rebuilds.
-			if (typeof value !== "object" || value === null || !Bun.deepEquals(cached.value, value)) {
-				cached.value = value;
-			}
+			if (!settingValuesEqual(cached.value, value)) cached.value = value;
 			cached.inputs = inputs;
 		}
 		cached.revision = revision;
@@ -294,13 +288,8 @@ export abstract class Derived<T> {
 	 * ({@link SettingsScope.addDisposer}, e.g. an `AgentSession`), the listener is removed with it.
 	 * Errors and rejections are logged, never thrown. Returns an unsubscribe function.
 	 */
-	listen(
-		scope: ScopeLike,
-		onChange: (value: T, previous: T) => void | Promise<void>,
-		options?: ListenOptions<T>,
-	): () => void {
+	listen(scope: ScopeLike, onChange: (value: T, previous: T) => void | Promise<void>): () => void {
 		const settings = settingsOf(scope);
-		const equals = options?.equals ?? ((a: T, b: T) => Bun.deepEquals(a, b));
 		const sources = this.sources;
 		const run = (next: T, previous: T) => {
 			try {
@@ -321,7 +310,7 @@ export abstract class Derived<T> {
 				queued = false;
 				if (!active) return;
 				const next = this.get(settings);
-				if (equals(next, current)) return;
+				if (settingValuesEqual(next, current)) return;
 				const previous = current;
 				current = next;
 				run(next, previous);
@@ -331,10 +320,41 @@ export abstract class Derived<T> {
 			active = false;
 			stop();
 		};
-		if (options?.immediate) run(current, current);
 		if ("settings" in scope) scope.addDisposer?.(unsubscribe);
 		return unsubscribe;
 	}
+}
+
+/**
+ * Deep equality of setting values that, unlike `Bun.deepEquals`, also compares the key order of
+ * plain objects: record order carries precedence (`edit.modelVariants` takes the first match), so a
+ * reorder is a change. Values other than plain objects and arrays compare with `Bun.deepEquals`.
+ */
+export function settingValuesEqual(a: unknown, b: unknown): boolean {
+	if (Object.is(a, b)) return true;
+	if (isArray(a) && isArray(b)) {
+		if (a.length !== b.length) return false;
+		for (let i = 0; i < a.length; i++) if (!settingValuesEqual(a[i], b[i])) return false;
+		return true;
+	}
+	if (!isPlainObject(a) || !isPlainObject(b)) return Bun.deepEquals(a, b);
+	// Positional key comparison needs `b`'s keys materialized; `a` streams.
+	const otherKeys = Object.keys(b);
+	let index = 0;
+	for (const key in a) {
+		if (key !== otherKeys[index++] || !settingValuesEqual(a[key], b[key])) return false;
+	}
+	return index === otherKeys.length;
+}
+
+function isArray(value: unknown): value is readonly unknown[] {
+	return Array.isArray(value);
+}
+
+function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
+	if (typeof value !== "object" || value === null) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
 function sameInputs(a: readonly unknown[], b: readonly unknown[]): boolean {
@@ -364,11 +384,11 @@ class MappedValue<S, T> extends Derived<T> {
 		return this.#source.sources;
 	}
 
-	protected inputs(settings: Settings): readonly unknown[] {
+	inputs(settings: Settings): readonly unknown[] {
 		return [this.#source.get(settings)];
 	}
 
-	protected compute(inputs: readonly unknown[]): T {
+	compute(inputs: readonly unknown[]): T {
 		return this.#fn(inputs[0] as S);
 	}
 }
@@ -396,11 +416,11 @@ class CombinedValue<R extends Record<string, Derived<unknown>>, T> extends Deriv
 		return this.#sources;
 	}
 
-	protected inputs(settings: Settings): readonly unknown[] {
+	inputs(settings: Settings): readonly unknown[] {
 		return this.#parts.map(part => part.get(settings));
 	}
 
-	protected compute(inputs: readonly unknown[]): T {
+	compute(inputs: readonly unknown[]): T {
 		const values: Record<string, unknown> = {};
 		for (let i = 0; i < this.#keys.length; i++) values[this.#keys[i]] = inputs[i];
 		return this.#fn(values as DerivedValues<R>);
@@ -416,11 +436,16 @@ class CombinedValue<R extends Record<string, Derived<unknown>>, T> extends Deriv
  * 	({ format, diagnostics }) => (format || diagnostics ? { format, diagnostics } : undefined),
  * );
  */
-export function combine<R extends Record<string, Derived<unknown>>, T = DerivedValues<R>>(
+export function combine<R extends Record<string, Derived<unknown>>>(parts: R): Derived<DerivedValues<R>>;
+export function combine<R extends Record<string, Derived<unknown>>, T>(
+	parts: R,
+	fn: (values: DerivedValues<R>) => T,
+): Derived<T>;
+export function combine<R extends Record<string, Derived<unknown>>, T>(
 	parts: R,
 	fn?: (values: DerivedValues<R>) => T,
-): Derived<T> {
-	return new CombinedValue(parts, fn ?? (values => values as T));
+): Derived<T | DerivedValues<R>> {
+	return fn ? new CombinedValue(parts, fn) : new CombinedValue(parts, values => values);
 }
 
 /**
@@ -435,13 +460,12 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly #sources: readonly AnySetting[];
 	/** Environment variable supplying this value, if declared (see {@link SettingEnv}). */
 	readonly envName: string | undefined;
+	/** How {@link envName} yields to configured layers: `false` = it overrides them (see {@link SettingEnv}). */
+	readonly envFallback: boolean | "blank";
 	readonly #parseEnv: ((raw: string) => unknown) | undefined;
-	readonly #envFallback: boolean;
 	/** Last raw environment text parsed, and its result: the variable is parsed once per distinct value. */
 	#envRaw: string | undefined;
 	#envParsed: T | undefined;
-	#warnedInvalid = false;
-	readonly #warnedItems = new Set<string>();
 
 	constructor(definition: SettingDefinition & { id: Id }) {
 		super();
@@ -453,7 +477,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		this.envName = typeof env === "string" ? env : env?.name;
 		this.#parseEnv =
 			typeof env === "object" && env.parse ? env.parse : env ? raw => this.#parseEnvText(raw) : undefined;
-		this.#envFallback = typeof env === "object" && env.fallback === true;
+		this.envFallback = typeof env === "object" ? (env.fallback ?? false) : false;
 	}
 
 	get sources(): readonly AnySetting[] {
@@ -498,14 +522,28 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.#envParsed;
 	}
 
-	/** Env value that currently takes effect in `scope`: a fallback env yields to any configured layer. */
+	/** Env value that currently takes effect in `scope`: a fallback env yields to a configured layer. */
 	#effectiveEnv(scope: ScopeLike): T | undefined {
-		if (this.#envFallback && settingsOf(scope).isConfigured(this)) return undefined;
-		return this.envValue();
+		const value = this.envValue();
+		if (value === undefined || !this.envFallback) return value;
+		const settings = settingsOf(scope);
+		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
+		const configured = settings.rawValue(this);
+		return configured === undefined || (typeof configured === "string" && configured.trim() === "")
+			? value
+			: undefined;
 	}
 
 	override get(scope: ScopeLike): T {
 		return this.#effectiveEnv(scope) ?? super.get(scope);
+	}
+
+	/**
+	 * Value from the settings layers alone (runtime, `--config` overlay, project, global, default),
+	 * ignoring the environment variable — what the settings panel shows and edits.
+	 */
+	layered(scope: ScopeLike): T {
+		return super.get(scope);
 	}
 
 	/**
@@ -584,6 +622,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	#parseEnvText(raw: string): unknown {
+		if (this.definition.type === "boolean") return raw === "" ? undefined : parseFlag(raw);
 		if (raw.trim() === "") return undefined;
 		try {
 			return this.parse(raw);
@@ -592,25 +631,30 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
-	protected inputs(settings: Settings): readonly unknown[] {
+	inputs(settings: Settings): readonly unknown[] {
 		return [settings.rawValue(this)];
 	}
 
-	protected compute(inputs: readonly unknown[]): T {
+	compute(inputs: readonly unknown[], settings: Settings): T {
 		const raw = inputs[0];
-		if (raw === undefined) return this.default;
-		if (this.accepts(raw)) return raw as T;
-		if (!this.#warnedInvalid) {
-			this.#warnedInvalid = true;
+		if (raw === undefined || this.accepts(raw)) {
+			// A fixed value re-arms this instance's warning, so breaking it again is reported again.
+			settings.warnState.invalid.delete(this.id);
+			return raw === undefined ? this.default : (raw as T);
+		}
+		const warned = settings.warnState.invalid;
+		if (!warned.has(this.id) || !Bun.deepEquals(warned.get(this.id), raw)) {
+			warned.set(this.id, raw);
 			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
 		}
 		return this.default;
 	}
 
 	/**
-	 * Registry plumbing run by `Settings` before every write.
+	 * Registry plumbing run by `Settings` before every write (handle writes and constructor overrides).
 	 *
-	 * @throws Error when `value` names an entry outside {@link ArrayDefinition.items} or fails `validate`.
+	 * @throws Error when `value` names an entry outside {@link ArrayDefinition.items}, fails `validate`
+	 * (checked first for their specific messages), or does not fit the declared type ({@link accepts}).
 	 */
 	assertWritable(value: unknown): void {
 		const unknown = this.#unknownItems(value);
@@ -620,19 +664,34 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			throw new Error(`Unknown ${noun}: ${unknown.join(", ")}. Valid ${label}s: ${values.join(", ")}`);
 		}
 		this.definition.validate?.(value);
+		if (!this.accepts(value)) {
+			const expected = this.enumValues ? `one of ${this.enumValues.join(", ")}` : `a ${this.definition.type}`;
+			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${expected})`);
+		}
 	}
 
 	/**
-	 * Registry plumbing run by `Settings` on every load/reload for the configured value.
+	 * Registry plumbing run by `Settings` on every load/reload for the value `settings` configures.
 	 *
-	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn, once each.
+	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn,
+	 * once each per instance.
 	 */
-	checkConfigured(raw: unknown): void {
+	checkConfigured(settings: Settings, raw: unknown): void {
 		this.definition.validate?.(raw);
+		const unknown = this.#unknownItems(raw);
+		const items = settings.warnState.items;
+		let warned = items.get(this.id);
+		// Entries no longer configured re-arm, so adding one back is reported again.
+		for (const entry of warned ?? []) if (!unknown.includes(entry)) warned?.delete(entry);
+		if (unknown.length === 0) return;
+		if (!warned) {
+			warned = new Set();
+			items.set(this.id, warned);
+		}
 		const label = this.definition.type === "array" ? this.definition.items?.label : undefined;
-		for (const entry of this.#unknownItems(raw)) {
-			if (this.#warnedItems.has(entry)) continue;
-			this.#warnedItems.add(entry);
+		for (const entry of unknown) {
+			if (warned.has(entry)) continue;
+			warned.add(entry);
 			logger.warn(`Settings: unknown ${label} ${entry}`, { setting: this.id });
 		}
 	}
@@ -649,14 +708,42 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return [...unknown];
 	}
 
-	/** Persists `value` to the global config (or sets a runtime-only override with `{ layer: "override" }`). */
-	set(scope: ScopeLike, value: T, options?: { layer?: SettingLayer }): void {
-		settingsOf(scope).writeValue(this, this.#normalize(value), options?.layer ?? "global");
+	/**
+	 * Persists `value` to the global config; `undefined` removes the key ({@link unset}).
+	 *
+	 * @throws Error when the value does not fit the definition (see {@link assertWritable}).
+	 */
+	set(scope: ScopeLike, value: T): void {
+		if (value === undefined) settingsOf(scope).unsetGlobalValue(this);
+		else settingsOf(scope).writeValue(this, this.#normalize(value), "global");
 	}
 
-	/** Runtime-only override (not persisted). */
+	/**
+	 * Runtime-only override (not persisted); `undefined` removes it ({@link clearOverride}).
+	 *
+	 * @throws Error when the value does not fit the definition (see {@link assertWritable}).
+	 */
 	override(scope: ScopeLike, value: T): void {
-		settingsOf(scope).writeValue(this, this.#normalize(value), "override");
+		if (value === undefined) settingsOf(scope).clearOverrideValue(this);
+		else settingsOf(scope).writeValue(this, this.#normalize(value), "override");
+	}
+
+	/**
+	 * Removes the key from the persisted global config: any other layer or environment variable that
+	 * configures this setting still applies, otherwise the default.
+	 */
+	unset(scope: ScopeLike): void {
+		settingsOf(scope).unsetGlobalValue(this);
+	}
+
+	/**
+	 * Holds the default as a runtime override only while no persisted layer — global, project,
+	 * `--config` overlay — configures this setting; no-op when the environment or any layer already
+	 * configures it, and dropped by a {@link set}/{@link unset} of this setting or when a reload or
+	 * re-scope configures it (protocol-host defaults).
+	 */
+	pinDefault(scope: ScopeLike): void {
+		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
 	}
 
 	#normalize(value: T): unknown {
@@ -715,70 +802,137 @@ export function all(): readonly AnySetting[] {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Warn-once diagnostics
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Warn-once diagnostics of one settings instance, stored at `Settings.warnState`: each is re-armed
+ * only by that instance's own values, so instances reading different values never re-trigger each other.
+ */
+export interface WarnState {
+	/** Invalid configured value each setting (by id) last warned about; re-armed once the value is fixed. */
+	readonly invalid: Map<string, unknown>;
+	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
+	readonly items: Map<string, Set<string>>;
+}
+
+/**
+ * Registry plumbing run by `Settings` when it derives `target` from `source` (overlays, cwd clones):
+ * `target` takes over `source`'s warn-once diagnostics, so the values it inherits are not reported again.
+ */
+export function inheritWarnings(target: Settings, source: Settings): void {
+	const { invalid, items } = target.warnState;
+	invalid.clear();
+	items.clear();
+	for (const [id, value] of source.warnState.invalid) invalid.set(id, value);
+	for (const [id, entries] of source.warnState.items) items.set(id, new Set(entries));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Process-wide effects
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Subscribes one effect to `settings` (applying it once right away); returns the unsubscribe. */
-type EffectBinder = (settings: Settings) => () => void;
+interface EffectEntry {
+	/** Subscribes the effect to `settings`, applying the current value right away; returns the unsubscribe. */
+	bind(settings: Settings): () => void;
+	/** Applies the value `defaults` yields when the process last applied a different one (test reset). */
+	reset(defaults: Settings): void;
+}
 
 interface EffectBinding {
 	settings: Settings;
-	stops: (() => void)[];
+	stops: Map<EffectEntry, () => void>;
 }
 
-const effects: EffectBinder[] = [];
+const effects = new Set<EffectEntry>();
+/** Outstanding {@link bindEffects} holds, oldest first; the last one drives effects. */
+const effectHolds: { settings: Settings }[] = [];
 let effectBinding: EffectBinding | undefined;
 
 /**
  * Declares a process-wide side effect of a setting (theme, credential redaction, request limits…).
- * It follows the primary settings instance bound with {@link bindEffects}: applied immediately on
- * bind and on every change. Unlike {@link Derived.listen}, application is synchronous — it lands
- * inside the write or reload that caused it, so code reading the affected process state right after
+ * It follows the settings instance bound with {@link bindEffects}: applied immediately on bind and
+ * on every change. Unlike {@link Derived.listen}, application is synchronous — it lands inside the
+ * write or reload that caused it, so code reading the affected process state right after
  * `set`/`override` sees the new value. Errors and rejections are logged, never thrown. Subagent
- * overlays and isolated instances never drive effects.
+ * overlays and isolated instances never drive effects. Returns a function removing the effect
+ * (module-level declarations never call it; test-scoped effects do).
  */
-export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise<void>): void {
-	const bind: EffectBinder = settings => {
-		const run = (next: T) => {
-			try {
-				const result = apply(next);
-				if (result instanceof Promise) result.catch(error => reportListenerError(value.sources, error));
-			} catch (error) {
-				reportListenerError(value.sources, error);
-			}
-		};
-		let current = value.get(settings);
-		const unsubscribe = settings.onEffectiveChange(value.sources, () => {
-			const next = value.get(settings);
-			if (Bun.deepEquals(next, current)) return;
-			current = next;
-			run(next);
-		});
-		run(current);
-		return unsubscribe;
+export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise<void>): () => void {
+	let applied: { value: T } | undefined;
+	const run = (next: T) => {
+		applied = { value: next };
+		try {
+			const result = apply(next);
+			if (result instanceof Promise) result.catch(error => reportListenerError(value.sources, error));
+		} catch (error) {
+			reportListenerError(value.sources, error);
+		}
 	};
-	effects.push(bind);
-	if (effectBinding) effectBinding.stops.push(bind(effectBinding.settings));
+	const entry: EffectEntry = {
+		bind: settings => {
+			let current = value.get(settings);
+			const unsubscribe = settings.onEffectiveChange(value.sources, () => {
+				const next = value.get(settings);
+				if (settingValuesEqual(next, current)) return;
+				current = next;
+				run(next);
+			});
+			run(current);
+			return unsubscribe;
+		},
+		reset: defaults => {
+			if (!applied) return;
+			const next = value.get(defaults);
+			if (!settingValuesEqual(next, applied.value)) run(next);
+		},
+	};
+	effects.add(entry);
+	effectBinding?.stops.set(entry, entry.bind(effectBinding.settings));
+	return () => {
+		effects.delete(entry);
+		effectBinding?.stops.get(entry)?.();
+		effectBinding?.stops.delete(entry);
+	};
 }
 
 /**
- * Makes `settings` the instance driving every {@link effect} (the process-global instance, or the
- * top-level session's settings in SDK embeddings). Rebinding replaces the previous binding. Returns
- * a function that ends this binding only — a no-op once another instance has been bound.
+ * Makes `settings` drive every {@link effect} (the process-global instance, the top-level session's
+ * settings in SDK embeddings, an ACP session's workspace settings) until the returned release is
+ * called. Holds stack: the most recent outstanding hold drives effects, and releasing it hands them
+ * back to the previous hold (re-applying its values). Holding the same instance twice takes two
+ * holds; the release is idempotent and never ends another holder's hold.
  */
 export function bindEffects(settings: Settings): () => void {
-	const binding = effectBinding?.settings === settings ? effectBinding : startEffectBinding(settings);
+	const hold = { settings };
+	effectHolds.push(hold);
+	syncEffectBinding();
 	return () => {
-		if (effectBinding === binding) unbindEffects();
+		const index = effectHolds.indexOf(hold);
+		if (index === -1) return;
+		effectHolds.splice(index, 1);
+		syncEffectBinding();
 	};
 }
 
-function startEffectBinding(settings: Settings): EffectBinding {
-	unbindEffects();
-	const binding: EffectBinding = { settings, stops: [] };
+/** Points effects at the newest hold's instance, re-subscribing only when that instance changed. */
+function syncEffectBinding(): void {
+	const settings = effectHolds.at(-1)?.settings;
+	if (effectBinding?.settings === settings) return;
+	stopEffectBinding();
+	if (!settings) return;
+	const binding: EffectBinding = { settings, stops: new Map() };
 	effectBinding = binding;
-	for (const bind of effects) binding.stops.push(bind(settings));
-	return binding;
+	// An effect declared while binding binds itself (see `effect`); the guard skips it here.
+	for (const entry of effects) {
+		if (!binding.stops.has(entry)) binding.stops.set(entry, entry.bind(settings));
+	}
+}
+
+function stopEffectBinding(): void {
+	const binding = effectBinding;
+	effectBinding = undefined;
+	for (const stop of binding?.stops.values() ?? []) stop();
 }
 
 /** Instance currently driving effects, if any. */
@@ -786,9 +940,17 @@ export function effectsSettings(): Settings | undefined {
 	return effectBinding?.settings;
 }
 
-/** Stops every {@link effect} from following the bound instance (test teardown). */
+/** Drops every {@link bindEffects} hold, so no instance drives effects (test teardown). */
 export function unbindEffects(): void {
-	const binding = effectBinding;
-	effectBinding = undefined;
-	for (const stop of binding?.stops ?? []) stop();
+	effectHolds.length = 0;
+	stopEffectBinding();
+}
+
+/**
+ * Test reset: drops every effect hold and re-applies each effect whose last applied value differs
+ * from the one `defaults` yields (restoring process state an earlier test changed).
+ */
+export function resetRegistryForTest(defaults: Settings): void {
+	unbindEffects();
+	for (const entry of effects) entry.reset(defaults);
 }

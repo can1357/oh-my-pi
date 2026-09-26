@@ -4,24 +4,22 @@
  * passage verification) lives in {@link runCascade}; this file is the tool
  * contract and the model-facing report.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
-import { InternalUrlRouter } from "../../internal-urls/router";
-import type { ResolveContext } from "../../internal-urls/types";
+import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
-import { formatPathRelativeToCwd, normalizePathLikeInput, resolveToCwd } from "../path-utils";
+import { formatPathRelativeToCwd, normalizePathLikeInput, resolveSearchResultPath } from "../path-utils";
 import { toolResult } from "../tool-result";
 import { runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
-import { isEnumerableScope, materializeUrlScope, type UrlScope } from "./url-scope";
+import { resolveSearchRoot } from "./tree";
 
 import { cfgFindEnabled } from "../settings";
 
@@ -71,101 +69,74 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		if (query.length === 0) throw new ToolError("`query` must be a non-empty description");
 		const cwd = this.session.cwd;
 		const rawScopeInput = params.path === undefined ? "" : normalizePathLikeInput(params.path);
-		const resolveContext = sessionResolveContext(this.session, { signal });
-		// Enumerable URLs (virtual document containers) have no local files, so
-		// the directory-walking cascade cannot read them in place: search a temp
-		// materialization and remap hits back to their URLs, the same shape
-		// `grep` uses for archives.
-		let urlScope: UrlScope | undefined;
-		if (isEnumerableScope(rawScopeInput)) {
-			onUpdate?.({ content: [{ type: "text", text: `materializing ${rawScopeInput}` }] });
-			urlScope = await materializeUrlScope(rawScopeInput, resolveContext);
-		}
-		try {
-			const root = urlScope?.dir ?? (await this.#resolveRoot(rawScopeInput, cwd, resolveContext));
-			const scopePath =
-				urlScope?.scopePath ??
-				(root === path.resolve(cwd) ? undefined : formatPathRelativeToCwd(root, cwd, { trailingSlash: true }));
-			const registry = this.session.modelRegistry;
-			if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
-			const judge = resolveJudge({
-				settings: this.session.settings,
-				registry,
-				sessionId: this.session.getSessionId?.() ?? undefined,
-				onUsage: journalJudgmentUsage(this.session.sessionManager, "find"),
-			});
-			const started = performance.now();
-			const result = await runCascade({
-				root,
-				query,
-				extraKeywords: params.grep_keywords,
-				judge,
-				includeHidden: false,
-				signal,
-				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
-			});
-			const elapsedMs = performance.now() - started;
-			const { stats, threshold, keywords } = result;
-			// Cascade paths are root-relative; the model and renderer want
-			// resolvable paths (`read`-relative for files, URLs for virtual
-			// documents) without knowing the scope.
-			const toRel = urlScope?.toUrl ?? ((rel: string) => formatPathRelativeToCwd(path.join(root, rel), cwd));
-			const hits = result.hits.map(hit => ({ ...hit, rel: toRel(hit.rel) }));
-			const details: FindToolDetails = { query, keywords, threshold, hits, stats, elapsedMs, cwd, scopePath };
-			// Virtual-document hits are URLs, not cwd-relative paths — they resolve
-			// through the `read` tool, including with `:start-end` selectors.
-			const where = scopePath === undefined ? "" : ` in ${scopePath}`;
-			const out: string[] = [];
-			if (hits.length === 0) {
-				out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
-			} else {
-				out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`, "");
-				for (const hit of hits) {
-					const coverage = hit.truncated
-						? `${hit.linesSeen} lines judged, partial`
-						: `${hit.linesSeen} lines judged`;
-					out.push(`${hit.rel}  ${hit.contentScore.toFixed(2)}  ${coverage}`);
-					for (const range of rankedHeat(hit.ranges, RANGES_SHOWN)) {
-						const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
-						out.push(`  ${hit.rel}:${span}  ${range.p.toFixed(2)}  ${range.snippet}`);
-					}
+		// Host paths stay native; internal URLs (`local://`, `omp://`, …) are
+		// listed, scanned, and read in place through the URL filesystem.
+		const filesystem = new InternalUrlFilesystem({
+			context: sessionResolveContext(this.session, { signal }),
+			tier: this.approval,
+		});
+		const root = await resolveSearchRoot(filesystem, rawScopeInput, cwd);
+		const scopePath =
+			root.path === path.resolve(cwd)
+				? undefined
+				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory" });
+		const registry = this.session.modelRegistry;
+		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
+		const judge = resolveJudge({
+			settings: this.session.settings,
+			registry,
+			sessionId: this.session.getSessionId?.() ?? undefined,
+			onUsage: journalJudgmentUsage(this.session.sessionManager, "find"),
+		});
+		const started = performance.now();
+		const result = await runCascade({
+			root,
+			filesystem,
+			query,
+			extraKeywords: params.grep_keywords,
+			judge,
+			includeHidden: false,
+			signal,
+			onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+		});
+		const elapsedMs = performance.now() - started;
+		const { stats, threshold, keywords } = result;
+		// Cascade paths are root-relative; the model and renderer want paths
+		// `read` resolves (cwd-relative files, URLs under URL scopes, including
+		// with `:start-end` selectors) without knowing the scope.
+		const hits = result.hits.map(hit => ({
+			...hit,
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+		}));
+		const details: FindToolDetails = { query, keywords, threshold, hits, stats, elapsedMs, cwd, scopePath };
+		const where = scopePath === undefined ? "" : ` in ${scopePath}`;
+		const out: string[] = [];
+		if (hits.length === 0) {
+			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
+		} else {
+			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`, "");
+			for (const hit of hits) {
+				const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
+				out.push(`${hit.rel}  ${hit.contentScore.toFixed(2)}  ${coverage}`);
+				for (const range of rankedHeat(hit.ranges, RANGES_SHOWN)) {
+					const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
+					out.push(`  ${hit.rel}:${span}  ${range.p.toFixed(2)}  ${range.snippet}`);
 				}
 			}
+		}
+		out.push(
+			"",
+			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+		);
+		if (stats.failures.length > 0) {
 			out.push(
-				"",
-				`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+				`${stats.errors} of ${stats.requests} requests failed:`,
+				...stats.failures.map(failure => `  ${failure}`),
 			);
-			if (stats.failures.length > 0) {
-				out.push(
-					`${stats.errors} of ${stats.requests} requests failed:`,
-					...stats.failures.map(failure => `  ${failure}`),
-				);
-			}
-			const builder = toolResult(details).text(out.join("\n"));
-			if (stats.requests > 0 && stats.errors === stats.requests) builder.error();
-			else if (hits.length === 0) builder.useless();
-			return builder.done();
-		} finally {
-			await urlScope?.cleanup();
 		}
-	}
-
-	/**
-	 * Absolute search root: `path` under cwd, or the local directory an internal
-	 * URL locates to; either must be an existing directory.
-	 */
-	async #resolveRoot(input: string, cwd: string, context: ResolveContext): Promise<string> {
-		if (input.length === 0) return path.resolve(cwd);
-		const router = InternalUrlRouter.instance();
-		const root = router.canHandle(input)
-			? await router.requireLocal(input, "find", context, { directory: true })
-			: resolveToCwd(input, cwd);
-		try {
-			if (!(await fs.stat(root)).isDirectory()) throw new ToolError(`Path is not a directory: ${input}`);
-		} catch (error) {
-			if (isEnoent(error)) throw new ToolError(`Path not found: ${input}`);
-			throw error;
-		}
-		return root;
+		const builder = toolResult(details).text(out.join("\n"));
+		if (stats.requests > 0 && stats.errors === stats.requests) builder.error();
+		else if (hits.length === 0) builder.useless();
+		return builder.done();
 	}
 }

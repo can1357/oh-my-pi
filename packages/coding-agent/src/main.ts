@@ -225,14 +225,13 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 }
 
 // Protocol hosts inherit OMP's neutral defaults for settings declaring `protocolDefault`
-// instead of the local user's interactive preferences. The guard preserves any explicit
-// configuration — caller `Settings.isolated` overrides, project `.claude/settings.yml`,
-// `--config` overlays, or global `config.yml` — so the default only kicks in when nothing
-// is set. Without it the override clobbers every caller/host choice (#2598, #3207).
+// instead of the local user's interactive preferences. The pin holds only while nothing
+// configures the setting — caller `Settings.isolated` overrides, project `.claude/settings.yml`,
+// `--config` overlays, or global `config.yml` always win (#2598, #3207), including a config
+// edit the RPC file watcher picks up later and an ACP session's own project config.
 function applyProtocolDefaults(host: ProtocolHost, targetSettings: Settings = settings): void {
 	for (const setting of all()) {
-		if (!setting.definition.protocolDefault?.includes(host) || setting.isConfigured(targetSettings)) continue;
-		setting.override(targetSettings, setting.default);
+		if (setting.definition.protocolDefault?.includes(host)) setting.pinDefault(targetSettings);
 	}
 }
 
@@ -512,6 +511,9 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
+		// Like every top-level session, it holds process-wide effects (`worktree.base`, request
+		// limits, …) on its own project's settings until disposed; its requests redact credentials
+		// per that project's `secrets.enabled` regardless of which session holds the effects.
 		const { session: nextSession, setToolUIContext } = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -1892,7 +1894,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			quiet: cfgStartupQuiet.get(settingsInstance),
-			composerShape: cfgComposerShape.get(settingsInstance) ?? "band",
+			composerShape: cfgComposerShape.get(settingsInstance),
 			showHardwareCursor: cfgShowHardwareCursor.get(settingsInstance),
 			maxInlineImages: cfgTuiMaxInlineImages.get(settingsInstance),
 			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
@@ -2134,6 +2136,7 @@ export async function runRootCommand(
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
 
 		// OTEL: register global OTLP exporters when an endpoint is configured via
@@ -2312,7 +2315,7 @@ export async function runRootCommand(
 					eventBus,
 					subagentEventBus,
 				}),
-				() => Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settingsInstance) ?? 420_000) || 0),
+				() => Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settingsInstance)) || 0),
 			);
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 				authStorage.keys.setRuntime(session.model.provider, parsedArgs.apiKey);

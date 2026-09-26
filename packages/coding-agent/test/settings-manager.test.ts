@@ -1814,8 +1814,21 @@ describe("Settings", () => {
 			expectedChains: Record<string, string[]>,
 		];
 
-		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
+		const webDefaultCandidates = MODEL_PRIO.web.flatMap(selector => {
+			if (selector === "google/gemini-2.5-flash") {
+				return [
+					"google-gemini-cli/gemini-2.5-flash",
+					"google-antigravity/gemini-2.5-flash",
+					"google/gemini-2.5-flash",
+				];
+			}
+			if (selector === "google-antigravity/gemini-2.5-flash") return [];
+			return [selector];
+		});
+		const webExaCandidates = ["web/exa", ...webDefaultCandidates.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
+			"google-gemini-cli/gemini-2.5-flash",
+			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-5.6-luna",
@@ -1824,18 +1837,18 @@ describe("Settings", () => {
 		];
 		const webOrderedCandidates = [
 			...webOrderedHead,
-			...MODEL_PRIO.web.filter(selector => !webOrderedHead.includes(selector)),
+			...webDefaultCandidates.filter(selector => !webOrderedHead.includes(selector)),
 		];
-		const webExcludedCandidates = MODEL_PRIO.web.filter(
+		const webExcludedCandidates = webDefaultCandidates.filter(
 			selector => selector !== "web/public" && !selector.startsWith("xai/") && !selector.startsWith("xai-oauth/"),
 		);
-		const webGeminiOverrideCandidates = MODEL_PRIO.web.map(selector =>
-			selector === "google/gemini-2.5-flash"
-				? "google/gemini-custom"
-				: selector === "google-antigravity/gemini-2.5-flash"
-					? "google-antigravity/gemini-custom"
-					: selector,
-		);
+		const webGeminiOverrideCandidates = MODEL_PRIO.web.flatMap(selector => {
+			if (selector === "google/gemini-2.5-flash") {
+				return ["google-gemini-cli/gemini-custom", "google-antigravity/gemini-custom", "google/gemini-custom"];
+			}
+			if (selector === "google-antigravity/gemini-2.5-flash") return [];
+			return [selector];
+		});
 		const imageOrderedHead = [
 			"openai/gpt-image-1",
 			"openai-codex/gpt-image-1",
@@ -1957,6 +1970,23 @@ describe("Settings", () => {
 				}
 			},
 		);
+
+		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
+			await writeSettings({
+				providers: {
+					webSearch: "gemini",
+					webSearchGeminiModel: "gemini-3.8-flash-high",
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
+				"google-gemini-cli/gemini-3.8-flash-high",
+				"google-antigravity/gemini-3.8-flash-high",
+				"google/gemini-3.8-flash-high",
+			]);
+		});
 
 		it("drops legacy defaults without materializing kind roles", async () => {
 			await writeSettings({

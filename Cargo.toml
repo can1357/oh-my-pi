@@ -12,15 +12,17 @@ members = [
    "crates/pi-natives",
    "crates/pi-shell",
    "crates/pi-vcs",
+   "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.3.0"
+version = "18.3.2"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -32,6 +34,9 @@ brush-core = { path = "crates/vendor/brush-core" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
+# vendored copy carries the upstream grammar fix (see its README.md).
+tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
 
 [profile.release]
 opt-level = 3
@@ -222,6 +227,7 @@ pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
+pi-vfs = { path = "crates/pi-vfs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 

@@ -2,10 +2,10 @@
  * Config CLI command handlers.
  *
  * Handles `omp config <command>` subcommands for managing settings.
- * Uses the settings schema as the source of truth for available settings.
+ * The settings registry (`config/registry.ts`) is the source of truth for available settings.
  */
 
-import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getAgentDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
@@ -207,9 +207,9 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		//
 		// Redaction is driven by the value, not by classification alone. Marking an
 		// unset credential as redacted would report every fresh install as having
-		// one configured, which leaks the opposite of what redaction is for. The
-		// settings panel persists "" when a credential is cleared and renders that
-		// as unset; the same semantics apply here (credentials are all strings).
+		// one configured, which leaks the opposite of what redaction is for. A
+		// configured "" renders as unset, like in the settings panel (credentials
+		// are all strings).
 		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
 		for (const def of defs) {
 			const value = def.setting.get(settings);
@@ -301,12 +301,61 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		process.exit(1);
 	}
 
-	const newValue = def.setting.get(settings);
+	// Report the value written to config.yml. When another layer or an environment variable still
+	// supplies the effective value, say which instead of echoing its value as if it had been set.
+	const saved = globalValue(def.setting);
+	const shadow = shadowingSource(def.setting);
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: newValue }));
-	} else {
-		console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(newValue)}`));
+		console.log(JSON.stringify({ key: def.path, value: saved, ...shadow?.json }));
+		return;
+	}
+	console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(saved)}`));
+	if (shadow) console.log(chalk.yellow(`${theme.status.warning} ${shadow.message}`));
+}
+
+/** Value `setting` holds in the global config layer — what `config set` wrote. */
+function globalValue(setting: AnySetting): unknown {
+	let value: unknown = settings.getGlobalSettings();
+	for (const segment of setting.segments) value = isRecord(value) ? value[segment] : undefined;
+	return value;
+}
+
+/** Where the effective value comes from when it is not the global config (or the default), if anywhere. */
+function shadowingSource(setting: AnySetting): { json: Record<string, string>; message: string } | undefined {
+	const provenance = setting.provenance(settings);
+	switch (provenance) {
+		case "global":
+		case "default":
+			return undefined;
+		case "env": {
+			const name = setting.envName;
+			if (!name) return undefined;
+			return setting.envFallback
+				? {
+						json: { fallbackEnv: name },
+						message: `$${name} is used as a fallback while the saved value is blank.`,
+					}
+				: {
+						json: { overriddenBy: name },
+						message: `$${name} overrides this value; unset it for the saved value to apply.`,
+					};
+		}
+		case "project":
+			return {
+				json: { overriddenBy: provenance },
+				message: "Project settings override this value here; edit or remove it there for the saved value to apply.",
+			};
+		case "overlay":
+			return {
+				json: { overriddenBy: provenance },
+				message: "A --config / PI_CONFIG_FILES overlay overrides this value for this process.",
+			};
+		case "runtime":
+			return {
+				json: { overriddenBy: provenance },
+				message: "A runtime override supplies the effective value for this process.",
+			};
 	}
 }
 
@@ -324,19 +373,24 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		process.exit(1);
 	}
 
-	const defaultValue = def.setting.default;
 	try {
-		def.setting.set(settings, defaultValue);
+		// Remove the key rather than writing the default, so later default changes still apply.
+		def.setting.unset(settings);
 		await settings.flush();
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
 	}
 
+	// The effective value may now come from another layer or the environment: never echo a credential.
+	const value = def.setting.get(settings);
+	const redacted = def.setting.isCredential && !!value;
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: defaultValue }));
+		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));
 	} else {
-		console.log(chalk.green(`${theme.status.success} Reset ${def.path} to ${formatValue(defaultValue)}`));
+		console.log(
+			chalk.green(`${theme.status.success} Reset ${def.path} to ${redacted ? REDACTED : formatValue(value)}`),
+		);
 	}
 }
 
@@ -355,7 +409,7 @@ ${chalk.bold("Commands:")}
   list               List all settings with current values
   get <key>          Get a specific setting value
   set <key> <value>  Set a setting value
-  reset <key>        Reset a setting to its default value
+  reset <key>        Remove a setting from config.yml so its default applies
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
 

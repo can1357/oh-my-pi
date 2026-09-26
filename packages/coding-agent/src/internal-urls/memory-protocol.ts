@@ -10,6 +10,7 @@ import {
 	buildDirectoryResource,
 	containedRealPath,
 	contentTypeForPath,
+	ensureCreatableWithinRoot,
 	validateRelativePath,
 } from "./filesystem-resource";
 import type {
@@ -98,15 +99,15 @@ function resolveMemoryUrlToPath(url: InternalUrl, memoryRoot: string): string {
 
 /**
  * Contained location of a `memory://root` URL under one memory root: `real` is
- * the realpath of an existing target, `target` the would-be path. A bare
- * `memory://root` addresses the summary file, or the root itself when
- * `directory` is set. Undefined when the root itself does not exist.
+ * the realpath of an existing target, `target` the would-be path under the
+ * realpathed `root`. A bare `memory://root` addresses the summary file, or the
+ * root itself when `directory` is set. Undefined when the root does not exist.
  */
 async function locateInRoot(
 	url: InternalUrl,
 	memoryRoot: string,
 	directory: boolean,
-): Promise<{ target: string; real: string | undefined } | undefined> {
+): Promise<{ root: string; target: string; real: string | undefined } | undefined> {
 	let resolvedRoot: string;
 	try {
 		resolvedRoot = await fs.realpath(path.resolve(memoryRoot));
@@ -115,7 +116,7 @@ async function locateInRoot(
 		throw error;
 	}
 	const target = directory && isBareMemoryUrl(url) ? resolvedRoot : resolveMemoryUrlToPath(url, resolvedRoot);
-	return { target, real: await containedRealPath(target, resolvedRoot, "memory") };
+	return { root: resolvedRoot, target, real: await containedRealPath(target, resolvedRoot, "memory", url.href) };
 }
 
 /** True for `memory://root` with no path, which reads the default summary file. */
@@ -322,7 +323,12 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
  */
 export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "memory";
-	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, linkable: true };
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: true,
+		linkable: true,
+	};
 
 	/** Advertised only when the session's memory backend owns the file-backed `memory://root` namespace. */
 	promptDoc(host: SchemeHost): string | undefined {
@@ -344,15 +350,19 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (caller.backend !== undefined && caller.backend !== "local") return null;
 
 		const directory = options?.directory === true;
-		let wouldBe: string | undefined;
+		let wouldBe: { root: string; target: string } | undefined;
 		for (const root of memoryRootsForContext(context, caller.session)) {
 			const located = await locateInRoot(url, root, directory);
 			if (located?.real !== undefined) return located.real;
-			wouldBe ??=
-				located?.target ??
-				(directory && isBareMemoryUrl(url) ? path.resolve(root) : resolveMemoryUrlToPath(url, path.resolve(root)));
+			wouldBe ??= located ?? {
+				root: path.resolve(root),
+				target:
+					directory && isBareMemoryUrl(url) ? path.resolve(root) : resolveMemoryUrlToPath(url, path.resolve(root)),
+			};
 		}
-		return options?.create ? (wouldBe ?? null) : null;
+		if (!options?.create || !wouldBe) return null;
+		await ensureCreatableWithinRoot(wouldBe.target, wouldBe.root, "memory", url.href);
+		return wouldBe.target;
 	}
 
 	locateSync(url: InternalUrl): string | undefined {

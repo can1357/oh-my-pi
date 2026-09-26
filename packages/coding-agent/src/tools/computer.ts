@@ -246,7 +246,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 		captureMaxHeight: coordinateSafe
 			? Math.min(configuredMaxHeight, COORDINATE_SAFE_MAX_CAPTURE_HEIGHT)
 			: configuredMaxHeight,
-		display: cfgComputerDisplay.get(session.settings) ?? "all",
+		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
 	};
 }

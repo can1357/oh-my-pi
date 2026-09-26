@@ -4,6 +4,7 @@ import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-se
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { translateUi } from "@oh-my-pi/pi-tui/ui-locale";
 
 import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
@@ -82,10 +83,10 @@ describe("settings section sidebar", () => {
 		for (let i = 0; i < 7; i++) comp.handleInput("\x1b[C");
 		expect(cfgDevAutoqa.get(settings)).toBe(true);
 
-		clickOption(comp, "Developer");
+		clickOption(comp, translateUi("Developer"));
 		expect(cfgDevAutoqa.get(settings)).toBe(true);
 
-		clickOption(comp, "Developer");
+		clickOption(comp, translateUi("Developer"));
 		expect(cfgDevAutoqa.get(settings)).toBe(true);
 	});
 });

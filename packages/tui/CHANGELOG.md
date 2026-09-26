@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Japanese welcome and settings text with `PI_UI_LANG=ja` ([#13179](https://github.com/can1357/oh-my-pi/pull/13179) by [@sota411](https://github.com/sota411)).
+
+## [18.3.1] - 2026-09-25
+
 ### Breaking Changes
 
 - Replaced the `CustomEditor` space-hold callbacks and `sttHoldEnabled` option with the `spaceHold.handler` API.
@@ -9,15 +15,20 @@
 
 ### Added
 
-- Added opt-in Japanese welcome and settings text with `PI_UI_LANG=ja` ([#13179](https://github.com/can1357/oh-my-pi/pull/13179) by [@sota411](https://github.com/sota411)).
-- Added transcript rendering for `cfg://` configuration read and write tool calls
-- Added push-to-talk dictation to `Input`, including live transcription text and `cursorOverride` support.
+- Added push-to-talk dictation to `Input`, with live transcription and `cursorOverride` support.
+- Added visual indicators for live-steered user messages and paginated content in read-tool results.
+- Added transcript support for `cfg://` configuration read and write tool calls.
+- Added an Anthropic slow-mode badge to the status-line model segment, showing the priority state, end time, and remaining request percentage when available.
+
+### Changed
+
+- Updated the settings selector so clearing an input field fully unsets the corresponding setting.
 
 ### Fixed
 
-- Fixed dimmed blockquote styling being reset after inline code spans.
-- Fixed tool call and result rendering for active top-level extension and MCP tools invoked through `xd://` links.
-- Fixed pending Read and Write cards opening incorrect browser URLs when file paths are clicked; paths now open their local targets, including home-directory, archive, and database paths.
+- Fixed dimmed blockquote styling after inline code spans.
+- Fixed rendering of tool calls and results for top-level extension and MCP tools invoked through `xd://` links.
+- Fixed file links in pending Read and Write cards so they open the correct local targets, including paths in the home directory, archives, and databases.
 
 ## [18.3.0] - 2026-09-24
 

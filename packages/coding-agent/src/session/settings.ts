@@ -27,10 +27,9 @@ import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
@@ -792,7 +791,7 @@ export const cfgRetryUsageReservePolicy = register({
 export const cfgRetryFallbackChains = register({
 	id: "retry.fallbackChains",
 	type: "record",
-	default: {} as Record<string, string[]>,
+	default: EMPTY_STRING_ARRAYS_RECORD,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
@@ -850,6 +849,20 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 		description:
 			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
 	},
+});
+
+/**
+ * Anthropic subscription slow mode (`off` | `auto`). Deliberately has no
+ * `/settings` UI: `/slow on|off` on an Anthropic model is the only switch.
+ * `auto` switches to low priority automatically when a Claude subscription
+ * hits its 5-hour limit and Anthropic offers it. Wrap-up allowance tracking
+ * runs either way; this only gates the low-priority lane.
+ */
+export const cfgProvidersAnthropicSlowMode = register({
+	id: "providers.anthropic.slowMode",
+	type: "enum",
+	values: ["off", "auto"] as const,
+	default: "off" as const,
 });
 
 // Provider selection
@@ -1053,6 +1066,19 @@ export const cfgProvidersOpenaiWebsockets = register({
 			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
 			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 		],
+	},
+});
+
+export const cfgProvidersOpenaiLiveSteering = register({
+	id: "providers.openaiLiveSteering",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "OpenAI Live Steering",
+		description:
+			"Deliver messages typed while a GPT-6 response streams into that response over the Codex WebSocket, instead of waiting for the next tool boundary",
 	},
 });
 

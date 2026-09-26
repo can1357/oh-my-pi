@@ -1645,10 +1645,20 @@ describe("ExtensionRunner", () => {
 				`,
 			);
 			const loaded = await loadTestExtensions([extensionPath]);
+			// Configured through a config file (as a user would): writes reject NaN/Infinity outright,
+			// while a file carrying them must still load and fall back to the default.
+			const configuredSettings: Settings[] = [];
+			for (const [index, yamlValue] of ["0", "-1", ".nan", ".inf"].entries()) {
+				const overlayPath = path.join(tempDir.path(), `invalid-timeout-${index}.yml`);
+				fs.writeFileSync(overlayPath, `extensionHandlers:\n  toolCallTimeoutMs: ${yamlValue}\n`);
+				configuredSettings.push(
+					await Settings.loadIsolated({ inMemory: true, cwd: tempDir.path(), configFiles: [overlayPath] }),
+				);
+			}
 
 			vi.useFakeTimers();
 			try {
-				for (const configuredTimeout of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+				for (const settings of configuredSettings) {
 					const runner = new ExtensionRunner(
 						loaded.extensions,
 						loaded.runtime,
@@ -1656,7 +1666,7 @@ describe("ExtensionRunner", () => {
 						sessionManager,
 						modelRegistry,
 						undefined,
-						Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": configuredTimeout }),
+						settings,
 					);
 					let settled = false;
 					const decision = runner

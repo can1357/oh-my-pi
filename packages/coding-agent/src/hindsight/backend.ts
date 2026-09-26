@@ -218,9 +218,11 @@ async function awaitPrimaryStateRebuild(session: AgentSession): Promise<void> {
 
 /**
  * Finish the memory rebind that a cwd move started, before the move reports
- * success. The settings reload may already have queued a rebuild for changed
- * `hindsight.*` values: await it and re-raise its failure instead of letting a
- * half-rebound session look like a completed move.
+ * success. The settings reload may already have started a backend switch or a
+ * rebuild for changed `hindsight.*` values: let it settle first, so the rebind
+ * never judges a half-switched runtime, then redo the destination's own
+ * transition and re-raise its failure instead of letting a half-rebound
+ * session look like a completed move.
  *
  * The rebuild is also requested here rather than only awaited, because the
  * bank scope derives from the cwd itself: a move between projects with
@@ -228,6 +230,7 @@ async function awaitPrimaryStateRebuild(session: AgentSession): Promise<void> {
  */
 export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<void> {
 	if (!session.memoryEnabled) return;
+	await session.settleMemoryBackend();
 	// Other backends have no Hindsight rebuild path. Reapply them on an
 	// explicit cwd move, but let an in-flight Hindsight transition finish (or
 	// fail) rather than retrying a partially torn-down backend outside its task.

@@ -8,7 +8,8 @@
 - Key collaborators:
   - `crates/pi-natives/src/ast.rs` — native rewrite planning and file mutation
   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
-  - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing and multi-path resolution
+  - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
+  - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-edit reads and writes through
   - `packages/coding-agent/src/tools/resolve.ts` — preview/apply queueing
   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number diff references
@@ -20,7 +21,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ops` | `{ pat: string; out: string }[]` | Yes | One or more rewrite rules. `pat` must be non-empty. Duplicate `pat` values fail before native execution. Empty `out` deletes the matched node. |
-| `paths` | `string[]` | Yes | One or more files, directories, globs, locatable internal URLs, or internal-URL globs over a locatable base. At least one non-empty entry is required. Fetched external URLs are read-only and cannot be rewritten. |
+| `paths` | `string[]` | Yes | One or more files, directories, globs, file-writable internal URLs (`local://`), or globs below them. At least one non-empty entry is required. Fetched external URLs are read-only and cannot be rewritten. |
 
 Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#inputs).
 
@@ -52,8 +53,8 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
    - duplicate `pat` values fail,
    - ops are converted to a `Record<pattern, replacement>`.
 2. The wrapper reads `PI_MAX_AST_FILES` via `$envpos(..., 1000)` and uses that as the native `maxFiles` cap for both preview and apply.
-3. Path normalization, internal URL handling, missing-path partitioning, and multi-path resolution follow the same `path-utils.ts` flow as `ast_grep`.
-4. The scope's `isDirectory` flag (set by a stat in `resolveToolSearchScope`) decides whether to render grouped directory output.
+3. Path normalization, internal URL handling, missing-path partitioning, and multi-path resolution follow the same `path-utils.ts` flow as `ast_grep`, with `fileWritableOnly` rejecting URLs whose scheme tools may not write (`router.fileWritable()`) before any filesystem access. The call's `InternalUrlFilesystem` carries its approval tier (the strictest `router.writeTier()` over `paths`), so native writes into a URL are refused above that tier.
+4. The scope's `isDirectory` flag (set by a stat through the URL filesystem in `resolveToolSearchScope`) decides whether to render grouped directory output.
 5. `runAstEditOnce(...)` always runs native `astEdit(...)` with `dryRun: true` and `failOnParseError: false` on the first pass.
 6. Native `ast_edit` in `crates/pi-natives/src/ast.rs`:
    - normalizes the rewrite map and sorts rules by pattern string,
@@ -71,7 +72,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - Single file: preview or apply against one file.
 - Directory + optional glob: native scan walks the directory, then filters by compiled glob.
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
-- Internal URL inputs: only supported when the router locates them (or a glob's base) to a local path; sources from immutable schemes are refused. Approval is the highest write tier among the targeted schemes.
+- Internal URL inputs: only file-writable schemes (`local://`); read-only and handler-written schemes are refused upfront. Native preview and apply read and write them through the URL filesystem, which redirects to their host files; the apply pass builds its own filesystem (no call signal) at the same tier. Approval is the highest write tier among the targeted schemes; hits are named by full URL and hashline snapshots bind to the located host file.
 - Preview mode: always the direct `ast_edit` tool result.
 - Apply mode: only reachable through the queued resolve callback (a `write` to `xd://resolve` or `xd://reject`) after a preview.
 - Hashline output mode vs plain line/column mode: controlled by `resolveFileDisplayMode()`.
@@ -100,7 +101,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - Preview text truncates each rendered `before` and `after` first line to 120 characters in `packages/coding-agent/src/tools/ast-edit.ts`.
 
 ## Errors
-- TS wrapper throws `ToolError` for empty patterns, duplicate rewrite patterns, empty path entries, internal-URL globs over a non-locatable base, internal URLs with no local file (`Cannot rewrite <scheme>:// URL: no local file backs …`), matches in immutable internal resources (`Cannot rewrite immutable resource: …`), and missing paths.
+- TS wrapper throws `ToolError` for empty patterns, duplicate rewrite patterns, empty path entries, internal URLs of schemes tools may not write (`Cannot rewrite <url>: <scheme>:// URLs are not editable files`), internal URLs the URL filesystem cannot stat (`Cannot rewrite <url>: <reason>`), and missing paths.
 - Native code returns hard errors for:
   - inability to infer a supported language for a candidate (reported as a parse issue in the wrapper's best-effort mode),
   - unsupported explicit `lang` in internal/native calls,

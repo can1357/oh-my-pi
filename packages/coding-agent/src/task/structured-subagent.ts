@@ -253,7 +253,7 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 
 function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
 	const taskDepth = request.session.taskDepth ?? 0;
-	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings) ?? 2;
+	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
 	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -298,7 +298,7 @@ export async function resolveEffectiveSubagentPolicy(
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
 		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
 	}
-	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings) as string[];
+	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
 	if (disabledAgents.includes(agentName)) {
 		const enabled = agents
 			.filter(candidate => !disabledAgents.includes(candidate.name))

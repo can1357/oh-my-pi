@@ -7,6 +7,7 @@ import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
+import { translateUi } from "@oh-my-pi/pi-tui/ui-locale";
 import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
@@ -88,7 +89,7 @@ describe("settings layout", () => {
 			"retry.usageReservePct",
 			"retry.usageReservePolicy",
 		]);
-		expect(defs[0]).toMatchObject({ type: "boolean", label: "Usage-Aware Fallback" });
+		expect(defs[0]).toMatchObject({ type: "boolean", label: translateUi("Usage-Aware Fallback") });
 		expect(defs[1]?.condition?.()).toBe(false);
 		expect(defs[2]?.condition?.()).toBe(false);
 		cfgRetryUsageAwareFallback.set(Settings.instance, true);
@@ -118,7 +119,7 @@ describe("settings layout", () => {
 		selector.handleInput("\n");
 
 		const rendered = selector.render(80).join("\n");
-		expect(rendered).toContain("Composer Shape");
+		expect(rendered).toContain(translateUi("Composer Shape"));
 		expect(rendered).toContain("Preview:");
 		expect(rendered).toContain("Ask anything");
 

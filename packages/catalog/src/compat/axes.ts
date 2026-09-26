@@ -139,6 +139,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
+	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -299,6 +300,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"omit-max-output-tokens": {
 		key: "omitMaxOutputTokens",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
+	 * The host accepts a prompt plus `max_tokens` beyond the context window and
+	 * ends generation at the window (Anthropic `model_context_window_exceeded`)
+	 * instead of rejecting the request, so callers must not lower the output cap
+	 * to fit the window.
+	 */
+	"stops-output-at-context-window": {
+		key: "stopsOutputAtContextWindow",
 		set: "catalog",
 		shape: "scalar",
 		values: [true, false],

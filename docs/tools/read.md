@@ -79,8 +79,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - Plain URL reads call `executeReadUrl()`.
    - URL reads with line selectors fetch/render into the URL cache as needed, then paginate the rendered text locally.
 3. It checks the internal URL router, including built-ins and MCP-advertised schemes.
-   - URLs of file-backed schemes that the router locates to a local file (`local://`, `artifact://`, `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, `?q=`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source.
-   - `agent://` query extraction (`/path` or `?q=`) returns a discrete value that bypasses pagination.
+   - URLs of file-backed schemes that the router locates to a local file (`local://`, `artifact://`, `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source. An image question (`?q=`) is split off only for `local://` and `attachment://` images; on other schemes `?q=` stays part of the URL.
+   - `agent://` path extraction (`/path`) returns a discrete value that bypasses pagination.
    - Other internal resources are paginated in memory.
 4. It prefers an existing literal filesystem path before treating selector-looking colons as archive, SQLite, PDF-image, or line-selector syntax.
 5. It tries archive resolution next with `#resolveArchiveReadPath()`.
@@ -236,14 +236,14 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - `#handleInternalUrl()` behavior:
    - parses the URL with `parseInternalUrl()` so colons inside the host segment are legal
    - handles URLs with no local file (virtual, remote, and device schemes, plus located schemes whose target is a directory or missing)
-   - returns discrete values (`shape: "value"`, e.g. `agent://` path or `?q=` extraction) without pagination; otherwise paginates the resolved text in memory
+   - returns discrete values (`shape: "value"`, e.g. `agent://` path extraction) without pagination; otherwise paginates the resolved text in memory
    - `:img` is rejected here; it requires a file-backed URL
    - passes `immutable` (defaulted from the scheme spec) through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as artifacts, skills, memory, and agent outputs
    - sets `ignoreResultLimits: true` for schemes whose spec is `unbounded` (`skill://`) so the full text is paginated only by explicit selectors, not by the normal default line limit
 - `conflict://` blocks are registered by the `<path>:conflicts` selector; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, `/base`, or `/both` selects a side. `conflict://*` is write-only.
 - `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`. Every repository-qualified form also accepts a GitHub Enterprise host prefix (`pr://ghe.example.com/<owner>/<repo>/<N>`), and a host with no dot (`pr://ghe/<owner>/<repo>/<N>`) is recognized in the numbered form. Short forms resolve the host from the session checkout, so an enterprise repo needs no prefix.
 - `memory://` accepts two grammars. `memory://root[/path]` reads file-backed memory artifacts under the project memory root (`memory://root` resolves to the compact startup summary `memory_summary.md`; deeper paths address files such as `MEMORY.md` and `skills/<name>/SKILL.md`, and `memory://root/...` supports glob patterns for `glob`). `memory://<memory-id>` looks up a live Mnemopi memory row by id — working or episodic — and returns the full stored content (not the clipped recall preview) behind a YAML frontmatter header carrying `id`, `bank`, `store`, `memory_type`, `source`, `timestamp`/`created_at`, `importance`, `veracity`, `session_id`, and `metadata`. The id grammar resolves against the calling session: it needs that session on `memory.backend = mnemopi` and searches only its own scoped banks, so a row held by another live session is not reachable; with `hindsight` it returns a corrective pointer (hindsight memories are not addressable), and unknown ids error with a pointer to `recall` for the available ids. This is the read counterpart to `memory_edit update`: read the full row before overwriting a truncated preview.
-- `artifact://<id>` locates the session artifact's backing file and reads it through the filesystem pipeline: reads stream at any size, and unbounded `:raw` follows the located-file raw cap below. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with selector and backing-path hints. Path consumers (search/grep, bash URL expansion) use `locate` and work on artifacts of any size.
+- `artifact://<id>` locates the session artifact's backing file and reads it through the filesystem pipeline: reads stream at any size, and unbounded `:raw` follows the located-file raw cap below. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with selector and backing-path hints. Path consumers (search/grep, the bash URL filesystem) use `locate` and work on artifacts of any size.
 
 ### Web URLs
 
@@ -322,6 +322,7 @@ Notes: ...
 - Unique suffix auto-resolution glob timeout: `5000` ms.
 - File snapshot store holds `256` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `packages/hashline/src/snapshots.ts`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
 - An unbounded `:raw` read of a URL-located file (any file-backed scheme except `unbounded` ones such as `skill://`) is refused above `50 KiB` (`MAX_URL_RAW_INLINE_BYTES`) with a notice naming bounded ranges (`<url>:raw:1-3000`, `<url>:1-3000`) and the backing file path.
+- A numbered page of an immutable URL-located file (for example `artifact://`) over `50 KiB` appends the same backing-file notice; writable schemes (`local://`, `vault://`) never get it, so a write-back cannot persist it. Only `artifact://` pages (`SchemeSpec.artifactStore`) skip the artifact spill; every other URL read spills over `tools.artifactSpillThreshold` like a plain file.
 
 ## Errors
 

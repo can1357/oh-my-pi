@@ -16,19 +16,22 @@ import {
 	Tokenizer,
 	tokenizerEncodingForModel,
 } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Encoding } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
+import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
 import {
 	cfgModelLoopGuardCheckAssistantContent,
 	cfgModelLoopGuardEnabled,
 	cfgOmitThinking,
 	cfgProvidersAnthropicServerSideFallback,
+	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
+	cfgProvidersOpenaiLiveSteering,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
 	cfgProvidersStreamFirstEventTimeoutSeconds,
@@ -50,6 +53,18 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	return Math.max(1, Math.trunc(value * 1000));
 }
 
+/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`). */
+export interface SettingsStreamSlowModeContext {
+	/** Defaults to the process-wide lane registry. */
+	lanes?: AnthropicSlowModeLanes;
+	/** Final gate before auto-accepting the lane for `model` (e.g. prefer sibling accounts). */
+	canAutoAccept?: (model: Model) => boolean | Promise<boolean>;
+	/** Route slow-mode notices to the requesting session. */
+	notify?: (level: "info" | "warning" | "error", message: string) => void;
+	/** Record which account lane served the session's latest Anthropic request. */
+	onLane?: (lane: string) => void;
+}
+
 /**
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
@@ -60,7 +75,11 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * {@link fitOutputTokensToContextWindow}); every request this session drives,
  * including side turns like `/btw`, goes through here.
  */
-export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
+export function createSettingsAwareStreamFn(
+	settings: Settings,
+	base: StreamFn = streamSimple,
+	slowModeContext?: SettingsStreamSlowModeContext,
+): StreamFn {
 	// One tokenizer per encoding, so per-message counts are reused across requests.
 	const tokenizers = new Map<Encoding | null, Tokenizer>();
 	return (model, context, streamOptions) => {
@@ -96,6 +115,21 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
+		// Anthropic usage-limit stages: the provider consults these hooks only for
+		// first-party OAuth requests, so attaching them per anthropic call is safe.
+		// Wrap-up tracking runs for everyone; the setting (`/slow`) gates only the
+		// low-priority lane, read per call so a mid-request toggle takes effect.
+		const slowModeLanes = slowModeContext?.lanes ?? anthropicSlowModeLanes;
+		const canAutoAccept = slowModeContext?.canAutoAccept;
+		const slowModeHooks =
+			streamOptions?.anthropicSlowMode === undefined && model.provider === "anthropic"
+				? slowModeLanes.hooks({
+						lowPriority: () => cfgProvidersAnthropicSlowMode.get(settings) === "auto",
+						canAutoAccept: canAutoAccept ? () => canAutoAccept(model) : undefined,
+						notify: slowModeContext?.notify,
+						onLane: slowModeContext?.onLane,
+					})
+				: undefined;
 		const encoding = tokenizerEncodingForModel(model);
 		let tokenizer = tokenizers.get(encoding);
 		if (!tokenizer) {
@@ -122,7 +156,10 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 				...streamOptions?.loopGuard,
 			},
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
+			// An off switch, not a default: the agent loop always offers its queue.
+			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
+			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);
 	};

@@ -88,7 +88,7 @@ const DEFAULT_PREAMBLE =
  */
 export function loadHindsightConfig(settings: Settings): HindsightConfig {
 	const config: HindsightConfig = {
-		hindsightApiUrl: cfgHindsightApiUrl.get(settings) ?? null,
+		hindsightApiUrl: cfgHindsightApiUrl.get(settings),
 		hindsightApiToken: cfgHindsightApiToken.get(settings) ?? null,
 
 		bankId: cfgHindsightBankId.get(settings) ?? null,
@@ -103,7 +103,7 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 		retainMode: cfgHindsightRetainMode.get(settings),
 		retainEveryNTurns: cfgHindsightRetainEveryNTurns.get(settings),
 		retainOverlapTurns: cfgHindsightRetainOverlapTurns.get(settings),
-		retainContext: cfgHindsightRetainContext.get(settings) ?? "omp",
+		retainContext: cfgHindsightRetainContext.get(settings),
 
 		recallBudget: cfgHindsightRecallBudget.get(settings),
 		recallMaxTokens: cfgHindsightRecallMaxTokens.get(settings),

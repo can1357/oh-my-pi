@@ -1,6 +1,7 @@
 /**
  * Every settings domain, in settings-panel order. Importing this module registers every setting;
- * {@link orderedSettings} lists them by domain order, then declaration order within a domain.
+ * {@link orderedSettings} lists them by domain order, then declaration order within a domain;
+ * `PLACED_DOMAINS` splice a domain into another domain's rows.
  */
 import { all, type AnySetting, Setting } from "./registry";
 import * as modesSettings from "../modes/settings";
@@ -43,8 +44,6 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	configModelSettings,
 	modesSettings,
 	sessionSettings,
-	liveSettings,
-	ttsSettings,
 	advisorSettings,
 	sessionContextSettings,
 	memoryBackendSettings,
@@ -77,15 +76,20 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	cliGcSettings,
 ];
 
+/** Domains listed immediately before `before` (a setting of a DOMAINS entry) instead of in DOMAINS order. */
+const PLACED_DOMAINS: readonly { domain: Readonly<Record<string, unknown>>; before: AnySetting }[] = [
+	{ domain: liveSettings, before: sessionSettings.cfgProvidersFetch },
+	{ domain: ttsSettings, before: sessionSettings.cfgProvidersFetch },
+];
+
 let ordered: readonly AnySetting[] | undefined;
 
 /** Every registered setting: domains in panel order, each in declaration order. */
 export function orderedSettings(): readonly AnySetting[] {
 	if (ordered) return ordered;
 	const sequence = new Map(all().map((handle, index) => [handle, index]));
-	const result: AnySetting[] = [];
 	const seen = new Set<AnySetting>();
-	for (const domain of DOMAINS) {
+	const domainHandles = (domain: Readonly<Record<string, unknown>>): AnySetting[] => {
 		const handles: AnySetting[] = [];
 		const collect = (value: unknown) => {
 			if (value instanceof Setting) {
@@ -97,9 +101,22 @@ export function orderedSettings(): readonly AnySetting[] {
 				for (const nested of Object.values(value)) collect(nested);
 			}
 		};
-		for (const value of Object.values(domain)) collect(value);
-		handles.sort((a, b) => (sequence.get(a) ?? 0) - (sequence.get(b) ?? 0));
-		result.push(...handles);
+		for (const key in domain) collect(domain[key]);
+		return handles.sort((a, b) => (sequence.get(a) ?? 0) - (sequence.get(b) ?? 0));
+	};
+	const placedBefore = new Map<AnySetting, AnySetting[]>();
+	for (const { domain, before } of PLACED_DOMAINS) {
+		const placed = placedBefore.get(before) ?? [];
+		placed.push(...domainHandles(domain));
+		placedBefore.set(before, placed);
+	}
+	const result: AnySetting[] = [];
+	for (const domain of DOMAINS) {
+		for (const handle of domainHandles(domain)) {
+			const placed = placedBefore.get(handle);
+			if (placed) result.push(...placed);
+			result.push(handle);
+		}
 	}
 	ordered = result;
 	return result;

@@ -1,15 +1,18 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
-const PLANS_DIR = path.join(os.tmpdir(), "plans");
 
 interface SessionOverrides {
 	artifactsDir?: string | null;
@@ -24,9 +27,7 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: {
-			getPlansDirectory: () => PLANS_DIR,
-		},
+		settings: Settings.isolated(),
 		getArtifactsDir: () => overrides.artifactsDir ?? null,
 		getSessionId: () => overrides.sessionId ?? null,
 		getPlanModeState: () => overrides.planMode,
@@ -174,6 +175,30 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		);
 	});
 
+	it("rejects sandbox paths that a symlinked ancestor routes into the working tree", async () => {
+		if (process.platform === "win32") return;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-link-"));
+		try {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const repo = path.join(tempDir, "repo");
+			await fs.mkdir(path.join(artifactsDir, "local"), { recursive: true });
+			await fs.mkdir(repo, { recursive: true });
+			await fs.symlink(repo, path.join(artifactsDir, "local", "link"));
+			const session = makeSession({ artifactsDir, cwd: repo, planMode });
+
+			for (const target of [
+				"local://link/newdir/f.md",
+				path.join(artifactsDir, "local", "link", "newdir", "f.md"),
+			]) {
+				await expect(enforcePlanModeWrite(session, target, { op: "create" })).rejects.toThrow(
+					/working tree is read-only/,
+				);
+			}
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("still rejects absolute paths outside the local sandbox", async () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
 		const workingTreePath = path.join(REPO_ROOT, "src", "foo.ts");
@@ -184,5 +209,42 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		await expect(enforcePlanModeWrite(session, `[${workingTreePath}#ABCD]`, { op: "update" })).rejects.toThrow(
 			/working tree is read-only/,
 		);
+	});
+});
+
+describe("local:// write and read agree for sessions without artifact wiring", () => {
+	beforeAll(async () => {
+		await Settings.init({ inMemory: true });
+	});
+
+	afterEach(() => {
+		LocalProtocolHandler.resetOverrideForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	it("reads back a local:// file written through the same legacy-shaped session", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-legacy-"));
+		try {
+			const hostArtifacts = path.join(tempDir, "host-artifacts");
+			LocalProtocolHandler.setOverride({ getArtifactsDir: () => hostArtifacts, getSessionId: () => "host" });
+			// Shape of the legacy pi-coding-agent shim session: no local:// pinning, no artifacts dir.
+			const session: ToolSession = {
+				cwd: tempDir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings: Settings.isolated(),
+				enableLsp: false,
+			};
+
+			await new WriteTool(session).execute("write-notes", { path: "local://notes.md", content: "shared notes\n" });
+			const read = await new ReadTool(session).execute("read-notes", { path: "local://notes.md" });
+			const text = read.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+
+			expect(await Bun.file(path.join(hostArtifacts, "local", "notes.md")).text()).toBe("shared notes\n");
+			expect(text).toContain("shared notes");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
 	});
 });

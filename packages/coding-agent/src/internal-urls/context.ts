@@ -30,7 +30,7 @@ export function sessionLocalProtocolOptions(session: ToolSession): LocalProtocol
  * its own artifacts dir defers to the process mapping (LocalProtocolHandler
  * override, then the registry's main session) instead of pinning a null root.
  */
-function contextLocalProtocolOptions(session: ToolSession): LocalProtocolOptions | undefined {
+export function contextLocalProtocolOptions(session: ToolSession): LocalProtocolOptions | undefined {
 	if (!session.localProtocolOptions && !session.getArtifactsDir) return undefined;
 	return sessionLocalProtocolOptions(session);
 }

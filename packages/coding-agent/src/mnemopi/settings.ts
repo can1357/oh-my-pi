@@ -174,7 +174,7 @@ export const cfgMnemopiEmbeddingModel = register({
 	type: "string",
 	default: undefined,
 	// Without the env term a variant default would silently shadow a user's configured env model.
-	env: { name: "MNEMOPI_EMBEDDING_MODEL", fallback: true },
+	env: { name: "MNEMOPI_EMBEDDING_MODEL", fallback: "blank" },
 	ui: {
 		tab: "memory",
 		group: "Mnemopi",

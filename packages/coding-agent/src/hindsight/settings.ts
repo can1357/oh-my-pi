@@ -6,6 +6,12 @@ import { register } from "../config/registry";
 
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 
+/** Integer `HINDSIGHT_*` variables: base-10 `parseInt` prefix (`5000ms` → 5000, `2.5` → 2); other text is unset. */
+function parseEnvInteger(raw: string): number | undefined {
+	const value = Number.parseInt(raw, 10);
+	return Number.isFinite(value) ? value : undefined;
+}
+
 // Hindsight (https://hindsight.vectorize.io)
 export const cfgHindsightApiUrl = register({
 	id: "hindsight.apiUrl",
@@ -152,7 +158,7 @@ export const cfgHindsightRetainMode = register({
 
 export const cfgHindsightRetainEveryNTurns = register({
 	id: "hindsight.retainEveryNTurns",
-	env: "HINDSIGHT_RETAIN_EVERY_N_TURNS",
+	env: { name: "HINDSIGHT_RETAIN_EVERY_N_TURNS", parse: parseEnvInteger },
 	type: "number",
 	default: 3,
 });
@@ -175,21 +181,21 @@ export const cfgHindsightRecallBudget = register({
 
 export const cfgHindsightRecallMaxTokens = register({
 	id: "hindsight.recallMaxTokens",
-	env: "HINDSIGHT_RECALL_MAX_TOKENS",
+	env: { name: "HINDSIGHT_RECALL_MAX_TOKENS", parse: parseEnvInteger },
 	type: "number",
 	default: 1024,
 });
 
 export const cfgHindsightRecallContextTurns = register({
 	id: "hindsight.recallContextTurns",
-	env: "HINDSIGHT_RECALL_CONTEXT_TURNS",
+	env: { name: "HINDSIGHT_RECALL_CONTEXT_TURNS", parse: parseEnvInteger },
 	type: "number",
 	default: 1,
 });
 
 export const cfgHindsightRecallMaxQueryChars = register({
 	id: "hindsight.recallMaxQueryChars",
-	env: "HINDSIGHT_RECALL_MAX_QUERY_CHARS",
+	env: { name: "HINDSIGHT_RECALL_MAX_QUERY_CHARS", parse: parseEnvInteger },
 	type: "number",
 	default: 800,
 });
@@ -209,28 +215,28 @@ export const cfgHindsightDebug = register({
 
 export const cfgHindsightRequestTimeoutMs = register({
 	id: "hindsight.requestTimeoutMs",
-	env: "HINDSIGHT_REQUEST_TIMEOUT_MS",
+	env: { name: "HINDSIGHT_REQUEST_TIMEOUT_MS", parse: parseEnvInteger },
 	type: "number",
 	default: 30_000,
 });
 
 export const cfgHindsightReflectTimeoutMs = register({
 	id: "hindsight.reflectTimeoutMs",
-	env: "HINDSIGHT_REFLECT_TIMEOUT_MS",
+	env: { name: "HINDSIGHT_REFLECT_TIMEOUT_MS", parse: parseEnvInteger },
 	type: "number",
 	default: 120_000,
 });
 
 export const cfgHindsightRecallTimeoutMs = register({
 	id: "hindsight.recallTimeoutMs",
-	env: "HINDSIGHT_RECALL_TIMEOUT_MS",
+	env: { name: "HINDSIGHT_RECALL_TIMEOUT_MS", parse: parseEnvInteger },
 	type: "number",
 	default: 30_000,
 });
 
 export const cfgHindsightRetainTimeoutMs = register({
 	id: "hindsight.retainTimeoutMs",
-	env: "HINDSIGHT_RETAIN_TIMEOUT_MS",
+	env: { name: "HINDSIGHT_RETAIN_TIMEOUT_MS", parse: parseEnvInteger },
 	type: "number",
 	default: 60_000,
 });

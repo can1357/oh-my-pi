@@ -10,7 +10,6 @@ import {
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	ThinkingLevel,
-	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	canReplayRemoteCompaction,
@@ -68,6 +67,7 @@ import {
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
 } from "../advisor";
+import { evictStaleToolResults } from "../advisor/tool-result-eviction";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -111,7 +111,12 @@ import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
-import { cfgAdvisorImmuneTurns, cfgAdvisorMaxNotesPerUpdate, cfgAdvisorSyncBacklog } from "../advisor/settings";
+import {
+	cfgAdvisorEvictStaleResults,
+	cfgAdvisorImmuneTurns,
+	cfgAdvisorMaxNotesPerUpdate,
+	cfgAdvisorSyncBacklog,
+} from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
@@ -281,6 +286,18 @@ interface ActiveAdvisor {
 	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
 	usageLimitRetries: number;
 	signature: string;
+}
+/** First index whose provider usage may anchor the advisor's context estimate. */
+function advisorAnchorSearchStart(messages: readonly AgentMessage[]): number {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "compactionSummary") continue;
+		// Advisor summaries created before this runtime-only boundary existed have
+		// no trustworthy way to distinguish retained from newly appended messages.
+		// Conservatively ignore every current assistant until the next compaction.
+		return (message as AdvisorCompactionSummaryMessage).advisorUsageAnchorStartIndex ?? messages.length;
+	}
+	return 0;
 }
 interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
 	firstKeptEntryId?: string;
@@ -764,7 +781,7 @@ export class SessionAdvisors {
 	// Advisor runtime lifecycle
 	// -------------------------------------------------------------------------
 	#advisorImmuneTurnLimit(): number {
-		const immuneTurns = cfgAdvisorImmuneTurns.get(this.#host.settings) as number;
+		const immuneTurns = cfgAdvisorImmuneTurns.get(this.#host.settings);
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
@@ -1923,6 +1940,27 @@ export class SessionAdvisors {
 	): Promise<boolean> {
 		await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisor, signal);
 		const agent = advisor.agent;
+		// Prior reviews' `read`/`grep`/`glob` output is re-sent on every later
+		// request; the deltas the advisor reviews and the notes it wrote (carried
+		// in `advise` tool-call arguments) are never touched, and the latest review
+		// is kept intact. Runs before the compaction gate because it is the
+		// advisor's own context hygiene, not a compaction method; it has its own
+		// `advisor.evictStaleResults` switch.
+		//
+		// On a prefix-bound thinking model the `prunedAt` marker also drops the
+		// signed thinking of every assistant after the cut, the latest review
+		// included. What is lost is reasoning its notes and the deltas already
+		// cover.
+		if (cfgAdvisorEvictStaleResults.get(this.#host.settings)) {
+			const eviction = evictStaleToolResults(agent.state.messages, agent.tokenizer);
+			if (eviction.evicted > 0) {
+				logger.debug("advisor evicted stale tool results", {
+					advisor: advisor.name,
+					evicted: eviction.evicted,
+					tokensSaved: eviction.tokensSaved,
+				});
+			}
+		}
 		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
 		const configuredCompaction = cfgCompaction.get(this.#host.settings);
@@ -1946,7 +1984,7 @@ export class SessionAdvisors {
 		// delta to that arm. Floor it by a full local estimate — fixed advisor system
 		// prompt, tool schemas, stored messages, and incoming delta — so provider
 		// under-reporting or payload transforms cannot suppress maintenance.
-		const providerContextTokens = this.#estimateAdvisorContextTokens(messages, agent.tokenizer) + incomingTokens;
+		const providerContextTokens = this.#estimateAdvisorContextTokens(advisor) + incomingTokens;
 		const localContextTokens =
 			agent.tokenizer.countTokens(agent.state.systemPrompt) +
 			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer, this.#host.settings.revision) +
@@ -1990,9 +2028,9 @@ export class SessionAdvisors {
 					id,
 					parentId,
 					// ISO like every CompactionEntry: the next round reads this
-					// back as previousSummaryTimestamp, and a millis string
-					// does not survive `new Date()` (NaN rewrite marker).
-					timestamp: new Date(message.timestamp || Date.now()).toISOString(),
+					// back as previousSummaryTimestamp (the reused rewrite marker),
+					// and a millis string does not survive `new Date()` (NaN marker).
+					timestamp: new Date(message.historyRewriteAt ?? (message.timestamp || Date.now())).toISOString(),
 					summary: message.summary,
 					shortSummary: message.shortSummary,
 					firstKeptEntryId: advisorSummary.firstKeptEntryId || `msg-${i + 1}`,
@@ -2164,20 +2202,24 @@ export class SessionAdvisors {
 		const advisorUsageAnchorStartIndex = recentMessages.length + 1;
 		const anthropicPayload = getAnthropicCompactionPayload(compactResult.preserveData);
 		// A native summary replays its block on later requests, so its rewrite
-		// marker must precede the retained tail: a fresh timestamp would make
+		// marker must precede the retained tail: the commit time would make
 		// `historyRewriteAt` newer than the tail and strip its bound thinking
 		// on the very next request. Reuse the previous compaction's marker when
 		// one exists, else sit just before the retained tail. Local summaries
-		// keep the existing fresh timestamp.
+		// use the commit time, which the summary always keeps as its timestamp.
 		const firstRetained = preparation.recentMessages[0];
-		const summaryTimestamp =
-			anthropicPayload !== undefined
-				? (preparation.previousSummaryTimestamp ??
-					(firstRetained ? new Date(firstRetained.timestamp - 1).toISOString() : new Date().toISOString()))
-				: new Date().toISOString();
+		const historyRewriteAt =
+			anthropicPayload === undefined
+				? undefined
+				: preparation.previousSummaryTimestamp !== undefined
+					? new Date(preparation.previousSummaryTimestamp).getTime()
+					: firstRetained
+						? firstRetained.timestamp - 1
+						: undefined;
 		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, summaryTimestamp, {
+			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), {
 				shortSummary,
+				historyRewriteAt,
 				// Carry provider-native replay state on the in-memory summary so
 				// later advisor requests replay it instead of ordinary summary text.
 				providerPayload: anthropicPayload ?? providerPayload,
@@ -2511,7 +2553,7 @@ export class SessionAdvisors {
 	#computeAdvisorStat(advisor: ActiveAdvisor): PerAdvisorStat {
 		const model = advisor.agent.state.model;
 		const messages = advisor.agent.state.messages;
-		const contextTokens = this.#estimateAdvisorContextTokens(messages, advisor.agent.tokenizer);
+		const contextTokens = this.#estimateAdvisorContextTokens(advisor);
 		let input = 0;
 		let output = 0;
 		let reasoning = 0;
@@ -2600,21 +2642,15 @@ export class SessionAdvisors {
 	 * generated output; only messages after that anchor are estimated. Usage from
 	 * retained pre-compaction messages is stale and must not immediately retrigger
 	 * maintenance on the newly compacted context.
+	 * Usage reported before the newest tool-result eviction is stale the same way.
 	 */
-	#estimateAdvisorContextTokens(messages: AgentMessage[], tokenizer: Tokenizer): number {
-		let usageAnchorStartIndex = 0;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message.role !== "compactionSummary") continue;
-			const advisorSummary = message as AdvisorCompactionSummaryMessage;
-			// Advisor summaries created before this runtime-only boundary existed have
-			// no trustworthy way to distinguish retained from newly appended messages.
-			// Conservatively ignore every current assistant until the next compaction.
-			usageAnchorStartIndex = advisorSummary.advisorUsageAnchorStartIndex ?? messages.length;
-			break;
-		}
-		return estimateTranscriptTokens(messages, tokenizer, {
-			anchorFromIndex: usageAnchorStartIndex,
+	#estimateAdvisorContextTokens(advisor: ActiveAdvisor): number {
+		const messages = advisor.agent.state.messages;
+		return estimateTranscriptTokens(messages, advisor.agent.tokenizer, {
+			anchorFromIndex: advisorAnchorSearchStart(messages),
+			// Evicted tool results were rewritten in place; usage reported before
+			// the newest eviction still counts the removed bytes.
+			skipPrunedAnchors: true,
 			excludeEncryptedReasoning: true,
 		});
 	}

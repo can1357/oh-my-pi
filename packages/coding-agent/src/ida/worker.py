@@ -32,6 +32,10 @@ def _arm_sigint():
     # supervisor's timeout/abort SIGINT raises KeyboardInterrupt instead of killing the worker.
     if signal.getsignal(signal.SIGINT) is not signal.default_int_handler:
         signal.signal(signal.SIGINT, signal.default_int_handler)
+    # The broker stops the host's whole process group; the host saves and closes this worker,
+    # so a group SIGTERM must not kill it mid-save.
+    if signal.getsignal(signal.SIGTERM) is not signal.SIG_IGN:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 _arm_sigint()
@@ -404,8 +408,8 @@ def _view_overview():
     segs = list(db.segments.get_all())
     entries = list(db.entries.get_all())
     funcs = list(_funcs())
-    n_imports = len(imports())
-    n_strings = len(strings())
+    n_imports = sum(1 for _ in db.imports.get_all_imports())
+    n_strings = sum(1 for _ in db.strings.get_all())
     lines = [
         f"{db.module} — {db.format}, {_ARCH_NAMES.get(db.architecture, db.architecture)} {db.bitness}-bit",
         f"base 0x{db.base_address:x} entry 0x{db.start_ip:x} range 0x{db.minimum_ea:x}-0x{db.maximum_ea:x}",
@@ -473,6 +477,60 @@ def _idb_path():
     return ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
 
 
+# Set by the IDB/Hex-Rays hooks below on any user-visible mutation; cleared by a save. Reported
+# on every successful response so the supervisor knows when an idle autosave is needed.
+_DIRTY = False
+_IDB_HOOKS = None
+_HEXRAYS_HOOKS = None
+
+
+def _mark_dirty():
+    global _DIRTY
+    _DIRTY = True
+
+
+def _dirty_hooks(base, events):
+    def _on_event(self, *args):
+        _mark_dirty()
+        return 0
+
+    return type(f"_Dirty{base.__name__}", (base,), {name: _on_event for name in events})
+
+
+_DirtyIdbHooks = _dirty_hooks(
+    ida_idp.IDB_Hooks,
+    (
+        "renamed",
+        "cmt_changed",
+        "extra_cmt_changed",
+        "range_cmt_changed",
+        "ti_changed",
+        "func_added",
+        "deleting_func",
+        "func_updated",
+        "set_func_start",
+        "set_func_end",
+        "byte_patched",
+        "op_type_changed",
+        "make_code",
+        "make_data",
+        "destroyed_items",
+        "local_types_changed",
+        "segm_added",
+        "deleting_segm",
+        "frame_udm_renamed",
+        "lt_udm_renamed",
+        "callee_addr_changed",
+        "sgr_changed",
+    ),
+)
+
+_DirtyHexraysHooks = _dirty_hooks(
+    ida_hexrays.Hexrays_Hooks,
+    ("lvar_name_changed", "lvar_type_changed", "lvar_cmt_changed", "lvar_mapping_changed", "cmt_changed"),
+)
+
+
 def _open_db(path, opts):
     db = Database.open(path, opts, save_on_close=False)
     _arm_sigint()
@@ -480,32 +538,26 @@ def _open_db(path, opts):
 
 
 def _rpc_open(params):
-    global DB
+    global DB, _DIRTY, _IDB_HOOKS, _HEXRAYS_HOOKS
     if DB is not None:
         raise RuntimeError("a database is already open in this worker")
     path = params["path"]
     new = bool(params.get("new"))
-    fallback = os.path.join(os.path.dirname(os.path.abspath(path)), os.path.basename(path) + ".i64")
-    fallback_opts = IdaCommandOptions(auto_analysis=True, new_database=True, output_database=fallback)
     if new:
-        try:
-            db = _open_db(path, IdaCommandOptions(auto_analysis=True, new_database=True))
-        except Exception:
-            traceback.print_exc()
-            db = _open_db(path, fallback_opts)
-        else:
-            idb = _idb_path() or ""
-            expected_dir = os.path.dirname(os.path.abspath(path))
-            if not (idb.lower().endswith(".i64") and os.path.dirname(os.path.abspath(idb)) == expected_dir):
-                db.close(save=False)
-                db = _open_db(path, fallback_opts)
+        db = _open_db(path, IdaCommandOptions(auto_analysis=True, new_database=True, output_database=path + ".i64"))
     else:
         db = _open_db(path, IdaCommandOptions(auto_analysis=True, new_database=False))
     DB = db
     ida_auto.auto_wait()
     _arm_sigint()
-    ida_hexrays.init_hexrays_plugin()
+    _IDB_HOOKS = _DirtyIdbHooks()
+    _IDB_HOOKS.hook()
+    if ida_hexrays.init_hexrays_plugin():
+        _HEXRAYS_HOOKS = _DirtyHexraysHooks()
+        _HEXRAYS_HOOKS.hook()
     _arm_sigint()
+    # A freshly analyzed database has never been written; the first idle autosave persists it.
+    _DIRTY = new
     NS.clear()
     NS.update({"__name__": "__ida_exec__", "__builtins__": __builtins__, "db": DB, "ida_domain": ida_domain})
     NS.update({m.__name__: m for m in _NS_MODULES})
@@ -573,10 +625,12 @@ def _rpc_make_function(params):
 
 
 def _rpc_save(params):
+    global _DIRTY
     _db()
     p = _idb_path()
     if not ida_loader.save_database(p, 0):
         raise RuntimeError("save failed")
+    _DIRTY = False
     return {"idb": p}
 
 
@@ -658,7 +712,7 @@ def _handle(line):
     except BaseException as e:
         _send({"id": req_id, "ok": False, "error": _error(e)})
         return
-    _send({"id": req_id, "ok": True, "result": result})
+    _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
 
 
 def main():

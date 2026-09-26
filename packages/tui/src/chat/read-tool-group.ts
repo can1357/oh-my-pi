@@ -138,8 +138,6 @@ const READ_STATUS_RANK: Record<ReadEntry["status"], number> = {
 	error: 3,
 };
 
-const URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
-
 function getDisplayReadTargets(details: ReadToolDetails | undefined): ReadDisplayPathSpec[] | undefined {
 	if (!Array.isArray(details?.displayReadTargets)) return undefined;
 	const links = Array.isArray(details.displayReadTargetLinks) ? details.displayReadTargetLinks : undefined;
@@ -238,7 +236,7 @@ function commaContinuesLineRangeSelector(input: string, partStart: number, comma
 
 function splitReadDisplayPathSpecs(rawPath: string): string[] {
 	const normalized = rawPath.trim();
-	if (!normalized || URL_LIKE_RE.test(normalized)) return [rawPath];
+	if (!normalized || splitUrlScheme(normalized)) return [rawPath];
 
 	const parts: string[] = [];
 	let braceDepth = 0;

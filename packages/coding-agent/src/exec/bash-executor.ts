@@ -5,7 +5,13 @@
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import {
+	type MinimizerOptions,
+	PtySession,
+	Shell,
+	type ShellFilesystem,
+	type ShellRunResult,
+} from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -39,6 +45,11 @@ export interface BashExecutorOptions {
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
 	pty?: BashPtyOptions;
+	/**
+	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
+	 * `cwd` included). External shells and processes never see it.
+	 */
+	filesystem?: ShellFilesystem;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -85,6 +96,9 @@ export interface BashResult {
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
+const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -492,17 +506,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
+	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
+	if (virtualCwd && (usePty || !options?.filesystem)) {
+		throw new Error(`Working directory ${commandCwd} needs the embedded shell with an injected filesystem`);
+	}
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools
 	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
 	// signal + timeout so an aborted / short-timeout call can't hang on a cold
 	// `.envrc` load before the abort listener is installed. The helper applies
-	// the configured shell `prefix` after any `unset -v` it prepends.
+	// the configured shell `prefix` after any `unset -v` it prepends. A URL cwd
+	// has no `.envrc` on the host.
 	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
 		callerEnv: options?.env,
 		signal: options?.signal,
 		timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
 		callerTimeoutMs: options?.timeout,
-		direnvSetting: cfgBashDirenv.get(settings),
+		direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
 		commandPrefix: prefix,
 	});
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
@@ -658,6 +677,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				env: commandEnv,
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
+				filesystem: options?.filesystem,
 			},
 			(err, chunk) => {
 				if (!err) {

@@ -18,7 +18,7 @@
  * - `hasContextTokenUsage(usage)`: the report must carry usable context numbers.
  */
 
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
 import type { MessageCountOptions, Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import { calculateContextTokens, hasContextTokenUsage } from "./compaction";
@@ -48,6 +48,31 @@ export function isTranscriptUsageAnchor(message: AgentMessage): message is Assis
 }
 
 /**
+ * Newest `prunedAt` in `messages`, or `-Infinity` when nothing was pruned.
+ *
+ * A pruned tool result was rewritten in place, so every usage report made at
+ * or before this time still counts the removed bytes.
+ */
+function newestPrunedAt(messages: readonly AgentMessage[]): number {
+	let rewriteAt = Number.NEGATIVE_INFINITY;
+	for (const message of messages) {
+		if (message.role === "toolResult" && message.prunedAt !== undefined) {
+			rewriteAt = Math.max(rewriteAt, message.prunedAt);
+		}
+	}
+	return rewriteAt;
+}
+
+/** Options for {@link findTranscriptUsageAnchor}. */
+export interface TranscriptUsageAnchorOptions {
+	/**
+	 * Also treat usage reported at or before the newest `prunedAt` as stale,
+	 * the same rule {@link findRequestUsageAnchor} applies to request contexts.
+	 */
+	skipPrunedAnchors?: boolean;
+}
+
+/**
  * Newest assistant turn in `messages[fromIndex..]` whose usage can anchor the
  * transcript, or `undefined` when none qualifies (fresh context, or every
  * recent turn aborted/errored).
@@ -58,13 +83,45 @@ export function isTranscriptUsageAnchor(message: AgentMessage): message is Assis
 export function findTranscriptUsageAnchor(
 	messages: readonly AgentMessage[],
 	fromIndex = 0,
+	options?: TranscriptUsageAnchorOptions,
 ): TranscriptUsageAnchor | undefined {
+	const rewriteAt = options?.skipPrunedAnchors === true ? newestPrunedAt(messages) : Number.NEGATIVE_INFINITY;
 	for (let index = messages.length - 1; index >= fromIndex; index--) {
 		const message = messages[index];
-		if (!isTranscriptUsageAnchor(message)) continue;
+		if (!isTranscriptUsageAnchor(message) || message.timestamp <= rewriteAt) continue;
 		return { index, message, tokens: calculateContextTokens(message.usage) };
 	}
 	return undefined;
+}
+
+/**
+ * Newest assistant turn in a provider request's `messages` whose usage still
+ * describes the prefix it sits on, or `undefined` when none does.
+ *
+ * Request contexts carry no compaction index, so staleness is read from the
+ * rewrite markers themselves: a compaction/branch summary or pruned tool result
+ * (`prunedAt`) replaced text that every report made at or before the rewrite
+ * already counted. A summary's rewrite time is its `timestamp` (commit time);
+ * its `historyRewriteAt` may be predated before a natively replayed retained
+ * tail so that tail's bound thinking survives, but the tail's usage still
+ * counted the summarized prefix.
+ */
+export function findRequestUsageAnchor(messages: readonly Message[]): TranscriptUsageAnchor | undefined {
+	let rewriteAt = Number.NEGATIVE_INFINITY;
+	let anchorIndex = -1;
+	let anchor: AssistantMessage | undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message.role === "user" && message.historyRewriteAt !== undefined) {
+			rewriteAt = Math.max(rewriteAt, message.historyRewriteAt, message.timestamp);
+		} else if (message.role === "toolResult" && message.prunedAt !== undefined) {
+			rewriteAt = Math.max(rewriteAt, message.prunedAt);
+		} else if (isTranscriptUsageAnchor(message) && message.timestamp > rewriteAt) {
+			anchorIndex = index;
+			anchor = message;
+		}
+	}
+	return anchor && { index: anchorIndex, message: anchor, tokens: calculateContextTokens(anchor.usage) };
 }
 
 /** Options for {@link estimateTranscriptTokens}. */
@@ -75,6 +132,8 @@ export interface TranscriptTokenOptions {
 	 * accounting is governed separately by {@link countFromIndex}.
 	 */
 	anchorFromIndex?: number;
+	/** Forwarded to {@link findTranscriptUsageAnchor}. */
+	skipPrunedAnchors?: boolean;
 	/**
 	 * First message whose content is counted locally when no anchor is found.
 	 * Defaults to 0 (count the whole transcript), which is what a floor
@@ -102,7 +161,9 @@ export function estimateTranscriptTokens(
 ): number {
 	const estimateOptions: MessageCountOptions | undefined =
 		options?.excludeEncryptedReasoning === true ? { excludeEncryptedReasoning: true } : undefined;
-	const anchor = findTranscriptUsageAnchor(messages, options?.anchorFromIndex ?? 0);
+	const anchor = findTranscriptUsageAnchor(messages, options?.anchorFromIndex ?? 0, {
+		skipPrunedAnchors: options?.skipPrunedAnchors,
+	});
 	let total = anchor?.tokens ?? 0;
 	for (let index = anchor ? anchor.index + 1 : (options?.countFromIndex ?? 0); index < messages.length; index++) {
 		total += tokenizer.countMessage(messages[index], estimateOptions);

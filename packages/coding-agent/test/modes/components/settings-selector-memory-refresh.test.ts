@@ -5,6 +5,7 @@ import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-se
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { translateUi, uiLanguage } from "@oh-my-pi/pi-tui/ui-locale";
 
 import { cfgHindsightApiToken } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
@@ -70,6 +71,8 @@ function focusMemoryTab(comp: SettingsSelectorComponent): void {
 }
 
 describe("SettingsSelectorComponent memory tab", () => {
+	const searchCountPattern = uiLanguage() === "ja" ? /\d+件/ : /\d+ matches?/;
+
 	it("reveals condition-gated Hindsight rows the moment memory.backend changes via the submenu", () => {
 		cfgMemoryBackend.set(settings, "off");
 		const comp = createSelector();
@@ -77,9 +80,9 @@ describe("SettingsSelectorComponent memory tab", () => {
 		// Width 70 keeps the flat single-column layout (the wide split layout
 		// shows only the active section's rows, covered by the sidebar test).
 		const before = comp.render(70).join("\n");
-		expect(before).toContain("Memory Backend");
-		expect(before).not.toContain("Hindsight API URL");
-		expect(before).not.toContain("Hindsight API Token");
+		expect(before).toContain(translateUi("Memory Backend"));
+		expect(before).not.toContain(translateUi("Hindsight API URL"));
+		expect(before).not.toContain(translateUi("Hindsight API Token"));
 
 		// Memory Backend is the only visible row, so it's already selected at index 0.
 		// Enter opens the SelectSubmenu pre-positioned on "off"; navigate to "hindsight" (index 2) and confirm.
@@ -90,10 +93,10 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		expect(cfgMemoryBackend.get(settings)).toBe("hindsight");
 		const after = comp.render(70).join("\n");
-		expect(after).toContain("Memory Backend");
-		expect(after).toContain("Hindsight API URL");
-		expect(after).toContain("Hindsight API Token");
-		expect(after).toContain("Hindsight Auto Recall");
+		expect(after).toContain(translateUi("Memory Backend"));
+		expect(after).toContain(translateUi("Hindsight API URL"));
+		expect(after).toContain(translateUi("Hindsight API Token"));
+		expect(after).toContain(translateUi("Hindsight Auto Recall"));
 	});
 
 	it("saves a pasted Hindsight API token from its settings row", () => {
@@ -103,7 +106,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		for (const ch of "hindsight api token") comp.handleInput(ch);
 		const row = comp.render(120).join("\n");
-		expect(row).toContain("Hindsight API Token");
+		expect(row).toContain(translateUi("Hindsight API Token"));
 		expect(row).toContain("••••••••");
 		expect(row).not.toContain("saved-secret-token");
 
@@ -129,7 +132,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 		const comp = createSelector();
 		focusMemoryTab(comp);
 		// Width 70 keeps the flat layout so all sections' rows render inline.
-		expect(comp.render(70).join("\n")).toContain("Hindsight API URL");
+		expect(comp.render(70).join("\n")).toContain(translateUi("Hindsight API URL"));
 
 		// Open Memory Backend → SelectSubmenu pre-selects the current value
 		// ("hindsight" at index 2) → step up twice to reach "off" → Enter confirms.
@@ -140,9 +143,9 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		expect(cfgMemoryBackend.get(settings)).toBe("off");
 		const after = comp.render(70).join("\n");
-		expect(after).toContain("Memory Backend");
-		expect(after).not.toContain("Hindsight API URL");
-		expect(after).not.toContain("Hindsight Auto Recall");
+		expect(after).toContain(translateUi("Memory Backend"));
+		expect(after).not.toContain(translateUi("Hindsight API URL"));
+		expect(after).not.toContain(translateUi("Hindsight Auto Recall"));
 	});
 
 	it("clears the global settings search on Escape before closing the selector", () => {
@@ -159,14 +162,14 @@ describe("SettingsSelectorComponent memory tab", () => {
 			comp
 				.render(120)
 				.map(strip)
-				.find(line => /\d+ match/.test(line)) ?? "";
+				.find(line => searchCountPattern.test(line)) ?? "";
 		expect(banner).toContain(" b ");
-		expect(searching).toMatch(/\d+ match/);
+		expect(searching).toMatch(searchCountPattern);
 
 		// First Escape exits search mode without closing the panel.
 		comp.handleInput("\x1b");
 		expect(cancelCount).toBe(0);
-		expect(comp.render(120).join("\n")).not.toContain("matches");
+		expect(comp.render(120).join("\n")).not.toMatch(searchCountPattern);
 
 		comp.handleInput("\x1b");
 		expect(cancelCount).toBe(1);
@@ -178,12 +181,12 @@ describe("SettingsSelectorComponent memory tab", () => {
 
 		const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
 		const rendered = comp.render(120).map(strip).join("\n");
-		const providersIndex = rendered.indexOf("Providers");
-		const appearanceIndex = rendered.indexOf("Appearance");
+		const providersIndex = rendered.indexOf(translateUi("Providers"));
+		const appearanceIndex = rendered.indexOf(translateUi("Appearance"));
 
-		expect(rendered).toContain("Fetch Provider");
-		expect(rendered).not.toContain("Include Model in Prompt");
-		expect(rendered).not.toContain("Service Tier");
+		expect(rendered).toContain(translateUi("Fetch Provider"));
+		expect(rendered).not.toContain(translateUi("Include Model in Prompt"));
+		expect(rendered).not.toContain(translateUi("Service Tier"));
 		expect(providersIndex).toBeGreaterThanOrEqual(0);
 		if (appearanceIndex >= 0) {
 			expect(appearanceIndex).toBeGreaterThan(providersIndex);
@@ -197,7 +200,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 			comp
 				.render(120)
 				.map(strip)
-				.find(line => /\d+ match/.test(line)) ?? "";
+				.find(line => searchCountPattern.test(line)) ?? "";
 
 		// alt+backspace deletes the trailing word from the query.
 		for (const ch of "image provider") comp.handleInput(ch);
@@ -222,14 +225,14 @@ describe("SettingsSelectorComponent memory tab", () => {
 		focusMemoryTab(comp);
 
 		comp.handleInput("\n");
-		expect(comp.render(120).join("\n")).toContain("Esc to go back");
+		expect(comp.render(120).join("\n")).toContain(translateUi("  Enter to select · Esc to go back").trim());
 
 		comp.handleInput("\x1b");
 		const afterBack = comp.render(120).join("\n");
 		expect(cancelCount).toBe(0);
-		expect(afterBack).toContain("Memory Backend");
-		expect(afterBack).toContain("Esc to close");
-		expect(afterBack).not.toContain("Esc to go back");
+		expect(afterBack).toContain(translateUi("Memory Backend"));
+		expect(afterBack).toContain(translateUi("Esc to close"));
+		expect(afterBack).not.toContain(translateUi("  Enter to select · Esc to go back").trim());
 
 		comp.handleInput("\x1b");
 		expect(cancelCount).toBe(1);

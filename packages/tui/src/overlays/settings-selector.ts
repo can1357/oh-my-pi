@@ -1118,9 +1118,10 @@ export class SettingsSelectorComponent implements Component {
 			this.#formatTextInputEditValue(def.path, this.#context.settings.get(def.path)),
 			def.secret,
 			value => {
-				// Empty string clears the setting; undefined-typed string settings
-				// store "" which the browser.ts expandPath ignores (no-op fallback).
-				this.#setSettingValue(def.path, value);
+				// An empty field removes the persisted value, so the default (or an
+				// environment fallback) applies again instead of a pinned "".
+				if (value === "") this.#context.settings.unset(def.path);
+				else this.#setSettingValue(def.path, value);
 				this.#callbacks.onChange(def.path, this.#context.settings.get(def.path));
 				wrappedDone(this.#formatTextInputValue(def, this.#context.settings.get(def.path)));
 			},

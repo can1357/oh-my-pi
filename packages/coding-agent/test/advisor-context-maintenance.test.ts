@@ -1027,8 +1027,8 @@ describe("AgentSession advisor context maintenance", () => {
 		// the next request keeps the tail's bound thinking and cached prefix.
 		const retainedTail = advisor.state.messages[1];
 		if (!retainedTail) throw new Error("Expected retained advisor tail");
-		expect(summaryMessage.timestamp).toBeLessThan(retainedTail.timestamp);
-		const firstSummaryTimestamp = summaryMessage.timestamp;
+		expect(summaryMessage.historyRewriteAt).toBeLessThan(retainedTail.timestamp);
+		const firstRewriteMarker = summaryMessage.historyRewriteAt;
 		// ...and the next maintenance round feeds it back into preparation.
 		seedOverflow(Date.now());
 		await session.prompt("second update");
@@ -1042,6 +1042,28 @@ describe("AgentSession advisor context maintenance", () => {
 		const [secondSummary] = advisor.state.messages;
 		expect(secondSummary?.role).toBe("compactionSummary");
 		if (secondSummary?.role !== "compactionSummary") throw new Error("Expected second advisor summary");
-		expect(secondSummary.timestamp).toBe(firstSummaryTimestamp);
+		expect(secondSummary.historyRewriteAt).toBe(firstRewriteMarker);
+	});
+
+	it("ignores usage reported before the newest prune and anchors again on a later report", () => {
+		const { advisor, advisorMock } = createHarness();
+		const anchored = CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS;
+		const prunedAt = Date.now() - 500;
+		const pruned = {
+			role: "toolResult",
+			toolCallId: "advisor-read-pruned",
+			toolName: "read",
+			content: [{ type: "text", text: "[Stale result elided - 4000 tokens]" }],
+			isError: false,
+			timestamp: Date.now() - 2_000,
+			prunedAt,
+		} as AgentMessage;
+		// This report was made before the rewrite, so it still counts the removed bytes.
+		advisor.state.messages.push(pruned, usageAnchor(advisorMock, prunedAt - 500));
+		expect(session.getAdvisorStats().contextTokens).toBeLessThan(anchored);
+
+		// A report made after the rewrite describes the context as it is now.
+		advisor.state.messages.push(usageAnchor(advisorMock, prunedAt + 500));
+		expect(session.getAdvisorStats().contextTokens).toBeGreaterThanOrEqual(anchored);
 	});
 });
