@@ -65,6 +65,15 @@ impl From<std::fs::Metadata> for Metadata {
 	}
 }
 
+impl Metadata {
+	/// Metadata of an open host file, keeping the handle identity that a
+	/// Windows path stat cannot provide, so [`Metadata::same_file`] can
+	/// compare it against path-side metadata.
+	pub fn from_file(file: &std::fs::File) -> io::Result<Self> {
+		crate::native::file_metadata(file)
+	}
+}
+
 fn split_time(time: SystemTime) -> (i64, i64) {
 	match time.duration_since(UNIX_EPOCH) {
 		Ok(after) => (after.as_secs() as i64, i64::from(after.subsec_nanos())),
@@ -311,6 +320,7 @@ impl Metadata {
 			#[cfg(windows)]
 			Repr::Native(native) => native
 				.handle
+				.filter(|handle| handle.file_index != 0)
 				.map(|handle| FileId::native(handle.volume_serial, handle.file_index)),
 			#[cfg(not(any(unix, windows)))]
 			Repr::Native(_) => None,
