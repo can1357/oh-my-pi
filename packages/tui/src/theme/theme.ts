@@ -302,3 +302,4 @@ export class ResolvedTheme implements Theme {
 export function createTheme(json: ThemeJson, options: ThemeOptions = {}): ResolvedTheme {
 	return new ResolvedTheme(json, options);
 }
+
