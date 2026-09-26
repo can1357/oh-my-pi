@@ -14,8 +14,9 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
-import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
 import { fuzzyFilter } from "../fuzzy";
@@ -188,6 +189,8 @@ type StripState =
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
+const MODEL_KINDS = ["chat", "tiny", "image", "tts", "stt", "search", "judge"] as const;
+const modelKind = (model: { kind?: ModelKind } | object): ModelKind => (model as { kind?: ModelKind }).kind ?? "chat";
 const MODEL_KIND_TABS: ReadonlyArray<"all" | ModelKind> = ["all", ...MODEL_KINDS];
 const ROLE_TABS = ["all", "chat", "kind"] as const;
 type RoleTab = (typeof ROLE_TABS)[number];
@@ -1152,22 +1155,28 @@ export class ModelHubComponent implements Component {
 		  }
 		| undefined {
 		const trimmed = raw.trim();
-		const parse = (pattern: string) =>
-			parseModelString(pattern, {
+		const parse = (pattern: string) => {
+			const separator = pattern.indexOf("/");
+			if (separator > 0) {
+				const exact = this.#registry.find(pattern.slice(0, separator), pattern.slice(separator + 1));
+				if (exact) return { provider: exact.provider, id: exact.id };
+			}
+			return parseModelString(pattern, {
 				allowMaxSuffix: true,
 				allowAutoAlias: true,
-				isLiteralModelId: (provider, id) => this.#findFallbackModel(provider, id) !== undefined,
+				isLiteralModelId: (provider, id) => this.#registry.find(provider, id) !== undefined,
 			});
+		};
 		const literal = parse(trimmed);
-		if (literal && this.#findFallbackModel(literal.provider, literal.id)) return { ...literal, upstream: undefined };
+		if (literal && this.#registry.find(literal.provider, literal.id)) return { ...literal, upstream: undefined };
 		const routing = splitUpstreamRouting(trimmed);
-		if (!routing) {
-			if (!literal) return undefined;
-			return { ...literal, upstream: undefined };
-		}
+		if (!routing) return literal ? { ...literal, upstream: undefined } : undefined;
 		const parsed = parse(routing.base.trim());
 		if (!parsed) return undefined;
-		return { ...parsed, upstream: routing.upstream };
+		const model = this.#registry.find(parsed.provider, parsed.id);
+		return model && (modelMatchesHost(model, "openrouter") || modelMatchesHost(model, "vercelAIGateway"))
+			? { ...parsed, upstream: routing.upstream }
+			: undefined;
 	}
 
 	/**
@@ -1235,9 +1244,16 @@ export class ModelHubComponent implements Component {
 		const base = `${resolved.item.provider}/${resolved.item.id}`;
 		const routed = resolved.upstream ? `${base}@${resolved.upstream}` : base;
 		const next = formatModelSelectorValue(routed, level);
-		chain[index] = next;
-		for (let i = chain.length - 1; i >= 0; i--) {
-			if (i !== index && chain[i] === next) chain.splice(i, 1);
+		const normalizedNext = next;
+		const primaryRaw = role.includes("/") ? role : this.#settings.getModelRole(role);
+		const normalizedPrimary = primaryRaw;
+		if (role !== "default" && normalizedPrimary === normalizedNext) {
+			chain.splice(index, 1);
+		} else {
+			chain[index] = next;
+			for (let i = chain.length - 1; i >= 0; i--) {
+				if (i !== index && chain[i] === normalizedNext) chain.splice(i, 1);
+			}
 		}
 		this.#setFallbackChain(role, chain);
 		const rowIndex = this.#rolesRows.findIndex(
@@ -1245,7 +1261,6 @@ export class ModelHubComponent implements Component {
 		);
 		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
-
 	#closeStrip(): void {
 		const strip = this.#strip;
 		this.#strip = null;
@@ -1819,6 +1834,10 @@ export class ModelHubComponent implements Component {
 			this.#openRoleNameStrip();
 			return;
 		}
+		if (printable === "t" && row?.kind === "fallback") {
+			this.#openFallbackThinkingStrip(row);
+			return;
+		}
 		if (printable === "t") {
 			const assignment = role ? this.#roles[role] : undefined;
 			if (role && assignment) {
@@ -2304,7 +2323,7 @@ export class ModelHubComponent implements Component {
 				// inherit and unknown models have no ladder to offer, so the
 				// action would be inert there.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
-				const thinking = editable ? " · t thinking" : "";
+				const thinking = editable ? " · t thinking" : " · thinking n/a";
 				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
 			}
 			if (row?.kind === "chainKey") {

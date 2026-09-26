@@ -1187,6 +1187,111 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).not.toContain("↳ test/model-a");
 		});
 
+		test("edits thinking on only the selected fallback row", () => {
+			const model = getBundledModel("openai", "gpt-5.6");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.6");
+			const settings = Settings.isolated({
+				modelRoles: { default: "openai/gpt-5.6:high" },
+				"retry.fallbackChains": {
+					default: ["openai/gpt-5.6:low", "openai/gpt-5.6:high"],
+					"openai/*": ["openai/gpt-5.6:off"],
+				},
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+			enterRolesView(hub);
+			hub.handleInput(DOWN);
+			hub.handleInput("t");
+			expect(footerLine(hub.render(220))).toContain("low");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [
+				"openai/gpt-5.6:medium",
+				"openai/gpt-5.6:high",
+			]);
+			expect(onFallbackChainChange).not.toHaveBeenCalledWith("openai/*", expect.anything());
+			expect(onAssign).not.toHaveBeenCalled();
+		});
+
+		test("preserves routed fallback identity when changing Off", () => {
+			const model = makeModel("openrouter", "z-ai/glm-5.2");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["openrouter/z-ai/glm-5.2@cerebras"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+			enterRolesView(hub);
+			hub.handleInput(DOWN);
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["openrouter/z-ai/glm-5.2@cerebras:off"]);
+		});
+
+		test("does not expose thinking for non-aggregator upstream routes", () => {
+			const model = makeModel("anthropic", "claude-sonnet-4-5");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["anthropic/claude-sonnet-4-5@cerebras"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+			enterRolesView(hub);
+			hub.handleInput(DOWN);
+			expect(footerLine(hub.render(220))).toContain("thinking n/a");
+			hub.handleInput("t");
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+
+		test("keeps a shared default primary match when editing its fallback", () => {
+			const model = getBundledModel("openai", "gpt-5.6");
+			if (!model) throw new Error("Expected bundled model openai/gpt-5.6");
+			const settings = Settings.isolated({
+				modelRoles: { default: "openai/gpt-5.6:high" },
+				"retry.fallbackChains": { default: ["openai/gpt-5.6:low"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
+			enterRolesView(hub);
+			hub.handleInput(DOWN);
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["openai/gpt-5.6:high"]);
+		});
+
+		test("removes a role-specific fallback when it becomes that role's primary", () => {
+			const model = getBundledModel("openai", "gpt-5.6");
+			const other = getBundledModel("openai", "gpt-5.5");
+			if (!model || !other) throw new Error("Expected bundled OpenAI models");
+			const settings = Settings.isolated({
+				modelRoles: { plan: "openai/gpt-5.6:high" },
+				"retry.fallbackChains": { plan: ["openai/gpt-5.6:low", "openai/gpt-5.5"] },
+			});
+			const { hub, onFallbackChainChange } = createHub({ models: [model, other], scoped: true, settings });
+			enterRolesView(hub);
+			for (let i = 0; i < 5; i++) hub.handleInput(DOWN);
+			hub.handleInput("t");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\x1b[C");
+			hub.handleInput("\n");
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("plan", ["openai/gpt-5.5"]);
+		});
+
+		test.each(["test/*", "test/missing"])(
+			"explains unavailable thinking for an unresolved fallback selector (%s)",
+			selector => {
+				const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
+				const { hub, onFallbackChainChange } = createHub({
+					models: [makeModel("test", "known")],
+					scoped: true,
+					settings,
+				});
+				enterRolesView(hub);
+				hub.handleInput(DOWN);
+				expect(footerLine(hub.render(220))).toContain("thinking n/a");
+				expect(footerLine(hub.render(220))).not.toContain("t thinking");
+				hub.handleInput("t");
+				expect(footerLine(hub.render(220))).toContain("thinking n/a");
+				expect(onFallbackChainChange).not.toHaveBeenCalled();
+			},
+		);
 		test("t on a fallback entry sets an explicit effort suffix", () => {
 			const model = getBundledModel("openai", "gpt-5.5");
 			if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
@@ -1228,8 +1333,8 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).not.toContain(`${selector}:off`);
 		});
 
-		test("t on a routed fallback entry preserves @upstream when setting effort", () => {
-			const model = makeModel("openrouter", "z-ai/glm-4.7");
+		test.each(["z-ai/glm-4.7", "acme/router:high"])("t preserves routed fallback identity %s", id => {
+			const model = makeModel("openrouter", id);
 			const routed = `${model.provider}/${model.id}@fireworks`;
 			const settings = Settings.isolated({ "retry.fallbackChains": { default: [routed] } });
 			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
@@ -1245,8 +1350,8 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(220))).toContain(`↳ ${routed}:off`);
 		});
 
-		test("t on a routed+suffixed entry clears back to the bare route", () => {
-			const model = makeModel("openrouter", "z-ai/glm-4.7");
+		test.each(["z-ai/glm-4.7", "acme/router:high"])("t clears effort without changing routed identity %s", id => {
+			const model = makeModel("openrouter", id);
 			const routed = `${model.provider}/${model.id}@fireworks`;
 			const settings = Settings.isolated({ "retry.fallbackChains": { default: [`${routed}:off`] } });
 			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
@@ -1275,8 +1380,8 @@ describe("ModelHub", () => {
 			expect(footerLine(hub.render(220))).not.toContain("inherit");
 		});
 
-		test("t on a literal @-suffixed id does not strip it as routing", () => {
-			const model = makeModel("test", "model@default");
+		test.each(["model@default", "nanogpt/coding-router:high"])("t preserves literal model ID %s", id => {
+			const model = makeModel("test", id);
 			const selector = `${model.provider}/${model.id}`;
 			const settings = Settings.isolated({ "retry.fallbackChains": { default: [selector] } });
 			const { hub, onFallbackChainChange } = createHub({ models: [model], scoped: true, settings });
