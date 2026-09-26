@@ -6,6 +6,11 @@
 
 - Added `detectToolCallAnomaly(message, toolResults)` and `createToolCallAuditEvent()` in `pi-ai`: pairs each emitted tool call with its result and reports a `tool_failed` (empty real result) or `never_run` (synthetic / no paired result) anomaly, with a structured `ToolCallAuditEvent` for logging or recovery.
 
+### Fixed
+
+- Fixed `detectToolCallAnomaly` misreporting tool results that contain only image content as `tool_failed`: a `ImageContent` block now counts as substantive output, while a genuinely empty text-only success result is still flagged.
+- Fixed calls that share a tool call `id` within a turn being cross-paired with one result: calls now pair FIFO with their matching results (matching the replay sanitizer), so each occurrence is audited against its own result.
+- Fixed tool calls stripped from provider requests because their `id`/`name` were empty or whitespace (`sanitizeMalformedToolCalls`) going unreported: the detector now reports them as a `malformed` anomaly (`sanitized: missing_id`, `sanitized: missing_name`, `sanitized: missing_id_and_name`) describing what the model actually sent, checked before any result pairing.
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

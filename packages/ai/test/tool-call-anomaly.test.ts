@@ -39,7 +39,7 @@ function toolCall(id: string, name: string, cursorExecResolved = false): ToolCal
 		id,
 		name,
 		arguments: {},
-	} as ToolCall & CursorExecResolvedCarrier;
+	};
 	if (cursorExecResolved) {
 		call[kCursorExecResolved] = true;
 	}
@@ -55,7 +55,7 @@ function realResult(callId: string, toolName: string, text: string | null, isErr
 		content: text !== null ? [{ type: "text", text }] : [],
 		isError,
 		timestamp: Date.now(),
-	} as ToolResultMessage;
+	};
 }
 
 /** A synthetic placeholder result (as emitted when a call was never executed). */
@@ -65,8 +65,8 @@ function syntheticResult(
 	source:
 		| "assistant_stop_aborted"
 		| "assistant_stop_error"
-		| "assistant_stop_skipped"
 		| "assistant_stop_length"
+		| "assistant_stop_skipped"
 		| "interrupt_skipped",
 ): ToolResultMessage {
 	return {
@@ -77,7 +77,7 @@ function syntheticResult(
 		isError: false,
 		details: { __synthetic: true, source },
 		timestamp: Date.now(),
-	} as ToolResultMessage;
+	};
 }
 
 describe("detectToolCallAnomaly", () => {
@@ -182,11 +182,84 @@ describe("detectToolCallAnomaly", () => {
 	it("ignores Cursor-exec resolved tool calls (already executed server-side)", () => {
 		const call = toolCall("call_exec", "bash", true);
 		const message = assistant([call]);
-		expect(isCursorExecResolved(call as CursorExecResolvedCarrier)).toBe(true);
+		expect(isCursorExecResolved(call)).toBe(true);
 		// Even though the result is empty, the call is Cursor-exec (already ran) so it
 		// must not be flagged.
 		const results = [realResult("call_exec", "bash", "")];
 		expect(detectToolCallAnomaly(message, results)).toBeUndefined();
+	});
+	// A model emitting a malformed call (empty name, nonempty local error
+	// result) still gets audited as `malformed` — it was stripped from every
+	// provider request, so the model never saw the pair.
+	it("flags malformed for an empty-name call even when a local error result exists", () => {
+		const message = assistant([toolCall("call_1", "")]);
+		const results = [realResult("call_1", "", "Invalid call: empty tool name", true)];
+		const anomaly = detectToolCallAnomaly(message, results);
+		expect(anomaly).toBeDefined();
+		expect(anomaly!.details).toHaveLength(1);
+		expect(anomaly!.details[0].callId).toBe("call_1");
+		expect(anomaly!.details[0].toolName).toBe("");
+		expect(anomaly!.details[0].kind).toBe("malformed");
+		expect(anomaly!.details[0].reason).toBe("sanitized: missing_name");
+	});
+
+	// Same, with an empty id.
+	it("flags malformed for an empty-id call even when a local result exists", () => {
+		const message = assistant([toolCall("", "bash")]);
+		const results = [realResult("", "bash", "some output", false)];
+		const anomaly = detectToolCallAnomaly(message, results);
+		expect(anomaly!.details).toHaveLength(1);
+		expect(anomaly!.details[0].kind).toBe("malformed");
+		expect(anomaly!.details[0].reason).toBe("sanitized: missing_id");
+	});
+
+	// Both fields malformed collapse to one reason.
+	it("flags malformed with combined reason when both id and name are empty", () => {
+		const message = assistant([toolCall("  ", "   ")]);
+		const results = [realResult("  ", "   ", "noise")];
+		const anomaly = detectToolCallAnomaly(message, results);
+		expect(anomaly!.details[0].kind).toBe("malformed");
+		expect(anomaly!.details[0].reason).toBe("sanitized: missing_id_and_name");
+	});
+
+	// Robomp: an `ImageContent` block is substantive — the model receives it.
+	it("does NOT flag a real image-only result as tool_failed", () => {
+		const message = assistant([toolCall("call_1", "read")]);
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "read",
+			content: [{ type: "image" as const, data: "iVBORw0KGgoAAA=", mimeType: "image/png" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		expect(detectToolCallAnomaly(message, [result])).toBeUndefined();
+	});
+
+	// Robomp: duplicate ids pair by occurrence (FIFO), matching
+	// sanitizeMalformedToolCalls dedup — the old last-wins Map cross-paired
+	// every same-id call onto one result.
+	it("pairs duplicate call ids by occurrence, not last-wins", () => {
+		const message = assistant([
+			toolCall("dup_1", "read"),
+			toolCall("dup_1", "read"),
+			toolCall("dup_1", "read"),
+			toolCall("dup_1", "read"),
+		]);
+		const results = [
+			realResult("dup_1", "read", "healthy output"),
+			realResult("dup_1", "read", "healthy output"),
+			realResult("dup_1", "read", ""),
+			syntheticResult("dup_1", "read", "assistant_stop_aborted"),
+		];
+		const anomaly = detectToolCallAnomaly(message, results);
+		expect(anomaly).toBeDefined();
+		// Only the two occurrences without substantive results are flagged,
+		// each paired with its own result.
+		expect(anomaly!.kinds).toEqual(["tool_failed", "never_run"]);
+		expect(anomaly!.details).toHaveLength(2);
+		expect(anomaly!.details[0].kind).toBe("tool_failed");
+		expect(anomaly!.details[1].kind).toBe("never_run");
 	});
 });
 

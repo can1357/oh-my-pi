@@ -162,8 +162,11 @@ function isMalformedToolCallName(name: string | undefined): boolean {
 function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
-
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
+/** Model-facing malformed predicate, shared with the tool-call anomaly
+ * detector: a `toolCall` with an empty/whitespace `id` or `name` is stripped
+ * from every provider request (`sanitizeMalformedToolCalls` below), so the
+ * model never receives the call or its paired result. */
+export function isMalformedToolCall(block: { id: string; name: string }): boolean {
 	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
 }
 
