@@ -16,7 +16,10 @@ export interface ResolvedSpawnPolicy {
 }
 
 /** Resolves spawn frontmatter into the default and prompt/error surfaces. */
-export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undefined): ResolvedSpawnPolicy {
+export function resolveSpawnPolicy(
+	parentSpawns: string | boolean | null | undefined,
+	defaultAgent: string = DEFAULT_SPAWN_AGENT,
+): ResolvedSpawnPolicy {
 	let normalized: string;
 	if (parentSpawns === false) {
 		normalized = "";
@@ -29,7 +32,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 	if (normalized === "*") {
 		return {
 			enabled: true,
-			defaultAgent: DEFAULT_SPAWN_AGENT,
+			defaultAgent,
 			allowedAgents: null,
 			allowedErrorText: "*",
 		};
@@ -42,7 +45,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 	if (allowedAgents.length === 0) {
 		return {
 			enabled: false,
-			defaultAgent: DEFAULT_SPAWN_AGENT,
+			defaultAgent,
 			allowedAgents,
 			allowedErrorText: "none (spawns disabled for this agent)",
 		};
@@ -50,7 +53,7 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 
 	return {
 		enabled: true,
-		defaultAgent: allowedAgents[0] ?? DEFAULT_SPAWN_AGENT,
+		defaultAgent: allowedAgents[0] ?? defaultAgent,
 		allowedAgents,
 		allowedErrorText: allowedAgents.join(","),
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),
