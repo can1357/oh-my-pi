@@ -13,7 +13,7 @@ import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import { compileRuleCondition, type Rule } from "../capability/rule";
+import { type AstCondition, compileRuleCondition, type Rule, serializeAstConditions } from "../capability/rule";
 import type { TtsrSettings } from "./ttsr-settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
@@ -107,8 +107,8 @@ interface TtsrScope {
 interface TtsrEntry {
 	rule: Rule;
 	conditions: RegExp[];
-	/** ast-grep pattern strings; matched only against edit/write tool snapshots. */
-	astConditions: string[];
+	/** ast-grep patterns or structured rules; matched only against edit/write tool snapshots. */
+	astConditions: AstCondition[];
 	/** Judge question; set → conditions only prefilter completed output, never stream matches. */
 	question?: string;
 	scope: TtsrScope;
@@ -397,7 +397,7 @@ export class TtsrManager {
 		}
 
 		const conditions = this.#compileConditions(rule);
-		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
+		const astConditions = rule.astCondition ?? [];
 		const question = rule.question?.trim() || undefined;
 		if (conditions.length === 0 && astConditions.length === 0 && !question) {
 			return false;
@@ -542,10 +542,12 @@ export class TtsrManager {
 		return matches;
 	}
 
-	async #astConditionsMatch(patterns: string[], source: string, lang: string): Promise<boolean> {
+	async #astConditionsMatch(conditions: AstCondition[], source: string, lang: string): Promise<boolean> {
+		const { patterns, ruleConfigs } = serializeAstConditions(conditions);
 		try {
 			const result = await astMatch({
 				patterns,
+				ruleConfigs,
 				source,
 				lang,
 				strictness: AstMatchStrictness.Smart,
@@ -554,7 +556,7 @@ export class TtsrManager {
 			return result.totalMatches > 0;
 		} catch (error) {
 			logger.warn("TTSR ast match failed, treating as no match", {
-				patterns,
+				conditions,
 				lang,
 				error: error instanceof Error ? error.message : String(error),
 			});

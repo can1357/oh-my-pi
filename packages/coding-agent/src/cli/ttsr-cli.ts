@@ -21,8 +21,11 @@ import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import {
 	BUILTIN_DEFAULTS_PROVIDER_ID,
 	compileRuleCondition,
+	formatAstCondition,
 	MAIN_AGENT_RULE_NAME,
 	ruleAppliesToAgent,
+	serializeAstConditions,
+	type AstCondition,
 	type Rule,
 	ruleCapability,
 } from "../capability/rule";
@@ -91,9 +94,9 @@ interface RuleMatchDetail {
 	path: string;
 	sourceProvider?: string;
 	/** Conditions that matched the snippet. */
-	matched: { regex: string[]; ast: string[] };
+	matched: { regex: string[]; ast: AstCondition[] };
 	/** All conditions defined on the rule (for verbose display). */
-	defined: { regex: string[]; ast: string[] };
+	defined: { regex: string[]; ast: AstCondition[] };
 	skippedAst?: string;
 	/** Judged-rule question; the CLI never calls the judge, so it cannot trigger here. */
 	question?: string;
@@ -121,7 +124,7 @@ interface TestReport {
 const STDIN_MARKER = "-";
 /** Extensions treated as source files for default tool-context inference. */
 const SOURCE_FILE_EXT =
-	/^\.(ts|tsx|js|jsx|mjs|cjs|rs|py|go|java|kt|swift|c|cc|cpp|h|hpp|rb|php|lua|css|scss|html|json|ya?ml|toml|md|mdc|cs|razor|cshtml|fs|fsx|vb|sh|bash|sql|zig|dart|scala|ex|exs|proto|tf)$/i;
+	/^\.(ts|tsx|js|jsx|mjs|cjs|rs|py|jl|go|java|kt|swift|c|cc|cpp|h|hpp|rb|php|lua|css|scss|html|json|ya?ml|toml|md|mdc|cs|razor|cshtml|fs|fsx|vb|sh|bash|sql|zig|dart|scala|ex|exs|proto|tf)$/i;
 
 const BINARY_PROBE_BYTES = 8192;
 const DEFAULT_MAX_SCAN_BYTES = 5 * 1024 * 1024;
@@ -151,7 +154,7 @@ interface ScanRulePlan {
 	defaultToolScope: boolean;
 	scopes: ScanScopePlan[];
 	regexConditions: ScanRegexCondition[];
-	astConditions: string[];
+	astConditions: AstCondition[];
 	astPrefilters: RegExp[];
 	astRequiresFullScan: boolean;
 }
@@ -203,18 +206,20 @@ async function regexMatches(rule: Rule, snippet: string): Promise<string[]> {
 	return out;
 }
 
-async function astMatches(rule: Rule, snippet: string, lang: string): Promise<string[]> {
-	const out: string[] = [];
-	for (const pattern of rule.astCondition ?? []) {
+async function astMatches(rule: Rule, snippet: string, lang: string): Promise<AstCondition[]> {
+	const out: AstCondition[] = [];
+	for (const condition of rule.astCondition ?? []) {
+		const { patterns, ruleConfigs } = serializeAstConditions([condition]);
 		try {
 			const result = await astMatch({
-				patterns: [pattern],
+				patterns,
+				ruleConfigs,
 				source: snippet,
 				lang,
 				strictness: AstMatchStrictness.Smart,
 				limit: 1,
 			});
-			if (result.totalMatches > 0) out.push(pattern);
+			if (result.totalMatches > 0) out.push(condition);
 		} catch {
 			// Treat as no match (manager logs at runtime).
 		}
@@ -482,7 +487,7 @@ function renderRuleDetail(detail: RuleMatchDetail, hit: boolean): void {
 		condParts.push(`condition: ${regex.map(c => chalk.yellow(`/${c}/`)).join(", ")}`);
 	}
 	if (ast.length > 0) {
-		condParts.push(`astCondition: ${ast.map(c => chalk.magenta(c)).join(", ")}`);
+		condParts.push(`astCondition: ${ast.map(c => chalk.magenta(formatAstCondition(c))).join(", ")}`);
 	}
 	if ((detail.agents ?? []).length > 0) {
 		condParts.push(`agents: ${detail.agents!.join(", ")}`);
@@ -530,7 +535,9 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 	for (const rule of rules) {
 		const condParts: string[] = [];
 		if ((rule.condition ?? []).length > 0) condParts.push(`condition: ${rule.condition!.join(", ")}`);
-		if ((rule.astCondition ?? []).length > 0) condParts.push(`astCondition: ${rule.astCondition!.join(", ")}`);
+		if ((rule.astCondition ?? []).length > 0) {
+			condParts.push(`astCondition: ${rule.astCondition!.map(formatAstCondition).join(", ")}`);
+		}
 		if (rule.question) condParts.push(`question: ${rule.question}`);
 		if ((rule.scope ?? []).length > 0) condParts.push(`scope: ${rule.scope!.join(", ")}`);
 		if ((rule.globs ?? []).length > 0) condParts.push(`globs: ${rule.globs!.join(", ")}`);
@@ -647,12 +654,15 @@ function compileScanRulePlans(rules: Rule[]): ScanRulePlan[] {
 				// Same behavior as TtsrManager: invalid regex conditions are unusable.
 			}
 		}
-		const astConditions = (rule.astCondition ?? [])
-			.map(pattern => pattern.trim())
-			.filter(pattern => pattern.length > 0);
+		const astConditions = rule.astCondition ?? [];
 		const astPrefilters: RegExp[] = [];
 		let astRequiresFullScan = false;
-		for (const pattern of astConditions) {
+		for (const condition of astConditions) {
+			if (typeof condition !== "string") {
+				astRequiresFullScan = true;
+				continue;
+			}
+			const pattern = condition;
 			const prefilter = compileAstPrefilter(pattern);
 			if (prefilter) {
 				astPrefilters.push(prefilter);
@@ -720,7 +730,7 @@ async function scanRulePlanMatchesContent(
 		}
 	}
 
-	const matchedAst: string[] = [];
+	const matchedAst: AstCondition[] = [];
 	let astHit = false;
 	if ((includeDetails || !regexHit) && lang && plan.astConditions.length > 0) {
 		if (includeDetails) {
@@ -728,8 +738,10 @@ async function scanRulePlanMatchesContent(
 			astHit = matchedAst.length > 0;
 		} else {
 			try {
+				const { patterns, ruleConfigs } = serializeAstConditions(plan.astConditions);
 				const result = await astMatch({
-					patterns: plan.astConditions,
+					patterns,
+					ruleConfigs,
 					source: fileContent,
 					lang,
 					strictness: AstMatchStrictness.Smart,
@@ -763,13 +775,15 @@ async function scanAnyAstConditionMatches(
 	if (!lang) {
 		return false;
 	}
-	const patterns = plans.flatMap(plan => plan.astConditions);
-	if (patterns.length === 0) {
+	const conditions = plans.flatMap(plan => plan.astConditions);
+	if (conditions.length === 0) {
 		return false;
 	}
 	try {
+		const { patterns, ruleConfigs } = serializeAstConditions(conditions);
 		const result = await astMatch({
 			patterns,
+			ruleConfigs,
 			source: fileContent,
 			lang,
 			strictness: AstMatchStrictness.Smart,
