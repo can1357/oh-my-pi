@@ -1,4 +1,11 @@
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseConfiguredThinkingLevel,
+} from "@oh-my-pi/pi-tui/thinking";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -174,6 +181,39 @@ async function applyComputerUseToggle(session: AgentSession, enable: boolean): P
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
+}
+
+/** Selectable `/effort` levels in display order, backing argument completion. */
+const EFFORT_LEVEL_ORDER: ReadonlyArray<ConfiguredThinkingLevel> = [
+	ThinkingLevel.Off,
+	AUTO_THINKING,
+	ThinkingLevel.Minimal,
+	ThinkingLevel.Low,
+	ThinkingLevel.Medium,
+	ThinkingLevel.High,
+	ThinkingLevel.XHigh,
+	ThinkingLevel.Max,
+];
+
+const EFFORT_USAGE = "Usage: /effort [off|auto|minimal|low|medium|high|xhigh|max]";
+
+/** Display label for a selector, falling back to the provider default. */
+function formatEffortSelector(level: ConfiguredThinkingLevel | undefined): string {
+	return level ?? "default";
+}
+
+/** Bare `/effort`: current level plus the active model's supported efforts. */
+function describeEffortStatus(session: AgentSession): string {
+	const model = session.model;
+	if (!model) return "No model is currently selected.";
+	if (!model.reasoning) return `The current model (${model.provider}/${model.id}) does not support reasoning.`;
+	const supported = session.getAvailableThinkingLevels();
+	const supportedLabel = supported.length > 0 ? supported.join(", ") : "none";
+	const configured = session.configuredThinkingLevel();
+	if (configured === AUTO_THINKING) {
+		return `Thinking level: auto (currently ${formatEffortSelector(session.thinkingLevel)}). Supported efforts: ${supportedLabel}.`;
+	}
+	return `Thinking level: ${formatEffortSelector(configured)}. Supported efforts: ${supportedLabel}.`;
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -451,6 +491,73 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (resolved.warning) runtime.ctx.showStatus(resolved.warning);
 			await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
+		},
+	},
+	{
+		name: "effort",
+		icon: "gauge",
+		description: "View or set the thinking level for the current model",
+		acpDescription: "View or set the thinking level for the current model",
+		acpInputHint: "[off|auto|minimal|low|medium|high|xhigh|max]",
+		subcommands: EFFORT_LEVEL_ORDER.map(level => {
+			const metadata = getConfiguredThinkingLevelMetadata(level);
+			return { name: metadata.value, description: metadata.description };
+		}),
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const session = runtime.ctx.session;
+			const model = session.model;
+			if (!model) return "Effort: no model selected";
+			if (!model.reasoning) return "Effort: model has no reasoning";
+			const configured = session.configuredThinkingLevel();
+			if (configured === AUTO_THINKING) return `Effort: auto (${formatEffortSelector(session.thinkingLevel)})`;
+			return `Effort: ${formatEffortSelector(configured)}`;
+		},
+		handle: async (command, runtime) => {
+			const model = runtime.session.model;
+			if (!model) {
+				await runtime.output("No model is currently selected.");
+				return commandConsumed();
+			}
+			const arg = command.args.trim().toLowerCase();
+			if (!arg) {
+				await runtime.output(describeEffortStatus(runtime.session));
+				return commandConsumed();
+			}
+			const level = parseConfiguredThinkingLevel(arg);
+			if (level === undefined || level === ThinkingLevel.Inherit) {
+				return usage(`Unknown thinking level: ${arg}. ${EFFORT_USAGE}`, runtime);
+			}
+			if (!model.reasoning) {
+				await runtime.output(
+					`The current model (${model.provider}/${model.id}) does not support reasoning; thinking level unchanged.`,
+				);
+				return commandConsumed();
+			}
+			// Never touches the model: `setThinkingLevel` clamps unsupported
+			// levels into the model's range, mirroring the `:level` suffix.
+			runtime.session.setThinkingLevel(level);
+			if (level === AUTO_THINKING) {
+				await runtime.output(
+					`Thinking level set to auto (currently ${formatEffortSelector(runtime.session.thinkingLevel)}) on ${model.provider}/${model.id}.`,
+				);
+				return commandConsumed();
+			}
+			const effective = runtime.session.thinkingLevel;
+			if (effective === undefined) {
+				await runtime.output(
+					`${model.provider}/${model.id} does not offer selectable effort levels; using the provider default.`,
+				);
+				return commandConsumed();
+			}
+			if (effective !== level) {
+				await runtime.output(
+					`Thinking level set to ${effective} (${level} is not supported by ${model.provider}/${model.id}; clamped to the closest supported effort).`,
+				);
+				return commandConsumed();
+			}
+			await runtime.output(`Thinking level set to ${level} on ${model.provider}/${model.id}.`);
+			return commandConsumed();
 		},
 	},
 	{
