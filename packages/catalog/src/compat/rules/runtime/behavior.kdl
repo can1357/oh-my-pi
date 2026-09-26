@@ -511,6 +511,9 @@ behavior {
 		model "factory-droid/gpt-image-2.5-sunburst"
 		model "factory-droid/gpt-image-2.5-flare"
 		model "factory-droid/gemini-3-pro-image-preview"
+		model "minimax-code/MiniMax-H3-Image"
+		model "minimax-code-cn/MiniMax-H3-Image"
+		model "minimax/MiniMax-H3-Image"
 	}
 	role-defaults "web" {
 		model "web/parallel"

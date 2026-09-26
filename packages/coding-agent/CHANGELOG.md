@@ -1094,6 +1094,11 @@
 - Fixed Esc no longer interrupting in the TUI after a second MCP OAuth login replaced an unfinished first one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ## [18.12.5] - 2026-10-21
+### Added
+
+- Added MiniMax image generation for `generate_image` (global and China hosts, pay-as-you-go and Token Plan keys) ([#12073](https://github.com/can1357/oh-my-pi/pull/12073) by [@abcfy2](https://github.com/abcfy2)).
+
+## [18.3.2] - 2026-09-25
 
 ### Added
 
