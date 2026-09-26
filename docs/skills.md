@@ -73,7 +73,7 @@ Current runtime behavior:
 `loadSkills()` in `packages/coding-agent/src/extensibility/skills.ts` does three passes:
 
 1. **Capability providers** via `loadCapability("skills")` (the managed/auto-learn provider's skills are skipped here and handled in pass 3)
-2. **Custom directories** via `scanSkillsFromDir(..., { requireDescription: true })` (one-level directory enumeration). A custom-directory skill overrides a same-named default provider skill; duplicate custom-directory names remain first-wins.
+2. **Custom directories** via `scanSkillsFromDir(..., { requireDescription: true })` (one-level directory enumeration). A custom-directory skill overrides a same-named default provider skill; the displaced provider skill stays reachable under its namespaced name unless its body is identical.
 3. **Managed (auto-learn) skills** (`omp-managed` provider) resolved dead-last, so any same-named enabled authored skill from a provider or custom directory takes precedence
 
 If `skills.enabled` is `false`, discovery returns no skills.
@@ -117,12 +117,16 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 ### Collision and duplicate handling
 
-- Capability dedup already keeps first skill per name (highest-precedence provider)
-- `extensibility/skills.ts` additionally:
+- Capability dedup keeps the first skill per name (highest-precedence provider) for the deduped `items` view; `loadSkills()` works from the pre-dedup superset so lower-precedence copies can still be examined.
+- `extensibility/skills.ts` then:
   - de-duplicates identical files by `realpath` (symlink-safe)
-  - emits collision warnings when a later skill name conflicts
+  - drops a later same-named skill silently when its body is byte-identical to the loaded one (the same skill installed twice, e.g. a plugin copy mirrored into `~/.agents/skills`)
+  - when same-named skills have differing bodies, the higher-precedence skill keeps the bare name and every other variant receives a `<namespace>/<name>` suffix, with collision warnings naming the paths. Precedence: an authored skill outranks a registry-installed package (the `skillshare` provider, `omp skill install`); a custom-directory skill outranks a provider skill (#7190); otherwise whichever was admitted first — provider-priority order for providers, array order within `skills.customDirectories` for custom directories — keeps the bare name. The namespace is the plugin identity from provider metadata when the provider tracks one (currently `claude-plugins`, so a Claude Code plugin namespaces by its own name rather than its cache path's version segment); otherwise the directory owning the skill's `skills/` tree, or the skill root's directory name, falling back to the provider id for dotted homes such as `~/.claude/skills`. A namespaced slot that is itself already taken by a differing skill gets a `~2`, `~3`, … suffix; nothing is dropped without a warning.
+  - rejects a raw frontmatter `name` containing `/` or `\` at scan time (with a warning): the separator is reserved for the namespaced form and for `skill://<name>/<path>` resolution.
   - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
-- Custom-directory skills are merged after provider skills and override same-named default-path provider skills. Among custom directories, the first same-named skill wins.
+- Namespaced skills resolve through `skill://<namespace>/<name>[/<path>]` and the leading `/skill:<namespace>/<name>` form. Because skill names never contain `/`, an exact `<host>/<first segment>` match is unambiguous and takes precedence over reading that segment as a path relative to a bare skill of the same name as the namespace. Mid-prompt `/skill:` tokens still exclude `/` (path ambiguity), so use the leading form for namespaced skills.
+- Custom-directory skills are merged after provider skills and outrank a same-named default-path provider skill regardless of admission order (#7190): the custom-directory skill keeps the bare name and the provider skill is re-admitted under its namespaced name (suffixed if that slot is taken) when the bodies differ. Among two custom directories, the first one in `skills.customDirectories` keeps the bare name and the other is namespaced.
+- `disabledExtensions` (`skill:<name>`) and `skills.ignore` are applied to both the raw and the final name, so a namespaced alias cannot bypass an exclusion. `skills.include` is applied to the final listing only, after every name is resolved, so `second/*` selects a namespaced skill even though the bare skill it collided with is not itself included.
 
 ## Runtime usage behavior
 

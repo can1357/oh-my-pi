@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Same-named skills from different sources no longer silently discard the loser: the higher-precedence skill keeps its bare name and the other stays reachable as `<namespace>/<name>` ([#12151](https://github.com/can1357/oh-my-pi/pull/12151) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

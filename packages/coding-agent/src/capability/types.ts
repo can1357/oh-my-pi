@@ -153,6 +153,16 @@ export interface SourceMeta {
 	 * tree — see `isSourceEnabled` in `extensibility/skills.ts` (#10743).
 	 */
 	origin?: string;
+	/**
+	 * Plugin name supplying this item, when the provider tracks one (currently
+	 * `claude-plugins`, from `ClaudePluginRoot.plugin`). Preferred by
+	 * `skillNamespace` in `extensibility/skills.ts` over parsing the item's
+	 * path, since Claude Code's own plugin cache
+	 * (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/...`)
+	 * puts the version, not the plugin name, in the path segment a
+	 * marketplace-cache layout would otherwise read.
+	 */
+	pluginName?: string;
 }
 
 /**

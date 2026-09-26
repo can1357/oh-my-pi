@@ -122,7 +122,7 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		expect(text).not.toContain("tail-skill skill.");
 	});
 
-	it("keeps first-wins across multiple custom directories", async () => {
+	it("keeps the first-admitted custom directory on the bare name", async () => {
 		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-a-"));
 		tempDirs.push(dirA);
 		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-b-"));
@@ -140,15 +140,20 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		});
 		setActiveSkills(skills);
 
-		const dup = skills.find(s => s.name === "same-name");
-		expect(dup).toBeDefined();
-		// Same-source (custom) duplicates keep first-wins: dirA claims the name.
-		expect(dup!.filePath).toBe(path.join(skillA, "SKILL.md"));
+		const nsB = path.basename(dirB);
+		const bareEntry = skills.find(s => s.name === "same-name");
+		const skillBEntry = skills.find(s => s.name === `${nsB}/same-name`);
+		expect(bareEntry).toBeDefined();
+		expect(skillBEntry).toBeDefined();
+		expect(bareEntry!.filePath).toBe(path.join(skillA, "SKILL.md"));
+		expect(skillBEntry!.filePath).toBe(path.join(skillB, "SKILL.md"));
 		expect(warnings.some(w => w.message.includes("collision"))).toBe(true);
 
 		const handler = new SkillProtocolHandler();
-		const resource = await handler.resolve(parseInternalUrl("skill://same-name/"));
-		expect(resource.sourcePath).toBe(path.join(skillA, "SKILL.md"));
+		const bareResource = await handler.resolve(parseInternalUrl("skill://same-name/"));
+		expect(bareResource.sourcePath).toBe(path.join(skillA, "SKILL.md"));
+		const namespaced = await handler.resolve(parseInternalUrl(`skill://${nsB}/same-name/`));
+		expect(namespaced.sourcePath).toBe(path.join(skillB, "SKILL.md"));
 	});
 
 	it("lets a custom-directory skill override a same-named default-path skill", async () => {
@@ -180,14 +185,60 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		});
 		setActiveSkills(skills);
 
-		const dup = skills.find(s => s.name === "shared-name");
-		expect(dup).toBeDefined();
-		// The explicitly configured custom directory is the higher-priority source.
-		expect(dup!.filePath).toBe(path.join(customSkill, "SKILL.md"));
+		// The custom-directory skill overrides onto the bare name (#7190); the
+		// displaced provider skill stays reachable under its namespaced form.
+		const bareEntry = skills.find(s => s.name === "shared-name");
+		const defaultEntry = skills.find(s => s.name === "claude/shared-name");
+		expect(bareEntry).toBeDefined();
+		expect(defaultEntry).toBeDefined();
+		expect(bareEntry!.filePath).toBe(path.join(customSkill, "SKILL.md"));
+		expect(defaultEntry!.filePath).toBe(path.join(defaultSkill, "SKILL.md"));
 
 		const handler = new SkillProtocolHandler();
 		const resource = await handler.resolve(parseInternalUrl("skill://shared-name/"));
 		expect(resource.sourcePath).toBe(path.join(customSkill, "SKILL.md"));
 		expect(resource.content).toContain("from custom");
+	});
+
+	it("overrides a default-path skill even when both bodies are byte-identical (#7190)", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-default-skill-identical-"));
+		tempDirs.push(cwd);
+		const customDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-skill-identical-"));
+		tempDirs.push(customDir);
+
+		// A default discovery path (Claude project skills) claims the name first,
+		// with the SAME body the custom-directory skill below will also carry.
+		const defaultSkill = path.join(cwd, ".claude", "skills", "shared-name");
+		await fs.mkdir(defaultSkill, { recursive: true });
+		await Bun.write(path.join(defaultSkill, "SKILL.md"), makeSkillMd("shared-name", "same"));
+
+		// The explicitly configured custom directory holds an identical body.
+		const customSkill = path.join(customDir, "shared-name");
+		await fs.mkdir(customSkill, { recursive: true });
+		await Bun.write(path.join(customSkill, "SKILL.md"), makeSkillMd("shared-name", "same"));
+
+		const { skills } = await loadSkills({
+			cwd,
+			enableCodexUser: false,
+			enableClaudeUser: false,
+			enableClaudeProject: true,
+			enablePiUser: false,
+			enablePiProject: false,
+			enableAgentsUser: false,
+			enableAgentsProject: false,
+			customDirectories: [customDir],
+		});
+		setActiveSkills(skills);
+
+		// An identical body must not short-circuit the override contract: the
+		// custom-directory copy still has to be the one reachable on the bare
+		// name, not whichever side happened to admit first.
+		const bareEntry = skills.find(s => s.name === "shared-name");
+		expect(bareEntry).toBeDefined();
+		expect(bareEntry!.filePath).toBe(path.join(customSkill, "SKILL.md"));
+
+		const handler = new SkillProtocolHandler();
+		const resource = await handler.resolve(parseInternalUrl("skill://shared-name/"));
+		expect(resource.sourcePath).toBe(path.join(customSkill, "SKILL.md"));
 	});
 });

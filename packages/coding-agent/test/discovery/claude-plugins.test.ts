@@ -516,6 +516,55 @@ describe("listClaudePluginRoots", () => {
 		expect(second.roots.map(root => root.id)).toEqual(["second@market"]);
 	});
 
+	test("derives the namespace from the plugin name, not the Claude cache version segment (#12151)", async () => {
+		// Claude Code's own plugin cache keeps marketplace/plugin/version as
+		// three separate path segments (`.../cache/<marketplace>/<plugin>/<version>/skills/...`),
+		// unlike OMP's single joined `<marketplace>___<plugin>___<version>` cache
+		// directory. Deriving the namespace from the path segment owning `skills/`
+		// would read the shared version ("1.0.0" → "1-0-0") for both plugins here,
+		// colliding them together instead of keeping their own plugin identities.
+		const marketRoot = path.join(tempDir, ".claude", "plugins", "cache", "test-market");
+		const pluginARoot = path.join(marketRoot, "plugin-a", "1.0.0");
+		const pluginBRoot = path.join(marketRoot, "plugin-b", "1.0.0");
+		const ompRegistryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+
+		await Promise.all([
+			fs.mkdir(path.join(pluginARoot, "skills", "shared-skill"), { recursive: true }),
+			fs.mkdir(path.join(pluginBRoot, "skills", "shared-skill"), { recursive: true }),
+			fs.mkdir(path.dirname(ompRegistryPath), { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginARoot, "skills", "shared-skill", "SKILL.md"),
+				"---\nname: shared-skill\ndescription: Plugin A's skill.\n---\nPlugin A body\n",
+			),
+			fs.writeFile(
+				path.join(pluginBRoot, "skills", "shared-skill", "SKILL.md"),
+				"---\nname: shared-skill\ndescription: Plugin B's skill.\n---\nPlugin B body\n",
+			),
+			fs.writeFile(
+				ompRegistryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"plugin-a@test-market": [{ scope: "user", installPath: pluginARoot, version: "1.0.0" }],
+						"plugin-b@test-market": [{ scope: "user", installPath: pluginBRoot, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const { skills, warnings } = await loadSkills({ cwd: tempDir });
+		const names = skills
+			.map(skill => skill.name)
+			.filter(name => name === "shared-skill" || name.endsWith("/shared-skill"))
+			.sort();
+		// "plugin-a" is admitted first (bare); "plugin-b" is namespaced by its
+		// own plugin name, never by the version segment both share.
+		expect(names).toEqual(["plugin-b/shared-skill", "shared-skill"]);
+		expect(warnings.some(warning => warning.message.includes("1-0-0"))).toBe(false);
+	});
+
 	test("loads OMP user skills without opting into foreign Claude skills", async () => {
 		const ompPluginPath = path.join(tempDir, "plugins", "omp-owned");
 		const claudePluginPath = path.join(tempDir, "plugins", "claude-owned");
