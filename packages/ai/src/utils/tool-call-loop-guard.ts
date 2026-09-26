@@ -4,7 +4,8 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 const LEGACY_INTENT_FIELD = "__intent";
 const RESULT_SUMMARY_LIMIT = 200;
 const ARGUMENT_SUMMARY_LIMIT = 400;
-const PATH_ARGUMENT_KEY = /(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
+const PATH_ARGUMENT_KEY =
+	/(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
 /** Argument keys whose changing value advances through a result set instead of repeating it. */
 const PROGRESS_ARGUMENT_KEY =
 	/(?:^|[_-])(?:skip|offset|limit|page(?:num|index|size)?|cursor|since|before|after|start|from|first|take)(?:[_-]|$)/i;
