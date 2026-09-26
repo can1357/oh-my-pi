@@ -286,8 +286,10 @@ describe("ModelHub", () => {
 			expect(smolRow).toContain("auto");
 		});
 		test("thinking-only edits preserve the model and scope from the persisted role layer", () => {
-			const storedModel = makeModel("test", "global-role-model");
-			const effectiveModel = makeModel("test", "runtime-role-model");
+			// Reasoning models: `t` only opens a strip where a level can apply.
+			const storedModel = getBundledModel("openai", "gpt-5.5");
+			const effectiveModel = getBundledModel("openai", "gpt-5.6");
+			if (!storedModel || !effectiveModel) throw new Error("Expected bundled OpenAI models");
 			const settings = Settings.isolated({ modelRoleStorage: "project" });
 			settings.setModelRole("default", `${storedModel.provider}/${storedModel.id}`);
 			settings.overrideModelRoles({ default: `${effectiveModel.provider}/${effectiveModel.id}` });
@@ -627,6 +629,60 @@ describe("ModelHub", () => {
 			expect(thinking).toContain("inherit");
 			expect(thinking).toContain("xhigh");
 			expect(thinking).not.toContain("max");
+		});
+		test("a model with no reasoning surface is assigned without a thinking strip", () => {
+			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
+			// assignment completes instead of parking on a dead strip (#13111).
+			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const { hub, onAssign } = createHub({ models: [model], scoped: true });
+			installTestTheme();
+
+			hub.handleInput("\n");
+			expect(footerLine(hub.render(220))).toContain("dictation");
+
+			hub.handleInput("\n"); // assign to dictation (first chip)
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[1]).toBe("dictation");
+			expect(onAssign.mock.calls[0]?.[2]).toBe(ThinkingLevel.Inherit);
+			const footer = footerLine(hub.render(220));
+			expect(footer).not.toContain("inherit");
+			expect(footer).not.toContain("auto");
+		});
+		test("t and its hint stay inert on a role row whose model cannot reason", () => {
+			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const settings = Settings.isolated({ modelRoles: { dictation: "local/parakeet-tdt-0.6b-v3" } });
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Dive into the role rows.
+			const selected = () =>
+				hub
+					.render(220)
+					.map(line => stripVTControlCharacters(line))
+					.find(line => line.includes("❯")) ?? "";
+			for (let step = 0; step < 20 && !selected().includes("DICTATION"); step++) hub.handleInput(DOWN);
+			expect(selected()).toContain("DICTATION");
+
+			expect(footerLine(hub.render(220))).not.toContain("t thinking");
+			hub.handleInput("t");
+			expect(footerLine(hub.render(220))).not.toContain("inherit");
+		});
+		test("a reasoner without an effort ladder keeps the always-on levels", () => {
+			// `thinking: undefined` means "no dial", not "no thinking": off and
+			// auto still change what the model does, so the strip must open.
+			const model = getBundledModel("xai", "grok-code-fast-1");
+			if (!model) throw new Error("Expected bundled model xai/grok-code-fast-1");
+			const { hub } = createHub({ models: [model], scoped: true });
+			installTestTheme();
+
+			hub.handleInput("\n");
+			hub.handleInput("\n"); // assign to default (first chip)
+			const thinking = footerLine(hub.render(220));
+			expect(thinking).toContain("inherit");
+			expect(thinking).toContain("off");
+			expect(thinking).toContain("auto");
+			expect(thinking).not.toContain("high");
 		});
 		test("awaits an async default assignment and does not recommit its preselected thinking", async () => {
 			const model = getBundledModel("openai", "gpt-5.5");

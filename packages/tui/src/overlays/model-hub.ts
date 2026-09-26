@@ -983,7 +983,11 @@ export class ModelHubComponent implements Component {
 		);
 	}
 
-	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
+	/**
+	 * Persist `role → item`, preserving a still-supported thinking level, then
+	 * open the thinking strip — skipped for models with no reasoning surface,
+	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
+	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
@@ -1002,6 +1006,13 @@ export class ModelHubComponent implements Component {
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
+			if (supported.length === 0) {
+				if (returnToRoles) {
+					this.#setActiveEntry("roles");
+					this.#focus = "list";
+				}
+				return;
+			}
 			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
 		});
 	}
@@ -1018,8 +1029,37 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
+	/**
+	 * Thinking levels a role assignment can actually apply. A model that does
+	 * not reason gets none: no request path sends reasoning for it, and
+	 * `applyAutoThinkingLevel` early-returns on `!model.reasoning`, so
+	 * `inherit`/`off`/`auto` would all be no-ops. Reasoners without an effort
+	 * dial (`thinking: undefined`, e.g. `xai/grok-code-fast-1`) keep the three
+	 * always-on levels — their thinking is real, only the ladder is absent.
+	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
+		if (!model.reasoning) return [];
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+	}
+
+	/**
+	 * Resolve what `t` on a role row would edit: the role's model in its
+	 * persisted scope. Undefined when the role is unassigned or its model has
+	 * no thinking levels to offer, which makes both `t` and its footer hint
+	 * inert — the same rule wildcard fallback rows follow.
+	 */
+	#roleThinkingTarget(role: string): { item: ModelBrowserItem; scope?: ModelRoleSelectionScope } | undefined {
+		const assignment = this.#roles[role];
+		if (!assignment) return undefined;
+		const source =
+			this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
+		const scope = source === "project" || source === "global" ? source : undefined;
+		const model = scope ? this.#roleForScope(role, scope).model : assignment.model;
+		if (!model || this.#thinkingOptionsFor(model).length === 0) return undefined;
+		return {
+			item: { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` },
+			scope,
+		};
 	}
 
 	/** Offer only the roles this model can actually fill (chat roles for chat models, `web` for search runners, …). */
@@ -1820,20 +1860,9 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (printable === "t") {
-			const assignment = role ? this.#roles[role] : undefined;
-			if (role && assignment) {
-				const source =
-					this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
-				const scope = source === "project" || source === "global" ? source : undefined;
-				const scopedModel = scope ? this.#roleForScope(role, scope).model : assignment.model;
-				if (!scopedModel) return;
-				const item: ModelBrowserItem = {
-					provider: scopedModel.provider,
-					id: scopedModel.id,
-					model: scopedModel,
-					selector: `${scopedModel.provider}/${scopedModel.id}`,
-				};
-				this.#openThinkingStrip(item, role, true, scope);
+			if (role) {
+				const target = this.#roleThinkingTarget(role);
+				if (target) this.#openThinkingStrip(target.item, role, true, target.scope);
 			} else if (row?.kind === "fallback") {
 				this.#openFallbackThinkingStrip(row);
 			}
@@ -2313,7 +2342,11 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			// Same rule as fallback rows: advertise `t` only where a strip would
+			// open — an assigned role whose model has thinking levels to offer.
+			const editable = row?.kind === "role" && this.#roleThinkingTarget(row.role) !== undefined;
+			const thinking = editable ? " · t thinking" : "";
+			return `↑/↓ rows · Enter pick · f fallback · x clear${thinking} · c cycle · [/] reorder · n new`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
