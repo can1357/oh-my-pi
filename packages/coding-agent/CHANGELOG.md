@@ -295,6 +295,7 @@
 - Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
 - Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
+- Fixed a stale "No models available" warning after signing in during the setup wizard: the registry now re-runs discovery once the wizard completes, and the warning is dropped when a usable model is available ([#12587](https://github.com/can1357/oh-my-pi/pull/12587) by [@xiechimon](https://github.com/xiechimon)).
 
 ## [18.2.6] - 2026-09-18
 

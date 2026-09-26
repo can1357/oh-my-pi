@@ -321,6 +321,14 @@ function resumeStartupWatchdog(): void {
 export interface InteractiveModeNotify {
 	kind: "warn" | "error" | "info";
 	message: string;
+	/**
+	 * #12281: marks a startup warning that is only true of the pre-login registry
+	 * snapshot. The session is constructed and background discovery runs before
+	 * the setup wizard, so a credential saved during setup can make the warning
+	 * stale before it is ever rendered. The render loop drops flagged
+	 * notifications once a usable model is available.
+	 */
+	obsoleteWhenModelAvailable?: boolean;
 }
 
 export function buildModelScopeNotification(
@@ -640,6 +648,14 @@ async function runInteractiveMode(
 
 		if (setupWizard && setupScenes.length > 0) {
 			await setupWizard.runSetupWizard(mode, setupScenes);
+			// #12281: session construction and the one-shot background discovery both
+			// ran before the wizard, so a credential saved during setup leaves the
+			// registry on the pre-login snapshot (the memoized starter would not
+			// refetch). Force one online pass so the registry reflects post-login
+			// state before the first render and the notifications below.
+			await session.modelRegistry
+				.refreshRuntimeProviders("online")
+				.catch(error => logger.warn("post-wizard model rediscovery failed", { error: String(error) }));
 		}
 
 		// Consume failures immediately, but defer any banner until the transcript is stable.
@@ -669,8 +685,19 @@ async function runInteractiveMode(
 			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
 		}
 
+		// #12281: the same usability criterion createAgentSession resolved with
+		// (hasConfiguredAuth covers keyless providers such as lm-studio). When it
+		// flips true between session construction and here — typically a credential
+		// saved by the setup wizard — warnings queued against the pre-login snapshot
+		// are stale and must not render.
+		const modelAvailableNow = session.modelRegistry
+			.getAvailable()
+			.some(candidate => session.modelRegistry.hasConfiguredAuth(candidate));
 		for (const notify of notifs) {
 			if (!notify) {
+				continue;
+			}
+			if (notify.obsoleteWhenModelAvailable && modelAvailableNow) {
 				continue;
 			}
 			if (notify.kind === "warn") {
@@ -2336,7 +2363,15 @@ export async function runRootCommand(
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
-				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				const enabledModels = settingsInstance.get("enabledModels");
+				notifs.push({
+					kind: "warn",
+					message: modelFallbackMessage,
+					// #12281: only the plain "no models" warning expires once a usable
+					// model shows up; an enabledModels-scope mismatch stays accurate
+					// regardless of auth state.
+					obsoleteWhenModelAvailable: !enabledModels || enabledModels.length === 0,
+				});
 			}
 
 			const modelRegistryError = modelRegistry.getError();
