@@ -2675,7 +2675,9 @@ describe("AuthStorage codex oauth ranking", () => {
 
 	test.each([
 		["gpt-5.6-sol", "free", "plus"],
-		["gpt-5.6-luna", "go", "business"],
+		["gpt-5.5", "free", "team"],
+		["gpt-6-sol", "free", "team"],
+		["gpt-6-astra", "free", "team"],
 		["gpt-5.6-sol-pro", "free", "team"],
 	])("%s routes away from a less-used %s account to an eligible %s account", async (modelId, freePlan, paidPlan) => {
 		if (!authStorage) throw new Error("test setup failed");
@@ -2710,6 +2712,8 @@ describe("AuthStorage codex oauth ranking", () => {
 
 	test.each([
 		["gpt-5.6-terra", "free", "enterprise"],
+		["gpt-5.6-luna", "free", "business"],
+		["gpt-5.6-luna-pro", "go", "business"],
 		["gpt-5.6-terra-pro", "go", "pro"],
 	])(
 		"%s keeps a less-used %s account in ordinary ranking ahead of %s",

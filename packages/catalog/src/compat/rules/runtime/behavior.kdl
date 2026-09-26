@@ -84,9 +84,9 @@ behavior {
 	// Subscription eligibility for model-aware Codex credential routing.
 	plan-requirement provider="openai-codex" {
 		tier "pro" substring="-spark"
-		tier "paid" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
-			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
-			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro"
+		tier "paid" exact="gpt-5.5" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
+			exact="gpt-6-sol" exact="gpt-6-astra" glob="*/gpt-5.5" glob="*/gpt-5.6" \
+			glob="*/gpt-5.6-sol" glob="*/gpt-5.6-sol-pro" glob="*/gpt-6-sol" glob="*/gpt-6-astra"
 	}
 
 	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing

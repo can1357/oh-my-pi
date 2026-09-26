@@ -707,9 +707,9 @@ const OPENAI_CODEX_FREE_PLAN_TOKENS: Record<string, true> = {
 /**
  * Account tier needed for model-aware Codex OAuth routing.
  *
- * GPT-5.6 Terra (including its local pro-mode alias) remains available on every
- * plan. Sol and Luna pro-mode aliases inherit their base models' paid tier;
- * only Spark currently has a documented Pro-plan preference in Codex.
+ * Terra and Luna (including their local pro-mode aliases) are available on
+ * Free accounts. Sol, Astra, and GPT-5.5 require a paid plan; only Spark has a
+ * documented Pro-plan preference in Codex.
  */
 function resolveOpenAICodexPlanRequirement(modelId: string | undefined): OpenAICodexPlanRequirement {
 	if (typeof modelId !== "string") return "none";
