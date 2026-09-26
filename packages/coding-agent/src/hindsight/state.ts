@@ -376,6 +376,11 @@ export class HindsightSessionState {
 		if (!this.config.autoRetain) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
+		// Same as the Dakera path: an ESC-aborted turn fires `agent_end` with the
+		// prompt present but no assistant reply yet. Retaining that husk spends
+		// the turn delta and loses the real answer on resume. Skip until the
+		// window has a reply.
+		if (messages[messages.length - 1]?.role === "user") return;
 		const userTurns = messages.filter(m => m.role === "user").length;
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 

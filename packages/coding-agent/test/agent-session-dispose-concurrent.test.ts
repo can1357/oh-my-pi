@@ -6,6 +6,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { DakeraSessionState, setDakeraSessionState } from "@oh-my-pi/pi-coding-agent/dakera/state";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -145,6 +146,7 @@ describe("AgentSession concurrent disposal", () => {
 		const asyncGate = Promise.withResolvers<void>();
 		const hindsightGate = Promise.withResolvers<void>();
 		const mnemopiGate = Promise.withResolvers<void>();
+		const dakeraGate = Promise.withResolvers<void>();
 		const asyncStarted = Promise.withResolvers<void>();
 		const order: string[] = [];
 		vi.spyOn(owned, "dispose").mockImplementation(async () => {
@@ -173,6 +175,21 @@ describe("AgentSession concurrent disposal", () => {
 		});
 		setMnemopiSessionState(current, mnemopi);
 
+		const dakera: DakeraSessionState = Object.create(DakeraSessionState.prototype);
+		vi.spyOn(dakera, "awaitPending").mockImplementation(async () => {
+			order.push("dakera:start");
+			await dakeraGate.promise;
+			order.push("dakera:end");
+		});
+		vi.spyOn(dakera, "buildClosingSummary").mockReturnValue("final summary");
+		vi.spyOn(dakera, "endSessionWithSummary").mockImplementation(async () => {
+			order.push("dakera:session-end");
+		});
+		vi.spyOn(dakera, "dispose").mockImplementation(() => {
+			order.push("dakera:dispose");
+		});
+		setDakeraSessionState(current, dakera);
+
 		let persistenceClosed = false;
 		vi.spyOn(current.sessionManager, "close").mockImplementation(async () => {
 			persistenceClosed = true;
@@ -185,14 +202,17 @@ describe("AgentSession concurrent disposal", () => {
 			await Promise.resolve();
 			expect(order).toContain("hindsight:start");
 			expect(order).toContain("mnemopi:start");
+			expect(order).toContain("dakera:start");
 			expect(order).not.toContain("async:end");
 			expect(order).not.toContain("hindsight:end");
 			expect(order).not.toContain("mnemopi:end");
+			expect(order).not.toContain("dakera:end");
 			expect(persistenceClosed).toBe(false);
 		} finally {
 			asyncGate.resolve();
 			hindsightGate.resolve();
 			mnemopiGate.resolve();
+			dakeraGate.resolve();
 		}
 		await dispose;
 		session = undefined;
@@ -201,6 +221,10 @@ describe("AgentSession concurrent disposal", () => {
 		expect(closeAt).toBeGreaterThan(order.indexOf("async:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("hindsight:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
+		expect(closeAt).toBeGreaterThan(order.indexOf("dakera:end"));
+		expect(order).toContain("dakera:dispose");
+		// The session row closes only after the pending-write drain settled.
+		expect(order.indexOf("dakera:session-end")).toBeGreaterThan(order.indexOf("dakera:end"));
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {

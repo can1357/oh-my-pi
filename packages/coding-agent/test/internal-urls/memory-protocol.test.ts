@@ -930,6 +930,28 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 	});
 });
 
+// Dakera ids exist on the server but the client wraps no get-by-id, so an id
+// would resolve to nothing; the error has to name the tools that can answer.
+describe("MemoryProtocolHandler — dakera", () => {
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		InternalUrlRouter.resetForTests();
+	});
+
+	it("returns a corrective error for memory://<id> when dakera is active", async () => {
+		const router = InternalUrlRouter.instance();
+		const settings = Settings.isolated({ "memory.backend": "dakera" });
+		await expect(router.resolve("memory://a1b2c3d4e5f6", { settings, cwd: "/work/dakera-project" })).rejects.toThrow(
+			/Dakera memories are not addressable via memory:\/\/.*Use `recall` to search or `reflect` to synthesize/s,
+		);
+	});
+});
+
 describe("MemoryProtocolHandler — file-backed root vs non-local backends (issue #11909)", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();

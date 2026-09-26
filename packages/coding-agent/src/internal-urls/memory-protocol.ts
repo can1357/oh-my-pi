@@ -39,6 +39,10 @@ const MEMORY_NAMESPACE = "root";
 const HINDSIGHT_UNADDRESSABLE =
 	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.";
 
+/** Dakera ids exist but the client exposes no get-by-id, so nothing is addressable. */
+const DAKERA_UNADDRESSABLE =
+	"Dakera memories are not addressable via memory://. Use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.";
+
 /**
  * Snapshot of memory roots for every registered session, deduped.
  * Each session has its own cwd (possibly a worktree), so subagents and main
@@ -263,7 +267,9 @@ function fileBackedRootUnavailableError(backend: string | undefined): Error {
 			? " Use `recall`/`reflect` to search Mnemopi memories, or `read memory://<memory-id>` for a full row."
 			: backend === "hindsight"
 				? " Use `recall`/`reflect` to search Hindsight memories."
-				: "";
+				: backend === "dakera"
+					? " Use `recall`/`reflect` to search Dakera memories."
+					: "";
 	return new Error(
 		`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}).${searchHint}`,
 	);
@@ -399,6 +405,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (namespace !== MEMORY_NAMESPACE) {
 			if (!caller.legacy) {
 				if (backend === "hindsight") throw new Error(HINDSIGHT_UNADDRESSABLE);
+				if (backend === "dakera") throw new Error(DAKERA_UNADDRESSABLE);
 				if (backend === "mnemopi") {
 					const hit = caller.session ? callerMnemopiState(caller.session)?.getScopedMemory(namespace) : undefined;
 					if (hit) return renderMnemopiMemory(url, hit);

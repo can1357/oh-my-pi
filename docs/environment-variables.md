@@ -510,6 +510,44 @@ are ignored.
 
 `PI_NO_PTY` is also set internally when CLI `--no-pty` is used.
 
+### Dakera memory backend
+
+`loadDakeraConfig()` resolves each supported environment override over the corresponding
+`dakera.*` setting and then its built-in default. String values are trimmed and an empty
+string is ignored. Boolean values are case-insensitive: only `true`, `1`, and `yes` mean true;
+any other defined value — including an empty one — means false. Numeric values are parsed with
+`Number()`, so decimals are accepted (`DAKERA_RETAIN_IMPORTANCE=0.7`) and non-numeric values are
+ignored; the loader does not clamp them. Enum values must exactly match one of the listed
+lowercase values; invalid values are ignored.
+
+| Variable                        | Setting overridden             | Accepted value / built-in default                                              |
+| ------------------------------- | ------------------------------ | ------------------------------------------------------------------------------ |
+| `DAKERA_API_URL`                | `dakera.apiUrl`                | Non-empty string; default `http://localhost:3000`                               |
+| `DAKERA_API_TOKEN`              | `dakera.apiToken`              | Non-empty string; unset by default                                              |
+| `DAKERA_API_KEY`                | `dakera.apiToken`              | Accepted alias for the token name the Dakera server/SDKs use; `DAKERA_API_TOKEN` wins when both are set |
+| `DAKERA_AGENT_ID`               | `dakera.agentId`               | Non-empty string; unset by default, so the selected scoping mode derives the id |
+| `DAKERA_SCOPING`                | `dakera.scoping`               | `global` or `per-project`; default `per-project`                                |
+| `DAKERA_AUTO_RECALL`            | `dakera.autoRecall`            | Boolean; default `true`                                                         |
+| `DAKERA_AUTO_RETAIN`            | `dakera.autoRetain`            | Boolean; default `true`                                                         |
+| `DAKERA_RETAIN_MODE`            | `dakera.retainMode`            | `full-session` or `last-turn`; default `full-session`                           |
+| `DAKERA_RETAIN_EVERY_N_TURNS`   | `dakera.retainEveryNTurns`     | Integer; default `3`                                                            |
+| `DAKERA_RETAIN_IMPORTANCE`      | `dakera.retainImportance`      | Number `0.0`–`1.0`; default `0.5`                                               |
+| `DAKERA_RECALL_TOP_K`           | `dakera.recallTopK`            | Integer; default `8`                                                            |
+| `DAKERA_RECALL_MIN_IMPORTANCE`  | `dakera.recallMinImportance`   | Number; default `0`                                                             |
+| `DAKERA_RECALL_RERANK`          | `dakera.recallRerank`          | Boolean; default `true`                                                         |
+| `DAKERA_RECALL_CONTEXT_TURNS`   | `dakera.recallContextTurns`    | Integer; default `1`                                                            |
+| `DAKERA_RECALL_MAX_QUERY_CHARS` | `dakera.recallMaxQueryChars`   | Integer; default `800`                                                          |
+| `DAKERA_REFLECT_MODEL`          | `dakera.reflectModel`          | Non-empty model selector; unset by default, so `reflect` uses `smol`, then `default`|
+| `DAKERA_DEBUG`                  | `dakera.debug`                 | Boolean; default `false`                                                        |
+| `DAKERA_REQUEST_TIMEOUT_MS`     | `dakera.requestTimeoutMs`      | Integer milliseconds; default `30000`                                           |
+| `DAKERA_RECALL_TIMEOUT_MS`      | `dakera.recallTimeoutMs`       | Integer milliseconds; default `30000`                                           |
+| `DAKERA_RETAIN_TIMEOUT_MS`      | `dakera.retainTimeoutMs`       | Integer milliseconds; default `60000`                                           |
+| `DAKERA_REFLECT_TIMEOUT_MS`     | `dakera.reflectTimeoutMs`      | Integer milliseconds; default `120000`                                          |
+
+`dakera.agentIdPrefix` has no environment override; it is settings-only. These variables
+configure the omp client only — the Dakera server has its own environment (including
+`DAKERA_TELEMETRY`, which is on by default for self-hosted installs).
+
 ---
 
 ## 6) Storage and config root paths

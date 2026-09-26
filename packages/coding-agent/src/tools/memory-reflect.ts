@@ -1,6 +1,8 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
+import { runDakeraReflect } from "../dakera/reflect";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { ensureBankExists } from "../hindsight/bank";
 import reflectDescription from "../prompts/tools/reflect.md" with { type: "text" };
@@ -14,6 +16,13 @@ const memoryReflectSchema = type({
 });
 
 export type MemoryReflectParams = typeof memoryReflectSchema.infer;
+
+/** Recall query for a reflection: the question plus any caller-supplied context. */
+function recallQuery(params: MemoryReflectParams): string {
+	return params.context?.trim()
+		? `${params.query.trim()}\n\nAdditional context:\n${params.context.trim()}`
+		: params.query;
+}
 
 export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> {
 	readonly name = "reflect";
@@ -29,14 +38,41 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 
 	static createIf(session: ToolSession): MemoryReflectTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "dakera") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new MemoryReflectTool(session);
 	}
 
 	async execute(_id: string, params: MemoryReflectParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "dakera") {
+				const state = this.session.getDakeraSessionState?.();
+				if (!state) {
+					throw new Error("Dakera backend is not initialised for this session.");
+				}
+				const modelRegistry = this.session.modelRegistry;
+				if (!modelRegistry) {
+					throw new Error("Dakera reflect has no model registry for this session.");
+				}
+
+				// Dakera synthesizes nothing server-side, so the answer is composed
+				// here from the recalled memories (see dakera/reflect.ts).
+				const hits = await state.recallHits(recallQuery(params), signal);
+				const text = await runDakeraReflect({
+					config: state.config,
+					hits,
+					settings: this.session.settings,
+					modelRegistry,
+					sessionId: state.sessionId,
+					query: params.query,
+					context: params.context,
+					signal,
+				});
+				return { content: [{ type: "text", text }], details: {} };
+			}
+
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {
@@ -44,10 +80,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 				}
 
 				try {
-					const query = params.context?.trim()
-						? `${params.query.trim()}\n\nAdditional context:\n${params.context.trim()}`
-						: params.query;
-					const results = await state.recallResultsScoped(query);
+					const results = await state.recallResultsScoped(recallQuery(params));
 					if (results.length === 0) {
 						return {
 							content: [{ type: "text", text: "No relevant information found to reflect on." }],

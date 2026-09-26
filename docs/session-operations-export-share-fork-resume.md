@@ -174,7 +174,7 @@ keeping the conversation you can see.
   abort it first.
 - Closes every cached provider-session state entry (server-side conversation /
   prompt-cache handles) and reports how many were pruned.
-- Mints a fresh provider session id and re-keys hindsight and mnemopi memory to
+- Mints a fresh provider session id and re-keys hindsight, mnemopi and dakera memory to
   it, and invalidates the append-only context so the next turn re-sends the full
   local transcript to the provider.
 - Leaves the local transcript, session file, and session identity unchanged, so

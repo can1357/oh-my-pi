@@ -17,8 +17,8 @@ import type { AgentSession } from "../session/agent-session";
 import { type BankScope, computeBankScope } from "./bank";
 import { createHindsightClient } from "./client";
 import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "./config";
-import { type HindsightMessage, hasSubstantiveContent } from "./content";
 import { HindsightSessionState } from "./state";
+import { flattenAgentMessages } from "./transcript";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
@@ -144,7 +144,7 @@ export const hindsightBackend: MemoryBackend = {
 		const state = session?.getHindsightSessionState();
 		if (!state) return undefined;
 
-		const flat = flattenMessagesForRecall(messages);
+		const flat = flattenAgentMessages(messages);
 		return await state.recallForCompaction(flat);
 	},
 
@@ -413,34 +413,4 @@ function bankScopesEqual(
 		stringArraysEqual(scope.recallTags, state.recallTags) &&
 		scope.recallTagsMatch === state.recallTagsMatch
 	);
-}
-
-/** Reduce arbitrary AgentMessages into the Hindsight flat-text shape. */
-function flattenMessagesForRecall(messages: AgentMessage[]): HindsightMessage[] {
-	const out: HindsightMessage[] = [];
-	for (const msg of messages) {
-		if (msg.role === "user") {
-			const content = msg.content;
-			if (typeof content === "string") {
-				if (hasSubstantiveContent(content)) out.push({ role: "user", content });
-				continue;
-			}
-			if (Array.isArray(content)) {
-				const text = content
-					.filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text")
-					.map(b => b.text)
-					.join("\n");
-				if (hasSubstantiveContent(text)) out.push({ role: "user", content: text });
-			}
-			continue;
-		}
-		if (msg.role === "assistant") {
-			const text = msg.content
-				.filter((b): b is { type: "text"; text: string } => b.type === "text")
-				.map(b => b.text)
-				.join("\n");
-			if (hasSubstantiveContent(text)) out.push({ role: "assistant", content: text });
-		}
-	}
-	return out;
 }

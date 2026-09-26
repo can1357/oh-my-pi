@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `memory.backend: dakera` for self-hosted [Dakera](https://dakera.ai) memory: automatic recall on the first turn and transcript retention on agent end, working `recall`, `retain`, and client-synthesized `reflect`, per-repository or global `agent_id` scoping (pinnable per repository with `dakera.agentId` in `.omp/config.yml`), and `DAKERA_*` overrides for every `dakera.*` setting but `agentIdPrefix`.
 
 ### Added
 
