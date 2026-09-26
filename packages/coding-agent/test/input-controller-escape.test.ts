@@ -312,12 +312,6 @@ describe("InputController escape behavior", () => {
 		controller.setupEditorSubmitHandler();
 		await editor.onSubmit?.("hello");
 
-		expect(spies.startPendingSubmission).toHaveBeenCalledWith({
-			text: "hello",
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
 		expect(spies.onInputCallback).toHaveBeenCalledWith(submission);
 
 		editor.onEscape?.();

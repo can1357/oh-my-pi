@@ -79,8 +79,9 @@ const SGR_MOUSE_COMPLETE = /^<\d+;\d+;\d+[Mm]$/;
 // adjacent stdin reads from one unmarked paste can be considered together.
 // Fixed from the first break-bearing read (not an inactivity debounce): normal
 // Enter latency and candidate memory remain bounded even under a continuous
-// stream. Ten milliseconds spans adjacent PTY reads without becoming perceptible.
-const RAW_PASTE_CLASSIFICATION_TIMEOUT_MS = 10;
+// stream. Twenty milliseconds spans iTerm2's 10ms paste-chunk interval, even
+// when its next write and our flush timer would otherwise race at 10ms.
+const RAW_PASTE_CLASSIFICATION_TIMEOUT_MS = 20;
 
 /**
  * Whether `text` has two completed logical line breaks (three line segments).

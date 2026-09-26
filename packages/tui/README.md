@@ -6,7 +6,7 @@ Minimal terminal UI framework with differential rendering and synchronized outpu
 
 - **Differential Rendering**: Three-strategy rendering system that only updates what changed
 - **Synchronized Output**: Uses CSI 2026 for atomic screen updates (no flicker)
-- **Bracketed Paste Mode**: Handles large pastes correctly with markers for >10 line pastes
+- **Bracketed Paste Mode**: Enables DEC 2004 and re-enables it on each paint if another tty user resets it; terminals without confirmed support also coalesce unmarked multiline bursts.
 - **Component-based**: Simple Component interface with render() method
 - **Theme Support**: Components accept theme interfaces for customizable styling
 - **Built-in Components**: Text, TruncatedText, Input, Editor, Markdown, Loader, SelectList, SettingsList, Spacer, Image, Box, Container

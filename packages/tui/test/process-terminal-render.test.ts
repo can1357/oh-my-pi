@@ -94,6 +94,17 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		expect(harness.terminal.columns).toBe(100);
 	});
 
+	it("re-enables bracketed paste after a terminal-mode reset before the next paint", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30);
+		await harness.settle();
+		harness.writes.push("\x1b[?2004l");
+
+		harness.tui.requestRender(true);
+		await harness.settle();
+
+		expect(harness.writes.slice(harness.writes.lastIndexOf("\x1b[?2004l") + 1).join("")).toContain("\x1b[?2004h");
+	});
+
 	it("stops rendering and raises SIGHUP when terminal input ends", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();

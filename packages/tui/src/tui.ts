@@ -1926,6 +1926,12 @@ export class TUI extends Container {
 		this.#paintEndSequence = enabled ? PAINT_END : PAINT_END_NO_SYNC;
 	}
 
+	#beginPaint(): string {
+		// Another tty user may have reset DEC 2004 since attach. Re-enable it
+		// on each frame, but not during the cooked-mode startup prepaint.
+		return this.#paintBeginSequence + (this.#inputDeferred ? "" : "\x1b[?2004h");
+	}
+
 	/**
 	 * Retire every eligible history batch into native scrollback before quitting.
 	 *
@@ -2822,7 +2828,7 @@ export class TUI extends Container {
 		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
 		const pendingAltExit = this.#pendingAltExit;
-		let buffer = this.#paintBeginSequence + pendingAltExit;
+		let buffer = this.#beginPaint() + pendingAltExit;
 		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			// A reset is explicitly destructive, so remove every placement—not only
 			// the ones this TUI tracked—then resend images composed for the clean
@@ -3601,7 +3607,7 @@ export class TUI extends Container {
 				return;
 			}
 		}
-		let buffer = `${this.#paintBeginSequence}\x1b[H`;
+		let buffer = `${this.#beginPaint()}\x1b[H`;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\n";
 			buffer += this.#lineRewriteSequence(

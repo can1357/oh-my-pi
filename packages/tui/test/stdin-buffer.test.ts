@@ -5,7 +5,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { StdinBuffer } from "@oh-my-pi/pi-tui/stdin-buffer";
 
@@ -637,6 +637,22 @@ describe("StdinBuffer", () => {
 			processInput("line 2\rline 3");
 			expect(emittedPaste).toEqual(["line 1\rline 2\rline 3"]);
 			expect(emittedSequences).toEqual([]);
+		});
+
+		it("coalesces iTerm2-sized chunks arriving ten milliseconds apart", () => {
+			const text = `${"a".repeat(628)}\r${"b".repeat(200)}\r${"c".repeat(40)}`;
+			vi.useFakeTimers();
+			try {
+				processInput(text.slice(0, 768));
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual([]);
+				vi.advanceTimersByTime(10);
+				processInput(text.slice(768));
+				expect(emittedPaste).toEqual([text]);
+				expect(emittedSequences).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("coalesces a paste whose first line was already delivered before a break-only read", () => {
