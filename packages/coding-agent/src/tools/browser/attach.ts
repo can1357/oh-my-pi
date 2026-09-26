@@ -536,7 +536,7 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
-/** Select relay tabs from /json before attaching; fall back to target enumeration. */
+/** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	if (options.relayJson) {
 		const entries = await fetchRelayEntries(options.relayJson);
@@ -554,11 +554,18 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 				);
 				if (active.length > 1) {
 					let firstPage: Page | null = null;
+					let unreadableActive = false;
 					for (const entry of active) {
 						const target = targets.find(t => (t as Target & { _targetId?: string })._targetId === entry.id);
-						if (!target) continue;
+						if (!target) {
+							unreadableActive = true;
+							continue;
+						}
 						const page = await attachPageWithTimeout(target);
-						if (!page || !(await waitForMainFrame(page))) continue;
+						if (!page || !(await waitForMainFrame(page))) {
+							unreadableActive = true;
+							continue;
+						}
 						firstPage ??= page;
 						const visible = await Promise.race([
 							page.evaluate(() => document.visibilityState === "visible").catch(() => false),
@@ -566,13 +573,17 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 						]);
 						if (visible) return page;
 					}
+					if (unreadableActive) throw new ToolError("An active tab is not ready; retry after it loads");
 					if (firstPage) return firstPage;
 				}
 			}
-			const target = selected && targets.find(t => (t as Target & { _targetId?: string })._targetId === selected.id);
-			if (target) {
+			if (selected) {
+				const target = targets.find(t => (t as Target & { _targetId?: string })._targetId === selected.id);
+				if (!target) throw new ToolError("Selected tab is no longer available");
 				const page = await attachPageWithTimeout(target);
-				if (page && (await waitForMainFrame(page))) return page;
+				if (!page || !(await waitForMainFrame(page)))
+					throw new ToolError("Selected tab is not ready; retry after it loads");
+				return page;
 			}
 		}
 	}

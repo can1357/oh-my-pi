@@ -1207,6 +1207,40 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(attachedIds(cdp)).not.toContain(`TAB${ANON}.1`);
 		expect(ext.rpcs("detach").map(r => r.tabId)).toEqual([1]);
 	});
+
+	it("reannounces a held tab on revival without attaching it while discarded", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+		);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1, discarded: true })]);
+		const discardedAttempts = replacement.rpcs("attach").length;
+		nack(bridge, replacement, "attach");
+		await flush();
+
+		bridge.extMessage(replacement, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1 }) }));
+		ack(bridge, replacement, "attach");
+		await flush();
+
+		expect(discardedAttempts).toBe(0);
+		expect(bridge.listTargets().map(target => target.id)).toContain(`PAGE${ANON}.1`);
+		expect(replacement.rpcs("attach").map(rpc => rpc.tabId)).toEqual([1]);
+		expect(attachedIds(cdp).filter(id => id === `TAB${ANON}.1`)).toHaveLength(2);
+	});
 });
 
 describe("RelayBridge active tab metadata", () => {

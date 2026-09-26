@@ -1,7 +1,7 @@
 /**
  * Tests for relay-safe target adoption in `pickElectronTarget`
  * (discarded-tab hangs, "Requesting main frame too early!" race):
- * - relay /json metadata selects the tab before any CDP attach,
+ * - relay /json metadata chooses a page before probing its frame,
  * - discarded matches fail with actionable guidance,
  * - per-target attach deadlines never hang,
  * - mainFrame readiness is polled past the frameTree race.
@@ -85,7 +85,9 @@ function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
 function makeBrowser(targets: Array<Target & { _targetId: string }>) {
 	return {
 		targets: () => targets,
-		pages: vi.fn(async () => targets.map(t => t.page())),
+		pages: vi.fn(async (): Promise<Page[]> =>
+			(await Promise.all(targets.map(t => t.page()))).filter((page): page is Page => page !== null),
+		),
 	} as unknown as Browser;
 }
 
@@ -649,6 +651,21 @@ describe("pickElectronTarget relay path", () => {
 		expect(second.pageSpy).not.toHaveBeenCalled();
 	});
 
+	it("does not adopt another live tab when the selected tab is unreadable", async () => {
+		const other = makeTarget("PAGE10", fakePage({ url: "https://docs.example.com", title: "Docs" }));
+		const unreadable = makeTarget("PAGE11", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Cart",
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson, preferVisible: true }),
+		).rejects.toThrow(/selected tab.*not ready/i);
+		expect(other.pageSpy).not.toHaveBeenCalled();
+	});
+
 	it("skips an active service worker page unless explicitly targeted", async () => {
 		relayEntries = [
 			{
@@ -714,6 +731,25 @@ describe("pickElectronTarget relay path", () => {
 			preferVisible: true,
 		});
 		expect(picked).toBe(visiblePage);
+	});
+
+	it("does not choose a hidden window when another active tab is unreadable", async () => {
+		relayEntries = RELAY_ENTRIES.map(entry => (entry.id === "PAGE10" ? { ...entry, active: "true" } : entry));
+		const unreadable = makeTarget("PAGE10", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Docs",
+		} as unknown as Page);
+		const hidden = makeTarget("PAGE11", {
+			url: () => relayEntries[1]!.url,
+			title: async () => "Cart",
+			evaluate: async () => false,
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { relayJson, preferVisible: true }),
+		).rejects.toThrow(/tab.*not ready/i);
 	});
 
 	it("fails with guidance when the only match is a discarded tab", async () => {

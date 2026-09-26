@@ -433,6 +433,12 @@ export class RelayBridge {
 			const wasAttached = tab.attached;
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
+			if (tab.discarded) {
+				// Retire held sessions now; revival will reannounce and attach the tab.
+				this.#retractTab(tab);
+				this.#detachIfUnheld(tab.tabKey);
+				continue;
+			}
 			// A service-worker restart can drop attachments while downstream
 			// connections still hold sessions: restore them best-effort.
 			if (wasAttached && !tab.attached && this.#sessionHolders(tab.tabKey).length > 0) {
