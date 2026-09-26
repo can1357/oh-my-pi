@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from "bun:test";
 import type { HostFrame, SessionEntry } from "@oh-my-pi/pi-wire";
-import { GuestClient } from "../src/lib/client";
+import { GuestClient, visibleTranscriptEntries } from "../src/lib/client";
 import { encodeBase64Url } from "../src/lib/link";
 import { decideTranscriptPoll } from "../src/lib/transcript-poll";
 
@@ -24,6 +24,17 @@ function messageEntry(id: string, content: string, timestamp: number): SessionEn
 		parentId: null,
 		timestamp: "2026-06-12T00:00:01Z",
 		message: { role: "user", content, timestamp },
+	};
+}
+
+function archiveEntry(id: string, parentId: string, targetId: string): SessionEntry {
+	return {
+		type: "archive",
+		id,
+		parentId,
+		timestamp: "2026-06-12T00:00:02Z",
+		targetId,
+		archived: true,
 	};
 }
 
@@ -83,13 +94,14 @@ describe("GuestClient.fetchTranscript", () => {
 
 describe("decideTranscriptPoll", () => {
 	it("retries on transient failure (null) without touching the cursor", () => {
-		expect(decideTranscriptPoll(null, "")).toEqual({ action: "retry" });
+		expect(decideTranscriptPoll(null, "", 0)).toEqual({ action: "retry" });
 	});
 
 	it("stops on a terminal frame error and carries the message to render", () => {
 		const decision = decideTranscriptPoll(
 			{ kind: "error", message: "transcript entry exceeds transcript fetch cap (4194304 bytes)" },
 			"partial-line",
+			0,
 		);
 		expect(decision).toEqual({
 			action: "stop",
@@ -101,12 +113,13 @@ describe("decideTranscriptPoll", () => {
 		const entry = messageEntry("m1", "hi", 1);
 		const rows = `{"type":"session","id":"s1"}\n${JSON.stringify(entry)}\n`;
 		const text = `${rows}{"type":"mes`;
-		const decision = decideTranscriptPoll({ kind: "rows", text, newSize: text.length }, "");
+		const decision = decideTranscriptPoll({ kind: "rows", text, newSize: text.length }, "", 0);
 		expect(decision).toEqual({
 			action: "advance",
 			newSize: text.length,
 			carry: '{"type":"mes',
 			fresh: [entry],
+			caughtUp: false,
 		});
 	});
 
@@ -117,24 +130,57 @@ describe("decideTranscriptPoll", () => {
 		const decision = decideTranscriptPoll(
 			{ kind: "rows", text: line.slice(splitAt), newSize: 100 },
 			line.slice(0, splitAt),
+			50,
 		);
 		expect(decision).toEqual({
 			action: "advance",
 			newSize: 100,
 			carry: "",
 			fresh: [entry],
+			caughtUp: false,
 		});
+	});
+
+	it("projects archived branches out of incrementally polled subagent rows", () => {
+		const root = messageEntry("root", "root", 1);
+		const hidden = { ...messageEntry("hidden", "private branch", 2), parentId: root.id };
+		const visible = { ...messageEntry("visible", "kept branch", 3), parentId: root.id };
+		const archived = archiveEntry("archive-hidden", visible.id, hidden.id);
+		const rows = [root, hidden, visible, archived].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		const decision = decideTranscriptPoll({ kind: "rows", text: rows, newSize: rows.length }, "", 0);
+		if (decision.action !== "advance") throw new Error("Expected transcript rows to advance");
+
+		expect(visibleTranscriptEntries(decision.fresh).map(entry => entry.id)).toEqual([root.id, visible.id]);
+	});
+
+	it("reports a transcript caught up only once a read returns nothing new", () => {
+		const root = messageEntry("root", "root", 1);
+		const hidden = { ...messageEntry("hidden", "private branch", 2), parentId: root.id };
+		const archived = archiveEntry("archive-hidden", root.id, hidden.id);
+		const firstText = [root, hidden].map(entry => `${JSON.stringify(entry)}\n`).join("");
+		const secondText = `${JSON.stringify(archived)}\n`;
+		const firstSize = firstText.length;
+		const secondSize = firstSize + secondText.length;
+
+		// A capped read stops short of the archive record, so its rows are not yet safe to show.
+		const first = decideTranscriptPoll({ kind: "rows", text: firstText, newSize: firstSize }, "", 0);
+		expect(first).toMatchObject({ action: "advance", caughtUp: false });
+		const second = decideTranscriptPoll({ kind: "rows", text: secondText, newSize: secondSize }, "", firstSize);
+		expect(second).toMatchObject({ action: "advance", caughtUp: false });
+		const third = decideTranscriptPoll({ kind: "rows", text: "", newSize: secondSize }, "", secondSize);
+		expect(third).toEqual({ action: "advance", newSize: secondSize, carry: "", fresh: [], caughtUp: true });
 	});
 
 	it("surfaces the error after rows were already read (rows then error sequence)", () => {
 		// First poll returns rows; second returns the host's terminal error with
 		// an unchanged cursor. The error decision must be stop — never retry —
 		// while the prior advance already delivered its entries.
-		const first = decideTranscriptPoll({ kind: "rows", text: '{"type":"message","id":"m1"}\n', newSize: 29 }, "");
+		const first = decideTranscriptPoll({ kind: "rows", text: '{"type":"message","id":"m1"}\n', newSize: 29 }, "", 0);
 		expect(first.action).toBe("advance");
 		const second = decideTranscriptPoll(
 			{ kind: "error", message: "transcript entry exceeds transcript fetch cap (4194304 bytes)" },
 			first.action === "advance" ? first.carry : "",
+			29,
 		);
 		expect(second).toEqual({
 			action: "stop",

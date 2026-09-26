@@ -1492,16 +1492,6 @@ export function renderResult(
 	});
 }
 
-/** Tests whether a persisted tool result carries a task snapshot. */
-export function isTaskToolDetails(value: unknown): value is TaskToolDetails {
-	return (
-		Boolean(value) &&
-		typeof value === "object" &&
-		"results" in (value as TaskToolDetails) &&
-		Array.isArray((value as TaskToolDetails).results)
-	);
-}
-
 /**
  * Subagent ids visible on a task tool card, for click-to-focus hit-testing.
  * Reads `progress[]` (in-flight) and `results[]` (settled) defensively — card

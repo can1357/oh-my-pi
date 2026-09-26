@@ -2,8 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded collaboration sessions to protocol version 4 so guests receive archived branch state ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+
+### Added
+
+- Added `/prune` to archive conversation branches with no completed assistant reply, with `/prune delete` available for permanent removal ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+- Added `/unarchive` and tree controls for revealing, archiving, and restoring branches; exports and shares omit archived content by default ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+
 ### Fixed
 
+- Archived branches retain the ancestry, selected branch, and active bookkeeping needed for cycle-safe pruning and branching, nested restoration from every navigation API, privacy-safe live collaboration resynchronization, and efficient leak-free exports ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+- Collaboration guests keep an archived branch hidden when local-only entries such as service-tier changes sit inside it, and their replicated branch no longer breaks at such entries ([#8301](https://github.com/can1357/oh-my-pi/pull/8301) by [@ParadaCarleton](https://github.com/ParadaCarleton))
+- Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries for up to 150 s and reclaims its room ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
+- Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line naming the command and pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
 

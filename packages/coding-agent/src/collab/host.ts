@@ -103,6 +103,7 @@ const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
 	branch_summary: true,
 	model_change: true,
 	thinking_level_change: true,
+	archive: true,
 };
 const COLLAB_BUS_CHANNELS = [
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -115,6 +116,71 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
+}
+
+/**
+ * The nearest ancestor guests receive. Local-only entries never reach
+ * them, so a wire entry below one would dangle on the replica and cut archive
+ * traversal (and the branch) at the gap; it hangs off the first wire ancestor instead.
+ */
+function wireParentId(parentId: string | null, lookup: (id: string) => StoredSessionEntry | undefined): string | null {
+	const seen = new Set<string>();
+	while (parentId !== null && !seen.has(parentId)) {
+		const parent = lookup(parentId);
+		if (!parent || isWireSessionEntry(parent)) return parentId;
+		seen.add(parentId);
+		parentId = parent.parentId;
+	}
+	return null;
+}
+
+/**
+ * Keep archived content private even when its root is local-only metadata that
+ * the collaboration protocol cannot represent. A guest cannot traverse from a
+ * missing root to its descendants, so omit that whole subtree and its dangling
+ * archive records instead of sending content the guest cannot know is hidden.
+ */
+function projectSnapshotEntries(entries: StoredSessionEntry[]): (StoredSessionEntry & WireSessionEntry)[] {
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	const archiveState = new Map<string, boolean>();
+	for (const entry of entries) {
+		if (entry.type === "archive") archiveState.set(entry.targetId, entry.archived);
+	}
+
+	const opaqueArchivedRoots = new Set<string>();
+	for (const [targetId, archived] of archiveState) {
+		if (!archived) continue;
+		const target = byId.get(targetId);
+		if (target && !isWireSessionEntry(target)) opaqueArchivedRoots.add(targetId);
+	}
+
+	const children = new Map<string, string[]>();
+	for (const entry of entries) {
+		if (!entry.parentId) continue;
+		const siblings = children.get(entry.parentId);
+		if (siblings) siblings.push(entry.id);
+		else children.set(entry.parentId, [entry.id]);
+	}
+	const hidden = new Set<string>();
+	const stack = [...opaqueArchivedRoots];
+	while (stack.length > 0) {
+		const id = stack.pop() as string;
+		if (hidden.has(id)) continue;
+		hidden.add(id);
+		for (const childId of children.get(id) ?? []) stack.push(childId);
+	}
+
+	const projected: (StoredSessionEntry & WireSessionEntry)[] = [];
+	for (const entry of entries) {
+		if (!isWireSessionEntry(entry) || hidden.has(entry.id)) continue;
+		if (entry.type === "archive") {
+			const target = byId.get(entry.targetId);
+			if (!target || !isWireSessionEntry(target) || hidden.has(entry.targetId)) continue;
+		}
+		const parentId = wireParentId(entry.parentId, id => byId.get(id));
+		projected.push(parentId === entry.parentId ? entry : { ...entry, parentId });
+	}
+	return projected;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
@@ -443,8 +509,14 @@ export class CollabHost {
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
-			if (isWireSessionEntry(entry)) {
-				const shrunk = shrinkReplicatedEntry(entry);
+			const archiveTarget =
+				entry.type === "archive" ? this.#ctx.sessionManager.getEntry(entry.targetId) : undefined;
+			if (entry.type === "archive" && !(archiveTarget && isWireSessionEntry(archiveTarget))) {
+				// Guests never received a local-only root: resync so the snapshot projection omits its subtree.
+				for (const [peerId, peer] of this.#peers) this.#sendSnapshot(peerId, peer.canWrite);
+			} else if (isWireSessionEntry(entry)) {
+				const parentId = wireParentId(entry.parentId, id => this.#ctx.sessionManager.getEntry(id));
+				const shrunk = shrinkReplicatedEntry(parentId === entry.parentId ? entry : { ...entry, parentId });
 				if (shrunk.type === "custom_message" && shrunk.customType === COLLAB_ENTRY_OMITTED_CUSTOM_TYPE) {
 					// The live path also emits a guest-visible notice: guests only
 					// apply `message` entries to their agent context, so without
@@ -457,6 +529,9 @@ export class CollabHost {
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
+		};
+		this.#ctx.sessionManager.onEntriesReplaced = () => {
+			for (const [peerId, peer] of this.#peers) this.#sendSnapshot(peerId, peer.canWrite);
 		};
 		this.#updateStatusSegment();
 
@@ -545,6 +620,7 @@ export class CollabHost {
 				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
 		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
+		this.#ctx.sessionManager.onEntriesReplaced = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const unsubscribe of this.#busUnsubscribers) unsubscribe();
@@ -730,7 +806,18 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#sendSnapshot(fromPeer, canWrite);
 
+		this.#ctx.session.emitNotice(
+			"info",
+			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
+			"collab",
+		);
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
+
+	#sendSnapshot(fromPeer: number, canWrite: boolean): void {
 		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
 		// materialize its chunks only as the transport drains.
 		// `copyForReplication` rather than the default `structuredClone`: a payload
@@ -751,7 +838,7 @@ export class CollabHost {
 			}
 			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
 		}
-		const entries = snapshot.entries.filter(isWireSessionEntry);
+		const entries = projectSnapshotEntries(snapshot.entries);
 		const socket = this.#socket;
 		if (!socket) return;
 		this.#send(
@@ -772,13 +859,6 @@ export class CollabHost {
 				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
 	}
 
 	/**

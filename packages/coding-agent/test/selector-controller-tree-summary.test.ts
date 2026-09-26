@@ -47,7 +47,7 @@ function userNode(id: string, parentId: string | null, text: string): SessionTre
 type NavigateTree = (
 	entryId: string,
 	options: { summarize: boolean; customInstructions: string | undefined; allowAskReopen: boolean },
-) => Promise<{ cancelled: boolean }>;
+) => Promise<{ aborted?: boolean; cancelled: boolean }>;
 type ShowHookSelector = (title: string, options: string[]) => Promise<string | undefined>;
 
 interface TreeSummaryHarness {
@@ -71,6 +71,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		sessionManager: {
 			getTree: () => [root],
 			getLeafId: () => null,
+			getArchivedRootId: () => undefined,
 			appendLabelChange: vi.fn(),
 		},
 		ui: {
@@ -101,6 +102,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		reloadTodos: vi.fn(async () => {}),
 		session: {
 			navigateTree,
+			restoreArchived: vi.fn(async () => 1),
 			abortBranchSummary: vi.fn(),
 		},
 	} as unknown as InteractiveModeContext;
