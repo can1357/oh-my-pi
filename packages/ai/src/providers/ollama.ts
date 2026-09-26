@@ -1,3 +1,4 @@
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -710,6 +711,7 @@ const streamOllamaOnce = (
 					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
 					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+					calculateCost(model, output.usage, output.timestamp);
 				}
 			}
 			if (streamMarkupHealing) {
