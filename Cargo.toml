@@ -16,6 +16,7 @@ members = [
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
    "crates/vendor/tree-sitter-go",
 ]
@@ -31,6 +32,7 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
+brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
@@ -390,7 +392,7 @@ tiktoken-rs = "0.12"
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.4"
+brush-parser = { path = "crates/vendor/brush-parser" }
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────

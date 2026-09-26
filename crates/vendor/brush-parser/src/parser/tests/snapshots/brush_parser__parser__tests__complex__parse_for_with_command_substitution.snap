@@ -1,0 +1,52 @@
+---
+source: brush-parser/src/parser/tests/complex.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "for f in $(ls *.txt); do cat \"$f\"; done",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(ForClause(ForClauseCommand(
+                variable_name: "f",
+                values: Some([
+                  Word(
+                    value: "$(ls *.txt)",
+                    loc: "[location]",
+                  ),
+                ]),
+                body: DoGroupCommand(
+                  list: CompoundList([
+                    CompoundListItem(AndOrList(
+                      first: Pipeline(
+                        seq: [
+                          Simple(SimpleCommand(
+                            word_or_name: Some(Word(
+                              value: "cat",
+                              loc: "[location]",
+                            )),
+                            suffix: Some(CommandSuffix([
+                              Word(Word(
+                                value: "\"$f\"",
+                                loc: "[location]",
+                              )),
+                            ])),
+                          )),
+                        ],
+                      ),
+                    ), Sequence),
+                  ]),
+                  loc: "[location]",
+                ),
+                loc: "[location]",
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

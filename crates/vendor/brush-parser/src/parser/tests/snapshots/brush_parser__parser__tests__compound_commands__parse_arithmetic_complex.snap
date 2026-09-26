@@ -1,0 +1,25 @@
+---
+source: brush-parser/src/parser/tests/compound_commands.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "(( x = 5 + 3 * 2 ))",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(Arithmetic(ArithmeticCommand(
+                expr: UnexpandedArithmeticExpr(
+                  value: "x = 5 + 3 * 2",
+                ),
+                loc: "[location]",
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

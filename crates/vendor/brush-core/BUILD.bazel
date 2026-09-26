@@ -17,7 +17,10 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.5.0",
-    deps = all_crate_deps(normal = True) + ["//crates/pi-vfs"],
+    deps = all_crate_deps(normal = True) + [
+        "//crates/pi-vfs",
+        "//crates/vendor/brush-parser",
+    ],
 )
 
 rust_test(
