@@ -553,6 +553,42 @@ describe("IRC", () => {
 			const event = await ircEvent;
 			expect(event.type).toBe("irc_message");
 		});
+		it("queues an IRC wake when a competing turn wins the prompt race", async () => {
+			const started = Promise.withResolvers<void>();
+			const { session } = createStreamingSession(modelRegistry, [
+				() => {
+					started.resolve();
+					return { content: ["competing turn"], delayMs: 20 };
+				},
+				{ content: ["peer reply"] },
+			]);
+			sessions.push(session);
+
+			const competingTurn = session.prompt("start competing turn");
+			await started.promise;
+			await expect(
+				session.deliverIrcMessage({
+					id: "msg-busy-race",
+					from: "0-Peer",
+					to: "0-Me",
+					body: "queued after race",
+					ts: Date.now(),
+				}),
+			).resolves.toBe("injected");
+			await competingTurn;
+			await session.waitForIdle();
+
+			expect(session.agent.state.messages).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						role: "custom",
+						customType: "irc:incoming",
+						details: expect.objectContaining({ id: "msg-busy-race" }),
+					}),
+				]),
+			);
+		});
+
 		it("defers an idle wake while a pooled yield contract is installed", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
@@ -574,26 +610,19 @@ describe("IRC", () => {
 			});
 			expect(outcome).toBe("woken");
 			for (let i = 0; i < 10; i++) await Promise.resolve();
-			// An ordinary wake under pooled items would emit keyed yields against
-			// another turn's items, so no turn starts while the contract is pooled.
 			expect(promptSpy).not.toHaveBeenCalled();
-			// The deferral must not re-arm itself through the idle drain: the
-			// records stay parked until the contract clears instead of chaining
-			// wake observers indefinitely.
-			// Yield the event loop repeatedly: a re-armed chain would schedule more
-			// parking calls per turn of the loop, while fixed code schedules
-			// nothing further, so extra yields cannot flake this assertion.
 			for (let i = 0; i < 20; i++) {
 				const { promise, resolve } = Promise.withResolvers<void>();
 				setImmediate(resolve);
 				await promise;
 			}
 			expect(queueDeferredWake).toHaveBeenCalledTimes(1);
-			// No turn ran, so the wake observer must never have attached: otherwise
-			// it would finalize the next turn's output as this wake's reply.
 			expect(observations).toBe(0);
-			// Clearing publishes the ordinary contract; the resume drain must turn
-			// the parked record into a monitored wake with no later message.
+			for (let i = 0; i < 20; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
 			promptSpy.mockClear();
 			await session.setWorkPoolYieldItems([]);
 			for (let i = 0; i < 10; i++) await Promise.resolve();
