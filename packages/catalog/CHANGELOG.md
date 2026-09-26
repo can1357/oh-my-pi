@@ -73,6 +73,10 @@
 - Updated input cost for TypeSafe models to 0.042
 - Improved model routing and thinking-policy handling for llama.cpp Qwen models, Bonsai lineage aliases, and custom provider names.
 
+### Fixed
+
+- Extension providers registered with a custom `api` id and a custom `streamSimple` no longer resolve `compat: undefined`; custom (non-built-in) api ids now resolve the OpenAI-completions dialect so the reused streamer no longer crashes and declared `compat` overrides apply ([#12562](https://github.com/can1357/oh-my-pi/issues/12562)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

@@ -1275,8 +1275,20 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		specUsesApi(spec, "google-gemini-cli")
 	) {
 		compat = resolveGooglePolicy(spec, axes);
-	} else {
+	} else if (
+		specUsesApi(spec, "ollama-chat") ||
+		specUsesApi(spec, "cursor-agent") ||
+		specUsesApi(spec, "gitlab-duo-agent")
+	) {
+		// Built-in transports whose streamers read no wire-compat record.
 		compat = undefined;
+	} else {
+		// Custom/extension API ids registered via `registerCustomApi` are not
+		// built-in and overwhelmingly reuse the OpenAI-completions streamer,
+		// which dereferences `model.compat` unguarded. Resolve the completions
+		// dialect so the record is populated — and spec `compat` overrides
+		// apply — instead of `undefined` crashing the streamer (#12562).
+		compat = resolveOpenAICompletionsPolicy(spec as ModelSpec<"openai-completions">, facts, axes);
 	}
 	return {
 		identity,
