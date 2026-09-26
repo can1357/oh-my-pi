@@ -26,7 +26,7 @@ import {
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
@@ -264,6 +264,34 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
 		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
+	});
+
+	it("names sibling memory tools by their xd:// URL only when they are mounted as devices", () => {
+		const session = makeSession(Settings.isolated({ "memory.backend": "mnemopi" }));
+		const recall = new MemoryRecallTool(session);
+		const reflect = new MemoryReflectTool(session);
+		const edit = new MemoryEditTool(session);
+		const tools = new Map<string, Tool>([
+			["recall", recall],
+			["reflect", reflect],
+			["memory_edit", edit],
+		]);
+		session.xdev = {
+			tools,
+			mountedNames: new Set(["recall", "memory_edit"]),
+			builtInNames: new Set(tools.keys()),
+			isActive: name => name === "reflect",
+		};
+
+		expect(reflect.description).toContain("unlike `xd://recall`, blends them");
+		expect(recall.description).toContain("`reflect`: synthesized answer");
+		expect(recall.description).toContain("Before any `xd://memory_edit update`");
+		expect(edit.description).toContain("Only ids returned by `xd://recall`.");
+
+		// A mounted device without a summary makes catalog summaries read its description;
+		// rendering refs must not depend on them, or this recurses without bound.
+		Object.assign(recall, { summary: undefined });
+		expect(recall.description).toContain("`reflect`: synthesized answer");
 	});
 });
 
