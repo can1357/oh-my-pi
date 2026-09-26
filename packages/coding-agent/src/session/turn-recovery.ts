@@ -25,7 +25,7 @@ import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-cred
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -604,18 +604,25 @@ export class TurnRecovery {
 
 	/**
 	 * Continue past a mid-stream transport failure (idle stall, HTTP/2 reset,
-	 * premature close) that hit a text-only turn after its text rendered.
-	 * {@link isRetryableError} refuses to replay committed text, and
-	 * {@link classifyResolvedInterruptedToolTurn} only resumes turns with tool
-	 * calls, so the session used to stop on a pinned error. Resuming from the
-	 * trailing assistant message would be a prefill, which newer Claude models
-	 * reject: keep the partial turn in context, append a developer reminder to
-	 * pick up where the text stopped, and continue. Honors `retry.enabled`;
-	 * bounded per prompt, past the cap the error surfaces as before.
+	 * premature close, socket closed mid-body) that hit a text-only turn after
+	 * its text rendered. {@link isRetryableError} refuses to replay committed
+	 * text, and {@link classifyResolvedInterruptedToolTurn} only resumes turns
+	 * with tool calls, so the session used to stop on a pinned error. Resuming
+	 * from the trailing assistant message would be a prefill, which newer Claude
+	 * models reject: keep the partial turn in context, append a developer
+	 * reminder to pick up where the text stopped, and continue. Honors
+	 * `retry.enabled`; bounded per prompt, past the cap the error surfaces as before.
+	 * A socket close counts here but not for tool turns: without tool calls there
+	 * is no executed side effect whose resumption policy it could change.
 	 */
 	handleCommittedTextStreamStall(message: AssistantMessage): boolean {
 		const id = this.#classifyRetryMessage(message);
-		if (!this.#isMidStreamTransportFailure(message, id)) {
+		const socketClosed =
+			message.stopReason === "error" &&
+			AIError.retriable(id) &&
+			!this.#host.streamingEditAbortTriggered() &&
+			isUnexpectedSocketCloseMessage(message.errorMessage ?? "");
+		if (!socketClosed && !this.#isMidStreamTransportFailure(message, id)) {
 			this.#streamStallContinueCount = 0;
 			return false;
 		}

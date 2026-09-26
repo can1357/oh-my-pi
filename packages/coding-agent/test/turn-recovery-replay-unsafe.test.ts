@@ -1191,10 +1191,11 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
-		it("also resumes HTTP/2 resets and premature closes", () => {
+		it("also resumes HTTP/2 resets, premature closes, and sockets closed mid-body", () => {
 			for (const errorMessage of [
 				"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
 				"OpenAI responses stream closed before a terminal response event was received",
+				"The socket connection was closed unexpectedly before the response completed",
 			]) {
 				const message = stalledTextTurn(undefined, errorMessage);
 				const { host, continues } = continuationHost(message);
