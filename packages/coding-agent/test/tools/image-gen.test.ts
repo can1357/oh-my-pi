@@ -418,3 +418,172 @@ describe("imageGenTool catalog routing", () => {
 		expect(tools[0]).not.toHaveProperty("model");
 	});
 });
+
+describe("imageGenTool minimax-images routing", () => {
+	function minimaxModel(provider: string): Model<Api> {
+		// Region-correct seed hosts from the provider KDL; the fabricated
+		// catalogModel helper would otherwise emit a placeholder baseUrl.
+		const baseUrl = provider === "minimax-code-cn" ? "https://api.minimaxi.com/v1" : "https://api.minimax.io/v1";
+		return { ...catalogModel(provider, "image-01", "minimax-images"), baseUrl };
+	}
+
+	function minimaxResponse(statusCode = 0, statusMsg = "ok"): Response {
+		const payload =
+			statusCode === 0
+				? { data: { image_base64: [PNG_DATA] } }
+				: { base_resp: { status_code: statusCode, status_msg: statusMsg } };
+		return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+	}
+
+	function minimaxContext(
+		models: Model<Api>[],
+		fetch: FetchImpl,
+		credentials: Record<string, string | undefined> = { "minimax-code-cn": "cn-key" },
+	): CustomToolContext {
+		const settings = Settings.isolated({ modelRoles: { image: `${models[0]!.provider}/${models[0]!.id}` } });
+		return createContext({ models, settings, fetch, credentials });
+	}
+
+	it("routes the china credential to the canonical domestic host with the default aspect ratio", async () => {
+		const model = minimaxModel("minimax-code-cn");
+		const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+			return minimaxResponse();
+		};
+		const ctx = minimaxContext([model], fetchMock);
+
+		const result = await imageGenTool.execute("minimax", { subject: "a token plan render" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]!.url).toBe("https://api.minimaxi.com/v1/image_generation");
+		expect(requests[0]!.body).toMatchObject({
+			model: "image-01",
+			prompt: "a token plan render.",
+			response_format: "base64",
+			aspect_ratio: "1:1",
+		});
+		expect(requests[0]!.body).not.toHaveProperty("width");
+		expect(result.details?.provider).toBe("minimax-code-cn");
+		// The fixture bytes are not a real image header, so the metadata probe
+		// falls back to MiniMax's documented JPEG payload default.
+		expect(result.details?.images[0]).toMatchObject({ data: PNG_DATA, mimeType: "image/jpeg" });
+	});
+
+	it("maps a base_resp application error to a ProviderHttpError status", async () => {
+		const model = minimaxModel("minimax-code-cn");
+		const fetchMock: FetchImpl = () => Promise.resolve(minimaxResponse(1002, "rate limited"));
+		const ctx = minimaxContext([model], fetchMock);
+
+		const error = (await imageGenTool
+			.execute("minimax-throttled", { subject: "busy" }, undefined, ctx)
+			.catch((cause: AggregateError) => cause)) as AggregateError;
+
+		// 1002 (rate limited) must translate to 429 so credential rotation engages.
+		expect(error.errors[0]).toMatchObject({ status: 429 });
+		expect((error.errors[0] as Error).message).toContain("status_code 1002");
+	});
+
+	it("maps the china token plan id to the domestic host and the intl ids to the global host", async () => {
+		const china = minimaxModel("minimax-code-cn");
+		const intl = minimaxModel("minimax-code");
+		const urls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			urls.push(input.toString());
+			return minimaxResponse();
+		};
+		const settings = Settings.isolated({
+			modelRoles: { image: "minimax-code/image-01" },
+			"retry.fallbackChains": { image: ["minimax-code-cn/image-01"] },
+		});
+		const ctx = createContext({
+			models: [intl, china],
+			settings,
+			fetch: fetchMock,
+			credentials: { "minimax-code": "intl-key" },
+		});
+
+		const result = await imageGenTool.execute("regions", { subject: "region check" }, undefined, ctx);
+		collectPaths(result);
+
+		// The intl candidate runs first and succeeds on the global host; the
+		// china candidate is never reached.
+		expect(urls).toEqual(["https://api.minimax.io/v1/image_generation"]);
+		expect(result.details?.provider).toBe("minimax-code");
+	});
+
+	it("sends explicit dimensions instead of an aspect ratio when image_size is set alone", async () => {
+		const model = minimaxModel("minimax-code-cn");
+		const requests: Array<{ body: Record<string, unknown> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({ body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+			return minimaxResponse();
+		};
+		const ctx = minimaxContext([model], fetchMock);
+
+		await imageGenTool.execute("dims", { subject: "sized", image_size: "1024x1536" }, undefined, ctx);
+
+		expect(requests[0]!.body).toMatchObject({ width: 1024, height: 1536 });
+		expect(requests[0]!.body).not.toHaveProperty("aspect_ratio");
+	});
+
+	it("falls through to an edit-capable sibling when more than one reference image is given", async () => {
+		const minimax = minimaxModel("minimax-code-cn");
+		const fallback = catalogModel("deepinfra", "fallback-image", "openai-images");
+		const urls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			urls.push(input.toString());
+			return input.toString().includes("minimax") ? minimaxResponse() : imageResponse();
+		};
+		const settings = Settings.isolated({
+			modelRoles: { image: "minimax-code-cn/image-01" },
+			"retry.fallbackChains": { image: ["deepinfra/fallback-image"] },
+		});
+		const ctx = createContext({ models: [minimax, fallback], settings, fetch: fetchMock });
+		const reference = `data:image/png;base64,${PNG_DATA}`;
+
+		const result = await imageGenTool.execute(
+			"two-refs",
+			{ subject: "edited", input: [{ data: reference }, { data: reference }] },
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+
+		// MiniMax must decline before any request is sent; the sibling serves it.
+		// With input images the sibling switches to its edit endpoint.
+		expect(urls).toEqual(["https://deepinfra.example/v1/images/edits"]);
+		expect(result.details?.provider).toBe("deepinfra");
+	});
+
+	it("reports the single-reference limit when no edit-capable sibling exists", async () => {
+		const model = minimaxModel("minimax-code-cn");
+		const fetchMock: FetchImpl = () => Promise.resolve(minimaxResponse());
+		const ctx = minimaxContext([model], fetchMock);
+		const reference = `data:image/png;base64,${PNG_DATA}`;
+
+		const error = (await imageGenTool
+			.execute(
+				"only-minimax-two-refs",
+				{ subject: "edited", input: [{ data: reference }, { data: reference }] },
+				undefined,
+				ctx,
+			)
+			.catch((cause: AggregateError) => cause)) as AggregateError;
+		expect((error.errors[0] as Error).message).toContain("single reference image");
+	});
+
+	it("reports the reference size limit for oversized inputs", async () => {
+		const model = minimaxModel("minimax-code-cn");
+		const fetchMock: FetchImpl = () => Promise.resolve(minimaxResponse());
+		const ctx = minimaxContext([model], fetchMock);
+		// 3/4 of the base64 length must exceed the 10 MB documented input limit.
+		const oversized = `data:image/png;base64,${"A".repeat(14 * 1024 * 1024)}`;
+
+		const error = (await imageGenTool
+			.execute("oversized", { subject: "big", input: [{ data: oversized }] }, undefined, ctx)
+			.catch((cause: AggregateError) => cause)) as AggregateError;
+		expect((error.errors[0] as Error).message).toContain("under 10 MB");
+	});
+});

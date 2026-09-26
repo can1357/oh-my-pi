@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `minimax-images` image client: HTTP-200 `base_resp` envelope errors translate to provider statuses for credential rotation, edits accept a single reference image under 10 MB ([#12073](https://github.com/can1357/oh-my-pi/pull/12073) by [@abcfy2](https://github.com/abcfy2)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

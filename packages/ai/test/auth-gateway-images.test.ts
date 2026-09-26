@@ -117,6 +117,40 @@ describe("auth gateway images", () => {
 		});
 	});
 
+	it("serves minimax-images models and forwards the native envelope upstream", async () => {
+		const model = imageModel("minimax", "image-01", "minimax-images");
+		let upstream: { url: string; body: Record<string, unknown> } | undefined;
+		const fetchStub: FetchImpl = async (input, init) => {
+			upstream = {
+				url: input.toString(),
+				body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+			};
+			return new Response(JSON.stringify({ data: { image_base64: [IMAGE_DATA] } }), {
+				headers: { "content-type": "application/json" },
+			});
+		};
+		await withGateway([model], fetchStub, async url => {
+			const response = await gatewayRequest(url, "/v1/images/generations", {
+				model: "minimax/image-01",
+				prompt: "paint a lighthouse",
+				n: 1,
+			});
+			expect(response.status).toBe(200);
+			expect(upstream).toEqual({
+				url: "https://minimax.example/v1/image_generation",
+				body: {
+					model: "image-01",
+					prompt: "paint a lighthouse",
+					n: 1,
+					response_format: "base64",
+					aspect_ratio: "1:1",
+				},
+			});
+			const body = (await response.json()) as { data: Array<{ b64_json: string }> };
+			expect(body.data).toEqual([{ b64_json: IMAGE_DATA }]);
+		});
+	});
+
 	it("accepts OpenAI multipart edits and forwards a multipart edit upstream", async () => {
 		const model = imageModel("openai", "gpt-image-edit", "openai-images");
 		let upstream:

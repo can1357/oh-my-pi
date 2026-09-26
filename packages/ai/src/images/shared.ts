@@ -124,7 +124,7 @@ export async function postMultipart(options: {
 	);
 }
 
-async function imageFromUrl(url: string, fetch: FetchImpl, signal?: AbortSignal): Promise<GeneratedImage> {
+export async function imageFromUrl(url: string, fetch: FetchImpl, signal?: AbortSignal): Promise<GeneratedImage> {
 	const response = await fetch(url, { signal });
 	if (!response.ok) {
 		const text = await response.text();

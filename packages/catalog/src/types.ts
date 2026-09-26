@@ -52,6 +52,7 @@ export const RUNNER_APIS = [
 	"openrouter-decisions",
 	"openai-images",
 	"openrouter-images",
+	"minimax-images",
 	"xai-tts",
 	"openai-speech",
 	"openai-embeddings",

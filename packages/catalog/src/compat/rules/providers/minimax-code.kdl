@@ -13,4 +13,24 @@ provider "minimax-code" priority=1 {
 	models "MiniMax-M3" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}
+
+	kind-apis {
+		image "minimax-images"
+	}
+
+	// Token Plan keys are valid on the image endpoint; the intl plan routes to
+	// the global host (api.minimax.io).
+	seed base-url="https://api.minimax.io/v1" bundle="always" {
+		model "image-01" name="image-01" api="minimax-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "image-01" {
+		kind "image"
+	}
 }

@@ -73,7 +73,10 @@
 		"xai-oauth/grok-imagine-image",
 		"openrouter/google/gemini-3-pro-image-preview",
 		"google/gemini-3-pro-image-preview",
-		"deepinfra/black-forest-labs/FLUX-2-pro"
+		"deepinfra/black-forest-labs/FLUX-2-pro",
+		"minimax-code/image-01",
+		"minimax-code-cn/image-01",
+		"minimax/image-01"
 	],
 	"web": [
 		"web/parallel",

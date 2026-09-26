@@ -6,4 +6,24 @@ provider "minimax" priority=1 {
 
 	// Replaces the provider-id regex in both OpenAI baselines.
 	reasoning-deltas-may-be-cumulative #true
+
+	kind-apis {
+		image "minimax-images"
+	}
+
+	// Documented image generation endpoint (platform.minimax.io); bundled so the
+	// model is usable without a discovery source for the image kind.
+	seed base-url="https://api.minimax.io/v1" bundle="always" {
+		model "image-01" name="image-01" api="minimax-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "image-01" {
+		kind "image"
+	}
 }

@@ -41,6 +41,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 5. The selected catalog model's `api` determines the transport:
    - `openai-images`: OpenAI-compatible `/images/generations` and `/images/edits` requests. This carries xAI Grok Imagine and DeepInfra image models; a `404` from the edit endpoint retries the generation endpoint with the edit payload.
    - `openrouter-images`: OpenRouter's native `/images` endpoint. It does not use OpenRouter chat completions. The selected OpenRouter image model ID is sent directly, for example `openrouter/google/gemini-3-pro-image`.
+   - `minimax-images`: MiniMax `image_generation` endpoint. Application errors arrive as HTTP 200 with a non-zero `base_resp.status_code` and are translated to provider statuses (1002→429, 1004/2049→401, 1008→402) so credential rotation engages. Edits accept exactly one reference image under 10 MB (JPG/PNG). The seed host follows the credential origin: `minimax-code-cn` posts to `api.minimaxi.com`, `minimax`/`minimax-code` to `api.minimax.io`.
    - `google-generative-ai`: Gemini `:generateContent` with `responseModalities: ["IMAGE"]`.
    - `google-gemini-cli`: Google Antigravity's internal SSE image endpoint, using the account-advertised image model when discovery provides one.
    - `openai-responses`: OpenAI hosted Responses image generation.
