@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -23,7 +24,13 @@ from omp_rpc import (
     RpcError,
     host_tool,
 )
-from omp_rpc.client import _RpcFrameDecoder
+from unittest import mock
+
+from omp_rpc.client import (
+    _RpcFrameDecoder,
+    _process_group_id,
+    _terminate_process_group,
+)
 
 
 FAKE_SERVER = textwrap.dedent(
@@ -1892,6 +1899,101 @@ class TerminatesProcessGroupTests(unittest.TestCase):
             first,
             "grandchild kept running after stop() — process group leaked",
         )
+
+
+class _Survivor:
+    """A child that cannot be reaped until it is told to `exit()`.
+
+    Models a process whose pending SIGKILL only lands after it leaves
+    uninterruptible sleep: `poll()`/`wait()` report it alive until `exit()`
+    flips the state, and `terminate()`/`kill()` never change it on their own.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.stdin = None
+        self.stdout = None
+        self.stderr = None
+        self._code: int | None = None
+
+    def exit(self) -> None:
+        self._code = 0
+
+    def poll(self) -> int | None:
+        return self._code
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._code is None:
+            raise subprocess.TimeoutExpired(cmd="omp", timeout=timeout)
+        return self._code
+
+    def terminate(self) -> None:  # pragma: no cover - survivor ignores signals
+        pass
+
+    def kill(self) -> None:  # pragma: no cover - survivor ignores signals
+        pass
+
+
+class RetainsSurvivorTests(unittest.TestCase):
+    """Regression (#12767): teardown that cannot confirm death must report it,
+    retain the survivor, and stay re-reapable — never drop the only handle.
+
+    Before the fix `_terminate_process_group` swallowed both `wait()` timeouts
+    and returned nothing, and `stop()` nulled `_process`/`_pgid` unconditionally,
+    so a child stuck in uninterruptible sleep became unobservable and the second
+    `stop()` was a guaranteed no-op.
+    """
+
+    def test_survivor_is_reported_retained_and_reaped_later(self) -> None:
+        survivor = _Survivor(pid=424242)
+        signals: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            signals.append((pgid, sig))
+            # Signal 0 probes group liveness; the group empties only once the
+            # survivor has actually exited.
+            if sig == 0 and survivor.poll() is not None:
+                raise ProcessLookupError()
+
+        client = RpcClient(command=[sys.executable, "-c", "pass"])
+        client._process = survivor  # type: ignore[assignment]
+        client._pgid = survivor.pid
+
+        with mock.patch("os.killpg", side_effect=fake_killpg):
+            # First stop(): survivor cannot be killed -> teardown reports failure,
+            # drops the live handle but keeps it observable as a survivor.
+            self.assertIs(client.stop(), False)
+            self.assertIsNone(client._process)
+            self.assertEqual(client.survivor_pid, survivor.pid)
+
+            # The second stop() (the one the `with` exit / cancel hook fires) must
+            # re-signal the group, not no-op.
+            signals.clear()
+            self.assertFalse(client.stop())
+            self.assertIn((survivor.pid, signal.SIGKILL), signals)
+            self.assertEqual(client.survivor_pid, survivor.pid)
+
+            # Once the child leaves uninterruptible sleep, reap() confirms it and
+            # clears the survivor.
+            survivor.exit()
+            self.assertTrue(client.reap())
+            self.assertIsNone(client.survivor_pid)
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+    def test_terminate_confirms_and_reaps_a_real_child(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        pgid = _process_group_id(proc)
+        self.assertIsNotNone(pgid)
+
+        self.assertTrue(_terminate_process_group(proc, pgid))
+        self.assertIsNotNone(proc.poll(), "child survived a confirmed teardown")
 
 
 if __name__ == "__main__":

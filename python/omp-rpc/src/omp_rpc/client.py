@@ -237,7 +237,7 @@ def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
         return None
 
 
-def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -> None:
+def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -> bool:
     """Terminate the subprocess *and* every descendant sharing its group.
 
     omp is spawned with `start_new_session=True`, so it leads a session/group
@@ -251,38 +251,59 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
 
     `pgid` is captured at spawn; `os.killpg` is POSIX-only, so without it
     (Windows) we fall back to terminating the leader process alone.
+
+    Returns `True` only when teardown is *confirmed*: the leader has exited and,
+    where a process group is available, the group is empty. Returns `False` when
+    a survivor remains after the SIGKILL escalation — e.g. a child in
+    uninterruptible sleep whose pending SIGKILL cannot land until it leaves that
+    state. Callers MUST retain the handle/pgid on `False` so the survivor stays
+    observable and can be reaped by a later pass; a swallowed timeout here is how
+    a multi-GB child outlived its task's hard timeout, unreaped and still holding
+    a concurrency slot.
     """
     killpg = getattr(os, "killpg", None)
+
+    def _leader_exited() -> bool:
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
     if pgid is None or killpg is None:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                try:
-                    process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    pass
-        return
+        if process.poll() is not None:
+            return True
+        process.terminate()
+        if _leader_exited():
+            return True
+        process.kill()
+        return _leader_exited()
 
     def _signal_group(sig: int) -> None:
         try:
             killpg(pgid, sig)
         except OSError:
-            # ESRCH: the group is already empty. Teardown is best-effort.
+            # ESRCH: the group is already empty. The return value below, not this
+            # best-effort signal, reports whether teardown actually succeeded.
             pass
 
+    def _group_gone() -> bool:
+        # Signal 0 probes the group without touching it: ESRCH means no member
+        # survives. A living member — signalable, or present-but-EPERM — means
+        # teardown has not completed.
+        try:
+            killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
     _signal_group(signal.SIGTERM)
-    try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        pass
+    if _leader_exited() and _group_gone():
+        return True
     _signal_group(signal.SIGKILL)
-    try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        pass
+    return _leader_exited() and _group_gone()
 
 
 def _clone_json_value(value: object) -> JsonValue:
@@ -513,6 +534,11 @@ class RpcClient:
 
         self._process: subprocess.Popen[str] | None = None
         self._pgid: int | None = None
+        # A child that outlived teardown (SIGKILL still pending against an
+        # uninterruptible-sleep process). Retained so `reap()` can re-attempt
+        # and the survivor stays observable via `survivor_pid`.
+        self._survivor: subprocess.Popen[str] | None = None
+        self._survivor_pgid: int | None = None
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -687,10 +713,21 @@ class RpcClient:
             self.set_host_uris(self._host_uris)
         return self
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """Tear down the RPC child and its process group.
+
+        Returns `True` when teardown is confirmed (no survivor remains) and
+        `False` when a child outlived the SIGTERM->SIGKILL escalation. On
+        `False` the survivor's handle and pgid are retained: inspect
+        `survivor_pid` and call `reap()` (or `stop()`) again to re-attempt once
+        the child becomes killable. Safe to call repeatedly.
+        """
         process = self._process
         if process is None:
-            return
+            # Either never started, or a prior stop() retained a survivor whose
+            # SIGKILL was still pending. Re-attempt the reap instead of the old
+            # unconditional no-op that left the survivor orphaned forever.
+            return self._reap_survivor()
 
         self._stopping = True
         for pending_call in self._pending_host_tool_calls.values():
@@ -698,14 +735,19 @@ class RpcClient:
         for pending_uri in self._pending_host_uri_requests.values():
             pending_uri.cancel_event.set()
 
+        pgid = self._pgid
+        reaped = False
         try:
             if process.stdin is not None:
                 try:
                     process.stdin.close()
-                except OSError:
+                except Exception:
+                    # Never let a stdin-close failure skip the kill below: the
+                    # finally block clears `_process`, so an escaped exception
+                    # would drop the handle to a still-running child.
                     pass
 
-            _terminate_process_group(process, self._pgid)
+            reaped = _terminate_process_group(process, pgid)
         finally:
             if process.stdout is not None:
                 try:
@@ -731,12 +773,52 @@ class RpcClient:
             self._pending_host_uri_requests.clear()
             self._process = None
             self._pgid = None
+            if reaped:
+                self._survivor = None
+                self._survivor_pgid = None
+            else:
+                # Retain the survivor so a later reap()/stop() can observe and
+                # re-kill it. Without this the child becomes unobservable and the
+                # second stop() (from the `with` exit / cancel hook) is a no-op.
+                self._survivor = process
+                self._survivor_pgid = pgid
             if self._stdout_thread is not None:
                 self._stdout_thread.join(timeout=1.0)
             if self._stderr_thread is not None:
                 self._stderr_thread.join(timeout=1.0)
             self._stdout_thread = None
             self._stderr_thread = None
+        return reaped
+
+    @property
+    def survivor_pid(self) -> int | None:
+        """PID of a child that outlived teardown, or `None` if the group is gone.
+
+        A non-`None` value means `stop()` could not confirm the child died — for
+        example a process stuck in uninterruptible sleep, whose pending SIGKILL
+        lands only after it wakes. Poll `reap()` to re-attempt and observe
+        whether it has finally exited.
+        """
+        survivor = self._survivor
+        return survivor.pid if survivor is not None else None
+
+    def reap(self) -> bool:
+        """Re-attempt teardown of a survivor retained by a prior `stop()`.
+
+        Returns `True` when no survivor remains — either there never was one, or
+        it has now exited. Idempotent and safe to poll from a background reaper.
+        """
+        return self._reap_survivor()
+
+    def _reap_survivor(self) -> bool:
+        survivor = self._survivor
+        if survivor is None:
+            return True
+        if _terminate_process_group(survivor, self._survivor_pgid):
+            self._survivor = None
+            self._survivor_pgid = None
+            return True
+        return False
 
     def on_event(self, listener: AgentEventListener) -> Callable[[], None]:
         self._event_listeners.append(listener)
