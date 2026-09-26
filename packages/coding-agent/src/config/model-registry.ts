@@ -2779,15 +2779,20 @@ export class ModelRegistry {
 		return model.headers ? { ...model.headers } : undefined;
 	}
 
-	/**
-	 * Get API key for a model.
-	 */
+	#isKeylessProvider(provider: string): boolean {
+		return (
+			(this.#keylessProviders.has(provider) || this.authStorage.keys.keyless(provider)) &&
+			this.authStorage.keys.source(provider) === undefined
+		);
+	}
+
+	/** Resolve a model's request credential or the no-auth sentinel. */
 	async getApiKey(
 		model: Model<Api>,
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
-		if (this.#keylessProviders.has(model.provider) && this.authStorage.keys.source(model.provider) === undefined) {
+		if (this.#isKeylessProvider(model.provider)) {
 			return kNoAuth;
 		}
 		return this.authStorage.keys.get(model.provider, sessionId, {
@@ -2813,7 +2818,7 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get API key for a provider (e.g., "openai").
+	 * Resolve a provider's request credential or the no-auth sentinel.
 	 *
 	 * `options.forceRefresh` powers step (b) of the auth-retry policy — it
 	 * re-mints the session-sticky OAuth token even when the cached copy still
@@ -2833,7 +2838,7 @@ export class ModelRegistry {
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<ResolvedApiKey | undefined> {
 		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
-		if (this.#keylessProviders.has(provider) && this.authStorage.keys.source(provider) === undefined) {
+		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
 		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;

@@ -1,5 +1,5 @@
 /**
- * Regression #12281 (defect C): pressing Enter at lm-studio's "Optional: Paste
+ * Regressions #12281 and #13246: pressing Enter at lm-studio's "Optional: Paste
  * LM Studio API key" login prompt stores the KDL `empty-fallback` placeholder
  * (`lm-studio-local`). On base that placeholder counted as a real credential:
  * `hasAuth()` reported authenticated — the /models hub rendered the provider
@@ -21,14 +21,15 @@
  *      without Authorization and succeeds, with AND without a stored
  *      placeholder, and the models stay selectable.
  *   4. Sibling guard: a placeholder-only vllm (same `empty-fallback` pattern,
- *      but no implicit keyless mark) keeps its discovered models available.
+ *      but no implicit keyless mark) stays available and resolves request auth
+ *      to the no-auth sentinel.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
 const LM_KEY = "sk-lm-12281-test-key";
@@ -280,12 +281,12 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		placeholder.close();
 	}, 30_000);
 
-	test("a placeholder-only vllm login keeps its discovered models available and off the wire as a bearer", async () => {
-		// Failure mode (sibling regression): vllm shares the empty-fallback
-		// placeholder pattern but never receives an implicit keyless mark,
-		// so filtering placeholders out of hasAuth without treating
-		// placeholder-only providers as keyless would lock a working
-		// keyless vllm server out of the model picker.
+	test("a placeholder-only vllm login keeps discovered models requestable without bearer auth", async () => {
+		// Failure mode (#13246): vllm shares the empty-fallback pattern but
+		// receives no implicit keyless mark. Availability recognizes the stored
+		// placeholder as keyless, while request credential resolution dropped it
+		// and returned undefined, so AgentSession rejected the prompt before any
+		// request reached the local server.
 		const storage = await bootStorage("vllm-placeholder");
 		await storage.oauth.login("vllm", { onAuth: () => {}, onPrompt: async () => "" });
 		expect(await storage.keys.peek("vllm")).toBe("vllm-local");
@@ -297,8 +298,12 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		for (const auth of vllmProbeAuth) {
 			expect(auth).toBeUndefined();
 		}
-		expect(registry.getAll().some(model => model.provider === "vllm" && model.id === "qwen3-8b")).toBe(true);
-		expect(registry.getAvailable().some(model => model.provider === "vllm" && model.id === "qwen3-8b")).toBe(true);
+		const model = registry.find("vllm", "qwen3-8b");
+		expect(model).toBeDefined();
+		if (!model) throw new Error("Expected discovered vllm model");
+		expect(await registry.getApiKey(model)).toBe(kNoAuth);
+		expect(registry.getAll().some(entry => entry.provider === "vllm" && entry.id === "qwen3-8b")).toBe(true);
+		expect(registry.getAvailable().some(entry => entry.provider === "vllm" && entry.id === "qwen3-8b")).toBe(true);
 		storage.close();
 	}, 30_000);
 });
