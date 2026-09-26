@@ -2250,6 +2250,9 @@ async function driveSessionToYield(
 				// any chance of producing a yield.
 				const lastBeforeReminder = session.getLastAssistantMessage();
 				if (lastBeforeReminder?.stopReason === "error") break;
+				// A turn waiting on owner work is a scheduling pause. The outer
+				// barrier settles that work before a reminder counts against it.
+				if (!budgetStop && session.hasPendingAsyncWork()) break;
 				try {
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
@@ -2295,10 +2298,10 @@ async function driveSessionToYield(
 		};
 
 		// Yield ladder + quiescence barrier (structured concurrency), one
-		// loop: each iteration first demands a yield — initially, and again
-		// whenever an async-result delivery un-latched the previous one
-		// (including during the notice turn) — then either completes on
-		// quiescence or settles one generation of owner async work.
+		// loop: a turn without a yield first settles pending owner work, then
+		// spends reminders only after there is nothing left to wait for.
+		// A yield also waits for quiescence; each delivered result supersedes
+		// the previous yield and demands a fresh one.
 		//
 		// A final yield with owner background jobs still running or
 		// undelivered is a scheduling pause, not run completion — the monitor
@@ -2313,24 +2316,34 @@ async function driveSessionToYield(
 		// Suppressed (acknowledged / wait-watched) jobs never re-wake the run
 		// and are reaped at teardown.
 		//
-		// Before blocking on running jobs, tell the model ONCE what it is
-		// waiting on so it can stand by or cancel via `write proc://<id>/kill` instead of sitting silent
-		// until the jobs (or the runtime limit) expire. Runs that never yield
-		// (ladder exhausted / terminal model error) skip the barrier — more
-		// injected turns just multiply the failure noise; the teardown reap
-		// still cancels and awaits their jobs before worktree capture.
+		// Before blocking on running jobs after a yield, tell the model ONCE
+		// what it is waiting on so it can stand by or cancel the job. A turn
+		// without a yield settles its pending jobs without an extra notice.
+		// Runs that exhaust the ladder with no pending work, or hit a terminal
+		// model error, skip the barrier; teardown reaps their jobs.
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
-				// Ladder exhausted / terminal model error: classified below
-				// (missing yield, or stale yield when one was invalidated).
-				if (!monitor.yieldCalled()) break;
+				if (
+					!monitor.yieldCalled() &&
+					(monitor.budgetStopRequested() ||
+						session.getLastAssistantMessage()?.stopReason === "error" ||
+						!session.hasPendingAsyncWork())
+				)
+					break;
 			}
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
-			if (!session.hasPendingAsyncWork()) break;
+			if (!session.hasPendingAsyncWork()) {
+				if (monitor.yieldCalled()) break;
+				continue;
+			}
+			if (!monitor.yieldCalled()) {
+				await awaitAbortable(session.settleAsyncWork());
+				continue;
+			}
 			if (!asyncPendingNoticeSent) {
 				asyncPendingNoticeSent = true;
 				const running = session.getAsyncJobSnapshot()?.running ?? [];
