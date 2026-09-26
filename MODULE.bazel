@@ -259,4 +259,13 @@ crate.annotation(
     },
     crate = "blake3",
 )
+# ring 0.17 compiles windows-aarch64 C/asm with GNU-driver `clang` from PATH
+# (never clang-cl); @msvc_cc_arm64's bin/clang wrapper translates the toolchain
+# CFLAGS and adds the xwin includes. Absent (and unused) for other targets.
+crate.annotation(
+    build_script_env = {
+        "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+    },
+    crate = "ring",
+)
 # --- end msvc cross toolchain ---------------------------------------------------
