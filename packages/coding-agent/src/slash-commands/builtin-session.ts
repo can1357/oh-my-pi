@@ -473,17 +473,27 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "context",
 		description: "Show estimated context usage breakdown",
 		acpDescription: "Show context usage",
+		acpInputHint: "[all]",
+		subcommands: [{ name: "all", description: "Show per-tool and per-skill token estimates" }],
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
 			if (!usage) return "Context: unavailable";
 			return `Context: ${Math.round(usage.percent)}% (${formatTokenCount(usage.tokens)}/${formatTokenCount(usage.contextWindow)})`;
 		},
-		handle: async (_command, runtime) => {
-			await runtime.output(buildContextReportText(runtime));
+		handle: async (command, runtime) => {
+			const argument = command.args.trim().toLowerCase();
+			if (argument && argument !== "all") return usage("Usage: /context [all]", runtime);
+			await runtime.output(buildContextReportText(runtime, argument === "all"));
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.handleContextCommand();
+		handleTui: (command, runtime) => {
+			const argument = command.args.trim().toLowerCase();
+			if (argument && argument !== "all") {
+				runtime.ctx.showWarning("Usage: /context [all]");
+			} else {
+				runtime.ctx.handleContextCommand(argument === "all");
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},

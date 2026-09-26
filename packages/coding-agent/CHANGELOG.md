@@ -259,6 +259,7 @@
 - Improved responsiveness in long sessions by significantly reducing the time required to scan provider context for credential patterns.
 - Fixed native judges failing to honor configured request headers, enabling authenticated and header-routed judge providers to work as configured.
 - Fixed LSP requests hanging when aborted while waiting for an earlier write to complete.
+- Added `/context all` to show per-tool and per-skill context token estimates ([#12663](https://github.com/can1357/oh-my-pi/pull/12663) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.2.7] - 2026-09-21
 
