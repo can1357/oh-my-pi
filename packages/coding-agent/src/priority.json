@@ -33,7 +33,7 @@
 		"gpt-5.6-luna",
 		"openai-codex/gpt-5.4-mini",
 		"gpt-5.4-mini",
-		"mini"
+		"-mini"
 	],
 	"slow": [
 		"openai-codex/gpt-5.6-sol",
