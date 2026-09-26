@@ -56,6 +56,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
 	type BranchSummaryMessage,
@@ -435,6 +436,25 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
+}
+
+/**
+ * Replay `xd://<device>` tool-call names under their bare device name. Sessions
+ * saved before the agent loop canonicalized fallback-resolved names persist the
+ * alias, which providers reject as a function name (#13352). Call ids are kept,
+ * so call/result pairing is unchanged.
+ */
+function canonicalizeXdToolCallNames(message: AssistantMessage): AssistantMessage {
+	let content: AssistantMessage["content"] | undefined;
+	for (let i = 0; i < message.content.length; i++) {
+		const block = message.content[i]!;
+		if (block.type !== "toolCall") continue;
+		const name = stripXdUrlPrefix(block.name);
+		if (name === block.name) continue;
+		content ??= message.content.slice();
+		content[i] = { ...block, name };
+	}
+	return content ? { ...message, content } : message;
 }
 
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
@@ -1089,18 +1109,24 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
 				return [];
 			}
-			const converted = convertMessageToLlm(source);
+			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
 		case "branchSummary":
 		case "compactionSummary":
 		case "user":
-		case "developer":
-		case "toolResult": {
+		case "developer": {
 			// Core roles share one transformer with agent-core —
 			// duplicating them here is how snapcompact frames once
 			// silently fell off the provider request.
 			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "toolResult": {
+			// Same pre-canonicalization history as `canonicalizeXdToolCallNames`;
+			// Gemini replays the result under this name.
+			const toolName = stripXdUrlPrefix(m.toolName);
+			const converted = convertMessageToLlm(toolName === m.toolName ? m : { ...m, toolName });
 			return converted ? [converted] : [];
 		}
 		default:
