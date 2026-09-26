@@ -32,6 +32,10 @@
 - Added credential-aware authentication routing with per-account OAuth policies, deterministic account selection, protected quota reserves, persistent rate-limit tracking, automatic recovery, and sticky session-to-credential affinity.
 - Added deprecated `getApiKey` and `reload` methods for backward compatibility.
 
+### Fixed
+
+- Fixed keyless Anthropic-compatible endpoints receiving `Authorization: Bearer N/A` and `X-Api-Key: N/A` headers ([#13043](https://github.com/can1357/oh-my-pi/pull/13043) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Fixed
