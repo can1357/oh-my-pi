@@ -698,6 +698,19 @@ describe("shouldEnableHyperlinksByDefault", () => {
 		).toBe(false);
 	});
 
+	it("enables Herdr panes: Herdr renders OSC 8 in its own grid and opens links itself", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TERM: "xterm-256color" }, "base")).toBe(true);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_PANE_ID: "w1:p1", TERM: "xterm-256color" }, "base")).toBe(true);
+	});
+
+	it("keeps screen/tmux nested in a Herdr pane on their own rules", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", STY: "1234.pts-0.host" }, "base")).toBe(false);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TMUX: "/tmp/tmux-1000/default,1,0" }, "base")).toBe(
+			false,
+		);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", PI_NO_HYPERLINKS: "1" }, "base")).toBe(false);
+	});
+
 	it("lets PI_NO_HYPERLINKS beat every positive heuristic", () => {
 		expect(shouldEnableHyperlinksByDefault({ PI_NO_HYPERLINKS: "1" }, "kitty")).toBe(false);
 		expect(
