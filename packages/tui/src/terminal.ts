@@ -808,6 +808,10 @@ export class ProcessTerminal implements Terminal {
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
 	#windowsTerminalAppearancePollTimer?: Timer;
+	#progressActive = false;
+	// Ghostty expires OSC 9;4 state without a heartbeat. Persistent hosts such
+	// as Windows Terminal restart their indeterminate animation on every write.
+	readonly #keepProgressAlive = TERMINAL.id === "ghostty";
 	#progressTimer?: Timer;
 
 	constructor(options?: ProcessTerminalOptions) {
@@ -1908,7 +1912,9 @@ export class ProcessTerminal implements Terminal {
 		// step throws.
 		restoreTerminalStderr();
 
-		if (this.#clearProgressTimer()) {
+		this.#clearProgressTimer();
+		if (this.#progressActive) {
+			this.#progressActive = false;
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
@@ -2297,14 +2303,17 @@ export class ProcessTerminal implements Terminal {
 	setProgress(active: boolean): void {
 		if (this.#headless) return;
 		if (active) {
+			if (this.#progressActive) return;
+			this.#progressActive = true;
 			this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			if (!this.#progressTimer) {
+			if (this.#keepProgressAlive && !this.#progressTimer) {
 				this.#progressTimer = setInterval(() => {
 					this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 				this.#progressTimer.unref?.();
 			}
 		} else {
+			this.#progressActive = false;
 			this.#clearProgressTimer();
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
