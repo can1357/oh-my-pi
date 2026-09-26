@@ -39,6 +39,7 @@ _ARCHES = {
         "machine": "X64",
         "cpu": "x64_windows",
         "cmake_processor": "AMD64",
+        "cmake_extra": "",
     },
     "aarch64": {
         "triple": "aarch64-pc-windows-msvc",
@@ -46,6 +47,10 @@ _ARCHES = {
         "machine": "ARM64",
         "cpu": "arm64_windows",
         "cmake_processor": "ARM64",
+        # opus' ARM runtime CPU detection (celt/arm/armcpu.c) uses the MSVC-only
+        # __emit intrinsic under _MSC_VER, which clang-cl lacks. Every aarch64
+        # Windows CPU has NEON, so presume it and compile RTCD out.
+        "cmake_extra": 'set(OPUS_PRESUME_NEON ON CACHE BOOL "aarch64 always has NEON")\n',
     },
 }
 
@@ -298,7 +303,7 @@ def _msvc_cc_impl(rctx):
 
     # CMake toolchain file for the cmake crate (no placeholders — it
     # self-locates via CMAKE_CURRENT_LIST_DIR, so no .format here).
-    rctx.file("toolchain.cmake", _TOOLCHAIN_CMAKE.replace("@PROCESSOR@", t["cmake_processor"]), executable = False)
+    rctx.file("toolchain.cmake", _TOOLCHAIN_CMAKE.replace("@PROCESSOR@", t["cmake_processor"]) + t["cmake_extra"], executable = False)
 
     # INCLUDE/LIB for raw cc_* compile/link actions (cwd = execroot, so the
     # execroot-relative entries resolve). The rust graph routes everything
