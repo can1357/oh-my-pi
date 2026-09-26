@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore, withAuth } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
+	AuthBrokerRefresher,
 	type AuthBrokerServerHandle,
 	RemoteAuthCredentialStore,
 	startAuthBroker,
@@ -105,5 +106,12 @@ describe("auth-broker refresh-then-401", () => {
 		// Well past the re-mint cooldown, a 401 may again mean a stale grant.
 		clockOffset += 60 * 60_000;
 		expect(await failingCycle()).toEqual({ bearers: ["minted-1", "minted-2"], refreshes: 1 });
+	});
+
+	test("the broker's scheduled expiry sweep still mints a token refreshed moments ago", async () => {
+		expect(await failingCycle()).toEqual({ bearers: ["valid", "minted-1"], refreshes: 1 });
+		// A window wider than the minted token's lifetime makes every row due.
+		await new AuthBrokerRefresher({ storage: serverStorage!, refreshSkewMs: 11 * DAY_MS }).tick();
+		expect(upstreamRefreshes).toBe(2);
 	});
 });

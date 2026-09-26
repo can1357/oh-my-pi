@@ -765,7 +765,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (refreshMatch) {
 					const id = Number.parseInt(refreshMatch[1], 10);
 					try {
-						const entry = await opts.storage.oauth.refresh(id, req.signal);
+						// Clients call this after the provider rejected the token
+						// (`markCredentialSuspect`) or to force-refresh it; neither is
+						// fixed by re-minting a token minted moments ago.
+						const entry = await opts.storage.oauth.refresh(id, req.signal, { reuseRecentMint: true });
 						const body: CredentialRefreshResponse = { entry };
 						logger.info("auth-broker credential refreshed", {
 							id,

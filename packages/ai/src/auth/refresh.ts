@@ -13,6 +13,7 @@ import {
 	type AuthCredentialSnapshotEntry,
 	type AuthStorageOptions,
 	type OAuthCredential,
+	type OAuthRefreshByIdOptions,
 	type StoredOAuthRefreshOptions,
 	type StoredOAuthRefreshResult,
 } from "./types";
@@ -41,9 +42,11 @@ const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
  * re-minting it. A provider that rejects a token minted moments ago (e.g. an
  * upstream outage answering 401 for every valid bearer) is not fixed by
  * another refresh; re-minting only rotates the refresh token and bumps the
- * store generation for every snapshot consumer on each auth retry. Revocation
- * is still detected: expiry-driven refreshes are unaffected, and the first
- * forced refresh after the window re-mints (and disables on `invalid_grant`).
+ * store generation for every snapshot consumer on each auth retry. Applies
+ * only to auth-failure refreshes ({@link OAuthRefresher.refresh} and
+ * {@link OAuthRefreshByIdOptions.reuseRecentMint}); scheduled expiry refreshes
+ * always mint. The first auth-failure refresh after the window re-mints (and
+ * disables on `invalid_grant`), so revocation is still detected.
  */
 const OAUTH_REMINT_COOLDOWN_MS = 5 * 60_000;
 
@@ -396,7 +399,27 @@ export class OAuthRefresher {
 		return undefined;
 	}
 
+	/**
+	 * Refresh `credential` when it is within {@link OAUTH_REFRESH_SKEW_MS} of
+	 * expiry (or forced via an `expires: 0` clone). A forced refresh of a row
+	 * still holding a token this refresher minted within
+	 * {@link OAUTH_REMINT_COOLDOWN_MS} returns that token instead of re-minting.
+	 */
 	async refresh(
+		provider: Provider,
+		credential: OAuthCredential,
+		credentialId: number | undefined,
+		signal?: AbortSignal,
+	): Promise<OAuthCredentials> {
+		if (credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
+			const recent = this.#recentMint(credentialId);
+			if (recent) return recent.credential;
+		}
+		return this.#refreshSingleFlight(provider, credential, credentialId, signal);
+	}
+
+	/** {@link OAuthRefresher.refresh} without the re-mint cooldown; shares the per-credential single-flight. */
+	async #refreshSingleFlight(
 		provider: Provider,
 		credential: OAuthCredential,
 		credentialId: number | undefined,
@@ -408,8 +431,6 @@ export class OAuthRefresher {
 			if (existing) return raceSignal(existing, signal, "credential refresh aborted");
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
-		const recent = credentialId === undefined ? undefined : this.#recentMint(credentialId);
-		if (recent) return recent.credential;
 		if (credentialId === undefined) {
 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal);
 		}
@@ -539,13 +560,16 @@ export class OAuthRefresher {
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream
 	 * refresh attempt, which is required for providers that rotate refresh tokens
-	 * on every successful refresh. A row still holding a token this refresher
-	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS} is returned as-is.
+	 * on every successful refresh.
 	 */
-	async refreshById(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry> {
+	async refreshById(
+		id: number,
+		signal?: AbortSignal,
+		options?: OAuthRefreshByIdOptions,
+	): Promise<AuthCredentialSnapshotEntry> {
 		const existing = this.#oauthRefreshInFlight.get(id);
 		if (existing) return raceSignal(existing, signal, "credential refresh aborted");
-		const recent = this.#recentMint(id);
+		const recent = options?.reuseRecentMint ? this.#recentMint(id) : undefined;
 		if (recent) return snapshotEntry(id, recent.provider, recent.credential);
 
 		const promise = (async () => {
@@ -578,12 +602,13 @@ export class OAuthRefresher {
 			// await so a definitive failure can CAS-disable the row against the
 			// value we actually attempted (NOT the expires:0 clone below).
 			const attempted = target.credential;
-			// Pass a clone with expires=0 so the cached not-yet-expired short-circuit
-			// in refresh doesn't suppress the requested refresh.
+			// Pass a clone with expires=0 and bypass the re-mint cooldown so
+			// neither the not-yet-expired short-circuit nor a recent mint
+			// suppresses the requested refresh.
 			const stale: OAuthCredential = { ...attempted, expires: 0 };
 			let refreshed: OAuthCredentials;
 			try {
-				refreshed = await this.refresh(provider as Provider, stale, id, signal);
+				refreshed = await this.#refreshSingleFlight(provider as Provider, stale, id, signal);
 			} catch (error) {
 				// A definitively-dead grant tears the row down here, where the
 				// attempted credential is known. CAS on the persisted credential so a
