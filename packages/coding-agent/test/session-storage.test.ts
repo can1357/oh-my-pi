@@ -168,6 +168,30 @@ describe("FileSessionStorage writer", () => {
 		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
 	});
+
+	it("does not truncate a replacement session when append rollback reopens the path", async () => {
+		const sessionPath = path.join(tempDir, "original.jsonl");
+		const replacementPath = path.join(tempDir, "replacement.jsonl");
+		fs.writeFileSync(sessionPath, "old\n");
+		fs.writeFileSync(replacementPath, "replacement session\n");
+		const writer = storage.openWriter(sessionPath);
+		const openSync = fs.openSync;
+		vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		vi.spyOn(fs, "ftruncateSync").mockImplementationOnce(() => {
+			throw new Error("append handle cannot truncate");
+		});
+		vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) =>
+			openSync(file === sessionPath && flags === "r+" ? replacementPath : file, flags, mode),
+		);
+
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("new\n")).toThrow("partial bytes could not be rolled back");
+		expect(fs.readFileSync(replacementPath, "utf8")).toBe("replacement session\n");
+		await expect(writer.close()).rejects.toThrow("partial bytes could not be rolled back");
+	});
 });
 
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
