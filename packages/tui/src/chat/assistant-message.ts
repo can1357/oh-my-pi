@@ -12,7 +12,7 @@ import type { AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
-import { convertImageToPng } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -186,10 +186,15 @@ export class AssistantMessageComponent extends Container {
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
-	#convertedKittyImages = new Map<string, ImageContent>();
+	/**
+	 * Payload keys ({@link imagePayloadKey}) whose Kitty PNG conversion this
+	 * component already awaits, so a re-delivered image neither re-encodes nor
+	 * schedules a second {@link updateContent} cascade. The conversions
+	 * themselves are shared process-wide by {@link convertImageToPngShared}.
+	 */
+	#kittyConversionsAwaited = new Set<string>();
 	#showImages = true;
 	#showToolResultImages = true;
-	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
 	/** See {@link setMidStreamPublication}; the wire's `stream-revision` axis decides it. */
 	#midStreamPublication = true;
@@ -832,16 +837,6 @@ export class AssistantMessageComponent extends Container {
 	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
 		if (!toolCallId) return;
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
-		for (const key of Array.from(this.#convertedKittyImages.keys())) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#convertedKittyImages.delete(key);
-			}
-		}
-		for (const key of Array.from(this.#kittyConversionsInFlight)) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#kittyConversionsInFlight.delete(key);
-			}
-		}
 		if (validImages.length === 0) {
 			this.#toolImagesByCallId.delete(toolCallId);
 		} else {
@@ -855,21 +850,21 @@ export class AssistantMessageComponent extends Container {
 
 	#convertImagesForKitty(entries: Array<{ image: ImageContent; key: string }>): void {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
-		for (const { image, key } of entries) {
+		for (const { image } of entries) {
 			if (image.mimeType === "image/png") continue;
-			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
-			this.#kittyConversionsInFlight.add(key);
-			convertImageToPng(image)
-				.then(converted => {
-					this.#kittyConversionsInFlight.delete(key);
-					this.#convertedKittyImages.set(key, converted);
+			if (cachedPngConversion(image)) continue;
+			const key = imagePayloadKey(image);
+			if (this.#kittyConversionsAwaited.has(key)) continue;
+			this.#kittyConversionsAwaited.add(key);
+			convertImageToPngShared(image)
+				.then(() => {
 					if (this.#lastMessage) {
 						this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 					}
 					this.#onImageUpdate?.();
 				})
 				.catch(() => {
-					this.#kittyConversionsInFlight.delete(key);
+					this.#kittyConversionsAwaited.delete(key);
 				});
 		}
 	}
@@ -882,7 +877,7 @@ export class AssistantMessageComponent extends Container {
 		for (const { image, key } of entries) {
 			const displayImage =
 				TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png"
-					? this.#convertedKittyImages.get(key)
+					? cachedPngConversion(image)
 					: image;
 			if (TERMINAL.imageProtocol && displayImage) {
 				this.#contentContainer.addChild(

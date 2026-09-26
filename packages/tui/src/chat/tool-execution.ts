@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
 import { SPINNER_ADVANCE_MS } from "../components/loader";
@@ -26,7 +27,7 @@ import { isWaitingPollDetails } from "../tools/wait";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
-import { convertImageToPng } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
@@ -296,8 +297,10 @@ export class ToolExecutionComponent extends Container {
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
 	#previewReady?: PromiseWithResolvers<void>;
-	// Cached converted images for Kitty protocol (which requires PNG), keyed by index
-	#convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
+	// Payload keys whose Kitty PNG conversion is already awaited; the converted
+	// images themselves live in the process-wide cache behind
+	// `convertImageToPngShared`, so rebuilt components reuse them.
+	#kittyConversionsAwaited = new Set<string>();
 	// Spinner animation for partial task results
 	#spinnerFrame?: number;
 	#spinnerActive = false;
@@ -545,26 +548,26 @@ export class ToolExecutionComponent extends Container {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		if (!this.#result) return;
 
-		const imageBlocks = this.#getAllImageBlocks();
-
-		for (let i = 0; i < imageBlocks.length; i++) {
-			const img = imageBlocks[i];
+		for (const img of this.#getAllImageBlocks()) {
 			if (!img.data || !img.mimeType) continue;
-			// Skip if already PNG or already converted
+			// Skip if already PNG or already converted anywhere in this process
 			if (img.mimeType === "image/png") continue;
-			if (this.#convertedImages.has(i)) continue;
+			const image: ImageContent = { type: "image", data: img.data, mimeType: img.mimeType };
+			if (cachedPngConversion(image)) continue;
+			const key = imagePayloadKey(image);
+			if (this.#kittyConversionsAwaited.has(key)) continue;
+			this.#kittyConversionsAwaited.add(key);
 
 			// Convert async - catch errors from processing
-			const index = i;
-			convertImageToPng({ type: "image", data: img.data, mimeType: img.mimeType })
-				.then(converted => {
-					this.#convertedImages.set(index, converted);
+			convertImageToPngShared(image)
+				.then(() => {
 					this.#displayInputVersion++;
 					this.#updateDisplay();
 					this.#ui.requestRender();
 				})
 				.catch(() => {
 					// Ignore conversion failures - display will use original image format
+					this.#kittyConversionsAwaited.delete(key);
 				});
 		}
 	}
@@ -1199,7 +1202,10 @@ export class ToolExecutionComponent extends Container {
 				const img = imageBlocks[i];
 				if (TERMINAL.imageProtocol && this.#showImages && img.data && img.mimeType) {
 					// Use converted PNG for Kitty protocol if available
-					const converted = this.#convertedImages.get(i);
+					const converted =
+						TERMINAL.imageProtocol === ImageProtocol.Kitty && img.mimeType !== "image/png"
+							? cachedPngConversion({ type: "image", data: img.data, mimeType: img.mimeType })
+							: undefined;
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 
