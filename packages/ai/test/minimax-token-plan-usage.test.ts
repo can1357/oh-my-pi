@@ -2,14 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { minimaxCodeUsageProvider } from "@oh-my-pi/pi-ai/usage/minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "@oh-my-pi/pi-ai/usage/minimax-code";
 
 const INTERVAL_START = 1_785_009_600_000;
 const INTERVAL_END = 1_785_024_000_000;
 const WEEKLY_START = 1_784_505_600_000;
 const WEEKLY_END = 1_785_110_400_000;
 
-function params(provider: "minimax-code" = "minimax-code", apiKey = "sk-cp-test"): UsageFetchParams {
+function params(
+	provider: "minimax-code" | "minimax-code-cn" = "minimax-code",
+	apiKey = "sk-cp-test",
+): UsageFetchParams {
 	return { provider, credential: { type: "api_key", apiKey }, accountKey: "account-1" };
 }
 
@@ -195,6 +198,23 @@ describe("MiniMax Token Plan usage", () => {
 		}
 	});
 
+	test("defaults the China credential to the China quota host and reports under its own id", async () => {
+		const requests: { url: string; init?: RequestInit }[] = [];
+		const fetchMock: FetchImpl = (input, init) => {
+			requests.push({ url: String(input), init });
+			return Promise.resolve(Response.json(remainsPayload()));
+		};
+
+		const report = await minimaxCodeCnUsageProvider.fetchUsage(params("minimax-code-cn"), { fetch: fetchMock });
+
+		// The international host does not serve CN keys, so the region default must follow the credential id.
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.url).toBe("https://api.minimaxi.com/v1/token_plan/remains");
+		expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe("Bearer sk-cp-test");
+		expect(report?.provider).toBe("minimax-code-cn");
+		expect(report?.limits.map(limit => limit.id)).toEqual(["general:4h", "general:7d", "video:24h", "video:7d"]);
+	});
+
 	test("fails closed when MiniMax rejects the key inside a 200 response", async () => {
 		const fetchMock: FetchImpl = () =>
 			Promise.resolve(
@@ -326,7 +346,7 @@ describe("MiniMax Token Plan usage", () => {
 		await storage.credentials.reload();
 		try {
 			expect(storage.usage.providerFor("minimax-code")).toBe(minimaxCodeUsageProvider);
-			expect(storage.usage.providerFor("minimax-code-cn")).toBeUndefined();
+			expect(storage.usage.providerFor("minimax-code-cn")).toBe(minimaxCodeCnUsageProvider);
 		} finally {
 			storage.close();
 		}

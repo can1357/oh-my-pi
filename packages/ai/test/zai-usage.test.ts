@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { type AuthCredentialStore, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
-import { zaiRankingStrategy, zaiUsageProvider } from "@oh-my-pi/pi-ai/usage/zai";
+import { zaiRankingStrategy, zaiUsageProvider, zhipuCodingPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/zai";
 
 function makeCredential(): UsageFetchParams["credential"] {
 	return {
@@ -54,6 +55,34 @@ function makeRecordingCtx(payload: unknown, sink: { authorization?: string }): U
 	return { fetch };
 }
 
+function emptyStore(): AuthCredentialStore {
+	return {
+		close() {},
+		listAuthCredentials() {
+			return [];
+		},
+		updateAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
+		tryDisableAuthCredentialIfMatches() {
+			return false;
+		},
+		async replaceAuthCredentials() {
+			return [];
+		},
+		async upsertAuthCredential() {
+			return [];
+		},
+		async deleteAuthCredentials() {},
+		getCache() {
+			return null;
+		},
+		setCache() {},
+		cleanExpiredCache() {},
+	};
+}
+
 describe("zai usage provider", () => {
 	it("preserves Z.AI token quota windows instead of treating them as separate accounts", async () => {
 		const report = await zaiUsageProvider.fetchUsage!(
@@ -90,11 +119,7 @@ describe("zai usage provider", () => {
 			"zai:tokens:5h",
 			"zai:tokens:1w",
 		]);
-		expect(report!.limits.map(limit => limit.label)).toEqual([
-			"ZAI Zread Quota",
-			"ZAI 5 Hours Token Quota",
-			"ZAI Weekly Token Quota",
-		]);
+		expect(report!.limits.map(limit => limit.label)).toEqual(["Monthly Zread", "5 Hours Tokens", "Weekly Tokens"]);
 		expect(report!.limits.map(limit => limit.scope.windowId)).toEqual(["1mo", "5h", "1w"]);
 		expect(report!.limits.map(limit => limit.scope.shared)).toEqual([false, true, true]);
 		expect(report!.limits[0]?.scope.tier).toBe("zread");
@@ -176,7 +201,7 @@ describe("zai usage provider", () => {
 
 		expect(report).not.toBeNull();
 		expect(report!.limits.map(limit => limit.id)).toEqual(["zai:credits:5h", "zai:credits:1w"]);
-		expect(report!.limits.map(limit => limit.label)).toEqual(["ZAI 5 Hours Credit Quota", "ZAI Weekly Credit Quota"]);
+		expect(report!.limits.map(limit => limit.label)).toEqual(["5 Hours Credits", "Weekly Credits"]);
 		expect(report!.limits.map(limit => limit.amount.unit)).toEqual(["credits", "credits"]);
 		expect(report!.limits[0]?.amount.used).toBe(1438);
 		expect(report!.limits[0]?.amount.limit).toBe(12000);
@@ -236,5 +261,75 @@ describe("zai usage provider", () => {
 		const ranked = zaiRankingStrategy.findWindowLimits(report!);
 		expect(ranked.primary?.id).toBe("zai:tokens:5h");
 		expect(ranked.secondary?.id).toBe("zai:tokens:1w");
+	});
+});
+
+describe("zhipu coding plan usage provider", () => {
+	it("supports the domestic credential id while the zai provider keeps its own", () => {
+		expect(
+			zhipuCodingPlanUsageProvider.supports!({
+				provider: "zhipu-coding-plan",
+				credential: makeCredential(),
+				signal: undefined,
+			}),
+		).toBe(true);
+		expect(zaiUsageProvider.supports!({ provider: "zai", credential: makeCredential(), signal: undefined })).toBe(
+			true,
+		);
+		// Per-instance narrowing (ollama dual-instance pattern): each provider
+		// answers only its own credential id.
+		expect(
+			zaiUsageProvider.supports!({ provider: "zhipu-coding-plan", credential: makeCredential(), signal: undefined }),
+		).toBe(false);
+		expect(
+			zhipuCodingPlanUsageProvider.supports!({ provider: "zai", credential: makeCredential(), signal: undefined }),
+		).toBe(false);
+	});
+
+	it("defaults the domestic credential to the bigmodel.cn quota host", async () => {
+		// Shape captured from a live `GET /api/monitor/usage/quota/limit` response
+		// for a GLM Coding Plan (China, open.bigmodel.cn) pro-tier key (2026-09):
+		// monthly TIME_LIMIT request meter + 5h TOKENS_LIMIT window, no weekly row.
+		const report = await zhipuCodingPlanUsageProvider.fetchUsage!(
+			{ provider: "zhipu-coding-plan", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					level: "pro",
+					limits: [
+						{
+							type: "TIME_LIMIT",
+							usage: 1000,
+							currentValue: 0,
+							remaining: 1000,
+							percentage: 0,
+							nextResetTime: 1784547608994,
+							unit: 5,
+							number: 1,
+						},
+						{ type: "TOKENS_LIMIT", percentage: 1, nextResetTime: 1782656863894, unit: 3, number: 5 },
+					],
+				},
+			}),
+		);
+
+		// Domestic keys are served by open.bigmodel.cn, not api.z.ai;
+		// metadata.endpoint is the exact URL the quota fetch used.
+		expect(report!.provider).toBe("zhipu-coding-plan");
+		expect(report!.limits.map(limit => limit.id)).toEqual(["zai:requests:1mo", "zai:tokens:5h"]);
+		expect(report!.limits.map(limit => limit.label)).toEqual(["Monthly Requests", "5 Hours Tokens"]);
+		expect(report!.metadata?.endpoint).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+		expect(report!.metadata?.planType).toBe("pro");
+	});
+
+	it("registers the domestic id in AuthStorage's default usage resolver", async () => {
+		const storage = new AuthStorage(emptyStore());
+		await storage.credentials.reload();
+		try {
+			expect(storage.usage.providerFor("zhipu-coding-plan")).toBe(zhipuCodingPlanUsageProvider);
+			expect(storage.usage.providerFor("zai")).toBe(zaiUsageProvider);
+		} finally {
+			storage.close();
+		}
 	});
 });
