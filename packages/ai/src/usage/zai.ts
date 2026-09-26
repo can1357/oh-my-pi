@@ -390,6 +390,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 	return report;
 }
 
+/** Fetches the account-wide quota windows for ZAI credentials. */
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
 	cacheVersion: 2,
@@ -399,6 +400,7 @@ export const zaiUsageProvider: UsageProvider = {
 		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
 };
 
+/** Ranks ZAI credentials and identifies quota blocks a live report can heal. */
 export const zaiRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report) {
 		const ranked = rankZaiRequestLimits(report);
@@ -407,6 +409,22 @@ export const zaiRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits(report) {
 		const limits = getZaiCredentialLimits(report);
 		return limits;
+	},
+	// All GLM requests share the account's quota pool; keep reactive blocks
+	// separate from provider-wide failures that a usage report cannot heal.
+	blockScope() {
+		return "credits";
+	},
+	healableBlockScopes(report) {
+		const limits = getZaiCredentialLimits(report);
+		// A feature-only report cannot prove the shared credit/token pool recovered.
+		if (!limits.some(limit => limit.id.startsWith("zai:credits:") || limit.id.startsWith("zai:tokens:"))) {
+			return [];
+		}
+		return [
+			{ blockScope: "credits", limits },
+			{ blockScope: "", limits },
+		];
 	},
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
