@@ -1,7 +1,7 @@
 /**
  * Hook runner - executes hooks and manages their lifecycle.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isNonBlankContext, joinAdditionalContext } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { SessionManager } from "../../session/session-manager";
@@ -280,6 +280,7 @@ export class HookRunner {
 			| SessionCompactingResult
 			| ToolResultEventResult
 			| undefined;
+		const toolResultContexts: string[] = [];
 
 		for (const hook of this.hooks) {
 			const handlers = hook.handlers.get(event.type);
@@ -298,9 +299,12 @@ export class HookRunner {
 						}
 					}
 
-					// For tool_result events, capture the result
+					// For tool_result events, capture the result (last wins) and keep
+					// every handler's passive context in registration order.
 					if (event.type === "tool_result" && handlerResult) {
 						result = handlerResult as ToolResultEventResult;
+						const context = (handlerResult as ToolResultEventResult).additionalContext;
+						if (isNonBlankContext(context)) toolResultContexts.push(context);
 					}
 					if (event.type === "session.compacting" && handlerResult) {
 						result = handlerResult as SessionCompactingResult;
@@ -316,6 +320,8 @@ export class HookRunner {
 			}
 		}
 
+		const additionalContext = joinAdditionalContext(toolResultContexts);
+		if (additionalContext !== undefined) return { ...result, additionalContext };
 		return result;
 	}
 

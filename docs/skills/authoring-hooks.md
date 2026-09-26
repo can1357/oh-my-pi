@@ -40,7 +40,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 | Event | Fires | Can return |
 |---|---|---|
 | `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }` |
-| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
+| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean; additionalContext?: string }` |
 
 ### Session lifecycle
 
@@ -103,7 +103,7 @@ Contract:
 
 ## Post-tool override contract
 
-Return `{ content, details, isError }` from a `tool_result` handler to patch what the LLM sees:
+Return `{ content, details, isError, additionalContext }` from a `tool_result` handler to patch what the LLM sees and/or attach trusted guidance outside the tool output:
 
 ```ts
 omp.on("tool_result", async (event, ctx) => {
@@ -115,7 +115,10 @@ omp.on("tool_result", async (event, ctx) => {
         text: chunk.text.replace(/(?:sk|pk)-[a-zA-Z0-9]{20,}/g, "[REDACTED_API_KEY]"),
       };
     });
-    return { content: redacted };
+    return {
+      content: redacted,
+      additionalContext: "Use the redacted result for subsequent reasoning.",
+    };
   }
 });
 ```
@@ -125,8 +128,9 @@ Contract:
 - Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event, and the last returned override wins.
 - `content` replaces the full content array for the LLM.
 - `details` replaces the structured details object.
+- `additionalContext` is not part of the tool result. Every non-blank value is retained in registration order and delivered before that call's `tool_call` context.
 - `isError` exists on the shared result type, but `HookToolWrapper` does not propagate it into a successful tool result; on a tool failure, the original error is rethrown after handlers complete.
-- On a tool failure, `tool_result` is still emitted with `isError: true`.
+- On a tool failure, `tool_result` is still emitted with `isError: true`, and returned `additionalContext` is delivered. Filter on `event.isError` so success-only and failure-only handlers cannot fire on the opposite outcome.
 
 ## Context modification contract
 

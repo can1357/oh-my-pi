@@ -120,7 +120,7 @@ Hook events are strongly typed in `types.ts`.
 ### Tool events (pre/post model)
 
 - `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true. Non-empty `additionalContext` values from all non-blocking handlers carry trusted handler-authored instructions delivered after the tool results and before the next provider request, with developer/system priority where the transport supports it; raw tool output and other untrusted data must stay in the tool result.
-- `tool_result` (post-execution) → can return `{ content?; details?; isError? }`
+- `tool_result` (post-execution) → can return `{ content?; details?; isError?; additionalContext?: string }`. Context is delivered outside tool output on both success and failure; check `event.isError` when guidance applies to only one outcome.
 
 This is the hook subsystem’s core pre/post interception model. Eval prelude invocations such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls, so they do not emit `tool_call` or `tool_result`.
 
@@ -137,8 +137,10 @@ tool_call handlers
    execute underlying tool
       │
       ├─ success ──> tool_result handlers can override { content, details }
+      │                    and attach passive additionalContext
       │
-      └─ error   ──> emit tool_result(isError=true) then rethrow original error
+      └─ error   ──> emit tool_result(isError=true), deliver returned
+                     additionalContext, then rethrow original error
 ```
 
 ## Execution model and mutation semantics
@@ -165,17 +167,18 @@ After success, wrapper emits `tool_result` with:
 - `details`
 - `isError: false`
 
-If handler returns overrides:
+If a handler returns overrides:
 
 - `content` can replace result content
 - `details` can replace result details
+- `additionalContext` carries trusted guidance outside the tool result; non-blank values from every handler are joined in registration order and delivered before the call's `tool_call` context
 
-On tool failure, wrapper emits `tool_result` with `isError: true` and error text content, then rethrows original error.
+On tool failure, the wrapper emits `tool_result` with `isError: true` and error text content, delivers any returned `additionalContext`, then rethrows the original error. A handler that should run only after failure must test `event.isError`; a `PostToolUse`-equivalent handler must reject it.
 
 ### What hooks can mutate
 
 - LLM context for a single call via `context` (`messages` replacement chain)
-- passive context for the next provider request via `additionalContext` from a non-blocking `tool_call` handler
+- passive context for the next provider request via `additionalContext` from `tool_call` or `tool_result`
 - raw tool execution arguments by returning `input` from `tool_call`
 - tool output content/details on successful tool calls (`tool_result` path)
 - pre-agent injected message via `before_agent_start`
@@ -209,7 +212,7 @@ Inside `HookRunner`, order is deterministic by registration sequence:
 Conflict behavior by event type:
 
 - `tool_call`: every non-empty `additionalContext` is preserved in handler order; `input` remains last-wins; first block short-circuits and discards context collected for that call. Handlers do not observe each other's input revisions
-- `tool_result`: last returned override wins (no short-circuit)
+- `tool_result`: last returned override wins (no short-circuit); every non-empty `additionalContext` is preserved in handler order
 - `context`: chained; each handler receives prior handler’s message output
 - `before_agent_start`: first returned message is kept; later messages ignored
 - `session_before_*`: latest returned result is tracked; `cancel: true` short-circuits immediately

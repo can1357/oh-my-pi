@@ -29,9 +29,9 @@ describe("HookToolWrapper tool_call contract", () => {
 		sharedTempDir.removeSync();
 	});
 
-	function makeHook(handler: (event: unknown) => unknown): LoadedHook {
+	function makeHook(handler: (event: unknown) => unknown, event = "tool_call"): LoadedHook {
 		const handlers = new Map<string, ((event: unknown, ctx: unknown) => Promise<unknown>)[]>();
-		handlers.set("tool_call", [async (event: unknown) => handler(event)]);
+		handlers.set(event, [async (hookEvent: unknown) => handler(hookEvent)]);
 		return {
 			path: "test-hook",
 			resolvedPath: "/test/test-hook.ts",
@@ -96,6 +96,109 @@ describe("HookToolWrapper tool_call contract", () => {
 
 		expect(executed).toEqual([{ command: "echo context" }]);
 		expect(delivered).toEqual(["first context\n\nsecond context"]);
+	});
+
+	it("delivers tool_result context before tool_call context", async () => {
+		const runner = makeRunner([
+			makeHook(() => ({ additionalContext: "call context" })),
+			makeHook(() => ({ additionalContext: "result context" }), "tool_result"),
+		]);
+		const wrapped = new HookToolWrapper(makeRecordingTool([]), runner);
+		const delivered: string[] = [];
+
+		await wrapped.execute("call-result-context", { command: "echo context" } as never, undefined, undefined, {
+			addAdditionalContext: (context: string) => {
+				delivered.push(context);
+			},
+		} as unknown as AgentToolContext);
+
+		expect(delivered).toEqual(["result context", "call context"]);
+	});
+
+	it("delivers failure-specific tool_result context when the tool throws", async () => {
+		const runner = makeRunner(
+			makeHook(
+				event =>
+					event && typeof event === "object" && "isError" in event && event.isError === true
+						? { additionalContext: "inspect the failed command before retrying" }
+						: undefined,
+				"tool_result",
+			),
+		);
+		const failingTool = {
+			...makeRecordingTool([]),
+			execute: async () => {
+				throw new Error("command failed");
+			},
+		} as AgentTool;
+		const delivered: string[] = [];
+
+		await expect(
+			new HookToolWrapper(failingTool, runner).execute(
+				"call-failure-context",
+				{ command: "false" } as never,
+				undefined,
+				undefined,
+				{
+					addAdditionalContext: (context: string) => {
+						delivered.push(context);
+					},
+				} as unknown as AgentToolContext,
+			),
+		).rejects.toThrow("command failed");
+		expect(delivered).toEqual(["inspect the failed command before retrying"]);
+	});
+
+	it("delivers failure-specific tool_result context for a non-throwing error result", async () => {
+		const runner = makeRunner(
+			makeHook(
+				event =>
+					event && typeof event === "object" && "isError" in event && event.isError === true
+						? { additionalContext: "inspect the failed result before retrying" }
+						: undefined,
+				"tool_result",
+			),
+		);
+		const failingTool: AgentTool = {
+			...makeRecordingTool([]),
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "command failed" }],
+				isError: true,
+			}),
+		};
+		const delivered: string[] = [];
+
+		const result = await new HookToolWrapper(failingTool, runner).execute(
+			"call-error-result-context",
+			{ command: "false" } as never,
+			undefined,
+			undefined,
+			{
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext,
+		);
+
+		expect(result.isError).toBe(true);
+		expect(delivered).toEqual(["inspect the failed result before retrying"]);
+	});
+
+	it("keeps a non-throwing error result an error when a hook rewrites its content", async () => {
+		const runner = makeRunner(
+			makeHook(() => ({ content: [{ type: "text", text: "redacted failure" }] }), "tool_result"),
+		);
+		const failingTool: AgentTool = {
+			...makeRecordingTool([]),
+			execute: async () => ({ content: [{ type: "text" as const, text: "secret failure" }], isError: true }),
+		};
+
+		const result = await new HookToolWrapper(failingTool, runner).execute("call-patched-error", {
+			command: "false",
+		} as never);
+
+		expect(result.content).toEqual([{ type: "text", text: "redacted failure" }]);
+		expect(result.isError).toBe(true);
 	});
 
 	it("discards replacement input and collected context when a later hook blocks", async () => {

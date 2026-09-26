@@ -392,8 +392,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				isError: !!executionError || result.isError === true,
 			});
 
-			if (resultResult) {
-				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
+			// Handler context reports into this call's sink like tool-authored
+			// context: it is delivered even for a failed call (the handler saw
+			// `isError`), and precedes any pending `tool_call` context.
+			if (resultResult?.additionalContext !== undefined) {
+				context?.addAdditionalContext?.(resultResult.additionalContext);
+			}
+
+			// `content` is present only when a handler modified the result.
+			if (resultResult?.content !== undefined) {
+				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
 
 				// Effective error state: an explicit handler override wins; otherwise the

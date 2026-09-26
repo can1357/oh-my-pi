@@ -2143,7 +2143,7 @@ describe("AgentSession message pipeline", () => {
 			authStorage.close();
 		}
 	});
-	it("delivers tool_call additionalContext on the next provider request", async () => {
+	it("delivers tool_call and tool_result additionalContext on the next provider request", async () => {
 		using tempDir = TempDir.createSync("@pi-tool-call-context-");
 		const api = "test-tool-call-context";
 		const contexts: Context[] = [];
@@ -2188,6 +2188,10 @@ describe("AgentSession message pipeline", () => {
 				if (event.toolName !== "bash") return undefined;
 				return { additionalContext: "Use the indexed result instead of searching again." };
 			});
+			pi.on("tool_result", async event => {
+				if (event.toolName !== "bash") return undefined;
+				return { additionalContext: "The command result is authoritative for this turn." };
+			});
 		};
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -2219,14 +2223,18 @@ describe("AgentSession message pipeline", () => {
 			await session.sendUserMessage("run it");
 
 			expect(contexts).toHaveLength(2);
+			const expected = [
+				{
+					type: "text" as const,
+					text:
+						"The command result is authoritative for this turn.\n\n" +
+						"Use the indexed result instead of searching again.",
+				},
+			];
 			const developer = contexts[1]?.messages.find(message => message.role === "developer");
-			expect(developer?.content).toEqual([
-				{ type: "text", text: "Use the indexed result instead of searching again." },
-			]);
+			expect(developer?.content).toEqual(expected);
 			const persisted = session.agent.state.messages.find(message => message.role === "developer");
-			expect(persisted?.content).toEqual([
-				{ type: "text", text: "Use the indexed result instead of searching again." },
-			]);
+			expect(persisted?.content).toEqual(expected);
 		} finally {
 			await session.dispose();
 			authStorage.close();
