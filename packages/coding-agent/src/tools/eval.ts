@@ -10,7 +10,7 @@ import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { raceJobSettlement } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -590,15 +590,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		}
 
 		const thresholdMs = Math.max(0, Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings)));
-		// The wait budget mirrors #runCells' clamped cell timeout. The cell budget
-		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
-		// can legitimately outlive it in wall time — exactly the case
-		// backgrounding exists for.
-		const clampedCellTimeoutMs =
-			cells[0].timeoutMs === 0
-				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
-		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
+		// The cell timeout budgets runtime work and pauses across agent()/tool
+		// bridge calls, so the wall-clock wait uses the threshold alone.
+		const autoBackgroundWaitMs = thresholdMs;
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
