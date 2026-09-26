@@ -357,6 +357,16 @@ describe("learn tool (local backend)", () => {
 		expect(await Bun.file(learnedFile).text()).toContain("- A local tool lesson");
 	});
 
+	it("rejects a global lesson without creating learned.md", async () => {
+		await expect(
+			new LearnTool(localSession()).execute("local-global", {
+				memory: "A cross-project lesson must not become project-local.",
+				scope: "global",
+			}),
+		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		expect(await Bun.file(learnedFile).exists()).toBe(false);
+	});
+
 	it("execute throws when the lesson is empty after sanitization", async () => {
 		await expect(new LearnTool(localSession()).execute("2", { memory: "   " })).rejects.toThrow(/empty/i);
 		expect(await Bun.file(learnedFile).exists()).toBe(false);

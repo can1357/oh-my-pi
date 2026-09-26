@@ -275,6 +275,31 @@ describe("learn execute", () => {
 		expect(result.content[0]).toEqual({ type: "text", text: "Lesson queued for retention." });
 	});
 
+	it("rejects a global Hindsight lesson before queueing or minting a skill", async () => {
+		const queued: string[] = [];
+		const session = makeSession(
+			{ "autolearn.enabled": true, "memory.backend": "hindsight" },
+			{
+				getHindsightSessionState: () =>
+					({
+						enqueueRetain: (memory: string) => {
+							queued.push(memory);
+						},
+					}) as unknown as HindsightSessionState,
+			},
+		);
+
+		await expect(
+			new LearnTool(session).execute("hindsight-global", {
+				memory: "A cross-project lesson must not become project-local.",
+				scope: "global",
+				skill: { action: "create", name: "global-lesson", description: "Shared lesson.", body: "# Shared lesson" },
+			}),
+		).rejects.toThrow(/only available with the Mnemopi backend/i);
+		expect(queued).toEqual([]);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "global-lesson", "SKILL.md")).exists()).toBe(false);
+	});
+
 	it("reports Hindsight skill failures as queued partial outcomes", async () => {
 		const queued: string[] = [];
 		const session = makeSession(

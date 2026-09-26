@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	redactMemorySecrets,
 	redactMemoryTextFields,
 	redactRememberWrite,
 } from "@oh-my-pi/pi-coding-agent/memory-backend/redact";
+import { loadMnemopiConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const NPM_TOKEN = `npm_${"a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuVwXy".slice(0, 36)}`;
 const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
@@ -78,6 +82,39 @@ describe("memory secret redaction", () => {
 		expect(scrubbed.metadata.nested[0]).toBe("also [REDACTED]");
 		expect(scrubbed.metadata.cwd).toBe("/work/app");
 		expect(scrubbed.content).toBe("safe");
+	});
+
+	it("redacts global Mnemopi memories and metadata before persistence", async () => {
+		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+		using dbDir = TempDir.createSync("memory-redaction-global-");
+		const settings = Settings.isolated({
+			"memory.backend": "mnemopi",
+			"mnemopi.dbPath": dbDir.join("mnemopi.db"),
+			"mnemopi.scoping": "per-project-tagged",
+			"mnemopi.noEmbeddings": true,
+			"mnemopi.llmMode": "none",
+			"mnemopi.proactiveLinking": false,
+			"mnemopi.autoRetain": false,
+		});
+		const state = new MnemopiSessionState({
+			sessionId: "global-redaction",
+			config: loadMnemopiConfig(settings, dbDir.path()),
+			session: {} as never,
+		});
+		try {
+			const id = state.rememberScoped(
+				`global token is ${NPM_TOKEN}`,
+				{ source: `agent-${NPM_TOKEN}`, metadata: { context: `auth uses ${NPM_TOKEN}` } },
+				state.getGlobalRetainTarget(),
+			);
+			expect(state.globalMemory!.get(id!)).toMatchObject({
+				content: "global token is [REDACTED]",
+				source: "agent-[REDACTED]",
+				metadata_json: JSON.stringify({ context: "auth uses [REDACTED]" }),
+			});
+		} finally {
+			await state.dispose();
+		}
 	});
 
 	it("handles a string memory and an absent options bag", () => {

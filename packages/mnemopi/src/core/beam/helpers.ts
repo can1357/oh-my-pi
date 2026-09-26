@@ -1,17 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { logger } from "@oh-my-pi/pi-utils";
 import { generateId as generateTimedId, sha256Hex16, stableMemoryId } from "../../util/ids";
-import {
-	cjkFtsTerms,
-	containsSpacelessCjk,
-	FACT_MATCH_STOPWORDS,
-	factMatchTokens,
-	ftsQueryTerms,
-	hasCjk,
-	isCjkChar,
-	RECALL_SYNONYMS,
-	recallTokens,
-} from "../../util/regex";
+import { cjkFtsTerms, containsSpacelessCjk, ftsQueryTerms, hasCjk, isCjkChar, recallTokens } from "../../util/regex";
 import { currentEmbeddingModel, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
@@ -46,7 +36,6 @@ const DEFAULT_WEIGHTS: HybridWeights = [0.5, 0.3, 0.2];
 const TS_CACHE_MAX = 2000;
 const moduleTimestampCache = new Map<string, Date>();
 
-const SPLIT_TOKEN_RE = /[_:/.-]+/g;
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
 function envNumber(name: string, fallback: number): number {
 	const raw = process.env[name];
@@ -185,68 +174,6 @@ export function temporalBoost(
 	if (halflife === 0) return effectiveTs.getTime() === query.getTime() ? 1 : 0;
 	const hoursDelta = (query.getTime() - effectiveTs.getTime()) / 3_600_000;
 	return Math.exp(-hoursDelta / halflife);
-}
-
-export function lexicalRelevance(queryTokens: readonly string[], content: string, queryLower = ""): number {
-	const contentLower = content.toLowerCase();
-	const queryCjk = new Set(Array.from(queryLower).filter(isCjkChar));
-	if (queryTokens.length === 0 && queryCjk.size === 0) return 0;
-
-	const contentTokens = new Set(recallTokens(contentLower));
-	for (const token of Array.from(contentTokens)) {
-		for (const part of token.split(SPLIT_TOKEN_RE)) {
-			if (part.length >= 3 && !FACT_MATCH_STOPWORDS.has(part) && !/^\d+$/.test(part)) contentTokens.add(part);
-		}
-	}
-	if (contentTokens.size === 0 && queryCjk.size === 0) return 0;
-
-	let exact = 0;
-	let partial = 0;
-	for (const token of queryTokens) {
-		if (contentTokens.has(token)) {
-			exact += 1;
-			continue;
-		}
-		const synonyms = RECALL_SYNONYMS[token] ?? [];
-		if (synonyms.some(syn => contentTokens.has(syn))) {
-			partial += 0.75;
-			continue;
-		}
-		if (
-			token.length >= 4 &&
-			Array.from(contentTokens).some(
-				contentToken => contentToken.length >= 4 && (token.includes(contentToken) || contentToken.includes(token)),
-			)
-		) {
-			partial += 0.4;
-		}
-	}
-
-	const fullMatch = queryLower !== "" && contentLower.includes(queryLower) ? 1 : 0;
-	let score = (exact + partial + fullMatch) / Math.max(queryTokens.length, 1);
-	if (score === 0 && queryCjk.size > 0) {
-		const contentCjk = new Set(Array.from(contentLower).filter(isCjkChar));
-		let overlap = 0;
-		for (const ch of queryCjk) if (contentCjk.has(ch)) overlap += 1;
-		score = overlap / queryCjk.size;
-	}
-	return Math.min(score, 1);
-}
-
-export function strictFactMatches(query: string, factText: string): boolean {
-	const queryLower = query.toLowerCase().trim();
-	const factLower = factText.toLowerCase().trim();
-	if (!queryLower || !factLower) return false;
-	if (factLower.includes(queryLower)) return true;
-	const queryTokens = factMatchTokens(queryLower);
-	const factTokens = factMatchTokens(factLower);
-	if (queryTokens.size === 0 || factTokens.size === 0) return false;
-	const overlap = Array.from(queryTokens).filter(token => factTokens.has(token));
-	if (overlap.length >= 2) return true;
-	const token = overlap[0];
-	if (token === undefined) return false;
-	if (token.length >= 8 && /[./:_-]/.test(token)) return true;
-	return token.length >= 5;
 }
 
 export function buildFtsQuery(query: string): string {
