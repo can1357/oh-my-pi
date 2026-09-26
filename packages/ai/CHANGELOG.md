@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `prepareProviderRequest` to the registry, which applies a provider's model and request hooks in dispatch order ([#13323](https://github.com/can1357/oh-my-pi/pull/13323) by [@mustafaabidali](https://github.com/mustafaabidali))
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

@@ -15,6 +15,7 @@
  *   with `{ summary, shortSummary? }`.
  */
 
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
@@ -43,6 +44,7 @@ import {
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -53,6 +55,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { Tokenizer } from "../tokenizer";
+import { prepareCompactionRequest } from "./provider-request";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -294,6 +297,8 @@ export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
 	}
 	if (model.provider === "openai") return true;
+	// Amazon Bedrock's OpenAI routes serve `/responses/compact` without an opt-in.
+	if (compactionApi === "openai-responses" && isBedrockOpenAIUrl(model.baseUrl)) return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
 	return isOpenAiRemoteCompactionApi(compactionApi);
 }
@@ -311,7 +316,8 @@ function resolveOpenAiCompactEndpoint(model: Model): string {
 
 	const defaultBase = "https://api.openai.com/v1";
 	const rawBase = model.baseUrl && model.baseUrl.length > 0 ? model.baseUrl : defaultBase;
-	const normalizedBase = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
+	const normalizedBase = rawBase.replace(/\/+$/, "");
+	if (normalizedBase.endsWith("/responses")) return `${normalizedBase}/compact`;
 	if (normalizedBase.endsWith("/v1")) return `${normalizedBase}/responses/compact`;
 	return `${normalizedBase}/v1/responses/compact`;
 }
@@ -776,8 +782,11 @@ export async function requestOpenAiRemoteCompaction(
 		codexCompaction?: CodexCompactionContext;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
-	const endpoint = resolveOpenAiCompactEndpoint(model);
-	const requestModel = resolveOpenAiCompactModel(model);
+	const prepared = await prepareCompactionRequest(model, apiKey, opts?.fetch, signal);
+	const providerModel = prepared.model;
+	const providerApiKey = prepared.apiKey;
+	const endpoint = resolveOpenAiCompactEndpoint(providerModel);
+	const requestModel = resolveOpenAiCompactModel(providerModel);
 	const trimmed = trimRemoteCompactionInputToContextWindow(
 		compactInput,
 		new Tokenizer(model),
@@ -808,22 +817,22 @@ export async function requestOpenAiRemoteCompaction(
 	const headers: Record<string, string> = isAzureOpenAiResponses
 		? {
 				"content-type": "application/json",
-				"api-key": apiKey,
-				...model.headers,
+				"api-key": providerApiKey,
+				...providerModel.headers,
 			}
 		: {
 				"content-type": "application/json",
-				Authorization: `Bearer ${apiKey}`,
-				...model.headers,
+				...(providerApiKey === NO_AUTH_SENTINEL ? {} : { Authorization: `Bearer ${providerApiKey}` }),
+				...providerModel.headers,
 			};
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {
-		const accountId = getCodexAccountId(apiKey);
+		const accountId = getCodexAccountId(providerApiKey);
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;
 		}
-		applyCodexResidencyHeader(headers, apiKey);
+		applyCodexResidencyHeader(headers, providerApiKey);
 		const attestation = await getCodexAttestationHeader(accountId);
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;
@@ -859,7 +868,7 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
-	const response = await (opts?.fetch ?? fetch)(endpoint, {
+	const response = await prepared.fetch(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(request),

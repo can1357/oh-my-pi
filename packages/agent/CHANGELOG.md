@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GPT models on Amazon Bedrock's OpenAI routes (bedrock-runtime and bedrock-mantle `/openai/...`) falling back to a local summary instead of OpenAI's native remote compaction; set `remoteCompaction.enabled: false` to opt out ([#13323](https://github.com/can1357/oh-my-pi/pull/13323) by [@mustafaabidali](https://github.com/mustafaabidali))
+- Fixed OpenAI remote compaction skipping the provider's request setup, which sent Bedrock Mantle compaction to an unresolved `{region}` host and skipped configured headers and proxies ([#13323](https://github.com/can1357/oh-my-pi/pull/13323) by [@mustafaabidali](https://github.com/mustafaabidali))
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
