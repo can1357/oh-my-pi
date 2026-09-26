@@ -241,6 +241,16 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
 			);
 		}
+		if (outcome === "outdated-relay") {
+			throw new ToolError(
+				`The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`,
+			);
+		}
+		if (outcome === "outdated-extension") {
+			throw new ToolError(
+				"The OMP Browser Relay extension is out of date. Run `omp browser-relay install` and reload the extension in Chrome.",
+			);
+		}
 		const puppeteer = await loadPuppeteer();
 		const browser = await puppeteer.connect({
 			browserURL: cdpUrl,

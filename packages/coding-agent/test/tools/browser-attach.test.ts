@@ -752,6 +752,63 @@ describe("pickElectronTarget relay path", () => {
 		).rejects.toThrow(/tab.*not ready/i);
 	});
 
+	it("does not select a hidden page when another connected-browser page is unreadable", async () => {
+		const unreadable = makeTarget("PAGE_A", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Active tab",
+		} as unknown as Page);
+		const hidden = makeTarget("PAGE_B", {
+			url: () => "https://example.com/hidden",
+			title: async () => "Background tab",
+			evaluate: async () => false,
+		} as unknown as Page);
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { preferVisible: true }),
+		).rejects.toThrow(/tab.*not ready/i);
+	});
+
+	it("does not satisfy a connected-browser matcher from another page when one is unreadable", async () => {
+		const unreadable = makeTarget("PAGE_A", {
+			url: () => {
+				throw new Error("Page frame unavailable");
+			},
+			title: async () => "Cart",
+		} as unknown as Page);
+		const otherMatch = makeTarget("PAGE_B", fakePage({ url: "https://example.com/cart", title: "Cart" }));
+
+		await expect(
+			pickElectronTarget(makeBrowser([unreadable.target, otherMatch.target]), { matcher: "cart" }),
+		).rejects.toThrow(/tab.*not ready/i);
+	});
+
+	it("aborts target discovery when the caller cancels", async () => {
+		const controller = new AbortController();
+		const page = Promise.withResolvers<Page | null>();
+		const { target } = makeTarget("PAGE_CANCEL");
+		Object.assign(target, { page: () => page.promise });
+		const selection = pickElectronTarget(makeBrowser([target]), { preferVisible: true, signal: controller.signal });
+
+		controller.abort(new Error("user cancelled"));
+		page.resolve(null);
+		await expect(selection).rejects.toThrow("Operation aborted");
+	});
+
+	it("aborts frame-readiness polling when the caller cancels", async () => {
+		const controller = new AbortController();
+		const page = {
+			url: () => {
+				throw new Error("Requesting main frame too early!");
+			},
+		} as unknown as Page;
+		const readiness = waitForMainFrame(page, 100, controller.signal);
+
+		controller.abort();
+		await expect(readiness).rejects.toThrow("Operation aborted");
+	});
+
 	it("fails with guidance when the only match is a discarded tab", async () => {
 		const made = makePage([() => {}]);
 		const { target } = makeTarget("PAGE12", made.page);

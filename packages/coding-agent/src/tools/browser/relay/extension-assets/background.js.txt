@@ -127,6 +127,7 @@ async function buildHello() {
     instanceId: await ensureInstanceId(),
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+    discardedTabsProtocol: 1,
     tabs: snapshots,
     attachedTabIds
   };

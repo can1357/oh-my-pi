@@ -166,6 +166,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		instanceId: await ensureInstanceId(),
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		tabs: snapshots,
 		attachedTabIds,
 	};
