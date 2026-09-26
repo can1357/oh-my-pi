@@ -3,6 +3,13 @@ import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
+import {
+	disposeAllVmContexts,
+	setJsEvalWorkerFactoriesForTests,
+	type JsEvalWorkerFactories,
+	type JsEvalWorkerHandle,
+} from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/eval/js/worker-protocol";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
@@ -15,6 +22,47 @@ function makeSession(settings: Settings, asyncJobManager: AsyncJobManager): Tool
 		getSessionSpawns: () => null,
 		settings,
 		asyncJobManager,
+	};
+}
+
+function crashableJsWorker(): {
+	factories: JsEvalWorkerFactories;
+	runStarted: Promise<void>;
+	crash: () => void;
+} {
+	const messageListeners = new Set<(message: WorkerOutbound) => void>();
+	const errorListeners = new Set<(error: Error) => void>();
+	const runStarted = Promise.withResolvers<void>();
+	const worker: JsEvalWorkerHandle = {
+		mode: "process",
+		send(message: WorkerInbound) {
+			if (message.type === "init") {
+				queueMicrotask(() => {
+					for (const listener of messageListeners) listener({ type: "ready" });
+				});
+				return;
+			}
+			if (message.type === "run") runStarted.resolve();
+		},
+		onMessage(handler) {
+			messageListeners.add(handler);
+			return () => messageListeners.delete(handler);
+		},
+		onError(handler) {
+			errorListeners.add(handler);
+			return () => errorListeners.delete(handler);
+		},
+		async close() {
+			return true;
+		},
+		async terminate() {},
+	};
+	return {
+		factories: { spawnProcess: () => worker, spawnWorker: () => worker },
+		runStarted: runStarted.promise,
+		crash() {
+			for (const listener of errorListeners) listener(new Error("simulated JS eval worker exit"));
+		},
 	};
 }
 
@@ -214,5 +262,58 @@ describe("EvalTool auto-background", () => {
 		await job?.promise;
 		expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
 		await asyncJobManager.dispose();
+	});
+
+	it("fails and delivers an auto-backgrounded cell when its JS worker exits", async () => {
+		const ownerId = "eval-owner";
+		const evalSessionId = `eval-session-${crypto.randomUUID()}`;
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const asyncJobManager = new AsyncJobManager({});
+		const worker = crashableJsWorker();
+		const restoreFactories = setJsEvalWorkerFactoriesForTests(worker.factories);
+		asyncJobManager.registerDeliverySink(ownerId, (jobId, text) => {
+			deliveries.push({ jobId, text });
+		});
+		const session: ToolSession = {
+			...makeSession(
+				Settings.isolated({
+					"eval.autoBackground.enabled": true,
+					"eval.autoBackground.thresholdMs": 0,
+				}),
+				asyncJobManager,
+			),
+			cwd: process.cwd(),
+			getAgentId: () => ownerId,
+			getEvalSessionId: () => evalSessionId,
+			getEvalKernelOwnerId: () => ownerId,
+		};
+		try {
+			const result = await new EvalTool(session).execute("call-worker-exit", {
+				language: "js",
+				code: "await work();",
+				timeout: 0,
+			});
+			expect(result.details?.async?.state).toBe("running");
+			const jobId = result.details?.async?.jobId;
+			if (!jobId) throw new Error("expected an auto-backgrounded eval job id");
+			const job = asyncJobManager.getJob(jobId);
+			if (!job) throw new Error("expected the auto-backgrounded eval job to remain registered");
+
+			expect(job.type).toBe("eval");
+			expect(job.status).toBe("running");
+			await worker.runStarted;
+			worker.crash();
+			expect(job.status).toBe("failed");
+			expect(job.errorText).toContain("simulated JS eval worker exit");
+			await job.promise;
+			expect(await asyncJobManager.drainDeliveries({ filter: { ownerId }, timeoutMs: 1_000 })).toBe(true);
+			expect(deliveries).toHaveLength(1);
+			expect(deliveries[0]?.jobId).toBe(jobId);
+			expect(deliveries[0]?.text).toContain("simulated JS eval worker exit");
+		} finally {
+			restoreFactories();
+			await asyncJobManager.dispose();
+			await disposeAllVmContexts();
+		}
 	});
 });

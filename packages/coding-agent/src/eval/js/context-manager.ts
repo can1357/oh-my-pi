@@ -68,6 +68,7 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	asyncJobId?: string;
 	shadowCell?: EvalShadowCellSession;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
@@ -154,6 +155,7 @@ export async function executeInVmContext(options: {
 	sessionId: string;
 	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
 	ownerId?: string;
+	asyncJobId?: string;
 	cwd: string;
 	session: ToolSession;
 	localRoots?: Record<string, string>;
@@ -513,6 +515,7 @@ async function runOnce(
 	session: JsSession,
 	options: {
 		sessionId: string;
+		asyncJobId?: string;
 		cwd: string;
 		session: ToolSession;
 		localRoots?: Record<string, string>;
@@ -531,6 +534,7 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		asyncJobId: options.asyncJobId,
 		shadowCell: getActiveEvalShadowCell(),
 		resolve,
 		reject,
@@ -901,6 +905,11 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 		updateEvalState(toolSession, { language: "js", kernelId: session.kernelId, alive: false });
 	}
 	for (const pending of session.pending.values()) {
+		if (pending.asyncJobId) {
+			const manager = pending.toolSession.asyncJobManager;
+			const ownerId = pending.toolSession.getAgentId?.();
+			manager?.failEvalJob(pending.asyncJobId, error, ownerId ? { ownerId } : undefined);
+		}
 		if (pending.settled) continue;
 		pending.settled = true;
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);

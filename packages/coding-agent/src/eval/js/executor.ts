@@ -26,6 +26,7 @@ export interface JsExecutorOptions {
 	sessionId: string;
 	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
 	kernelOwnerId?: string;
+	asyncJobId?: string;
 	reset?: boolean;
 	sessionFile?: string;
 	/** Absolute source path for file-backed cells. */
@@ -157,6 +158,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			sessionKey: options.sessionId,
 			sessionId: options.sessionId,
 			ownerId: options.kernelOwnerId,
+			asyncJobId: options.asyncJobId,
 			cwd,
 			session: options.session,
 			localRoots: options.localRoots,
