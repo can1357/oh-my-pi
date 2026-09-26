@@ -15,7 +15,7 @@ import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { providerEntries, seedModels } from "../compat/providers";
-import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { billingVariantPlain, classifyModel, discoveryVocabulary, recoversCanonicalParams } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -25,7 +25,7 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
-import { resolveModelReference } from "../identity/reference";
+import { inheritReferenceThinking, resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import {
@@ -547,6 +547,36 @@ function mapWithBundledReference<TApi extends Api>(
 		baseUrl: defaults.baseUrl,
 		contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 		maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
+	};
+}
+
+function mapWithCanonicalRecovery(
+	providerId: string,
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	if (reference) return mapWithBundledReference(entry, defaults, reference);
+	if (!recoversCanonicalParams(providerId))
+		return { ...defaults, name: toModelName(entry.name, defaults.name) };
+
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex());
+	if (!canonical) return { ...defaults, name: toModelName(entry.name, defaults.name) };
+
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	const thinking = inheritReferenceThinking(defaults.thinking, canonical, providerId);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		...(thinking && { thinking }),
+		contextWindow,
+		maxTokens,
 	};
 }
 
@@ -1154,9 +1184,10 @@ export interface GmiCloudModelManagerConfig {
  * reference exists (the seeded default) it supplies GMI's published tariff and
  * limits directly. Every other id is an open-weight model GMI resells under its
  * canonical id (`deepseek-ai/…`, `moonshotai/…`, `zai-org/…`, `Qwen/…`), so its
- * intrinsic capabilities — context window, output limit, reasoning, thinking
- * ladder — are recovered from any bundled upstream entry via the canonical
- * reference index. Pricing is deliberately never borrowed across providers:
+ * intrinsic capabilities — context window, output limit, reasoning, and input
+ * modes — are recovered from any bundled upstream entry via the canonical
+ * reference index. Provider-specific thinking routes and pricing are deliberately
+ * never borrowed across providers:
  * GMI's per-model tariff is unknown for these ids, so cost stays zeroed rather
  * than inheriting another provider's rate.
  */
@@ -1165,29 +1196,7 @@ function mapGmiCloudModel(
 	defaults: ModelSpec<"openai-completions">,
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
-	if (reference) {
-		return mapWithBundledReference(entry, defaults, reference);
-	}
-	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
-		| ModelSpec<"openai-completions">
-		| undefined;
-	if (!canonical) {
-		return { ...defaults, name: toModelName(entry.name, defaults.name) };
-	}
-	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
-	const maxTokens =
-		canonical.maxTokens != null && contextWindow != null
-			? Math.min(canonical.maxTokens, contextWindow)
-			: (canonical.maxTokens ?? defaults.maxTokens);
-	return {
-		...defaults,
-		name: toModelName(entry.name, canonical.name ?? defaults.name),
-		reasoning: canonical.reasoning,
-		input: canonical.input,
-		...(canonical.thinking && { thinking: canonical.thinking }),
-		contextWindow,
-		maxTokens,
-	};
+	return mapWithCanonicalRecovery("gmi-cloud", entry, defaults, reference);
 }
 
 export function gmiCloudModelManagerOptions(
@@ -1202,6 +1211,50 @@ export function gmiCloudModelManagerOptions(
 		requireApiKey: true,
 		mapModel: mapGmiCloudModel,
 	});
+}
+
+
+// ---------------------------------------------------------------------------
+// 1c. Nous Portal
+// ---------------------------------------------------------------------------
+
+const NOUS_PORTAL_BASE_URL = "https://inference-api.nousresearch.com/v1";
+
+export interface NousPortalModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function mapNousPortalModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	return mapWithCanonicalRecovery("nous-portal", entry, defaults, reference);
+}
+
+export function nousPortalModelManagerOptions(
+	config?: NousPortalModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl?.trim() || NOUS_PORTAL_BASE_URL;
+	return {
+		providerId: "nous-portal",
+		cacheProviderId: resolveModelCacheProviderId("nous-portal", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "nous-portal",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapNousPortalModel(entry, defaults, undefined),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
