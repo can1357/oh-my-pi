@@ -22,6 +22,7 @@
  *   shared root session and passed through verbatim
  */
 import { createHash } from "node:crypto";
+import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -102,7 +103,7 @@ interface ExtInstance {
 	/** Stable short code derived from the instance id; names target ids (`TAB<code>.<tabId>`). */
 	code: string;
 	socket: RelaySocket | null;
-	info: { userAgent: string; browserVersion: string } | null;
+	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
 }
 
 /** Deterministic per-instance code for target ids: stable across relay restarts. */
@@ -135,6 +136,8 @@ class TabState {
 	url: string;
 	title: string;
 	active: boolean;
+	/** Discarded tabs cannot answer debugger calls. */
+	discarded: boolean;
 	windowId: number;
 	pinned: boolean;
 	/** Chrome tab group id from the last snapshot; -1 when ungrouped. */
@@ -146,6 +149,12 @@ class TabState {
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
+	/** Discard cancels the waiter but keeps the extension RPC alive for late cleanup. */
+	attachCancelled = false;
+	attachGeneration = 0;
+	cancelAttach: (() => void) | null = null;
+	/** Retry when a revived tab's canceled attach request finally settles. */
+	retryAttachAfterDiscard = false;
 	/** Relay-initiated detach in flight; reattach serializes behind it. */
 	detaching: Promise<void> | null = null;
 	/** A successful attach completed after the most recently requested relay detach. */
@@ -177,6 +186,7 @@ class TabState {
 		this.url = snap.url;
 		this.title = snap.title;
 		this.active = snap.active;
+		this.discarded = snap.discarded;
 		this.windowId = snap.windowId;
 		this.pinned = snap.pinned;
 		this.groupId = snap.groupId;
@@ -186,6 +196,7 @@ class TabState {
 		this.url = snap.url;
 		this.title = snap.title;
 		this.active = snap.active;
+		this.discarded = snap.discarded;
 		this.windowId = snap.windowId;
 		this.pinned = snap.pinned;
 		this.groupId = snap.groupId;
@@ -270,6 +281,13 @@ export class RelayBridge {
 	/** Payload for `GET /json/version`. */
 	versionInfo(wsUrl: string): Record<string, string> {
 		const info = this.#lastHello()?.info;
+		let hasCompatibleExtension = false;
+		for (const instance of this.#instances.values()) {
+			if (instance.socket && instance.info?.discardedTabsProtocol === DISCARDED_TABS_PROTOCOL_VERSION) {
+				hasCompatibleExtension = true;
+				break;
+			}
+		}
 		const ua = info?.userAgent ?? "";
 		return {
 			Browser: info?.browserVersion ?? "Chrome/unknown",
@@ -278,6 +296,8 @@ export class RelayBridge {
 			"V8-Version": "",
 			"WebKit-Version": "",
 			webSocketDebuggerUrl: wsUrl,
+			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
 		};
 	}
 
@@ -286,7 +306,14 @@ export class RelayBridge {
 		const out: Array<Record<string, string>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
-			out.push({ id: pageTargetIdFromKey(tab.tabKey), type: "page", title: tab.title, url: tab.url });
+			out.push({
+				id: pageTargetIdFromKey(tab.tabKey),
+				type: "page",
+				title: tab.title,
+				url: tab.url,
+				active: String(tab.active),
+				discarded: String(tab.discarded),
+			});
 		}
 		return out;
 	}
@@ -402,7 +429,11 @@ export class RelayBridge {
 		}
 		inst.socket = socket;
 		this.#socketInstance.set(socket, instanceId);
-		inst.info = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
+		inst.info = {
+			userAgent: msg.userAgent,
+			browserVersion: msg.browserVersion,
+			discardedTabsProtocol: msg.discardedTabsProtocol,
+		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
 		// The hello GC is scoped to this instance: another browser's tabs are
@@ -422,6 +453,14 @@ export class RelayBridge {
 			const wasAttached = tab.attached;
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
+			tab.cancelAttach = null;
+			tab.attachCancelled = false;
+			if (tab.discarded) {
+				// Retire held sessions now; revival will reannounce and attach the tab.
+				this.#retractTab(tab);
+				this.#detachIfUnheld(tab.tabKey);
+				continue;
+			}
 			// A service-worker restart can drop attachments while downstream
 			// connections still hold sessions: restore them best-effort.
 			if (wasAttached && !tab.attached && this.#sessionHolders(tab.tabKey).length > 0) {
@@ -760,16 +799,24 @@ export class RelayBridge {
 			}
 			case "Target.setAutoAttach": {
 				conn.autoAttach = true;
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
-				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
+				// Discarded tabs can stall debugger calls. Retract targets already
+				// announced by Target.setDiscoverTargets so Puppeteer can connect().
+				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab) && !tab.discarded);
+				await Promise.all(tabs.map(tab => this.#ensureAttached(tab, true)));
 				for (const tab of tabs) {
-					if (!tab.attached) {
-						// Attach failed (DevTools open, another debugger, …): retract
-						// the target so puppeteer's init never waits on it.
+					if (!tab.attached || tab.discarded || !this.#eligible(tab)) {
+						// Failed or newly discarded tabs must not hold up connect().
 						this.#retractTab(tab);
+						this.#detachIfUnheld(tab.tabKey);
 						continue;
 					}
 					this.#emitTabAttached(conn, tab);
+				}
+				for (const tab of this.#tabs.values()) {
+					if (tab.announced && tab.discarded && this.#eligible(tab)) {
+						this.#retractTab(tab);
+						this.#detachIfUnheld(tab.tabKey);
+					}
 				}
 				this.#reply(conn, msg, {});
 				return;
@@ -779,6 +826,10 @@ export class RelayBridge {
 				const tab = parsed ? this.#tabs.get(parsed.key) : undefined;
 				if (!parsed || !tab) {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					return;
+				}
+				if (tab.discarded) {
+					this.#replyError(conn, msg, `Cannot attach to discarded tab ${tab.tabKey}`);
 					return;
 				}
 				if (!(await this.#ensureAttached(tab))) {
@@ -987,6 +1038,7 @@ export class RelayBridge {
 		if (!inst) return;
 		const key = tabKeyOf(inst.code, snap.tabId);
 		let tab = this.#tabs.get(key);
+		const becameActive = snap.active && (!tab || !tab.active || tab.windowId !== snap.windowId);
 		if (!tab) {
 			tab = new TabState(instanceId, inst.code, snap.tabId, snap);
 			this.#tabs.set(key, tab);
@@ -999,11 +1051,22 @@ export class RelayBridge {
 				tab.groupOptOut = true;
 			}
 			tab.update(snap);
+			if (tab.discarded && tab.attaching && !tab.attachCancelled) {
+				tab.attachGeneration++;
+				tab.attachCancelled = true;
+				tab.cancelAttach?.();
+			}
+		}
+		if (becameActive) {
+			for (const other of this.#tabs.values()) {
+				if (other !== tab && other.instanceId === instanceId && other.windowId === snap.windowId)
+					other.active = false;
+			}
 		}
 		if (opts.silent) return;
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
-		if (eligible && !tab.announced) {
+		if (eligible && !tab.announced && !tab.discarded) {
 			tab.announced = true;
 			for (const conn of this.#conns.values()) {
 				if (!conn.discover) continue;
@@ -1012,14 +1075,15 @@ export class RelayBridge {
 			}
 			for (const conn of this.#conns.values()) {
 				if (!conn.autoAttach) continue;
-				void this.#ensureAttached(tab).then(ok => {
-					if (ok) this.#emitTabAttached(conn, tab);
-				});
+				this.#attachForAutoAttach(tab);
+				break;
 			}
 			return;
 		}
-		if (!eligible && tab.announced) {
+		if ((!eligible || tab.discarded) && tab.announced) {
+			// Puppeteer waits for attachments to announced targets.
 			this.#retractTab(tab);
+			this.#detachIfUnheld(tab.tabKey);
 			return;
 		}
 		if (eligible && tab.announced) {
@@ -1029,6 +1093,28 @@ export class RelayBridge {
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
 			}
 		}
+	}
+
+	#attachForAutoAttach(tab: TabState): void {
+		let hasAutoAttach = false;
+		for (const conn of this.#conns.values()) {
+			if (conn.autoAttach) {
+				hasAutoAttach = true;
+				break;
+			}
+		}
+		if (!hasAutoAttach) return;
+		void this.#ensureAttached(tab, true).then(ok => {
+			if (!ok) return;
+			if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
+				this.#retractTab(tab);
+				this.#detachIfUnheld(tab.tabKey);
+				return;
+			}
+			for (const conn of this.#conns.values()) {
+				if (conn.autoAttach) this.#emitTabAttached(conn, tab);
+			}
+		});
 	}
 
 	// ---- tab grouping -----------------------------------------------------------
@@ -1230,19 +1316,27 @@ export class RelayBridge {
 		});
 	}
 
-	async #ensureAttached(tab: TabState): Promise<boolean> {
+	async #ensureAttached(tab: TabState, retryAfterDiscard = false): Promise<boolean> {
+		if (tab.discarded) return false;
 		// The extension emits the detach echo before resolving the RPC. Awaiting
 		// prevents a replacement attach racing either operation.
 		while (tab.detaching) await tab.detaching;
-		if (tab.attached) return true;
+		if (tab.discarded) return false;
+		if (!this.#eligible(tab)) return false;
 		const inst = this.#instances.get(tab.instanceId);
-		if (tab.banned || !inst?.socket) return false;
-		if (tab.attaching) return await tab.attaching;
-		const attempt = this.#rpc({ op: "attach", tabId: tab.tabId }, inst)
+		if (!inst?.socket) return false;
+		if (tab.attaching) {
+			if (tab.attachCancelled && retryAfterDiscard) tab.retryAttachAfterDiscard = true;
+			return await tab.attaching;
+		}
+		const generation = tab.attachGeneration;
+		const cancelled = Promise.withResolvers<boolean>();
+		const request = this.#rpc({ op: "attach", tabId: tab.tabId }, inst)
 			.then(() => {
 				tab.attached = true;
 				tab.reattachedAfterDetach = true;
-				return true;
+				if (tab.discarded) this.#detachIfUnheld(tab.tabKey);
+				return !tab.discarded;
 			})
 			.catch(err => {
 				this.#log("attach failed", {
@@ -1250,21 +1344,30 @@ export class RelayBridge {
 					url: tab.url,
 					error: err instanceof Error ? err.message : String(err),
 				});
-				if (!(err instanceof ExtensionReplacedError)) tab.banned = true;
+				if (!(err instanceof ExtensionReplacedError) && generation === tab.attachGeneration) tab.banned = true;
 				return false;
 			})
 			.finally(() => {
-				tab.attaching = null;
+				if (tab.attaching === attempt) {
+					tab.attaching = null;
+					tab.cancelAttach = null;
+					tab.attachCancelled = false;
+				}
+				const retry = tab.retryAttachAfterDiscard;
+				tab.retryAttachAfterDiscard = false;
+				if (retry && !tab.discarded) this.#attachForAutoAttach(tab);
 			});
+		// Stop waiting for discarded tabs without dropping the extension RPC's late result.
+		const attempt = Promise.race([request, cancelled.promise]);
 		tab.attaching = attempt;
+		tab.cancelAttach = () => cancelled.resolve(false);
 		return await attempt;
 	}
 
 	#eligible(tab: TabState): boolean {
 		if (tab.banned) return false;
-		// A browser whose extension socket is gone cannot be driven; hide its
-		// tabs from discovery until the instance reconnects.
-		if (!this.#instances.get(tab.instanceId)?.socket) return false;
+		const instance = this.#instances.get(tab.instanceId);
+		if (!instance?.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) return false;
 		if (!tab.url) return true;
 		return !INELIGIBLE_URL.test(tab.url);
 	}
