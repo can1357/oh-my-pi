@@ -794,8 +794,9 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
-| `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
-| `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `plan.enabled`                       | boolean | `true`          | Enable plan mode.                                                                                       |
+| `plan.defaultOnStartup`              | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `plan.executeAfterCompactionFailure` | boolean | `true`          | Dispatch the approved plan on the plan model when compaction fails. Disable to halt because the intact context may exceed the configured execution model's window. |
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 

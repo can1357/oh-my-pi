@@ -34,6 +34,20 @@ export const cfgPlanDefaultOnStartup = register({
 	},
 });
 
+export const cfgPlanExecuteAfterCompactionFailure = register({
+	id: "plan.executeAfterCompactionFailure",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Execute After Compaction Failure",
+		description:
+			"Dispatch the approved plan on the plan model when compaction fails, even if the intact context may exceed the execution model's window",
+		condition: "planModeEnabled",
+	},
+});
+
 export const cfgPlanAutosave = register({
 	id: "plan.autosave",
 	type: "boolean",
