@@ -4,7 +4,8 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 const LEGACY_INTENT_FIELD = "__intent";
 const RESULT_SUMMARY_LIMIT = 200;
 const ARGUMENT_SUMMARY_LIMIT = 400;
-const PATH_ARGUMENT_KEY = /(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
+const PATH_ARGUMENT_KEY =
+	/(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
 
 /** Runtime settings for cross-turn tool-call repetition detection. */
 export interface ToolCallLoopGuardOptions {
@@ -116,7 +117,7 @@ export class ToolCallLoopGuard {
 	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length === 0 || toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
+		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
 			this.#lastHash = undefined;
 			this.#count = 0;
 			this.#lastNormalizedHash = undefined;
