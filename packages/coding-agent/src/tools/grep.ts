@@ -63,7 +63,7 @@ const searchSchema = type({
 	"path?": "string",
 	"case?": "boolean",
 	"gitignore?": "boolean",
-	"skip?": type("number").or("null"),
+	"skip?": type("number").or("string.integer.parse").or("null"),
 });
 
 export type GrepToolInput = typeof searchSchema.infer;

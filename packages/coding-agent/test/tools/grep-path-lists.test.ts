@@ -267,6 +267,23 @@ describe("tool path arrays", () => {
 		expect(details?.fileCount).toBe(1);
 		expect(details?.scopePath).toBe("folder with spaces");
 	});
+	it("grep accepts a numeric string skip through tool validation", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "search-string-skip",
+			name: tool.name,
+			arguments: { pattern: "shared-needle", path: ".", skip: "1" },
+		});
+		const expected = await tool.execute("search-numeric-skip", { pattern: "shared-needle", path: ".", skip: 1 });
+		const actual = await tool.execute("search-string-skip", args);
+
+		expect(args.skip).toBe(1);
+		expect(getText(actual)).toBe(getText(expected));
+	});
 	it("search resolves bracketed literal paths (Next.js routes) when they exist", async () => {
 		// Create `apps/[id]/page.tsx` — `[id]` is glob char-class syntax but here it
 		// is a literal directory name. The literal path must take precedence over
