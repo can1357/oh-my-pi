@@ -3304,6 +3304,58 @@ describe("ModelRegistry", () => {
 			expect(registry.find("synthetic", "hf:moonshotai/Kimi-K2.5")).toBeUndefined();
 		});
 
+		test("refreshes legacy CoreWeave caches and preserves the discovered roster on restart", async () => {
+			authStorage.setRuntimeApiKey("coreweave", "coreweave-test-key");
+			const bundled = getBundledModels("coreweave");
+			writeModelCache(
+				"coreweave",
+				Date.now(),
+				bundled,
+				true,
+				fingerprintStaticModels(bundled, false),
+				path.join(tempDir, "models.db"),
+			);
+			const advertisedIds = ["openai/gpt-oss-120b", "new-coreweave-model"];
+			const fetchMock = mockOpenAiCompatibleModels("https://api.inference.wandb.ai/v1/models", advertisedIds);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("coreweave", "online-if-uncached");
+			expect(new Set(getModelsForProvider(registry, "coreweave").map(model => model.id))).toEqual(
+				new Set(advertisedIds),
+			);
+
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async () => {
+					throw new Error("Offline restart must use the cached catalog");
+				},
+			});
+			await restarted.refreshProvider("coreweave", "offline");
+			expect(new Set(getModelsForProvider(restarted, "coreweave").map(model => model.id))).toEqual(
+				new Set(advertisedIds),
+			);
+		});
+
+		test("keeps CoreWeave fallback on discovery failure but honors a successful empty catalog", async () => {
+			authStorage.setRuntimeApiKey("coreweave", "coreweave-test-key");
+			let unavailable = true;
+			const fetchMock: FetchImpl = async input => {
+				if (String(input) !== "https://api.inference.wandb.ai/v1/models") {
+					throw new Error(`Unexpected URL: ${input}`);
+				}
+				return unavailable ? new Response(null, { status: 503 }) : Response.json({ data: [] });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("coreweave", "online");
+			expect(new Set(getModelsForProvider(registry, "coreweave").map(model => model.id))).toEqual(
+				new Set(getBundledModels("coreweave").map(model => model.id)),
+			);
+
+			unavailable = false;
+			await registry.refreshProvider("coreweave", "online");
+			expect(getModelsForProvider(registry, "coreweave")).toEqual([]);
+		});
+
 		test("does not re-add bundled Zhipu Coding Plan models after account discovery", async () => {
 			authStorage.keys.setRuntime("zhipu-coding-plan", "zhipu-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://open.bigmodel.cn/api/coding/paas/v4/models", [

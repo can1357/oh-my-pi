@@ -59,6 +59,10 @@
 - Expanded OpenRouter provider support with embedding, reranking, video generation, text-to-speech, and speech-to-text capabilities, including five new speech-to-text models.
 - Added speech-to-text support to the OpenAI provider.
 
+### Fixed
+
+- Fixed CoreWeave and GMI Cloud retaining bundled models absent from successful discovery responses, and fresh authoritative caches re-adding removed models during cache-only refreshes.
+
 ## [18.2.7] - 2026-09-21
 
 ### Added
