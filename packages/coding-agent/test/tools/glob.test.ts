@@ -85,6 +85,31 @@ describe("GlobTool.execute", () => {
 		}
 	});
 
+	test("never suggests a retry limit above the maximum", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-max-"));
+		try {
+			await Promise.all(
+				Array.from({ length: 1001 }, (_, index) => Bun.write(path.join(cwd, `file-${index}.txt`), "")),
+			);
+			const tool = new GlobTool(createSession(cwd));
+			const partial = await tool.execute("glob-limit-partial", { path: "*.txt", limit: 600, gitignore: false });
+			const suggestedLimit = /Use limit=(\d+) for more/.exec(formatOutputNotice(partial.details?.meta))?.[1];
+			expect(suggestedLimit).toBe("1000");
+
+			const atMax = await tool.execute("glob-limit-max", {
+				path: "*.txt",
+				limit: Number(suggestedLimit),
+				gitignore: false,
+			});
+			expect(atMax.details?.files).toHaveLength(1000);
+			expect(formatOutputNotice(atMax.details?.meta)).not.toContain("Use limit=");
+			const text = atMax.content[0]?.type === "text" ? atMax.content[0].text : "";
+			expect(text).toContain("Partition the pattern or scope to a deeper directory");
+		} finally {
+			await removeWithRetries(cwd);
+		}
+	});
+
 	test("rejects a caller abort during preparation without launching a native scan", async () => {
 		const controller = new AbortController();
 		const statStarted = Promise.withResolvers<void>();

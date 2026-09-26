@@ -50,6 +50,12 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
+	/** Record a result-limit notice whose retry suggestion differs from the default `reached * 2` (e.g. a tool-enforced maximum). */
+	resultLimit(reached: number, suggestion: number): this {
+		this.#meta.resultLimit(reached, suggestion);
+		return this;
+	}
+
 	sourceUrl(value: string): this {
 		this.#meta.sourceUrl(value);
 		return this;

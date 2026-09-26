@@ -32,6 +32,7 @@ The tool returns a single text block plus structured `details`.
 - Success text: matching paths grouped as a multi-level, prefix-folded directory tree (`formatGroupedPaths()`): one `#` per nesting level, single-child directory chains fold into one header (`# a/b/c/`), and files are listed bare under the deepest owning header; root-level matches are listed without a header. Directory matches carry a trailing `/`. Exact file inputs return that file path as one line.
 - Empty result text: `No files found matching pattern`, optionally followed by a timeout or missing-path notice.
 - Multi-path partial miss: appends `Skipped missing paths: ...` after the result block, or after the empty-result line.
+- Result limit reached: below the maximum, `meta.limits.resultLimit` suggests a retry of `min(2 × limit, 1000)` (rendered as `Use limit=N for more`); at `limit: 1000` the text instead ends with `[1000 results maximum reached. Partition the pattern or scope to a deeper directory for more]` and no retry limit is suggested.
 - `details` may include:
   - `scopePath`: display form of the searched root or merged roots.
   - `fileCount`: number of paths returned after result limiting.
@@ -61,7 +62,7 @@ The tool returns a single text block plus structured `details`.
 9. In the local branch, optional `onMatch` callbacks convert each match to a display path (cwd-relative for host paths, a full URL with percent-encoded segments below a URL root via `resolveSearchResultPath()`) and emit throttled progress updates.
 10. After native glob returns, JS merges per-target results, deduplicates repeated display paths, and sorts the merged list by `mtime` descending before formatting paths.
 11. `buildResult()` applies `applyListLimit()` to cap the array again at `effectiveLimit`, formats paths with `formatGroupedPaths()` (from `@oh-my-pi/pi-utils`), appends notices, then runs `truncateHead()` with `maxLines: Number.MAX_SAFE_INTEGER`. In practice this leaves the 50 KB byte cap in place while disabling the default 3000-line cap.
-12. `toolResult()` packages text plus `details`, and records result-limit / truncation metadata for renderers.
+12. `toolResult()` packages text plus `details`, and records result-limit / truncation metadata for renderers. The result-limit retry suggestion is capped at `MAX_LIMIT` so the advertised follow-up is always accepted.
 
 ## Modes / Variants
 - **Exact file path**: if the parsed input has no glob and the resolved path stats as a file, output is that one path.

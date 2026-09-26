@@ -268,10 +268,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const listLimit = applyListLimit(files, { limit: effectiveLimit });
 				const limited = listLimit.items;
 				const limitMeta = listLimit.meta;
+				const limitReached = limitMeta.resultLimit?.reached;
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
+				// At the maximum no larger `limit` is accepted, so replace the generic
+				// "Use limit=N" retry hint with the actual way to see more matches.
+				if (limitReached === MAX_LIMIT) {
+					trailingNotes.push(
+						`[${MAX_LIMIT} results maximum reached. Partition the pattern or scope to a deeper directory for more]`,
+					);
+				}
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 
@@ -286,9 +294,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};
 
-				const resultBuilder = toolResult(details)
-					.text(truncation.content)
-					.limits({ resultLimit: limitMeta.resultLimit?.reached });
+				const resultBuilder = toolResult(details).text(truncation.content);
+				if (limitReached !== undefined && limitReached < MAX_LIMIT) {
+					resultBuilder.resultLimit(limitReached, Math.min(limitReached * 2, MAX_LIMIT));
+				}
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}
