@@ -1977,11 +1977,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			const serving = session.servingModel;
 			if (!serving) return;
 			const isFallback = serving.isFallback;
+			// A model swap moves the window the usage gauge divides by. Without
+			// this the Agent Hub kept the startup model's window while labelling
+			// the row with the fallback that replaced it. Models with no declared
+			// window keep the last known one rather than blanking the gauge.
+			const contextWindow =
+				serving.contextWindow && serving.contextWindow > 0 ? serving.contextWindow : progress.contextWindow;
 			if (
 				serving.selector === progress.resolvedModel &&
 				serving.modelIdentity === progress.resolvedModelIdentity &&
 				serving.thinkingLevel === progress.resolvedThinkingLevel &&
-				(progress.resolvedModelIsFallback ?? false) === isFallback
+				(progress.resolvedModelIsFallback ?? false) === isFallback &&
+				contextWindow === progress.contextWindow
 			) {
 				return;
 			}
@@ -1989,6 +1996,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			progress.resolvedModelIdentity = serving.modelIdentity;
 			progress.resolvedThinkingLevel = serving.thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
+			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
 		return session.subscribe(event => {

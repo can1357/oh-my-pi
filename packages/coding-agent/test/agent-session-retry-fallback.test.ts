@@ -1713,6 +1713,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 
 		const swapProbe: Array<ServingModel | undefined> = [];
@@ -1751,6 +1752,7 @@ describe("AgentSession retry fallback", () => {
 				modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 				thinkingLevel: undefined,
 				isFallback: true,
+				contextWindow: secondFallback.contextWindow,
 			},
 		]);
 		expect(session.servingModel).toEqual({
@@ -1758,6 +1760,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: secondFallback.contextWindow,
 		});
 	});
 
@@ -4956,6 +4959,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 	});
 
@@ -5011,6 +5015,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 
 		// Capture attribution inside the restore's synchronous `model_changed`
@@ -5038,6 +5043,8 @@ describe("AgentSession retry fallback", () => {
 		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
 		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
 		const baseId = fastModel.id.replace(/-fast$/, "");
+		const baseModel = getBundledModel("fireworks", baseId);
+		if (!baseModel) throw new Error("Expected the bundled Fireworks base model to exist");
 
 		const requestedModels: string[] = [];
 		const mock = createMockModel();
@@ -5076,6 +5083,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: baseModel.contextWindow,
 		});
 
 		// How the previous transcript was routed says nothing about a freshly
@@ -5087,6 +5095,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: baseModel.contextWindow,
 		});
 	});
 
@@ -6405,6 +6414,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 
 		await session.prompt("Fail over and die on the fallback");
@@ -6419,6 +6429,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: primaryModel.contextWindow,
 		});
 		// Both attribution and how the model was routed belong to the session they
 		// were earned in. Every real switch mints a new session id — including for
@@ -6431,6 +6442,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: false,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 
@@ -6471,6 +6483,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 
@@ -6501,6 +6514,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		};
 		expect(session.servingModel).toEqual(served);
 
@@ -6567,6 +6581,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 
 		// `model_changed` fans out synchronously from inside the swap, which is the
@@ -6587,6 +6602,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: firstFallback.contextWindow,
 		});
 		// Never the incoming candidate: mid-swap it has produced nothing.
 		expect(servingAtModelChange.length).toBeGreaterThan(0);
@@ -6662,6 +6678,7 @@ describe("AgentSession retry fallback", () => {
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
 			isFallback: true,
+			contextWindow: fallbackModel.contextWindow,
 		});
 	});
 
