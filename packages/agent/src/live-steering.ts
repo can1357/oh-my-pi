@@ -22,8 +22,6 @@ export interface LiveSteeringQueue {
 	 * `undefined` when that view is not purely user messages.
 	 */
 	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
-	/** Called once the provider delivers `messages` into the in-flight response. */
-	onAccepted(messages: AgentMessage[]): void;
 }
 
 /** One provider call's {@link LiveSteering} source. */
@@ -80,7 +78,6 @@ export class LiveSteeringChannel implements LiveSteering {
 				if (settled) return;
 				settled = true;
 				this.accepted.push(...messages);
-				this.#queue.onAccepted(messages);
 			},
 			reject: () => {
 				if (settled) return;

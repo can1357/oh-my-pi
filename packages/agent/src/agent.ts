@@ -413,10 +413,11 @@ export class Agent {
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
 	/**
-	 * Steering a provider accepted into its in-flight response (`onLiveSteeringAccepted`) that
-	 * the transcript has not recorded yet. Kept apart from {@link #queuedMessageDeliveries}: the model
-	 * already has it, so queue replacement never drops it; the run's end requeues whatever it
-	 * did not record, and {@link withdrawLiveSteering} takes it back ahead of an abort.
+	 * Steering live steering took for the in-flight response (`onLiveSteeringTaken`) that the
+	 * transcript has not recorded yet, whether or not the provider accepted it. Kept apart from
+	 * {@link #queuedMessageDeliveries}: the loop drops it on abort instead of recording it, so queue
+	 * replacement must not drop it too; the run's end requeues whatever it did not record, and
+	 * {@link withdrawLiveSteering} takes it back ahead of an abort.
 	 */
 	#liveSteered: { message: AgentMessage; controller: AbortController | undefined }[] = [];
 	/** Dequeued originals remain recoverable until their transcript events arrive. */
@@ -1022,14 +1023,14 @@ export class Agent {
 		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
 	}
 
-	/** Move steering the provider accepted out of the queue-delivery records into {@link #liveSteered}. */
-	#adoptLiveSteering(accepted: readonly AgentMessage[]): void {
+	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
+	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
-			const kept = pending.filter(message => !accepted.includes(message));
+			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
 			for (const message of pending) {
-				if (accepted.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
+				if (taken.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
 			}
 			if (kept.length === 0) {
 				this.#queuedMessageDeliveries.delete(delivery);
@@ -1050,8 +1051,8 @@ export class Agent {
 		return messages;
 	}
 
-	/** Steering the provider accepted into its streaming response; the transcript records it
-	 *  once that response ends, which is when the model switches to it. */
+	/** Steering live steering took for the streaming response; the transcript records it once
+	 *  that response (or its tool batch) ends, which is when the model switches to it. */
 	peekLiveSteeredMessages(): AgentMessage[] {
 		return this.#liveSteered.map(entry => entry.message);
 	}
@@ -1776,7 +1777,7 @@ export class Agent {
 						: this.#steeringQueue.length,
 				),
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
-			onLiveSteeringAccepted: messages => this.#adoptLiveSteering(messages),
+			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),

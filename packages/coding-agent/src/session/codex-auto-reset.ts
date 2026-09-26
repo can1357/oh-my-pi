@@ -537,6 +537,22 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	return { actions, skipped };
 }
 
+/**
+ * Cross-process lock identity for one upstream Codex account. Saved resets are
+ * a ChatGPT-account balance, not a local credential row: credential stores
+ * (SDK `agentDir`s) reuse row ids, so sessions share a fence exactly when they
+ * share the account. Undefined when the account cannot be identified.
+ */
+export function codexResetLockKey(identity: {
+	accountId?: string;
+	email?: string;
+	orgId?: string;
+}): string | undefined {
+	const account = (identity.accountId ?? identity.email)?.trim().toLowerCase();
+	if (!account) return undefined;
+	return `openai-codex|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
+}
+
 /** One attempt per (account, weekly-reset-minute) block episode. */
 export function blockedAttemptKey(accountKey: string, weeklyResetsAtMs: number): string {
 	return `block|${accountKey}|${Math.round(weeklyResetsAtMs / DEBOUNCE_BUCKET_MS)}`;
@@ -673,6 +689,8 @@ export interface CodexAutoRedeemCoordinator {
 	attemptedKeys: Set<string>;
 	deferredUntilByKey: Map<string, number>;
 	lastAttemptAtByAccount: Map<string, number>;
+	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
+	resetLockPath?: string;
 	inFlightByAccount: Map<string, Promise<boolean>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;
