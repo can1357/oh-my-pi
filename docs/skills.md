@@ -57,7 +57,10 @@ Supported frontmatter fields on the skill type:
 - `alwaysApply?: boolean`
 - `hide?: boolean`
 - `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
+- `model?: string | string[]` (OMP-native skill only; default model for subagents delegated during an explicit `/skill:<name>` invocation)
 - additional keys are preserved as unknown metadata
+
+An explicit skill invocation's model applies only to its user turn. A later user message ends that scope; loading a skill or reading `skill://` does not activate it. An explicit model on the subagent request, `task.agentModelOverrides`, and a named agent's pinned model take precedence. Without a skill model, dispatch is unchanged. Plugin-packaged Agent Skills use `metadata.omp.model` because their standard frontmatter rejects unknown top-level keys. `context: fork` and `hooks:` are separate from model selection.
 
 Current runtime behavior:
 

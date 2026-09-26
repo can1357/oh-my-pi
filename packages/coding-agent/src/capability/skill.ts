@@ -12,6 +12,8 @@ import type { SourceMeta } from "./types";
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
+	/** Default model for subagents delegated during an explicit skill invocation. */
+	model?: string | string[];
 	globs?: string[];
 	alwaysApply?: boolean;
 	/**

@@ -24,6 +24,7 @@ import {
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -107,6 +108,68 @@ function result(): SingleResult {
 function mockDiscovery(agent: AgentDefinition = AGENT): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 }
+
+describe("skill model selection", () => {
+	it("uses the invoked skill for an inheriting subagent without overriding explicit selectors", async () => {
+		mockDiscovery({ ...AGENT, model: ["@task"] });
+		const active = session({ modelRoles: { task: "openai/base" } });
+		active.skills = [
+			{
+				name: "cheap",
+				description: "Cheap worker",
+				filePath: "/tmp/cheap/SKILL.md",
+				baseDir: "/tmp/cheap",
+				source: "test",
+				frontmatter: { model: "openai/cheap" },
+			},
+		];
+		active.sessionManager = {
+			getBranch: () => [
+				{
+					type: "custom_message",
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					attribution: "user",
+					details: { name: "cheap" },
+				},
+			],
+		} as ToolSession["sessionManager"];
+		expect((await resolveEffectiveSubagentPolicy(request({ session: active }))).modelOverride).toEqual([
+			"openai/cheap",
+		]);
+		expect(
+			(await resolveEffectiveSubagentPolicy(request({ session: active, model: "openai/explicit" }))).modelOverride,
+		).toEqual(["openai/explicit"]);
+	});
+
+	it("does not carry a skill override into the next user turn", async () => {
+		mockDiscovery({ ...AGENT, model: ["@task"] });
+		const active = session({ modelRoles: { task: "openai/base" } });
+		active.skills = [
+			{
+				name: "cheap",
+				description: "Cheap worker",
+				filePath: "/tmp/cheap/SKILL.md",
+				baseDir: "/tmp/cheap",
+				source: "test",
+				frontmatter: { model: "openai/cheap" },
+			},
+		];
+		active.sessionManager = {
+			getBranch: () => [
+				{
+					type: "custom_message",
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					attribution: "user",
+					details: { name: "cheap" },
+				},
+				{ type: "message", message: { role: "user", content: "Unrelated task" } },
+			],
+		} as ToolSession["sessionManager"];
+		expect((await resolveEffectiveSubagentPolicy(request({ session: active }))).modelOverride).toEqual([
+			"openai/base",
+		]);
+	});
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();
