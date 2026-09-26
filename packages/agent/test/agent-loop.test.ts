@@ -5526,6 +5526,7 @@ describe("agentLoop passive additionalContext", () => {
 				return {
 					content: [{ type: "text", text: "rewritten" }],
 					isError: true,
+					additionalContext: "post-tool context survives the error override",
 				};
 			},
 		};
@@ -5556,6 +5557,14 @@ describe("agentLoop passive additionalContext", () => {
 			expect(toolResultMessage.isError).toBe(true);
 			expect(toolResultMessage.content).toEqual([{ type: "text", text: "rewritten" }]);
 		}
+
+		const contextMessage = events
+			.filter(e => e.type === "message_start")
+			.map(e => (e.type === "message_start" ? e.message : undefined))
+			.find((m): m is Extract<AgentMessage, { role: "developer" }> => m !== undefined && m.role === "developer");
+		expect(contextMessage?.content).toEqual([
+			{ type: "text", text: "post-tool context survives the error override" },
+		]);
 	});
 
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {

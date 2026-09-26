@@ -210,7 +210,7 @@ export class TtsrCoordinator {
 		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
-	/** Folds per-tool reminders into the matched tool's result. */
+	/** Delivers per-tool reminders through the trusted passive-context channel. */
 	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
 		const rules = this.#perToolInjections.get(ctx.toolCall.id);
 		if (!rules || rules.length === 0) return undefined;
@@ -226,7 +226,7 @@ export class TtsrCoordinator {
 			.join("\n\n");
 		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
 		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
-		return { content: [{ type: "text", text: reminder }, ...ctx.result.content] };
+		return { additionalContext: reminder };
 	}
 
 	/** Resolves and clears the current resume gate. */

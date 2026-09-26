@@ -1960,14 +1960,18 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(toolExecuted).toBe(true);
 		expect(streamCallCount).toBe(2);
 
-		// The matched tool's result must carry the in-band reminder.
+		// The tool output remains unmodified; the harness-authored reminder is a
+		// separate developer message after the result.
 		const toolResult = agent.state.messages.find(
 			(m): m is Extract<typeof m, { role: "toolResult" }> =>
 				m.role === "toolResult" && m.toolCallId === toolCallContent.id,
 		);
-		expect(toolResult).toBeDefined();
-		const text = Array.isArray(toolResult?.content)
-			? toolResult.content
+		expect(toolResult?.content).toEqual([{ type: "text", text: "edit applied" }]);
+		const reminder = agent.state.messages.find(
+			(m): m is Extract<typeof m, { role: "developer" }> => m.role === "developer",
+		);
+		const text = Array.isArray(reminder?.content)
+			? reminder.content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map(c => c.text)
 					.join("\n")
@@ -1975,7 +1979,6 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(text).toContain("<system-reminder");
 		expect(text).toContain('rule="no-unwrap"');
 		expect(text).toContain("Do not use .unwrap()");
-		expect(text.indexOf("<system-reminder")).toBeLessThan(text.indexOf("edit applied"));
 	});
 
 	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {
@@ -2089,12 +2092,11 @@ describe("AgentSession TTSR resume gate", () => {
 			});
 
 			await session.prompt("Write the probe");
-			const result = agent.state.messages.find(
-				(message): message is Extract<typeof message, { role: "toolResult" }> =>
-					message.role === "toolResult" && message.toolCallId === toolCall.id,
+			const contextMessage = agent.state.messages.find(
+				(message): message is Extract<typeof message, { role: "developer" }> => message.role === "developer",
 			);
-			const reminder = Array.isArray(result?.content)
-				? result.content
+			const reminder = Array.isArray(contextMessage?.content)
+				? contextMessage.content
 						.filter((content): content is { type: "text"; text: string } => content.type === "text")
 						.map(content => content.text)
 						.join("\n")
@@ -2205,14 +2207,17 @@ describe("AgentSession TTSR resume gate", () => {
 			(message): message is Extract<typeof message, { role: "toolResult" }> =>
 				message.role === "toolResult" && message.toolCallId === toolCall.id,
 		);
-		const reminder = Array.isArray(result?.content)
-			? result.content
+		expect(result?.content).toEqual([{ type: "text", text: "probe ran" }]);
+		const contextMessage = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "developer" }> => message.role === "developer",
+		);
+		const reminder = Array.isArray(contextMessage?.content)
+			? contextMessage.content
 					.filter((content): content is { type: "text"; text: string } => content.type === "text")
 					.map(content => content.text)
 					.join("\n")
 			: "";
 		expect(reminder).toContain('rule="probe-args"');
-		expect(reminder.indexOf("<system-reminder")).toBeLessThan(reminder.indexOf("probe ran"));
 	});
 
 	it("interruptMode never deduplicates the reminder across sibling tool calls in one batch", async () => {
@@ -2330,12 +2335,20 @@ describe("AgentSession TTSR resume gate", () => {
 			(m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult",
 		);
 		expect(toolResults).toHaveLength(3);
-		const withReminder = toolResults.filter(r =>
-			Array.isArray(r.content)
-				? r.content.some(c => c.type === "text" && c.text.includes("<system-reminder"))
-				: false,
+		expect(
+			toolResults.every(result =>
+				Array.isArray(result.content)
+					? result.content.every(content => content.type !== "text" || !content.text.includes("<system-reminder"))
+					: true,
+			),
+		).toBe(true);
+		const reminders = agent.state.messages.filter(
+			(message): message is Extract<typeof message, { role: "developer" }> =>
+				message.role === "developer" &&
+				Array.isArray(message.content) &&
+				message.content.some(content => content.type === "text" && content.text.includes("<system-reminder")),
 		);
-		expect(withReminder).toHaveLength(1);
+		expect(reminders).toHaveLength(1);
 	});
 
 	it("prompt() waits for context-promotion continuation to finish", async () => {
