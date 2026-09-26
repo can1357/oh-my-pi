@@ -356,6 +356,14 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 	}
 }
 
+function printLinkPreview(pluginPath: string, json?: boolean): void {
+	if (json) {
+		console.log(JSON.stringify({ dryRun: true, action: "link", path: pluginPath }, null, 2));
+	} else {
+		console.log(chalk.dim(`[dry-run] Would link ${pluginPath}`));
+	}
+}
+
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
@@ -434,11 +442,7 @@ async function handleInstall(
 				);
 			}
 			if (flags.dryRun) {
-				if (flags.json) {
-					console.log(JSON.stringify({ dryRun: true, action: "link", path: target.path }, null, 2));
-				} else {
-					console.log(chalk.dim(`[dry-run] Would link ${spec}`));
-				}
+				printLinkPreview(spec, flags.json);
 				continue;
 			}
 			try {
@@ -648,10 +652,19 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 	}
 }
 
-async function handleLink(manager: PluginManager, paths: string[], flags: { json?: boolean }): Promise<void> {
+async function handleLink(
+	manager: PluginManager,
+	paths: string[],
+	flags: { json?: boolean; dryRun?: boolean },
+): Promise<void> {
 	if (paths.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin link <path>`));
 		process.exit(1);
+	}
+
+	if (flags.dryRun) {
+		printLinkPreview(paths[0], flags.json);
+		return;
 	}
 
 	try {
