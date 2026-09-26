@@ -27,6 +27,36 @@ import type { ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
+ * Second `renderCall` argument that satisfies both the omp and the upstream-pi
+ * renderer contracts.
+ *
+ * omp invokes renderers as `renderCall(args, options, theme)` (see
+ * `packages/tui/src/tools/renderer.ts`), while pi-era renderers — including
+ * every third-party plugin written against pi's published example — are
+ * declared `renderCall(args, theme, context)`. Both shapes take three
+ * parameters, so arity cannot discriminate them. The returned value carries
+ * both instead: own keys stay the render options, every other property
+ * resolves against the live theme. `Theme` keeps its state in `#private`
+ * fields, so delegated methods are bound to the theme instance rather than to
+ * the proxy.
+ */
+function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T & Theme {
+	const delegates = new Map<PropertyKey, unknown>();
+	return new Proxy(options, {
+		get(target, prop, receiver) {
+			if (Object.hasOwn(target, prop)) return Reflect.get(target, prop, receiver);
+			const delegate = delegates.get(prop);
+			if (delegate !== undefined) return delegate;
+			const value = Reflect.get(theme, prop, theme);
+			if (typeof value !== "function") return value;
+			const bound = value.bind(theme);
+			delegates.set(prop, bound);
+			return bound;
+		},
+	}) as T & Theme;
+}
+
+/**
  * Adapts a RegisteredTool into an AgentTool.
  */
 export class RegisteredToolAdapter implements AgentTool<any, any, any> {
@@ -53,7 +83,11 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// discards tool result text (extensions without renderers show blank).
 		if (registeredTool.definition.renderCall) {
 			this.renderCall = (args: any, options: any, theme: any) =>
-				registeredTool.definition.renderCall!(args, options, theme as Theme);
+				registeredTool.definition.renderCall!(
+					args,
+					renderOptionsWithTheme(options, theme as Theme),
+					theme as Theme,
+				);
 		}
 		if (registeredTool.definition.renderResult) {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>

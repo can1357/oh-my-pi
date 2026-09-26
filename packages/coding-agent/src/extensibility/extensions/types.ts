@@ -682,7 +682,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
-	/** Custom rendering for tool call display */
+	/**
+	 * Custom rendering for tool call display.
+	 *
+	 * At runtime `options` also answers the {@link Theme} API, so renderers
+	 * ported from upstream pi — declared `renderCall(args, theme, context)` —
+	 * keep styling correctly.
+	 */
 	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
 
 	/** Custom rendering for tool result display */
