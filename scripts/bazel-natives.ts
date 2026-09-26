@@ -37,12 +37,16 @@
  * `linux-all` copy overwrites the gnu addon with the musl one (and vice versa);
  * CI jobs that ship files always request an explicit disjoint target set.
  *
- * After install, the addon for the host's own target is dlopen-probed in a
- * child process and an unloadable image (or a load that hangs) fails the build.
+ * Every install stamps packages/natives/package.json#version into the addon's
+ * post-link version slot (scripts/stamp-native-version.ts), so release bumps
+ * never touch a Rust input. After install, the addon for the host's own target
+ * is dlopen-probed in a child process and an unloadable image (or a load that
+ * hangs) fails the build.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { detectHostAvx2Support, detectHostMusl, resolveLocalHostAddon } from "./host-detect";
+import { nativesPackageVersion, stampNativeVersion } from "./stamp-native-version";
 
 const repoRoot = path.join(import.meta.dir, "..");
 
@@ -246,12 +250,14 @@ async function runBazel(
 	return { exitCode, stdout: stdoutText, stderrTail: tail };
 }
 
-async function installAddon(sourcePath: string, destPath: string): Promise<void> {
+/** Copy an addon into place, stamping `version` into the copy before the atomic rename. */
+async function installAddon(sourcePath: string, destPath: string, version: string): Promise<void> {
 	const realSource = await fs.realpath(sourcePath); // bazel-bin outputs are symlink-reachable; copy the real bytes
 	const tempPath = `${destPath}.tmp.${process.pid}`;
-	await fs.copyFile(realSource, tempPath);
-	await fs.chmod(tempPath, 0o644);
 	try {
+		await fs.copyFile(realSource, tempPath);
+		await fs.chmod(tempPath, 0o644);
+		await stampNativeVersion(tempPath, version);
 		await fs.rename(tempPath, destPath); // atomic even if dest is a loaded addon
 	} catch (err) {
 		await fs.unlink(tempPath).catch(() => {});
@@ -323,7 +329,7 @@ async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<voi
 	const builtPath = path.join(repoRoot, "packages/natives/native", filename);
 	if (path.dirname(builtPath) !== destDir) {
 		await fs.mkdir(destDir, { recursive: true });
-		await installAddon(builtPath, path.join(destDir, filename));
+		await installAddon(builtPath, path.join(destDir, filename), await nativesPackageVersion());
 	}
 	console.log(`installed ${filename} → ${path.join(destDir, filename)}`);
 	await verifyHostAddonLoads(path.join(destDir, filename));
@@ -438,11 +444,12 @@ async function main(): Promise<void> {
 	}
 	await fs.mkdir(destDir, { recursive: true });
 	const probeFilename = hostProbeFilename(options.targets, host);
+	const version = await nativesPackageVersion();
 	for (const output of outputs) {
 		const absolute = path.isAbsolute(output) ? output : path.join(repoRoot, output);
 		const destPath = path.join(destDir, path.basename(output));
-		await installAddon(absolute, destPath);
-		console.log(`installed ${path.basename(output)} → ${destPath}`);
+		await installAddon(absolute, destPath, version);
+		console.log(`installed ${path.basename(output)} (stamped ${version}) → ${destPath}`);
 		if (probeFilename && path.basename(output) === probeFilename) await verifyHostAddonLoads(destPath);
 	}
 }

@@ -9,7 +9,7 @@ This page defines the public JS/TS boundary between `@oh-my-pi/pi-natives` calle
 3. `gen-enums.ts` reads the declarations, rewrites napi-rs `const enum` declarations to runtime-usable declarations, and replaces the marked block in `native/index.js` with explicit class/function exports and literal enum objects.
 4. `native/index.js` loads the addon and binds that generated root surface.
 
-There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only a release-version sentinel for install/compiled loads, not every public symbol; a function export the loaded addon omits is `missingNativeExport(name)` — `undefined` on a current addon, and on a stale workspace addon a throwing stub that names the addon and the rebuild command (`bun run build:native`).
+There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only the post-link release stamp (`__piNativesBuildVersion()`) for install/compiled loads, not every public symbol; a function export the loaded addon omits is `missingNativeExport(name)` — `undefined` on a current addon, and on a stale workspace addon a throwing stub that names the addon and the rebuild command (`bun run build:native`).
 
 ## Public entrypoints
 
@@ -87,7 +87,7 @@ Numeric and string enum declarations constrain TypeScript callers but do not by 
 ## Import and error behavior
 
 - Importing the root throws if no compatible addon candidate loads. Lazy desktop/clipboard subpaths defer that failure until their wrapper is called.
-- Install and compiled candidates missing the expected version sentinel are rejected during loading. Workspace-development candidates skip sentinel validation.
+- Install and compiled candidates that do not report the package version through their release stamp are rejected during loading. Workspace-development candidates skip this validation.
 - A resident prior-version addon can produce a restart-specific mismatch; a stale file on disk produces a reinstall diagnosis.
 - The loader does not check the full export set. A same-version incomplete build can therefore load and later expose `undefined` members.
 - N-API conversion errors throw or reject before Rust business logic runs. Native task and async failures reject their returned promises.

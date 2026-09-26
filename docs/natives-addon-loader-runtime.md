@@ -15,7 +15,7 @@ A successful call is not memoized by JS. Repeated calls rely on the runtime's `r
 `initLoaderContext()` derives:
 
 - `platformTag`: `${platform}-${process.arch}`;
-- package version and sentinel name `__piNativesV<version_with_underscores>`;
+- package version (the release every install/compiled addon must report via its post-link stamp);
 - package-local `nativeDir` and the directory of `process.execPath`;
 - `nativesDir`, normally `~/.omp/natives`; it uses `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists;
 - `versionedDir`: `<nativesDir>/<packageVersion>`;
@@ -105,14 +105,14 @@ For each candidate:
 
 1. Emit a startup marker when enabled.
 2. `require(candidate)`.
-3. Unless this is workspace development, require the expected package-version sentinel function.
+3. Unless this is workspace development, require `__piNativesBuildVersion()` to return the package version. The build pipeline writes that version into a fixed 64-byte slot (`PI_NATIVES_VERSION_STAMP:<version>` + NUL padding) after linking (`scripts/stamp-native-version.ts`, called from every `scripts/bazel-natives.ts` install and the local cargo build), so a release bump edits no Rust input. Addons published before the stamp expose a per-release `__piNativesV<version_with_underscores>` export instead; those are still read as their release for diagnosis.
 4. Call `__ompInstallTokioRuntime()` if the addon provides it.
 5. Best-effort remove valid semantic-version cache directories older than the current version.
 6. Return the bindings.
 
-The sentinel error distinguishes a previous addon still resident in the current process from a stale file on disk. If the loaded exports carry an older sentinel but the candidate bytes contain the expected current sentinel, the diagnostic says to restart. Otherwise it says to reinstall. The loader does not validate all public exports.
+The version error distinguishes a previous addon still resident in the current process from a stale file on disk. If the loaded exports report an older release but the candidate bytes contain the current stamp (`PI_NATIVES_VERSION_STAMP:<packageVersion>\0`), the diagnostic says to restart. Otherwise it says to reinstall. The loader does not validate all public exports.
 
-Workspace development is the one case that skips the sentinel check, so a checkout that pulled a newer release boots before its rebuild. That tolerance is not silent: `native/index.js` exports `missingNativeExport(symbol)` in every function slot the addon omits, which is `undefined` on a current addon and a throwing stub on a stale one naming the symbol, the addon path, the loaded and expected releases, and `bun run build:native`. `nativeAddonStatus()` reports the same identity (`path`, `sentinel`, `expectedSentinel`, `packageVersion`, `stale`) for callers that surface it themselves.
+Workspace development is the one case that skips the version check, so a checkout that pulled a newer release boots before its rebuild. That tolerance is not silent: `native/index.js` exports `missingNativeExport(symbol)` in every function slot the addon omits, which is `undefined` on a current addon and a throwing stub on a stale one naming the symbol, the addon path, the loaded and expected releases, and `bun run build:native`. `nativeAddonStatus()` reports the same identity (`path`, `version`, `packageVersion`, `stale`) for callers that surface it themselves.
 
 Rust module initialization installs crash diagnostics but does not spawn runtime threads under the dynamic-loader lock. The optional post-load hook installs bounded Windows Tokio and Rayon pools. It is best-effort; older addons or hook failures fall back to napi-rs behavior. Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr, including hook success/failure.
 
@@ -135,7 +135,7 @@ entrypoint evaluates or lazy wrapper is invoked
   -> extract matching embedded archive, if any
   -> otherwise stage Windows node_modules addon, if applicable
   -> require candidates in deterministic order
-       -> validate sentinel outside workspace development
+       -> validate release stamp outside workspace development
        -> install optional post-load runtime; record addon identity
        -> best-effort clean older version caches
        -> return bindings

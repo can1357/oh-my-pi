@@ -31,6 +31,7 @@ import {
 	resolveLoaderCandidates,
 	shouldStageNodeModulesAddon,
 } from "../native/loader-state.js";
+import { VERSION_STAMP_MAGIC, VERSION_STAMP_SIZE } from "../native/version-sentinel.js";
 import packageJson from "../package.json" with { type: "json" };
 
 const winNodeModulesNativeDir = "C:\\Users\\Admin\\node_modules\\@oh-my-pi\\pi-natives\\native";
@@ -221,16 +222,15 @@ describe("windows native addon staging", () => {
 	});
 });
 
-describe("pi-natives version sentinel", () => {
-	it("Rust `js_name` matches the package version", async () => {
-		// The JS loader (`packages/natives/native/index.js`) computes its expected
-		// sentinel from `package.json#version`; if the Rust source falls out of
-		// sync we ship a `.node` that the loader will refuse to use. Pinning the
-		// pairing here catches release-script regressions before they reach CI.
+describe("pi-natives version stamp slot", () => {
+	it("Rust placeholder matches the JS stamp magic and slot size", async () => {
+		// `scripts/stamp-native-version.ts` and the loader locate the slot by
+		// `VERSION_STAMP_MAGIC` and size it by `VERSION_STAMP_SIZE`; the Rust
+		// placeholder must agree or every stamped addon misreports its release.
 		const libRs = await Bun.file(path.join(import.meta.dir, "../../../crates/pi-natives/src/lib.rs")).text();
-		const sentinelMatch = libRs.match(/js_name = "(__piNativesV[A-Za-z0-9_]+)"/);
-		expect(sentinelMatch, 'Rust sentinel `js_name = "__piNativesV…"` not found in lib.rs').not.toBeNull();
-		const expected = `__piNativesV${packageJson.version.replace(/[^A-Za-z0-9]/g, "_")}`;
-		expect(sentinelMatch?.[1]).toBe(expected);
+		expect(libRs).toContain(`const VERSION_STAMP_LEN: usize = ${VERSION_STAMP_SIZE};`);
+		expect(libRs).toContain(`const VERSION_STAMP_MAGIC_LEN: usize = ${VERSION_STAMP_MAGIC.length};`);
+		expect(libRs).toContain(`b"${VERSION_STAMP_MAGIC}"`);
+		expect(libRs).not.toMatch(/js_name = "__piNativesV/);
 	});
 });

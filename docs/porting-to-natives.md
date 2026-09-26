@@ -123,7 +123,7 @@ Run the narrow scenario against the addon you just built. When diagnosing a cand
 bun -e 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url); const mod = require(process.argv[1]); console.log(Object.keys(mod).sort())' -- /path/to/pi_natives.<tag>[-variant].node
 ```
 
-Confirm the export and the package-version sentinel are present. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
+Confirm the export is present and `__piNativesBuildVersion()` reports the package version. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
 
 ## Common failures
 
@@ -139,7 +139,7 @@ Remove only the stale local artifacts/cache identified by loader diagnostics, th
 
 ### Same-version incomplete addon
 
-The sentinel proves release version, not the complete export set. A locally produced same-version binary can pass loading while missing a newly generated member. Inspect `Object.keys` on the actual candidate and rebuild it; do not weaken the caller.
+The release stamp proves release version, not the complete export set. A locally produced same-version binary can pass loading while missing a newly generated member. Inspect `Object.keys` on the actual candidate and rebuild it; do not weaken the caller.
 
 ### Runtime enum missing
 
