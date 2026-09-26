@@ -80,7 +80,7 @@ export const cfgSkillsIncludeSkills = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
-/** Skill discovery options (`skills.*` except the `omp skill` registry URL). */
+/** Skill discovery options (`skills.*` except the `omp skill` registry URL and prompt rendering). */
 export const cfgSkills = combine({
 	enabled: cfgSkillsEnabled,
 	enableSkillCommands: cfgSkillsEnableSkillCommands,
@@ -98,6 +98,24 @@ export const cfgSkills = combine({
 
 /** Skill discovery options ({@link cfgSkills}); omitted fields fall back to the setting defaults. */
 export type SkillsSettings = Partial<SettingValueOf<typeof cfgSkills>>;
+
+/**
+ * System-prompt rendering of skill descriptions. `true` shows a short preview and compresses each
+ * description in the background with the smol model; `false` shows descriptions as authored and
+ * makes no compression calls.
+ */
+export const cfgSkillsCompressDescriptions = register({
+	id: "skills.compressDescriptions",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Compress Skill Descriptions",
+		description:
+			"Shorten skill descriptions in the system prompt with background smol-model calls; off keeps them as authored",
+	},
+});
 
 // Commands
 export const cfgCommandsEnableClaudeUser = register({

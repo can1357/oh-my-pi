@@ -106,4 +106,40 @@ describe("system prompt skill descriptions", () => {
 			"Use for interactive sites; not static pages.",
 		);
 	});
+
+	it("verbatim mode renders authored descriptions and never compresses, even over a warm cache", async () => {
+		using temp = TempDir.createSync("omp-skill-description-verbatim-");
+		const dbPath = temp.join("skills.db");
+		const warm = new SkillDescriptionCatalog({ dbPath, compress: async () => "Use for interactive browser tasks." });
+		warm.render([original]);
+		await warm.waitForPending();
+		expect(new SkillDescriptionCatalog({ dbPath }).render([original])[0]?.description).toBe(
+			"Use for interactive browser tasks.",
+		);
+
+		let calls = 0;
+		const verbatim = new SkillDescriptionCatalog({
+			dbPath,
+			verbatim: true,
+			compress: async () => {
+				calls++;
+				return "unused";
+			},
+		});
+		const changed = { ...original, description: `${original.description} Also inspect accessibility trees.` };
+		expect(verbatim.render([original, changed]).map(skill => skill.description)).toEqual([
+			original.description,
+			changed.description,
+		]);
+		expect(verbatim.snapshot([changed])[0]?.description).toBe(changed.description);
+		const { systemPrompt } = await buildSystemPrompt({
+			skills: [original],
+			skillDescriptions: verbatim,
+			toolNames: ["read"],
+			systemPromptTemplate: "{{#each skills}}- {{name}}: {{description}}{{/each}}",
+		});
+		expect(systemPrompt.join("\n")).toContain(`- ${original.name}: ${original.description}`);
+		await verbatim.waitForPending();
+		expect(calls).toBe(0);
+	});
 });
