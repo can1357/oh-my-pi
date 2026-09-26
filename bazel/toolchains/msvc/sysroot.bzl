@@ -118,7 +118,7 @@ def _xwin_sysroot_impl(rctx):
             rctx.path("xwin"),
             "--accept-license",
             "--arch",
-            "x86_64",
+            rctx.attr.arch,
             "--variant",
             "desktop",
             "--manifest-version",
@@ -172,6 +172,15 @@ def _xwin_sysroot_impl(rctx):
 xwin_sysroot_repository = repository_rule(
     implementation = _xwin_sysroot_impl,
     doc = "MSVC CRT + Windows SDK sysroot splatted by a pinned xwin release.",
+    attrs = {
+        # One repo per arch (not --arch x86_64,aarch64 in one splat) so the
+        # x64 repo's splat and cache entry are unaffected by the arm64 target.
+        "arch": attr.string(
+            default = "x86_64",
+            values = ["x86_64", "aarch64"],
+            doc = "xwin --arch: target CRT/SDK library architecture.",
+        ),
+    },
     # Persistent splat cache location; changing it only changes where the CDN
     # payload lands, not the splat contents, but Bazel still refetches.
     environ = ["OMP_XWIN_CACHE_DIR"],

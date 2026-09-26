@@ -70,6 +70,7 @@ rust_binary(
         "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
 )
@@ -130,6 +131,7 @@ rust_shared_library(
         # switched to /MT in lock-step via the static_link_msvcrt cc feature in
         # the native_addon transition (bazel/defs.bzl).
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
     version = "17.1.5",

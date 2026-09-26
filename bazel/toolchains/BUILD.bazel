@@ -81,3 +81,18 @@ _MSVC_EXEC_HOSTS = {
     )
     for name, exec_cv in _MSVC_EXEC_HOSTS.items()
 ]
+
+# aarch64-pc-windows-msvc variant (@msvc_cc_arm64, xwin aarch64 splat).
+[
+    toolchain(
+        name = "msvc-arm64-cc-from-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:windows",
+            "@platforms//cpu:aarch64",
+        ],
+        toolchain = "@msvc_cc_arm64//:cc_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for name, exec_cv in _MSVC_EXEC_HOSTS.items()
+]

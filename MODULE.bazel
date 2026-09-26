@@ -44,6 +44,7 @@ rust.toolchain(
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
     ],
     # Pinned archive checksums for every toolchain component. Not (only) a
     # supply-chain nicety: rules_rust marks a toolchain-tools repo as
@@ -68,6 +69,7 @@ rust.toolchain(
         "2026-04-29/llvm-tools-nightly-x86_64-apple-darwin.tar.xz": "ab6cd3bae1c979fd807982b8c39e911227f9344dab5051d45f612b440dad13ff",
         "2026-04-29/llvm-tools-nightly-x86_64-unknown-linux-gnu.tar.xz": "0fb4bed6714359d9505b870c8bd67c722266c5a3894f66523bc231b9c479db31",
         "2026-04-29/rust-src-nightly.tar.xz": "2a9c5ae7696a808e30fc5169ddfea20d69571a11997f142944c022a0d30af48b",
+        "2026-04-29/rust-std-nightly-aarch64-pc-windows-msvc.tar.xz": "c80c12f7b85565e30efc7b1e47e691b8e237c5e1df10e20efa74b81a3171c9cf",
         "2026-04-29/rust-std-nightly-aarch64-apple-darwin.tar.xz": "cd9e231f3e343b4ed5cff5c384c813cecba13fca94ef767fa8dc4aa0ff58a171",
         "2026-04-29/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz": "80dceec313e144e3cfc5d67326826d85c664e762a27b53fea018a96d537a2942",
         "2026-04-29/rust-std-nightly-aarch64-unknown-linux-musl.tar.xz": "9d5cb99d5678b2310bd69b2b654e9dcbbc3c5a50f9b66d03a21745cff4444927",
@@ -162,6 +164,7 @@ crate.from_cargo(
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
     ],
 )
 
@@ -171,6 +174,7 @@ crate.from_cargo(
 crate.annotation(
     build_script_env = {
         "CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc/toolchain.cmake",
+        "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/toolchain.cmake",
         "CFLAGS": "-fno-sanitize=undefined",
         "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
     },
@@ -219,9 +223,21 @@ xwin_sysroot = use_repo_rule("//bazel/toolchains/msvc:sysroot.bzl", "xwin_sysroo
 
 xwin_sysroot(name = "xwin_sysroot")
 
+xwin_sysroot(
+    name = "xwin_sysroot_arm64",
+    arch = "aarch64",
+)
+
 msvc_cc = use_repo_rule("//bazel/toolchains/msvc:cc.bzl", "msvc_cc_repository")
 
 msvc_cc(name = "msvc_cc")
+
+# aarch64-pc-windows-msvc variant (//:natives-win32-arm64).
+msvc_cc(
+    name = "msvc_cc_arm64",
+    arch = "aarch64",
+    xwin_repo = "@xwin_sysroot_arm64//:BUILD.bazel",
+)
 
 # Swift toolchain probe for the Apple Foundation Models bridge in pi-natives.
 applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")

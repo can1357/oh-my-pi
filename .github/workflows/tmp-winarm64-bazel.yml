@@ -1,0 +1,69 @@
+# THROWAWAY: validates the bazel aarch64-pc-windows-msvc cross build
+# (//:natives-win32-arm64) on kata + a dlopen probe on windows-11-arm.
+name: tmp-winarm64-bazel
+
+on:
+   workflow_dispatch:
+   push:
+      branches: [ci/winarm64-bazel]
+
+permissions:
+   contents: read
+
+jobs:
+   build:
+      runs-on: omp-kata
+      steps:
+         - uses: actions/checkout@v4
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+           with:
+              scope: linux
+         - name: Build //:natives-win32-arm64
+           run: |
+              set -eo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              start=$(date +%s)
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --verbose_failures //:natives-win32-arm64 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+              echo "::notice title=Build time::$(( $(date +%s) - start ))s"
+              summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
+              echo "::notice title=Bazel build summary::${summary:-none}"
+              mkdir -p out && cp -L bazel-bin/natives-win32-arm64/*.node out/
+              ls -la out
+              file out/*.node || true
+              readobj=$(find -L "$(bazelisk info output_base 2>/dev/null)/external" -maxdepth 3 -name llvm-readobj -path '*llvm_msvc_tools*' 2>/dev/null | head -1 || true)
+              [ -n "$readobj" ] && "$readobj" --coff-imports out/*.node | grep -i 'Name:' || true
+         - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: natives-win32-arm64
+              path: out/*.node
+              if-no-files-found: error
+              retention-days: 3
+
+   probe:
+      needs: build
+      runs-on: windows-11-arm
+      steps:
+         - uses: actions/download-artifact@v4
+           with:
+              name: natives-win32-arm64
+              path: addon
+         - uses: actions/setup-node@v4
+           with:
+              node-version: 22
+              architecture: arm64
+         - name: dlopen probe (node)
+           shell: bash
+           run: |
+              cat > probe.cjs <<'EOF'
+              const path = require("node:path");
+              const p = path.resolve("addon/pi_natives.win32-arm64.node");
+              console.log(process.platform, process.arch, p);
+              const m = require(p);
+              console.log("loaded; exports:", Object.keys(m).length);
+              EOF
+              node probe.cjs
+         - uses: oven-sh/setup-bun@v2
+         - name: dlopen probe (bun)
+           shell: bash
+           run: bun probe.cjs

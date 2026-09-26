@@ -22,6 +22,8 @@ _ADDONS = {
     "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),
     "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives.darwin-arm64.node"),
     "win32-x64-baseline": ("//bazel/platforms:win32-x64-baseline", "pi_natives.win32-x64-baseline.node"),
+    # Cross-built from linux; not in natives-linux-all until validated on CI.
+    "win32-arm64": ("//bazel/platforms:win32-arm64", "pi_natives.win32-arm64.node"),
 }
 
 [

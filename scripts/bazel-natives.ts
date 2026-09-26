@@ -56,6 +56,7 @@ export const ADDON_OUTPUTS: Record<string, string> = {
 	"darwin-x64-baseline": "pi_natives.darwin-x64-baseline.node",
 	"darwin-arm64": "pi_natives.darwin-arm64.node",
 	"win32-x64-baseline": "pi_natives.win32-x64-baseline.node",
+	"win32-arm64": "pi_natives.win32-arm64.node",
 };
 
 /** Aggregate filegroups → their member addon targets (mirrors BUILD.bazel). */
