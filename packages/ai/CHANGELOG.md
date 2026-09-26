@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic requests with thinking enabled failing on models whose output ceiling cannot fit the thinking budget: the budget now shrinks below the model cap — including the interleaved-thinking path — and thinking is disabled when its minimum no longer fits ([#13359](https://github.com/can1357/oh-my-pi/pull/13359) by [@jchanghong023](https://github.com/jchanghong023))
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
