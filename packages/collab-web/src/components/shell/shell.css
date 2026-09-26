@@ -725,11 +725,16 @@
 	.sh-composer-actions .sh-btn {
 		padding: 8px;
 	}
-	.sh-composer-input,
-	.sh-input,
-	.sh-input-mono,
 	.sh-ask-title,
 	.sh-ask-option-label {
+		font-size: 16px;
+	}
+}
+
+@media (any-pointer: coarse) {
+	.sh-composer-input,
+	.sh-input,
+	.sh-input-mono {
 		font-size: 16px;
 	}
 }

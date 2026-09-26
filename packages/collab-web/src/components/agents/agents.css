@@ -414,7 +414,7 @@
 	}
 }
 
-@media (max-width: 640px) {
+@media (any-pointer: coarse) {
 	.ag-chat-input {
 		font-size: 16px;
 	}
