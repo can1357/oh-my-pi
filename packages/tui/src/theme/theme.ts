@@ -8,7 +8,8 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
-import type { SymbolPreset } from "./symbols";
+import { SYMBOL_PRESETS, type SymbolPreset } from "./symbols";
+import { setKeyHintSymbolResolver } from "../key-hint";
 import type { Theme } from "./theme-class";
 
 export { getAvailableThemes, getAvailableThemesWithPaths, getThemeByName, type ThemeInfo } from "./loader";
@@ -808,3 +809,8 @@ export async function getThemeExportColors(themeName?: string): Promise<{
 		return {};
 	}
 }
+
+// Wire key hints to the live theme: theme glyphs once a theme is assigned,
+// ascii preset words before. key-hint.ts stays theme-free so the CLI bootstrap
+// graph can format hints without loading this module.
+setKeyHintSymbolResolver(key => (typeof theme === "undefined" ? SYMBOL_PRESETS.ascii[key] : theme.symbol(key)));
