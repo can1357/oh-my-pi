@@ -112,35 +112,36 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		disposeSpy = vi.spyOn(session, "dispose");
 	});
 
+	/** Revoke write permission on the session directory: every publish then fails for real. */
+	async function sealSessionDir(): Promise<void> {
+		await fs.chmod(path.dirname(sessionFile), 0o555);
+	}
+
 	afterEach(async () => {
+		await fs.chmod(path.dirname(sessionFile), 0o755).catch(() => undefined);
 		vi.restoreAllMocks();
 		authStorage.close();
 		tempDir.removeSync();
 		resetSettingsForTest();
 	});
 
-	it("surfaces the genuine write conflict on the first attempt without force-exiting", async () => {
+	it("saves the session after an external writer changed the file", async () => {
 		await mode.shutdown();
 
 		const message = showErrorSpy.mock.calls.map((call: unknown[]) => String(call[0])).join("\n");
-		expect(message).toContain("Could not close session");
-		expect(message).toContain("Ctrl+C");
-		// The surfaced detail is the real guard's message, proving the error
-		// came from the storage backend rather than a hand-constructed throw.
-		expect(message).toContain("Session file changed before rewrite");
-		// Must not force-exit yet: the user gets one chance to see the error.
-		expect(quitSpy).not.toHaveBeenCalled();
-		// The latch is cleared so a second Ctrl+C can re-enter shutdown().
-		expect(mode.isShuttingDown).toBe(false);
-		expect(mode.teardownFailed).toBe(true);
+		expect(message).not.toContain("Could not close session");
+		expect(mode.teardownFailed).toBe(false);
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		// The dispose failure IS the genuine guard error, end to end.
-		await expect(disposeSpy.mock.results[0]!.value).rejects.toBeInstanceOf(SessionWriteConflictError);
-		// The guard refused to clobber: the externally added bytes survive.
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
+		await expect(disposeSpy.mock.results[0]!.value).resolves.toBeUndefined();
+		// The transcript is durable and the unparseable bytes are gone.
+		const persisted = await Bun.file(sessionFile).text();
+		expect(persisted).not.toBe(corruptedBytes);
+		expect(persisted).toContain("yo");
+		expect(persisted).not.toContain("you're now broken");
 	});
 
 	it("exits without writing the session log on the second attempt", async () => {
+		await sealSessionDir();
 		await mode.shutdown();
 		await mode.shutdown();
 
@@ -149,12 +150,10 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		// "Without writing the session log" is literal: the corrupted file is
-		// still byte-identical to what the external writer left behind.
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
 	});
 
 	it("a single Ctrl+C keypress after the failure reaches the escape hatch", async () => {
+		await sealSessionDir();
 		await mode.shutdown(); // arms the escape hatch and shows the message
 		quitSpy.mockClear();
 
@@ -168,10 +167,10 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1); // never re-runs the doomed teardown
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
 	});
 
 	it("a failed restart arms the same single-Ctrl+C escape hatch", async () => {
+		await sealSessionDir();
 		await mode.restart();
 		quitSpy.mockClear();
 
@@ -182,10 +181,10 @@ describe("InteractiveMode shutdown when the session write conflicts (#12238)", (
 		expect(quitSpy).toHaveBeenCalledTimes(1);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
-		expect(await Bun.file(sessionFile).text()).toBe(corruptedBytes);
 	});
 
 	it("bypasses a guarded process.exit after cleanup", async () => {
+		await sealSessionDir();
 		await mode.shutdown();
 		quitSpy.mockRejectedValueOnce(new Error("process.exit is guarded"));
 

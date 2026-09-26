@@ -99,6 +99,7 @@ import {
 	MemorySessionStorage,
 	type SessionStorage,
 	type SessionStorageWriter,
+	SessionWriteConflictError,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -109,6 +110,10 @@ import {
 import { recordSessionRecap, recordSessionTitle } from "./session-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
+/** Consecutive reconcile republishes before a contended file is left to the disk-failure path. */
+const MAX_RECONCILE_ATTEMPTS = 5;
+/** Quiet period between repeat warnings while a session stays unsaved. */
+const DISK_FAILURE_RENOTIFY_MS = 30_000;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 
@@ -768,6 +773,8 @@ export class SessionManager {
 	#diskFailureLogged = false;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
+	/** When the user was last told this session is not being saved. */
+	#diskFailureNotifiedAt = 0;
 	/** Observer notifications withheld until their entries are proven durable. */
 	#pendingDurabilityNotifications: SessionEntry[] = [];
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
@@ -809,6 +816,9 @@ export class SessionManager {
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
+	/** Reconcile pass queued after a concurrent writer advanced the file. */
+	#reconcileScheduled = false;
+	#reconcileAttempts = 0;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -857,8 +867,24 @@ export class SessionManager {
 		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceErrorObserver(observer, error);
 	}
 
+	/**
+	 * A rejected publish means another process advanced the file. The entries
+	 * it added are readable, so the transcript is reconciled and republished.
+	 * Once reconcile attempts are spent the conflict is a real persistence
+	 * failure: it latches and notifies observers like any other.
+	 */
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
+		if (error instanceof SessionWriteConflictError && this.#reconcileAttempts < MAX_RECONCILE_ATTEMPTS) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			logger.warn("Session file advanced by another process; reconciling.", {
+				sessionFile: this.#sessionFile,
+				error: error.message,
+			});
+			this.#scheduleReconcile();
+			return error;
+		}
 		if (!this.#diskFailure) this.#diskFailure = error;
 
 		if (!this.#diskFailureLogged) {
@@ -869,9 +895,73 @@ export class SessionManager {
 				stack: error.stack,
 			});
 			this.#notifyPersistenceErrorObservers(error);
+			this.#diskFailureNotifiedAt = Date.now();
+		} else if (Date.now() - this.#diskFailureNotifiedAt >= DISK_FAILURE_RENOTIFY_MS) {
+			// A session that cannot save must keep saying so: one warning at the
+			// start of a long unsaved stretch scrolls away unread.
+			this.#notifyPersistenceErrorObservers(this.#diskFailure);
+			this.#diskFailureNotifiedAt = Date.now();
 		}
 
 		return this.#diskFailure;
+	}
+
+	/**
+	 * Fold entries another process appended into memory and refresh the CAS
+	 * token. Foreign entries keep their own parents, so they land as a sibling
+	 * branch; the active leaf stays this session's.
+	 */
+	async #adoptForeignEntries(sessionFile: string): Promise<boolean> {
+		let content: string;
+		try {
+			content = await this.#storage.readText(sessionFile);
+		} catch {
+			return false;
+		}
+		const { entries, invalidHeader } = parseSessionContent(content);
+		if (invalidHeader) return false;
+		const leaf = this.#index.leafId();
+		let adopted = 0;
+		for (const entry of entries) {
+			if (entry.type === "session" || this.#index.has(entry.id)) continue;
+			this.#entries.push(entry);
+			this.#index.insert(entry);
+			adopted++;
+		}
+		this.#index.setLeaf(leaf);
+		this.#expectedDiskSize = Buffer.byteLength(content, "utf8");
+		if (adopted > 0) logger.warn("Adopted session entries from a concurrent writer", { sessionFile, adopted });
+		return true;
+	}
+
+	/**
+	 * Republish the transcript on top of whatever the other process wrote.
+	 * Bounded so two writers fighting over the same file cannot spin.
+	 */
+	#scheduleReconcile(): void {
+		if (this.#reconcileScheduled || this.#released || !this.#persist || !this.#sessionFile) return;
+		if (this.#reconcileAttempts >= MAX_RECONCILE_ATTEMPTS) return;
+		this.#reconcileScheduled = true;
+		this.#reconcileAttempts++;
+		void this.#scheduleDiskWork(
+			async () => {
+				this.#reconcileScheduled = false;
+				const sessionFile = this.#sessionFile;
+				if (!sessionFile || this.#released) return;
+				if (!(await this.#adoptForeignEntries(sessionFile))) return;
+				if (await this.#runFencedAtomicRewrite(this.#diskEpoch)) {
+					this.#fileIsCurrent = true;
+					this.#materializeBreadcrumb();
+					this.#rewriteRequired = false;
+					this.#hasTitleSlot = true;
+					this.#reconcileAttempts = 0;
+					this.#clearDiskError();
+				}
+			},
+			{ ignorePriorError: true },
+		).catch(() => {
+			this.#reconcileScheduled = false;
+		});
 	}
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
@@ -1274,6 +1364,7 @@ export class SessionManager {
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
+		let conflictRetries = 0;
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
@@ -1292,6 +1383,15 @@ export class SessionManager {
 						if ((await this.#storage.readText(sessionFile)) === body) this.#recordFullRewrite(body);
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
+					}
+					if (
+						error instanceof SessionWriteConflictError &&
+						conflictRetries < MAX_RECONCILE_ATTEMPTS &&
+						(await this.#adoptForeignEntries(sessionFile))
+					) {
+						conflictRetries++;
+						this.#atomicRewriteDirty = true;
+						continue;
 					}
 					throw error;
 				}

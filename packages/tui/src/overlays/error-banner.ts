@@ -17,7 +17,7 @@ const MAX_BANNER_ROWS = 4;
  * overflow row reveals the full body inline in the transcript.
  */
 export class ErrorBannerComponent extends Container {
-	constructor(message: string) {
+	constructor(message: string, options?: { footer?: string }) {
 		super();
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder(str => theme.fg("error", str)));
@@ -33,7 +33,7 @@ export class ErrorBannerComponent extends Container {
 				0,
 			),
 		);
-		this.addChild(new Text(theme.fg("dim", "Dismissed when you send your next message."), 1, 0));
+		this.addChild(new Text(theme.fg("dim", options?.footer ?? "Dismissed when you send your next message."), 1, 0));
 		this.addChild(new DynamicBorder(str => theme.fg("error", str)));
 	}
 }

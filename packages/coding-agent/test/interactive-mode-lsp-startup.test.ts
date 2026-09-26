@@ -131,23 +131,28 @@ describe("InteractiveMode LSP startup welcome banner", () => {
 		expect(showWarningSpy).not.toHaveBeenCalled();
 	});
 
-	it("surfaces a sanitized warning when session persistence fails", async () => {
+	it("halts input behind a pinned banner when session persistence fails", async () => {
 		await mode.init();
 		await session.sessionManager.ensureOnDisk();
-		const showWarning = vi.spyOn(mode, "showWarning").mockImplementation(() => {});
+		expect(mode.editor.disableSubmit).toBe(false);
+		const showPinnedError = vi.spyOn(mode, "showPinnedError");
 		const writeFailure = vi.spyOn(fs, "writeSync").mockImplementation(() => {
 			throw Object.assign(new Error("ENOSPC:\tdisk full\n\u001b[31mretry later\u001b[0m"), { code: "ENOSPC" });
 		});
 		session.sessionManager.appendCustomEntry("persistence-failure-probe", {});
 
-		expect(showWarning).toHaveBeenCalledTimes(1);
-		const warning = showWarning.mock.calls[0]?.[0] ?? "";
-		expect(warning).toContain("Session persistence failed: ENOSPC:");
-		expect(warning).toContain("Unsaved entries remain in memory");
-		expect(warning).not.toContain("\t");
-		expect(warning).not.toContain("\n");
-		expect(warning).not.toContain("\u001b");
+		expect(mode.editor.disableSubmit).toBe(true);
+		const banner = showPinnedError.mock.calls[0]?.[0] ?? "";
+		expect(banner).toContain("SESSION IS NOT BEING SAVED — ENOSPC:");
+		expect(banner).not.toContain("\t");
+		expect(banner).not.toContain("\n");
+		expect(banner).not.toContain("\u001b");
+		expect(showPinnedError.mock.calls[0]?.[1]?.footer).toContain("restart omp");
+
+		// The store recovering does not re-open input: the gap is already unsaved.
 		writeFailure.mockRestore();
 		session.sessionManager.appendCustomEntry("persistence-recovery-probe", {});
+		mode.clearPinnedError();
+		expect(mode.editor.disableSubmit).toBe(true);
 	});
 });

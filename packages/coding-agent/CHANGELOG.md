@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Fixed a session opened in two windows silently persisting nothing after the other window rewrote the file; the conflicting writer now merges the other window's entries and republishes ([#12624](https://github.com/can1357/oh-my-pi/pull/12624) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- A session that genuinely cannot reach disk now stops accepting input behind a red banner until you restart, instead of printing one warning and running on unsaved ([#12624](https://github.com/can1357/oh-my-pi/pull/12624) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries for up to 150 s and reclaims its room ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
+- Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line naming the command and pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
 

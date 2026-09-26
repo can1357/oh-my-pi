@@ -328,7 +328,7 @@ describe("SessionManager atomic rewrite race", () => {
 	});
 });
 describe("SessionManager cross-process rewrite freshness", () => {
-	it("refuses to erase a durable turn appended by another manager", async () => {
+	it("adopts a durable turn appended by another manager instead of erasing it", async () => {
 		const tempDir = TempDir.createSync("@omp-session-rewrite-conflict-");
 		try {
 			const first = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
@@ -342,21 +342,19 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			second.appendMessage({ role: "user", content: "durable second-writer turn", timestamp: Date.now() });
 			await second.close();
 
-			await expect(first.rewriteEntries()).rejects.toBeInstanceOf(SessionWriteConflictError);
+			first.appendMessage({ role: "user", content: "first-writer turn", timestamp: Date.now() });
+			await first.rewriteEntries();
 
 			const reopened = await SessionManager.open(sessionFile, tempDir.path(), new FileSessionStorage(), {
 				suppressBreadcrumb: true,
 			});
-			expect(
-				reopened
-					.getEntries()
-					.some(
-						entry =>
-							entry.type === "message" &&
-							entry.message.role === "user" &&
-							entry.message.content === "durable second-writer turn",
-					),
-			).toBe(true);
+			const userTurns = reopened.getEntries().flatMap(entry => {
+				if (entry.type !== "message" || entry.message.role !== "user") return [];
+				const { content } = entry.message;
+				return typeof content === "string" ? [content] : [];
+			});
+			expect(userTurns).toContain("durable second-writer turn");
+			expect(userTurns).toContain("first-writer turn");
 			await reopened.close();
 		} finally {
 			await tempDir.remove();
