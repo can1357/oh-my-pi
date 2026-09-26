@@ -36,6 +36,25 @@ import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
+import {
+	filterAvailable,
+	resolveRoutingJudge,
+	routeTurn,
+	toJevTiers,
+	type ModelTier,
+	type RouteDecision,
+	type RoutingPolicy,
+} from "../routing";
+import {
+	cfgJevRoutingAllowVerify,
+	cfgJevRoutingEnabled,
+	cfgJevRoutingMaxComplexityForDegrade,
+	cfgJevRoutingMaxEscalationsPerTurn,
+	cfgJevRoutingMinComplexityConfidence,
+	cfgJevRoutingMinConfidenceToDegrade,
+	cfgJevRoutingMinConfidenceToEscalate,
+	cfgJevRoutingTiers,
+} from "../routing/settings";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -666,6 +685,119 @@ export class ModelControls {
 			configured: AUTO_THINKING,
 			resolved: effort,
 		});
+	}
+
+	/** Tier id the router last placed this session on; `undefined` until routing first engages. */
+	#routedTierId: string | undefined;
+
+	/**
+	 * Per-turn Jev model-tier routing (spec: jev-routing-spec.md). Runs BEFORE
+	 * auto-thinking so the thinking clamp sees the routed model.
+	 *
+	 * Semantics:
+	 * - Settings-gated: `jevRouting.enabled` + non-empty `jevRouting.tiers`.
+	 * - TypeSafe-only judge (`resolveRoutingJudge`): Jev down -> no routing
+	 *   decision -> top tier. The `resolveJudge` LLM fallback never answers
+	 *   routing questions.
+	 * - Fail-open = fail EXPENSIVE: any error, timeout, or low-confidence
+	 *   verdict keeps/returns the top tier.
+	 * - User override: a current model outside the pool that routing did NOT
+	 *   place (`#routedTierId` unset) is treated as an explicit user choice —
+	 *   routing does not touch it.
+	 * - Sticky-session: none — every user turn re-routes fresh (spec §7 leaves
+	 *   this to the implementation; re-probing is the conservative choice).
+	 * - Never throws into the turn.
+	 */
+	async applyJevRouting(promptText: string, generation: number): Promise<void> {
+		if (!cfgJevRoutingEnabled.get(this.#host.settings)) return;
+		const configuredTiers = toJevTiers(cfgJevRoutingTiers.get(this.#host.settings));
+		if (configuredTiers.length < 2) return;
+
+		// Resolve tier models against the live registry; drop unresolvable ones.
+		const availableModels = this.#host.modelRegistry.getAvailable();
+		const tiers: ModelTier[] = [];
+		for (const t of configuredTiers) {
+			const resolved = resolveModelRoleValue(t.model, availableModels, {
+				settings: this.#host.settings,
+				matchPreferences: getModelMatchPreferences(this.#host.settings),
+			});
+			if (resolved.model) tiers.push({ ...t, model: resolved.model });
+		}
+		if (tiers.length < 2) return;
+
+		// Layer-0: deterministic availability filter before any judgment call.
+		const filtered = filterAvailable(tiers, {});
+		if (filtered.available.length === 0) {
+			this.#host.emitNotice(
+				"warning",
+				"jev-routing: every tier is gated (window/quota/context) — staying on current model",
+				"jev-routing",
+			);
+			return;
+		}
+		const top = tiers[tiers.length - 1];
+		const current = this.#model;
+
+		// User override: a current model outside the pool that routing did not
+		// place is an explicit choice — leave it alone.
+		const currentInPool = current !== undefined && tiers.some(t => modelsAreEqual(t.model, current));
+		if (!currentInPool && this.#routedTierId === undefined) return;
+
+		let decision: RouteDecision;
+		if (filtered.available.length === 1) {
+			// Arithmetic already decided — no judgment call needed.
+			decision = { tier: filtered.available[0].id, reason: "jev-confident" };
+		} else {
+			const judge = resolveRoutingJudge({
+				settings: this.#host.settings,
+				registry: this.#host.modelRegistry,
+				sessionModel: current,
+				sessionId: this.#host.sessionId(),
+				metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+			});
+			if (!judge) return; // no TypeSafe auth -> no router -> keep current
+			try {
+				decision = await routeTurn(judge, promptText, filtered.available, this.#routingPolicy());
+			} catch (error) {
+				// Caller abort propagates; anything else is fail-expensive.
+				if (this.#host.promptGeneration() !== generation) return;
+				logger.debug("jev-routing: routeTurn failed; staying on current model", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return;
+			}
+		}
+
+		// Drop the result if the turn was aborted/superseded while judging.
+		if (this.#host.promptGeneration() !== generation) return;
+
+		const target = tiers.find(t => t.id === decision.tier) ?? top;
+		this.#routedTierId = target.id;
+		if (current && modelsAreEqual(target.model, current)) return;
+		try {
+			await this.setModelTemporary(target.model, undefined, { ephemeral: true });
+			this.#host.emitNotice(
+				"info",
+				`jev-routing: ${decision.reason} → ${target.model.provider}/${target.model.id}`,
+				"jev-routing",
+			);
+		} catch (error) {
+			logger.debug("jev-routing: model switch failed; staying on current model", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#routingPolicy(): RoutingPolicy {
+		const s = this.#host.settings;
+		return {
+			minConfidenceToDegrade: cfgJevRoutingMinConfidenceToDegrade.get(s),
+			maxComplexityForDegrade: cfgJevRoutingMaxComplexityForDegrade.get(s),
+			minComplexityConfidence: cfgJevRoutingMinComplexityConfidence.get(s),
+			allowVerify: cfgJevRoutingAllowVerify.get(s),
+			minConfidenceToEscalate: cfgJevRoutingMinConfidenceToEscalate.get(s),
+			maxEscalationsPerTurn: cfgJevRoutingMaxEscalationsPerTurn.get(s),
+		};
 	}
 
 	/**

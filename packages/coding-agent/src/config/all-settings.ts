@@ -18,6 +18,7 @@ import * as hindsightSettings from "../hindsight/settings";
 import * as exportTtsrSettings from "../export/ttsr-settings";
 import * as editSettings from "../edit/settings";
 import * as toolsSettings from "../tools/settings";
+import * as routingSettings from "../routing/settings";
 import * as lspSettings from "../lsp/settings";
 import * as execSettings from "../exec/settings";
 import * as evalSettings from "../eval/settings";
@@ -55,6 +56,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	exportTtsrSettings,
 	editSettings,
 	toolsSettings,
+	routingSettings,
 	lspSettings,
 	execSettings,
 	evalSettings,
