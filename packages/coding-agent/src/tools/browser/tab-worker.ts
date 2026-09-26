@@ -233,12 +233,29 @@ declare module "puppeteer-core" {
 
 declare global {
 	interface Element extends HTMLElement {}
+	/** Minimal shape of the overlay divs created by {@link flashActionHighlight} and {@link setBusyFrame}. */
+	interface ActionHighlightBox {
+		style: { cssText: string; opacity: string; transform: string; left: string; top: string };
+		readonly offsetWidth: number;
+		id: string;
+		textContent: string;
+		setAttribute(name: string, value: string): void;
+		remove(): void;
+	}
 	function getComputedStyle(element: Element): Record<string, unknown>;
+	function matchMedia(mediaQuery: string): { readonly matches: boolean };
 	var innerWidth: number;
 	var innerHeight: number;
 	var document: {
 		elementFromPoint(x: number, y: number): Element | null;
+		getElementById(elementId: string): ActionHighlightBox | null;
 		readonly visibilityState: "visible" | "hidden";
+		createElement(tagName: string): ActionHighlightBox;
+		readonly documentElement: {
+			appendChild(node: ActionHighlightBox): void;
+			querySelector(selector: string): ActionHighlightBox | null;
+			querySelectorAll(selector: string): { forEach(callbackfn: (element: ActionHighlightBox) => void): void };
+		};
 	};
 }
 
@@ -1157,6 +1174,181 @@ async function collectObservationEntries(
 }
 
 /**
+ * Best-effort visual cue for user-driven (relay/connected) tabs: briefly
+ * outlines the element about to be acted on and moves the virtual cursor —
+ * a page-wide singleton that glides between interaction points — to its
+ * center, plus an expanding click-ripple, so a human watching the real
+ * browser can see where the agent is working — mirroring the highlight and
+ * simulated pointer Claude in Chrome shows before each action. Purely
+ * cosmetic — a detached handle, closed page, or CSP that blocks the inline
+ * style is swallowed and never affects the underlying click/type/fill.
+ */
+function flashActionHighlight(handle: ElementHandle): void {
+	void handle
+		.evaluate(el => {
+			const element = el as HTMLElement;
+			const rect = element.getBoundingClientRect();
+			if (rect.width < 1 || rect.height < 1) return;
+			const cx = rect.left + rect.width / 2;
+			const cy = rect.top + rect.height / 2;
+			// Match the omp tab-group chip color (Chrome's own "cyan") so the
+			// in-page affordances read as part of the group; per color-scheme,
+			// exactly like the chip Chrome draws.
+			const accent = globalThis.matchMedia("(prefers-color-scheme: dark)").matches ? "#78d9ec" : "#007b83";
+			const accentRgb = accent === "#78d9ec" ? "120,217,236" : "0,123,131";
+
+			const box = globalThis.document.createElement("div");
+			box.style.cssText = [
+				"position:fixed",
+				`left:${rect.left}px`,
+				`top:${rect.top}px`,
+				`width:${rect.width}px`,
+				`height:${rect.height}px`,
+				`border:2px solid ${accent}`,
+				"border-radius:3px",
+				`background:rgba(${accentRgb},0.15)`,
+				"pointer-events:none",
+				"z-index:2147483647",
+				"transition:opacity 250ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(box);
+
+			// Virtual cursor: a singleton arrow glyph that glides between
+			// interaction points (left/top transitions) rather than being
+			// re-spawned per action, so it reads as one continuous "agent
+			// pointer" — the way Claude in Chrome's simulated cursor behaves.
+			// An expanding "click ripple" is dropped at the same point.
+			const existing = globalThis.document.getElementById("omp-cursor") as (ActionHighlightBox & { __ompFade?: number }) | null;
+			const cursor = existing ?? (globalThis.document.createElement("div") as ActionHighlightBox & { __ompFade?: number });
+			cursor.id = "omp-cursor";
+			if (!existing) {
+				cursor.style.cssText = [
+					"position:fixed",
+					`left:${cx}px`,
+					`top:${cy}px`,
+					"width:20px",
+					"height:20px",
+					"margin:-2px 0 0 -2px",
+					`background:${accent}`,
+					"clip-path:polygon(0% 0%, 0% 70%, 27% 55%, 42% 92%, 58% 85%, 43% 50%, 75% 48%)",
+					"filter:drop-shadow(0 1px 2px rgba(0,0,0,0.6))",
+					"pointer-events:none",
+					"z-index:2147483647",
+					"transition:left 220ms ease-out, top 220ms ease-out, opacity 250ms ease-out",
+				].join(";");
+				globalThis.document.documentElement.appendChild(cursor);
+			} else {
+				// Glide to the new interaction point instead of teleporting.
+				cursor.style.left = `${cx}px`;
+				cursor.style.top = `${cy}px`;
+			}
+			cursor.style.opacity = "1";
+			// Fade the pointer out during idle gaps between actions; the busy
+			// teardown (setBusyFrame) removes it outright when the burst ends.
+			globalThis.clearTimeout(cursor.__ompFade);
+			// The page's setTimeout returns a plain DOM timer id; the host-side
+			// ambient type disagrees, hence the cast.
+			cursor.__ompFade = globalThis.setTimeout(() => {
+				cursor.style.opacity = "0";
+			}, 1500) as unknown as number;
+
+			const ripple = globalThis.document.createElement("div");
+			ripple.style.cssText = [
+				"position:fixed",
+				`left:${cx}px`,
+				`top:${cy}px`,
+				"width:10px",
+				"height:10px",
+				"margin:-5px 0 0 -5px",
+				"border-radius:50%",
+				`border:2px solid ${accent}`,
+				"pointer-events:none",
+				"z-index:2147483646",
+				"transform:scale(1)",
+				"opacity:0.9",
+				"transition:transform 450ms ease-out, opacity 450ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(ripple);
+			// Force layout before flipping the transform/opacity, otherwise the
+			// browser coalesces both states into one paint and the transition
+			// (the ripple's expansion) never plays.
+			void ripple.offsetWidth;
+			ripple.style.transform = "scale(4)";
+			ripple.style.opacity = "0";
+
+			setTimeout(() => {
+				box.style.opacity = "0";
+				setTimeout(() => {
+					box.remove();
+					ripple.remove();
+				}, 250);
+			}, 300);
+		})
+		.catch(() => undefined);
+}
+
+/** {@link flashActionHighlight} for actions addressed by CSS selector rather than an already-resolved handle. */
+function flashActionHighlightAt(page: Page, selector: string): void {
+	void page
+		.$(selector)
+		.then(async handle => {
+			if (!handle) return;
+			flashActionHighlight(handle);
+			await handle.dispose().catch(() => undefined);
+		})
+		.catch(() => undefined);
+}
+
+/**
+ * Best-effort "omp is driving this page" affordance for user-driven
+ * (relay/connected) tabs: four thin pulsing bars pinned to the viewport
+ * edges for the whole duration of a busy burst — mirroring the animated
+ * page border Claude in Chrome keeps on a tab while it works it. Also the
+ * teardown point for the virtual cursor left behind by
+ * {@link flashActionHighlight}. Lives in the page DOM, so a navigation
+ * drops it; the next busy burst re-injects it. Purely cosmetic — any
+ * failure is swallowed and never affects the underlying actions.
+ */
+async function setBusyFrame(page: Page, busy: boolean): Promise<void> {
+	await page.evaluate(on => {
+		const root = globalThis.document.documentElement;
+		if (!on) {
+			root.querySelector("style#omp-busy-style")?.remove();
+			root.querySelectorAll("[data-omp-busy-edge]").forEach(edge => edge.remove());
+			root.querySelector("#omp-cursor")?.remove();
+			return;
+		}
+		// Same per-scheme "cyan" as the omp tab-group chip (see flashActionHighlight).
+		const accent = globalThis.matchMedia("(prefers-color-scheme: dark)").matches ? "#78d9ec" : "#007b83";
+		const accentRgb = accent === "#78d9ec" ? "120,217,236" : "0,123,131";
+		if (!root.querySelector("style#omp-busy-style")) {
+			const style = globalThis.document.createElement("style");
+			style.id = "omp-busy-style";
+			style.textContent = [
+				"@keyframes omp-busy-pulse{0%,100%{opacity:.2}50%{opacity:.95}}",
+				`[data-omp-busy-edge]{background:${accent};box-shadow:0 0 6px rgba(${accentRgb},.5);animation:omp-busy-pulse 1.6s ease-in-out infinite}`,
+				"@media (prefers-reduced-motion:reduce){[data-omp-busy-edge]{animation:none;opacity:.7}}",
+			].join("");
+			root.appendChild(style);
+		}
+		const edges = [
+			"top:0;left:0;right:0;height:3px",
+			"bottom:0;left:0;right:0;height:3px",
+			"top:0;left:0;bottom:0;width:3px",
+			"top:0;right:0;bottom:0;width:3px",
+		];
+		edges.forEach((css, i) => {
+			if (root.querySelector(`[data-omp-busy-edge="${i}"]`)) return;
+			const edge = globalThis.document.createElement("div");
+			edge.setAttribute("data-omp-busy-edge", `${i}`);
+			edge.style.cssText = `position:fixed;${css};pointer-events:none;z-index:2147483645;`;
+			root.appendChild(edge);
+		});
+	}, busy);
+}
+
+
+/**
  * Hint appended to a selector op's fail-fast timeout, given the selector's current
  * match count: a missing element (consent wall, wrong page) reads differently from
  * a present-but-unactionable one.
@@ -1244,6 +1436,9 @@ export class WorkerCore {
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
 	readonly #recording = new RecordingController();
+	/** In-flight action depth for the tab-group "⏳" busy indicator; see {@link #beginBusy}. */
+	#busyDepth = 0;
+	#busySession?: CDPSession;
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1458,6 +1653,44 @@ export class WorkerCore {
 			// Not the omp relay; nothing to claim.
 		} finally {
 			await session?.detach().catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Increment/decrement the in-flight action depth for this tab and mirror
+	 * 0↔1 transitions to both the page (pulsing viewport-edge frame, virtual
+	 * cursor teardown) and the relay (transient "⏳" suffix on the "omp" tab
+	 * group title) while — and only while — this worker is actively driving
+	 * the page. Mirrors the in-progress indicators Claude in Chrome shows on
+	 * the tab it is working in.
+	 */
+	#beginBusy(): void {
+		this.#busyDepth++;
+		if (this.#busyDepth === 1) void this.#signalBusy(true);
+	}
+
+	#endBusy(): void {
+		this.#busyDepth = Math.max(0, this.#busyDepth - 1);
+		if (this.#busyDepth === 0) void this.#signalBusy(false);
+	}
+
+	/**
+	 * Best-effort; mirrors {@link #claimRelayTarget}'s relay-private-method tolerance.
+	 * The page-edge frame is injected on the page itself, so it also covers
+	 * `connected` tabs the relay-private method cannot reach.
+	 */
+	async #signalBusy(busy: boolean): Promise<void> {
+		const page = this.#page;
+		if (!page) return;
+		void setBusyFrame(page, busy).catch(() => undefined);
+		try {
+			if (!this.#busySession) this.#busySession = await page.createCDPSession();
+			const raw = this.#busySession as unknown as {
+				send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+			};
+			await raw.send("OMP.setBusy", { busy });
+		} catch {
+			// Not the omp relay, or the session died; nothing to signal.
 		}
 	}
 
@@ -1853,6 +2086,23 @@ export class WorkerCore {
 		const page = this.#requirePage();
 		const webmcp = this.#webmcp;
 		if (!webmcp) throw new ToolError("Tab worker WebMCP handling is not initialized");
+		// Only flash for user-driven (relay/connected/spawned) backends — a
+		// human might actually be watching a headless, project-shared page.
+		const showHighlight = this.#mode === "attach";
+		// Reused for the busy indicators — the tab-group "⏳" suffix and the
+		// pulsing page-edge frame (#beginBusy/#endBusy); all cosmetic,
+		// relay-only signals gated on the same condition.
+		const busyOp =
+			<T>(fn: (sig: AbortSignal) => Promise<T>): ((sig: AbortSignal) => Promise<T>) =>
+			async sig => {
+				if (!showHighlight) return fn(sig);
+				this.#beginBusy();
+				try {
+					return await fn(sig);
+				} finally {
+					this.#endBusy();
+				}
+			};
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
@@ -1882,27 +2132,31 @@ export class WorkerCore {
 			url: () => page.url(),
 			title: () => op("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
-				op(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
-					this.#clearElementCache();
-					try {
-						// Default to "load" because dev servers with HMR/WS never reach networkidle.
-						// budgetBound (not the full cell) so a hung navigation fails named and
-						// catchable inside the run instead of dying with the whole cell.
-						await untilAborted(sig, () =>
-							page.goto(url, { waitUntil: opts?.waitUntil ?? "load", timeout: budgetBound }),
-						);
-					} catch (err) {
-						if (err instanceof Error && err.name === "TimeoutError") {
-							// Abandon the hung navigation NOW — a still-pending load stalls every
-							// later op on this page and cascades into more opaque timeouts.
-							await this.#stopLoading();
-							throw new ToolError(
-								`tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`,
+				op(
+					`tab.goto(${JSON.stringify(url)})`,
+					INF,
+					busyOp(async sig => {
+						this.#clearElementCache();
+						try {
+							// Default to "load" because dev servers with HMR/WS never reach networkidle.
+							// budgetBound (not the full cell) so a hung navigation fails named and
+							// catchable inside the run instead of dying with the whole cell.
+							await untilAborted(sig, () =>
+								page.goto(url, { waitUntil: opts?.waitUntil ?? "load", timeout: budgetBound }),
 							);
+						} catch (err) {
+							if (err instanceof Error && err.name === "TimeoutError") {
+								// Abandon the hung navigation NOW — a still-pending load stalls every
+								// later op on this page and cascades into more opaque timeouts.
+								await this.#stopLoading();
+								throw new ToolError(
+									`tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`,
+								);
+							}
+							throw err;
 						}
-						throw err;
-					}
-				}),
+					}),
+				),
 			observe: opts => op("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
 			ariaSnapshot: (selector, opts) =>
 				op(
@@ -1951,93 +2205,115 @@ export class WorkerCore {
 					return content;
 				}),
 			click: selector =>
-				op(`tab.click(${JSON.stringify(selector)})`, actionOpMs, async sig => {
-					const label = `tab.click(${JSON.stringify(selector)})`;
-					const resolved = normalizeSelector(selector);
-					if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
-						await clickQueryHandlerText(page, resolved, label, actionOpMs, sig);
-						return;
-					}
-					const handle =
-						parseAriaRefSelector(selector) !== null
-							? await this.#resolveAriaRef(selector)
-							: ((await untilAborted(sig, () => page.$(resolved))) as ElementHandle | null);
-					if (!handle) throw new ToolError(`${label} matched no visible element`);
-					try {
-						await clickElement(handle, label, sig);
-					} finally {
-						void handle.dispose().catch(() => undefined);
-					}
-				}),
+				op(
+					`tab.click(${JSON.stringify(selector)})`,
+					actionOpMs,
+					busyOp(async sig => {
+						const label = `tab.click(${JSON.stringify(selector)})`;
+						const resolved = normalizeSelector(selector);
+						if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
+							if (showHighlight) flashActionHighlightAt(page, resolved);
+							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig);
+							return;
+						}
+						const handle =
+							parseAriaRefSelector(selector) !== null
+								? await this.#resolveAriaRef(selector)
+								: ((await untilAborted(sig, () => page.$(resolved))) as ElementHandle | null);
+						if (!handle) throw new ToolError(`${label} matched no visible element`);
+						try {
+							if (showHighlight) flashActionHighlight(handle);
+							await clickElement(handle, label, sig);
+						} finally {
+							void handle.dispose().catch(() => undefined);
+						}
+					}),
+				),
 			type: (selector, text) =>
 				op(
 					`tab.type(${JSON.stringify(selector)})`,
 					actionOpMs,
-					async sig => {
+					busyOp(async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
+							if (showHighlight) flashActionHighlight(handle);
 							await untilAborted(sig, () => handle.type(text, { delay: 0 }));
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
-					},
+					}),
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			fill: (selector, value) =>
 				op(
 					`tab.fill(${JSON.stringify(selector)})`,
 					actionOpMs,
-					async sig => {
+					busyOp(async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
+							if (showHighlight) flashActionHighlight(handle);
 							await fillViaHandle(handle, value, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
-					},
+					}),
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			press: (key, opts) =>
-				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
-					assertTabPressArgs(key, opts);
-					const selector = opts?.selector;
-					if (selector) {
-						if (parseAriaRefSelector(selector) !== null) {
-							const handle = await this.#resolveAriaRef(selector);
-							try {
-								await untilAborted(sig, () => handle.focus());
-							} finally {
-								await handle.dispose().catch(() => undefined);
+				op(
+					`tab.press(${JSON.stringify(key)})`,
+					actionOpMs,
+					busyOp(async sig => {
+						assertTabPressArgs(key, opts);
+						const selector = opts?.selector;
+						if (selector) {
+							if (parseAriaRefSelector(selector) !== null) {
+								const handle = await this.#resolveAriaRef(selector);
+								try {
+									if (showHighlight) flashActionHighlight(handle);
+									await untilAborted(sig, () => handle.focus());
+								} finally {
+									await handle.dispose().catch(() => undefined);
+								}
+							} else {
+								const resolved = normalizeSelector(selector);
+								if (showHighlight) flashActionHighlightAt(page, resolved);
+								await untilAborted(sig, () => page.focus(resolved));
 							}
-						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
-					}
-					await untilAborted(sig, () => page.keyboard.press(key));
-				}),
+						}
+						await untilAborted(sig, () => page.keyboard.press(key));
+					}),
+				),
 			scroll: (deltaX, deltaY, opts) =>
-				op("tab.scroll()", actionOpMs, async sig => {
-					if (!opts?.selector) {
-						await untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY })));
-						return;
-					}
-					const handle = await this.#resolveActionHandle(opts.selector, actionOpMs, sig);
-					try {
-						await untilAborted(sig, () =>
-							handle.evaluate(
-								(el, dx, dy) => {
-									const target = el as unknown as {
-										scrollBy(opts: { left: number; top: number; behavior: string }): void;
-									};
-									target.scrollBy({ left: dx, top: dy, behavior: "instant" });
-								},
-								deltaX,
-								deltaY,
-							),
-						);
-					} finally {
-						await handle.dispose().catch(() => undefined);
-					}
-				}),
-			drag: (from, to) => op("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
+				op(
+					"tab.scroll()",
+					actionOpMs,
+					busyOp(async sig => {
+						if (!opts?.selector) {
+							await untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY })));
+							return;
+						}
+						const handle = await this.#resolveActionHandle(opts.selector, actionOpMs, sig);
+						try {
+							if (showHighlight) flashActionHighlight(handle);
+							await untilAborted(sig, () =>
+								handle.evaluate(
+									(el, dx, dy) => {
+										const target = el as unknown as {
+											scrollBy(opts: { left: number; top: number; behavior: string }): void;
+										};
+										target.scrollBy({ left: dx, top: dy, behavior: "instant" });
+									},
+									deltaX,
+									deltaY,
+								),
+							);
+						} finally {
+							await handle.dispose().catch(() => undefined);
+						}
+					}),
+				),
+			drag: (from, to) => op("tab.drag()", actionOpMs, busyOp(sig => this.#drag(from, to, sig))),
 			waitFor: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
 				return op(
@@ -2974,6 +3250,7 @@ export class WorkerCore {
 		await this.#consoleCapture.detach();
 		this.#emulation?.dispose();
 		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		await this.#busySession?.detach().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();

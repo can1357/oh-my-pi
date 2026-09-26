@@ -644,6 +644,14 @@ export class RelayBridge {
 			this.#replyError(conn, msg, "relay extension is not connected");
 			return;
 		}
+		// Relay-private busy signal: the omp tab worker toggles this while it
+		// actively drives the tab, so the extension can flag the tab's group.
+		// Never forwarded — real Chrome rejects the unknown method.
+		if (msg.method === "OMP.setBusy") {
+			void this.#rpc({ op: "setBusy", tabId: tab.tabId, busy: msg.params?.busy === true }, inst).catch(() => {});
+			this.#reply(conn, msg, {});
+			return;
+		}
 		try {
 			const result = await this.#rpc(
 				{
@@ -805,8 +813,25 @@ export class RelayBridge {
 					this.#replyError(conn, msg, "relay extension is not connected");
 					return;
 				}
-				const result = (await this.#rpc({ op: "createTab", url }, inst)) as { tab: TabSnapshot };
+				// Pass the group spec so the extension groups the tab inside the same
+				// RPC that creates it — a driven tab is born in the omp group instead of
+				// flashing standalone first (and a later claim sync that races a
+				// service-worker restart can no longer leave it loose). `--no-group`
+				// sends no spec and the tab stays ungrouped.
+				const result = (await this.#rpc(
+					{ op: "createTab", url, group: this.#group ?? undefined },
+					inst,
+				)) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab, inst.instanceId);
+				// The extension grouped before snapshotting, so a real groupId in the
+				// snapshot is OUR group; record it so release/drag-out accounting
+				// treats this exactly like a tab grouped through the claim sync.
+				const created = this.#tabs.get(tabKeyOf(inst.code, result.tab.tabId));
+				if (this.#group && created && result.tab.groupId !== -1) {
+					created.grouped = true;
+					created.ompGroupId = result.tab.groupId;
+					this.#log("tab created into group", { tabId: result.tab.tabId, groupId: result.tab.groupId });
+				}
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
 				this.#claimTab(conn, createdKey);

@@ -7,6 +7,11 @@
 ### Fixed
 
 - Fixed browser relay support when multiple browser instances, such as Chrome and Edge, are connected simultaneously, ensuring tabs and relay requests remain associated with the correct browser while preserving single-browser compatibility for extensions without an instance identifier.
+### Added
+
+- 0.2.3: group title marks move to the front and gain a done state — "⏳omp" while driving, "✅omp" once the burst ends (plain "omp" again on release). In-page affordances (busy frame, virtual cursor, ripple, element outline) now use Chrome's own tab-group cyan (#007b83 light / #78d9ec dark) per color-scheme instead of orange.
+- Busy affordances matching Claude in Chrome: the extension now pins a small "⏳" badge on the toolbar icon of the exact tab being driven (complementing the existing "⏳" group-title suffix), while the CLI's tab worker pulses a frame along all four viewport edges of the page and glides a virtual cursor between interaction points for the whole duration of a driving burst.
+
 
 ## [18.0.7] - 2026-08-26
 

@@ -40,6 +40,7 @@ function snapshot(tab) {
   };
 }
 var ompGroupTitle = null;
+var busyTabsByGroup = new Map;
 var groupOps = Promise.resolve();
 function enqueueGroupOp(fn) {
   const result = groupOps.then(fn, fn);
@@ -82,6 +83,9 @@ async function groupTabs(tabIds, title, color) {
   }
   return { grouped };
 }
+function ompGroupTitles(title) {
+  return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
+}
 async function restoreGroups() {
   if (!ompGroupTitle) {
     const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
@@ -89,13 +93,47 @@ async function restoreGroups() {
   }
   if (!ompGroupTitle)
     return;
-  const groups = await chrome.tabGroups.query({ title: ompGroupTitle }).catch(() => []);
+  const allGroups = await chrome.tabGroups.query({}).catch(() => []);
+  const title = ompGroupTitle;
+  const wanted = ompGroupTitles(title);
+  const groups = allGroups.filter((group) => group.title !== undefined && wanted[group.title]);
   for (const group of groups) {
     const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
     const ids = tabs.map((tab) => tab.id).filter((id) => id !== undefined);
     if (ids.length > 0)
       await chrome.tabs.ungroup(ids).catch(() => {});
   }
+}
+async function setGroupBusy(tabId, busy) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.groupId === undefined || tab.groupId < 0)
+    return;
+  const groupId = tab.groupId;
+  let busyTabIds = busyTabsByGroup.get(groupId);
+  if (busy) {
+    if (!busyTabIds) {
+      busyTabIds = new Set;
+      busyTabsByGroup.set(groupId, busyTabIds);
+    }
+    if (busyTabIds.size === 0)
+      await updateGroupBusyTitle(groupId, true);
+    busyTabIds.add(tabId);
+  } else {
+    if (!busyTabIds)
+      return;
+    busyTabIds.delete(tabId);
+    if (busyTabIds.size === 0) {
+      busyTabsByGroup.delete(groupId);
+      await updateGroupBusyTitle(groupId, false);
+    }
+  }
+}
+async function updateGroupBusyTitle(groupId, busy) {
+  if (!ompGroupTitle)
+    return;
+  try {
+    await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
+  } catch {}
 }
 function post(msg) {
   if (ws?.readyState === WebSocket.OPEN)
@@ -148,6 +186,14 @@ async function runRpc(msg) {
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
       const tab = await chrome.tabs.create({ url: msg.url });
+      if (msg.group && tab.id !== undefined) {
+        await enqueueGroupOp(() => groupTabs([tab.id], msg.group.title, msg.group.color)).catch(() => {});
+        const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+        const snap = snapshot(fresh ?? tab);
+        if (!snap)
+          throw new Error("created tab has no id");
+        return { tab: snap };
+      }
       const snap = snapshot(tab);
       if (!snap)
         throw new Error("created tab has no id");
@@ -166,6 +212,10 @@ async function runRpc(msg) {
       return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
     case "ungroup":
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
+      return {};
+    case "setBusy":
+      await enqueueGroupOp(() => setGroupBusy(msg.tabId, msg.busy));
+      await chrome.action.setBadgeText({ tabId: msg.tabId, text: msg.busy ? "⏳" : "" }).catch(() => {});
       return {};
   }
 }

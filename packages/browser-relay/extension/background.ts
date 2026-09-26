@@ -67,6 +67,8 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 
 /** Title of the omp tab group; mirrored to session storage so a restarted service worker can still dissolve it. */
 let ompGroupTitle: string | null = null;
+/** Tabs currently marked busy per group id, so the "⏳" suffix survives multiple concurrently-driven tabs. */
+const busyTabsByGroup = new Map<number, Set<number>>();
 
 /**
  * Serialize group mutations. Chrome's query→group→set-title sequence is not
@@ -119,6 +121,11 @@ async function groupTabs(tabIds: number[], title: string, color: string): Promis
 	return { grouped };
 }
 
+/** Every title form the omp group can carry: plain, busy ("⏳…"), done ("✅…"), plus the historical suffix form. */
+function ompGroupTitles(title: string): Record<string, true> {
+	return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
+}
+
 /** Dissolve every omp-titled group (relay disconnected or asked us to release tabs). */
 async function restoreGroups(): Promise<void> {
 	if (!ompGroupTitle) {
@@ -126,12 +133,54 @@ async function restoreGroups(): Promise<void> {
 		const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
 		ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
 	}
+
 	if (!ompGroupTitle) return;
-	const groups = await chrome.tabGroups.query({ title: ompGroupTitle }).catch(() => []);
+	// Query every group and match by any title form (busy/done marks included).
+	const allGroups = await chrome.tabGroups.query({}).catch(() => []);
+	const title = ompGroupTitle;
+	const wanted = ompGroupTitles(title);
+	const groups = allGroups.filter(group => group.title !== undefined && wanted[group.title]);
 	for (const group of groups) {
 		const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
 		const ids = tabs.map(tab => tab.id).filter(id => id !== undefined);
 		if (ids.length > 0) await chrome.tabs.ungroup(ids).catch(() => {});
+	}
+}
+
+/** Toggle the "⏳" busy suffix on the title of whichever group `tabId` currently belongs to. */
+async function setGroupBusy(tabId: number, busy: boolean): Promise<void> {
+	const tab = await chrome.tabs.get(tabId).catch(() => null);
+	if (!tab || tab.groupId === undefined || tab.groupId < 0) return;
+	const groupId = tab.groupId;
+	let busyTabIds = busyTabsByGroup.get(groupId);
+	if (busy) {
+		if (!busyTabIds) {
+			busyTabIds = new Set();
+			busyTabsByGroup.set(groupId, busyTabIds);
+		}
+		if (busyTabIds.size === 0) await updateGroupBusyTitle(groupId, true);
+		busyTabIds.add(tabId);
+	} else {
+		if (!busyTabIds) return;
+		busyTabIds.delete(tabId);
+		if (busyTabIds.size === 0) {
+			busyTabsByGroup.delete(groupId);
+			await updateGroupBusyTitle(groupId, false);
+		}
+	}
+}
+
+/**
+ * Flip the group title between its busy and done forms: "⏳omp" while any tab in
+ * the group is being driven, "✅omp" once the burst ends, so a human can tell at
+ * a glance whether omp is working or finished (until the next burst or release).
+ */
+async function updateGroupBusyTitle(groupId: number, busy: boolean): Promise<void> {
+	if (!ompGroupTitle) return;
+	try {
+		await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
+	} catch {
+		// Group may have been dissolved concurrently; ignore.
 	}
 }
 
@@ -192,6 +241,18 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			);
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url });
+			// Group inside the same RPC that creates the tab, so a driven tab is
+			// born in the omp group rather than flashing standalone first. An absent
+			// spec means the relay runs with --no-group; leave the tab loose.
+			// The object returned by tabs.create snapshots pre-grouping state, so
+			// re-fetch before snapshotting or the relay would never see the groupId.
+			if (msg.group && tab.id !== undefined) {
+				await enqueueGroupOp(() => groupTabs([tab.id!], msg.group!.title, msg.group!.color)).catch(() => {});
+				const fresh = await chrome.tabs.get(tab.id).catch(() => null);
+				const snap = snapshot(fresh ?? tab);
+				if (!snap) throw new Error("created tab has no id");
+				return { tab: snap };
+			}
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };
@@ -209,6 +270,13 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
+			return {};
+		case "setBusy":
+			await enqueueGroupOp(() => setGroupBusy(msg.tabId, msg.busy));
+			// Per-tab "⏳" badge so the driven tab itself stays identifiable even
+			// when the group holds several; cosmetic only, mirrors the aggregate
+			// group-title suffix above.
+			await chrome.action.setBadgeText({ tabId: msg.tabId, text: msg.busy ? "⏳" : "" }).catch(() => {});
 			return {};
 	}
 }

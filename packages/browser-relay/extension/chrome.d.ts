@@ -92,7 +92,7 @@ declare const chrome: {
 		onAlarm: ChromeEvent<(alarm: { name: string }) => void>;
 	};
 	action: {
-		setBadgeText(details: { text: string }): Promise<void>;
+		setBadgeText(details: { text: string; tabId?: number }): Promise<void>;
 		setBadgeBackgroundColor(details: { color: string }): Promise<void>;
 		onClicked: ChromeEvent<(tab: ChromeTab) => void>;
 	};
