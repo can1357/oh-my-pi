@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept macOS spelling available in TUI sessions without creating a terminal Dock tile ([#12491](https://github.com/can1357/oh-my-pi/issues/12491), based on [#12522](https://github.com/can1357/oh-my-pi/pull/12522) by [@spz003](https://github.com/spz003), adapted in [#12818](https://github.com/can1357/oh-my-pi/pull/12818) by [@Dante-dan](https://github.com/Dante-dan)).
 ## [18.3.1] - 2026-09-25
 
 ### Added
