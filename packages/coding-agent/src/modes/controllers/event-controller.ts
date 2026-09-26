@@ -1489,9 +1489,9 @@ export class EventController {
 			}
 		}
 		if (event.message.role === "user") {
-			// Live-steered input stays listed until the agent appends it, which follows
+			// Live steering stays listed until the agent appends it, which follows
 			// message_start: drop its Steering chip now.
-			if (event.message.liveSteered) this.ctx.updatePendingMessagesDisplay();
+			this.ctx.updatePendingMessagesDisplay();
 			return;
 		}
 		const unlockedThinkingVisibility =

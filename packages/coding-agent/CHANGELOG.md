@@ -18,6 +18,9 @@
 
 ### Changed
 
+- Updated /play command help description to show space pauses, q quits
+- Changed read tool group summary to display "2 more lines" instead of a Ctrl+O hint
+- Granted wait tool to subagents when explicitly requested
 - Updated empty-submit interrupt policy to account for live-steered messages alongside queued input
 - Updated UI chip display to surface live-steered messages pending transcript recording
 - Updated ps command to list exited global services with --all and show live globals by default

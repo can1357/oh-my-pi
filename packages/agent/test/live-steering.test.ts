@@ -86,10 +86,11 @@ async function runSteered(
 
 /**
  * Starts an `Agent` run whose provider stream stays open until aborted and
- * accepts one steer live; resolves once the provider accepted it.
+ * claims one steer live without settling it, as while `response.steer` awaits
+ * its acknowledgement; resolves once claimed.
  */
 async function startLiveSteeredRun(): Promise<{ agent: Agent; steer: AgentMessage; running: Promise<void> }> {
-	const accepted = Promise.withResolvers<void>();
+	const claimed = Promise.withResolvers<void>();
 	const agent = new Agent({
 		streamFn: async (_model, _context, options) => {
 			const live = options?.liveSteering;
@@ -98,15 +99,15 @@ async function startLiveSteeredRun(): Promise<{ agent: Agent; steer: AgentMessag
 			const stream = new AssistantMessageEventStream();
 			signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
 			await live.wait(signal);
-			(await live.claim(signal))?.accept();
-			accepted.resolve();
+			if (!(await live.claim(signal))) throw new Error("steer was not claimed");
+			claimed.resolve();
 			return stream;
 		},
 	});
 	const running = agent.prompt("start");
 	const steer = createUserMessage("use tabs");
 	agent.steer(steer);
-	await accepted.promise;
+	await claimed.promise;
 	return { agent, steer, running };
 }
 
@@ -218,9 +219,9 @@ describe("agent loop live steering", () => {
 		expect(liveSteeredTexts(transcript)).toEqual(["use tabs"]);
 	});
 
-	it("requeues accepted live steering when its run aborts, even after the queue was replaced", async () => {
-		// The steer left the queue for the response; queue edits (Alt+Up, Esc's
-		// clear) must not lose it, and the empty-submit interrupt redelivers it.
+	it("requeues live steering when its run aborts, even after the queue was replaced", async () => {
+		// The steer left the queue for the response (before any ack); queue edits
+		// (Alt+Up, Esc's clear) must not lose it, and the empty-submit interrupt redelivers it.
 		const { agent, steer, running } = await startLiveSteeredRun();
 		expect(agent.peekSteeringQueue()).toEqual([]);
 		expect(agent.peekLiveSteeredMessages()).toEqual([steer]);

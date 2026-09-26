@@ -133,7 +133,7 @@ await wait(5_000);`,
 		const html = `<!doctype html><script>
 			console.log("hostile", { toString: "x", valueOf: "y" });
 		</script>`;
-		await invoke({ action: "open", name: "console-hostile", url: `data:text/html,${encodeURIComponent(html)}` });
+		await invoke({ action: "open", name: "console", url: `data:text/html,${encodeURIComponent(html)}` });
 		try {
 			const first = (await call("console")) as CaptureResult;
 			expect(first.entries.find(entry => entry.text === 'hostile {"toString":"x","valueOf":"y"}')).toMatchObject({
@@ -145,12 +145,12 @@ await wait(5_000);`,
 			expect(next.entries.map(entry => entry.text)).toEqual(["after hostile"]);
 			expect(((await call("errors")) as CaptureResult).entries).toEqual([]);
 		} finally {
-			await invoke({ action: "close", name: "console-hostile" });
+			await invoke({ action: "close", name: "console" });
 		}
 	}, 30_000);
 
 	it("keeps the cmux page hook from throwing on values whose text conversion throws", async () => {
-		await invoke({ action: "open", name: "console-cmux-hook", url: "data:text/html,<title>cmux hook</title>" });
+		await invoke({ action: "open", name: "console", url: "data:text/html,<title>cmux hook</title>" });
 		try {
 			const result = await call("evaluate", [
 				`(() => {
@@ -175,7 +175,7 @@ await wait(5_000);`,
 				}),
 			]);
 		} finally {
-			await invoke({ action: "close", name: "console-cmux-hook" });
+			await invoke({ action: "close", name: "console" });
 		}
 	}, 30_000);
 
