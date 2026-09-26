@@ -39,6 +39,7 @@ import {
 	getStreamingPartialJson,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
 import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
 import {
 	createHarmonyAuditEvent,
@@ -1021,6 +1022,13 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 	if (intent === "optional" || intent === "omit") return intent;
 	return "require";
 }
+
+/**
+ * Longest `i` value accepted as an intent. The injected field is described as
+ * a "concise intent" (INTENT_FIELD_DESCRIPTION); anything past this is a tool
+ * payload the model put in the wrong field, not a label.
+ */
+const MAX_INTENT_LENGTH = 200;
 
 function extractIntent(args: Record<string, unknown>): { intent?: string; strippedArgs: Record<string, unknown> } {
 	const { [INTENT_FIELD]: intent, ...strippedArgs } = args;
@@ -2830,6 +2838,19 @@ async function prepareToolCallDispatch(
 		if (intentTracing) {
 			const { intent, strippedArgs } = extractIntent(toolCall.arguments);
 			argsForExecution = strippedArgs;
+			// A payload in `i` would be stripped and the tool run with the leftover
+			// args. Unknown tools fall through to the not-found error; a tool that
+			// owns `i` as a real parameter has nowhere else to put the value.
+			if (
+				intent !== undefined &&
+				intent.length > MAX_INTENT_LENGTH &&
+				tool &&
+				!schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD)
+			) {
+				entry.args = strippedArgs;
+				entry.validationErrorMessage = `\`${INTENT_FIELD}\` is a short intent label (at most ${MAX_INTENT_LENGTH} chars); the value you sent is ${intent.length} chars. The tool was not run. Put that content in the tool's own parameters and retry with a brief \`${INTENT_FIELD}\`.`;
+				continue;
+			}
 			if (intent) {
 				toolCall.intent = intent;
 			} else if (typeof tool?.intent === "function") {

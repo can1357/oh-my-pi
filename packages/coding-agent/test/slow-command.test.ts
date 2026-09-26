@@ -103,7 +103,7 @@ describe("/slow", () => {
 		const lane = anthropicSlowModeLanes.lane(LANE);
 		expect(lane.isActive()).toBe(false);
 
-		expect(await slow(session, "on")).toContain("continuing at lower priority");
+		expect(await slow(session, "on")).toContain("continuing at low priority");
 		expect(cfgProvidersAnthropicSlowMode.get(session.settings)).toBe("auto");
 		expect(lane.activeResetsAtSec()).toBe(resetsAtSec);
 

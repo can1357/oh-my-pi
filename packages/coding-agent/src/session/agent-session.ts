@@ -153,7 +153,7 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../extensibility/extensions";
-import { emitSessionShutdownEvent } from "../extensibility/extensions";
+import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -182,6 +182,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import type { PlanModeState } from "../plan-mode/state";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
+import anthropicUsageWrapUpPrompt from "../prompts/system/anthropic-usage-wrap-up.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
@@ -285,9 +286,11 @@ import type {
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
+	ASYNC_PREVIEW_TAIL_CHARS,
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
@@ -862,6 +865,8 @@ export class AgentSession implements SettingsScope {
 	#detachUsageBeforeModelCall: (() => void) | undefined;
 	/** Claude account lane (`cred:<id>`/`key:<hash>`) that served the latest Anthropic request. */
 	#anthropicSlowModeLane: string | undefined;
+	/** `<lane>#<window>` of the wrap-up window this session already told the model about. */
+	#anthropicWrapUpHinted: string | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1678,6 +1683,7 @@ export class AgentSession implements SettingsScope {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -2720,6 +2726,18 @@ export class AgentSession implements SettingsScope {
 		const body = meta?.artifactError ? stripOutputNotice(result, meta).trimEnd() : result;
 		const preview = `${body.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
 		if (meta?.artifactError) return `${preview}\n[${formatArtifactErrorNotice(meta.artifactError)}]`;
+		// The producing tool's output sink already mirrored the raw stream to an
+		// artifact; `result` is its elided inline body, so link the raw capture.
+		// The capture lacks notices the tool appended after the stream (exit code,
+		// wall time, timeout), so the preview keeps `result`'s tail as well.
+		const rawArtifactId = meta?.truncation?.artifactId ?? meta?.limits?.columnTruncated?.artifactId;
+		if (rawArtifactId) {
+			const headTail = truncateMiddle(result, {
+				maxBytes: ASYNC_PREVIEW_MAX_CHARS,
+				maxHeadBytes: ASYNC_PREVIEW_MAX_CHARS - ASYNC_PREVIEW_TAIL_CHARS,
+			}).content;
+			return `${headTail}\nFull output: artifact://${rawArtifactId}`;
+		}
 		try {
 			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
 			if (artifactPath && artifactId) {
@@ -7367,6 +7385,9 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			isProjectTrusted: () => true,
+			// Used only when the session has no extension runner. `createAgentSession` always builds
+			// one (carrying the real identity), so only hand-constructed sessions land here.
+			agent: TOP_LEVEL_AGENT,
 
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
@@ -8990,15 +9011,42 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Status-line label for Anthropic subscription slow mode, e.g.
-	 * `low priority until 14:30 · 62% left`; undefined unless this session's
-	 * account lane is active and the session is on an Anthropic model.
+	 * Status-line label for the Claude account's usage-limit stage, e.g.
+	 * `limit reached · wrapping up · resets 14:30` or (with `/slow on`)
+	 * `low priority until 14:30 · 62% left`; undefined outside both stages or
+	 * off an Anthropic model.
 	 */
 	getAnthropicSlowModeLabel(): string | undefined {
-		if (this.model?.provider !== "anthropic" || cfgProvidersAnthropicSlowMode.get(this.settings) === "off") {
-			return undefined;
-		}
-		return this.getAnthropicSlowModeLane()?.statusLabel();
+		if (this.model?.provider !== "anthropic") return undefined;
+		return this.getAnthropicSlowModeLane()?.statusLabel(
+			undefined,
+			cfgProvidersAnthropicSlowMode.get(this.settings) === "auto",
+		);
+	}
+
+	/**
+	 * Mid-run, once per wrap-up window: tell the model to checkpoint when its
+	 * Claude account runs on the wrap-up allowance and nothing (low priority,
+	 * extra usage) will carry the work past it.
+	 */
+	#steerAnthropicWrapUp(): void {
+		const lane = this.#anthropicSlowModeLane;
+		if (lane === undefined || this.model?.provider !== "anthropic") return;
+		const window = anthropicSlowModeLanes
+			.lane(lane)
+			.wrapUpHintKey(cfgProvidersAnthropicSlowMode.get(this.settings) === "auto");
+		if (window === undefined) return;
+		const key = `${lane}#${window}`;
+		if (this.#anthropicWrapUpHinted === key) return;
+		this.#anthropicWrapUpHinted = key;
+		this.agent.steer({
+			role: "custom",
+			customType: "anthropic-usage-wrap-up",
+			content: anthropicUsageWrapUpPrompt,
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		});
 	}
 
 	/** Sets or clears one model family's live service tier. */

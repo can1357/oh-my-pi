@@ -650,7 +650,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_3_1(): void
+export declare function __piNativesV18_3_2(): void
 
 /**
  * Reports whether the on-device model can generate, as an `availability`
@@ -1726,6 +1726,11 @@ export interface GrepOptions {
   path: string
   /** Glob filter for filenames (e.g., "*.ts"). */
   glob?: string
+  /**
+   * Match simple glob patterns at any depth (default: true; `*.ts` ->
+   * `**\/*.ts`). Set false when `glob` is already relative to `path`.
+   */
+  recursive?: boolean
   /** Filter by file type (e.g., "js", "py", "rust"). */
   type?: string
   /** Case-insensitive search. */
