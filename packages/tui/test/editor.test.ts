@@ -165,6 +165,198 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 
+		it("keeps a draft cleared after a context change", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "persisted from the first context" }],
+				second: [{ prompt: "persisted from the second context" }],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			// The context changes without touching the editor, then the user types and clears a
+			// draft: the first browse must not re-seed over it.
+			key = "second";
+			editor.setText("draft typed in the second context");
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+
+			expect(editor.getText()).toBe("draft typed in the second context");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted from the second context");
+		});
+
+		it("keeps a submission in the context it was typed in, across an untravelled round trip", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				A: [{ prompt: "persisted in A" }],
+				B: [{ prompt: "persisted in B" }],
+			};
+			let key = "A";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			// Session B is resumed, a prompt is submitted there, and A is resumed again without
+			// browsing history while in B: B's submission must not surface in A's recall.
+			key = "B";
+			editor.addToHistory("typed in B");
+			key = "A";
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+		});
+
+		it("retries the seed after a failed read instead of serving the previous context", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "prompt from the first context" }],
+				second: [{ prompt: "prompt from the second context" }],
+			};
+			let key = "first";
+			let failNextRead = false;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async () => {},
+					getRecent: () => {
+						if (failNextRead) {
+							failNextRead = false;
+							// `HistoryStorage.getRecent` reports a failed read by throwing, so a broken
+							// handle must not look like "this context has no history".
+							throw new Error("storage read failed");
+						}
+						return byKey[key] ?? [];
+					},
+				},
+				() => key,
+			);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
+
+			key = "second";
+			failNextRead = true;
+			editor.setText("");
+			// The failed read is contained and the press is a no-op: it neither escapes the
+			// keystroke handler nor recalls a prompt from the context just left.
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the second context");
+		});
+
+		it("keeps a submitted entry out of the list while the re-seed failed", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				A: [{ prompt: "persisted in A" }],
+				B: [{ prompt: "persisted in B" }],
+			};
+			const written: string[] = [];
+			let key = "A";
+			let failNextRead = false;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async prompt => {
+						written.push(prompt);
+					},
+					getRecent: () => {
+						if (failNextRead) {
+							failNextRead = false;
+							throw new Error("storage read failed");
+						}
+						return byKey[key] ?? [];
+					},
+				},
+				() => key,
+			);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+
+			// The switch fails to seed, so the list still belongs to A while the submission is
+			// filed under B. Coming back to A re-seeds nothing — its key was restored — so the
+			// entry would be recalled there if it had been filed into that list.
+			key = "B";
+			failNextRead = true;
+			editor.addToHistory("typed while in B");
+			expect(written).toEqual(["typed while in B"]);
+
+			key = "A";
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted in A");
+		});
+
+		it("carries a canceled draft across a context change, keeping its payload expandable", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "persisted from the first context" }],
+				second: [{ prompt: "persisted from the second context" }],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+			const payload = "canceled payload ".repeat(120).trim();
+
+			// Ctrl+C keeps a draft for recall until the process exits, so a context change must
+			// not take it (with its paste payload) away.
+			editor.handleInput("\x1b[200~" + payload + "\x1b[201~");
+			editor.rememberDraft();
+			editor.setText("");
+			key = "second";
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getExpandedText()).toBe(payload);
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("persisted from the second context");
+		});
+
+		it("re-seeds from storage when the host's source key changes", () => {
+			const byKey: Record<string, { prompt: string }[]> = {
+				first: [{ prompt: "prompt from the first context" }],
+				second: [{ prompt: "prompt from the second context" }],
+			};
+			let key = "first";
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage({ add: async () => {}, getRecent: () => byKey[key] ?? [] }, () => key);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the first context");
+
+			key = "second";
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("prompt from the second context");
+
+			// A context whose history is empty must win over the previous context's entries.
+			key = "third";
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("keeps locally remembered drafts while the source key holds", () => {
+			let loads = 0;
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHistoryStorage(
+				{
+					add: async () => {},
+					getRecent: () => {
+						loads++;
+						return [{ prompt: "persisted" }];
+					},
+				},
+				() => "stable",
+			);
+
+			editor.setText("cleared draft");
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+
+			expect(editor.getText()).toBe("cleared draft");
+			// Re-seeding here would both drop the draft and re-hit storage on every keypress.
+			expect(loads).toBe(1);
+		});
+
 		it("shows most recent history entry on Up arrow when editor is empty", () => {
 			const editor = new Editor(defaultEditorTheme);
 

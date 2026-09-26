@@ -794,6 +794,9 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
 | `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
+| `history.scope`        | enum    | `global`        | `session`, `cwd`, `repo`, `global`. Which prompts the `Up` arrow recalls; all projects by default, `repo` spans linked worktrees. |
+| `history.searchScope`  | enum    | `global`        | Which scope `Ctrl+R` opens on; `Tab`/`Shift+Tab` change it inside the panel.                            |
+| `composer.recallClearedDrafts` | boolean | `true`          | Keep prompts cleared with `Ctrl+C` in the editor's local Up/Down history until exit.                    |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. |

@@ -203,6 +203,8 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		requestRender: vi.fn(),
 		requestComponentRender: vi.fn(),
 		setFocus: vi.fn(),
+		getFocused: vi.fn((): Component | null => (ctx.editorContainer.children[0] as Component | null) ?? null),
+		hasOverlay: vi.fn(() => false),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
 	};

@@ -2,6 +2,7 @@ import { combine, effect, register, type Setting } from "../config/registry";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { type HistoryScopeKind, HISTORY_SCOPE_KINDS, HISTORY_SCOPE_LABELS } from "../session/history-storage";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
@@ -20,6 +21,14 @@ import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
 // ────────────────────────────────────────────────────────────────────────
+/** Submenu rows for the history-scope enums, labelled with the names the Ctrl+R panel shows. */
+const HISTORY_SCOPE_OPTIONS: ReadonlyArray<{ value: HistoryScopeKind; label: string }> = HISTORY_SCOPE_KINDS.map(
+	kind => ({
+		value: kind,
+		label: HISTORY_SCOPE_LABELS[kind],
+	}),
+);
+
 // General settings (no UI)
 // ────────────────────────────────────────────────────────────────────────
 export const cfgSetupVersion = register({ id: "setupVersion", type: "number", default: 0 });
@@ -790,6 +799,36 @@ export const cfgLoopConditionTimeoutMs = register({
 });
 
 // Input and startup
+export const cfgHistoryScope = register({
+	id: "history.scope",
+	type: "enum",
+	values: HISTORY_SCOPE_KINDS,
+	default: "global",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prompt History Scope",
+		description:
+			"Which prompts the Up arrow recalls: all projects by default, or this session, the current folder or this repository (worktrees included)",
+		options: HISTORY_SCOPE_OPTIONS,
+	},
+});
+
+export const cfgHistorySearchScope = register({
+	id: "history.searchScope",
+	type: "enum",
+	values: HISTORY_SCOPE_KINDS,
+	default: "global",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "History Search Scope",
+		description:
+			"Which scope Ctrl+R opens on: this session, the current folder, this repository or all projects; Tab and Shift+Tab change it while the panel is open",
+		options: HISTORY_SCOPE_OPTIONS,
+	},
+});
+
 export const cfgComposerRecallClearedDrafts = register({
 	id: "composer.recallClearedDrafts",
 	type: "boolean",

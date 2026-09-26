@@ -116,7 +116,7 @@ import {
 } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
-import { HistoryStorage } from "../session/history-storage";
+import { HistoryStorage, type HistoryScope } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
@@ -244,6 +244,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
+import { bindHistorySource, type HistoryScopeContext, resolveHistoryScope } from "./history-scope";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import {
@@ -343,6 +344,8 @@ import {
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
 } from "./settings";
+import { cfgHistoryScope } from "./settings";
+
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
@@ -1510,7 +1513,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
 			this.historyStorage = HistoryStorage.open();
-			this.editor.setHistoryStorage(this.historyStorage);
+			this.#installHistoryStorage(this.editor);
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
@@ -6321,6 +6324,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
 	}
 
+	/** Context a configured recall scope resolves against: the live conversation and project. */
+	#historyScopeContext(): HistoryScopeContext {
+		return { sessionId: this.sessionManager.getSessionId(), cwd: getProjectDir() };
+	}
+
+	/** Recall scope for Up-arrow history, from the `history.scope` setting. */
+	#historyScope(): HistoryScope {
+		return resolveHistoryScope(cfgHistoryScope.get(this.settings), this.#historyScopeContext());
+	}
+
+	/**
+	 * Install persistent prompt history on `editor`, scoped to the active context. Both the
+	 * bound storage and the source key resolve lazily, so a session switch, a `/move` or a
+	 * settings change re-scopes the list without recreating the editor.
+	 */
+	#installHistoryStorage(editor: CustomEditor): void {
+		const storage = this.historyStorage;
+		if (!storage) return;
+		const source = bindHistorySource(storage, () => this.#historyScope());
+		editor.setHistoryStorage(source.storage, source.sourceKey);
+	}
+
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void {
@@ -6360,7 +6385,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.syncComposerShape();
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
-			nextEditor.setHistoryStorage(this.historyStorage);
+			this.#installHistoryStorage(nextEditor);
 		}
 		nextEditor.setText(previousText);
 
