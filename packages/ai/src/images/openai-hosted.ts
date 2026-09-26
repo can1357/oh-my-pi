@@ -20,11 +20,15 @@ const IMAGE_SYSTEM_INSTRUCTION =
 interface HostedOutput {
 	type: "image_generation_call" | "message";
 	result?: string;
+	size?: string;
+	quality?: string;
 	content?: Array<{ type?: string; text?: string; refusal?: string }>;
 }
 
 interface HostedResponse {
 	output?: HostedOutput[];
+	/** Resolved tool configuration echoed by the backend, including the image model that actually ran. */
+	tools?: Array<{ type?: string; model?: string }>;
 	usage?: { input_tokens?: number; output_tokens?: number };
 	error?: { message?: string };
 }
@@ -83,7 +87,12 @@ function collectResponse(response: HostedResponse): ImageGenerationResult {
 	for (const output of response.output ?? []) {
 		if (output.type === "image_generation_call" && output.result) {
 			const bytes = Buffer.from(output.result, "base64");
-			images.push({ data: output.result, mimeType: parseImageMetadata(bytes)?.mimeType ?? "image/webp" });
+			images.push({
+				data: output.result,
+				mimeType: parseImageMetadata(bytes)?.mimeType ?? "image/webp",
+				...(output.size ? { size: output.size } : {}),
+				...(output.quality ? { quality: output.quality } : {}),
+			});
 		}
 		if (output.type === "message") {
 			for (const part of output.content ?? []) {
@@ -93,7 +102,13 @@ function collectResponse(response: HostedResponse): ImageGenerationResult {
 		}
 	}
 	const text = texts.join("\n").trim();
-	return { images, ...(text ? { text } : {}), usage: usageFromWire(response.usage) };
+	const model = response.tools?.find(tool => tool.type === "image_generation")?.model;
+	return {
+		images,
+		...(text ? { text } : {}),
+		usage: usageFromWire(response.usage),
+		...(model ? { model } : {}),
+	};
 }
 
 async function parseSse(response: Response, signal?: AbortSignal): Promise<ImageGenerationResult> {
@@ -116,7 +131,7 @@ async function parseSse(response: Response, signal?: AbortSignal): Promise<Image
 			completed = event.response;
 		}
 	}
-	return collectResponse(completed?.output?.length ? completed : { output: fallbackOutput, usage: completed?.usage });
+	return collectResponse(completed?.output?.length ? completed : { ...completed, output: fallbackOutput });
 }
 
 export async function generateHostedImage(
