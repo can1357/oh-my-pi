@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { PythonKernel as PythonKernelInstance } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
@@ -10,6 +11,7 @@ import { createAgentSession, type ExtensionFactory, type WorkspaceTree } from "@
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const OK_EXECUTION = { status: "ok", cancelled: false, timedOut: false, stdinRequested: false } as const;
 
@@ -74,9 +76,14 @@ const createTempProject = () => {
 	return { tempDir, cwd };
 };
 
-// createAgentSession opens an AuthStorage at <agentDir>/auth.db that is not
-// closed when construction fails. Point agentDir at a separate dir so the
-// auth.db handle doesn't keep the per-test project temp dir locked on Windows.
+// Inject in-memory auth and a shared model registry: letting createAgentSession
+// discover them per call opens <agentDir>/auth.db and rebuilds the model cache
+// in every fresh agentDir, which costs ~1s per session locally and pushed the
+// two-session tests past their timeout on loaded CI runners. A separate agentDir
+// per session still keeps other per-agent SQLite handles from locking the
+// per-test project temp dir on Windows.
+const authStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
 const agentDirPool: TempDir[] = [];
 const createAgentDir = (): string => {
 	const dir = TempDir.createSync("@pi-python-cleanup-agentdir-");
@@ -118,6 +125,8 @@ const createSession = async (
 		await createAgentSession({
 			cwd,
 			agentDir: createAgentDir(),
+			authStorage,
+			modelRegistry,
 			sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
 			settings: Settings.isolated({ "python.kernelMode": "session" }),
 			model: getModel(),
@@ -170,13 +179,17 @@ describe("AgentSession python cleanup", () => {
 		AgentStorage.close();
 		await pythonExecutor.disposeAllKernelSessions();
 		await Bun.sleep(0);
-		// Best-effort cleanup: createAgentSession opens AuthStorage/AgentStorage
+		// Best-effort cleanup: createAgentSession opens AgentStorage
 		// inside agentDir that may outlive the test (dispose() doesn't close them).
 		// On Windows the leaked SQLite handles keep the dir locked; swallow EBUSY
 		// rather than failing the test — the OS temp dir reaper will clean up.
 		for (const tempDir of [...tempDirs.splice(0), ...agentDirPool.splice(0)]) {
 			await tempDir.remove().catch(() => {});
 		}
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	it("does not dispose unrelated Python owners when createAgentSession fails before session construction", async () => {
@@ -203,6 +216,8 @@ describe("AgentSession python cleanup", () => {
 			createAgentSession({
 				cwd,
 				agentDir: createAgentDir(),
+				authStorage,
+				modelRegistry,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings: Settings.isolated({ "python.kernelMode": "session" }),
 				model: getModel(),
@@ -271,6 +286,8 @@ describe("AgentSession python cleanup", () => {
 			createAgentSession({
 				cwd,
 				agentDir: createAgentDir(),
+				authStorage,
+				modelRegistry,
 				sessionManager: SessionManager.inMemory(cwd),
 				settings: Settings.isolated({ "python.kernelMode": "session", "memory.backend": "local" }),
 				model: getModel(),
