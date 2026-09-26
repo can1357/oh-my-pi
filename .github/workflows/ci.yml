@@ -201,6 +201,33 @@ jobs:
          - name: Build collab web
            run: bun run collab:web:build
 
+   # MODULE.bazel.lock caches the crate_universe (@crates) extension result,
+   # keyed by Cargo.toml/Cargo.lock/member-manifest hashes. While current, a
+   # fresh bazel server skips the extension entirely; once stale, every bazel
+   # job here re-runs `cargo-bazel splice` (~240 s each, CI run 36255186857).
+   # Stale is slow, never wrong, so this job only makes drift visible — PRs
+   # that touch Cargo files get told to run `bun run gen:bazel-lock`. The
+   # check compares hashes only (no splice); on failure the job evaluates the
+   # extension once and uploads the refreshed lockfile, so a contributor
+   # without bazelisk can commit it as-is.
+   bazel_lock:
+      name: Check MODULE.bazel.lock freshness
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         - name: Check crate_universe entry
+           run: bun scripts/gen-bazel-lock.ts --check
+         - name: Refresh MODULE.bazel.lock
+           if: failure()
+           run: bun scripts/gen-bazel-lock.ts
+         - name: Upload refreshed MODULE.bazel.lock
+           if: failure()
+           uses: actions/upload-artifact@v4
+           with:
+              name: MODULE.bazel.lock
+              path: MODULE.bazel.lock
+
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is

@@ -397,6 +397,15 @@ async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<v
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
 
+	// Step 4 refreshes MODULE.bazel.lock through bazel; fail before touching
+	// any file rather than half-way through the version rewrite.
+	const bazel = Bun.which("bazelisk") ?? Bun.which("bazel");
+	if (!bazel) {
+		console.error("Error: bazelisk (or bazel) not on PATH; needed to refresh MODULE.bazel.lock.");
+		process.exit(1);
+	}
+	console.log(`  Bazel: ${bazel}`);
+
 	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
 	let version = versionOrBump;
 	if (version === "major" || version === "minor" || version === "patch") {
@@ -483,6 +492,12 @@ async function cmdRelease(versionOrBump: string, skipCICheck = false): Promise<v
 	// it here (like the lockfiles) so the bazel clippy policy can never drift.
 	// The release_gate CI job runs the matching `--check`.
 	await $`bun scripts/gen-clippy-bazelrc.ts`;
+	// MODULE.bazel.lock caches the crate_universe extension result keyed by
+	// Cargo.toml/Cargo.lock hashes, which the bump just rewrote. Unrefreshed,
+	// every bazel job of the release run re-splices the cargo workspace
+	// (~4 min each). One local evaluation (~1-4 min) fixes all of them. The
+	// bazel_lock CI job runs the matching `--check`.
+	await $`bun scripts/gen-bazel-lock.ts`;
 	console.log();
 
 	// 5. Update changelogs
