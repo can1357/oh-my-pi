@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `detectToolCallAnomaly(message, toolResults)` and `createToolCallAuditEvent()` in `pi-ai`: pairs each emitted tool call with its result and reports a `tool_failed` (empty real result) or `never_run` (synthetic / no paired result) anomaly, with a structured `ToolCallAuditEvent` for logging or recovery.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import type { ToolCallAuditEvent } from "@oh-my-pi/pi-ai/utils/tool-call-anomaly";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -191,6 +192,13 @@ export interface AgentOptions {
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
 	 */
 	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
+	/**
+	 * Called when a tool call on a turn did not land as a real executed tool
+	 * result (empty/error output, or a synthetic placeholder for a call the
+	 * assistant never invoked locally). Optional; the loop always writes a
+	 * structured warning for every anomaly.
+	 */
+	onToolCallAnomaly?: (event: ToolCallAuditEvent) => void | Promise<void>;
 	/**
 	 * Custom token budgets for thinking levels (token-based providers only).
 	 */
@@ -420,6 +428,7 @@ export class Agent {
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
+	#onToolCallAnomaly?: (event: ToolCallAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: AgentBeforeModelCall;
@@ -504,6 +513,7 @@ export class Agent {
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
+		this.#onToolCallAnomaly = opts.onToolCallAnomaly;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
 		this.transformAssistantMessage = opts.transformAssistantMessage;
@@ -1464,6 +1474,7 @@ export class Agent {
 				: undefined,
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
+			onToolCallAnomaly: this.#onToolCallAnomaly,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,

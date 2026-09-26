@@ -22,6 +22,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import type { ToolCallAuditEvent } from "@oh-my-pi/pi-ai/utils/tool-call-anomaly";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
@@ -397,6 +398,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
 	 */
 	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
+
+	/**
+	 * Called when a tool call on a turn did not land as a real executed tool
+	 * result (empty/error output, or a synthetic placeholder for a call the
+	 * assistant never invoked locally). Optional; the loop always writes a
+	 * structured warning for every anomaly.
+	 */
+	onToolCallAnomaly?: (event: ToolCallAuditEvent) => void | Promise<void>;
 
 	/**
 	 * Dynamic tool-choice directive, resolved once per turn. Returns a hard

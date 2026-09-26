@@ -46,6 +46,10 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import {
+	createToolCallAuditEvent,
+	detectToolCallAnomaly,
+} from "@oh-my-pi/pi-ai/utils/tool-call-anomaly";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
@@ -1431,6 +1435,35 @@ async function runLoopBody(
 					hasMoreToolCalls = true;
 				}
 
+				// Detect tool calls on this turn that did not land as a real, executed
+				// tool result (empty/error output, or a synthetic placeholder for a call
+				// the assistant never invoked locally). This audits the "model emitted a
+				// malformed / invalid tool invocation and was never shown to it" failure
+				// mode. Non-fatal: no throw, no turn abort — just a structured warning plus
+				// the optional onToolCallAnomaly hook.
+				const toolCallAnomaly = detectToolCallAnomaly(message, toolResults);
+				if (toolCallAnomaly) {
+					const { provider, id } = config.getModel?.() ?? config.model;
+					logger.warn(
+						"tool-call anomaly: invocation did not land as a real executed tool result",
+						{
+							kinds: toolCallAnomaly.kinds.join(", "),
+							stopReason: toolCallAnomaly.stopReason,
+							truncated: toolCallAnomaly.stopReason === "length",
+							calls: toolCallAnomaly.details.map(
+								(d) => `${d.toolName} -> ${d.kind} (${d.reason})`,
+							),
+							model: { provider, id },
+						},
+					);
+					await config.onToolCallAnomaly?.(
+						createToolCallAuditEvent({
+							anomaly: toolCallAnomaly,
+							model: { provider, id },
+							timestamp: Date.now(),
+						}),
+					);
+				}
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
 				});

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `onToolCallAnomaly` to `AgentLoopConfig` and `AgentOptions`: when a model-emitted tool call does not land as a real executed result (empty output, or an uninvoked synthetic placeholder), the agent fires this hook with a structured `ToolCallAuditEvent`, so a host can log, observe, or recover from an invalid or malformed tool invocation.
+
+### Changed
+
+- The agent now logs a structured warning when a tool call the model issued never receives a real result, without ever interrupting the turn or changing its control flow.
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed
