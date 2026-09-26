@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-notes";
 import type { ContextNotesEntry } from "@oh-my-pi/pi-coding-agent/session/context-notes";
 import type { CustomEntry, ResetBoundaryEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { ContextNotesTool, NewContextTool } from "@oh-my-pi/pi-coding-agent/tools/context-notes";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
@@ -168,5 +169,14 @@ describe("experimental context notes", () => {
 		} finally {
 			ensureSpy.mockRestore();
 		}
+	});
+
+	it("keeps a compaction summary first so Anthropic accepts the native compaction block", () => {
+		const entries: SessionEntry[] = [
+			noteEntry("note", null, "current state"),
+			{ type: "compaction", id: "c", parentId: "note", timestamp: NOW, summary: "older work", firstKeptEntryId: "c", tokensBefore: 1 },
+		];
+		const roles = buildSessionContext(entries).messages.map(message => message.role);
+		expect(roles.slice(0, 2)).toEqual(["compactionSummary", "custom"]);
 	});
 });

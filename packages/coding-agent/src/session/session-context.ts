@@ -617,7 +617,12 @@ export function buildSessionContext(
 		if (notes && renderedNotes.length > 0) {
 			const sourceEntry = path.find(entry => entry.id === notes.entryId);
 			if (sourceEntry) {
-				messages.unshift(
+				// Anthropic requires a native compaction block to open the history, so
+				// the notebook goes after a leading summary rather than ahead of it.
+				const at = messages[0]?.role === "compactionSummary" ? 1 : 0;
+				messages.splice(
+					at,
+					0,
 					createCustomMessage(CONTEXT_NOTES_ENTRY_TYPE, renderedNotes, false, undefined, sourceEntry.timestamp),
 				);
 			}
