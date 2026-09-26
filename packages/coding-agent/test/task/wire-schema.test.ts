@@ -98,6 +98,22 @@ describe("task wire schema", () => {
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
 	});
+
+	it("rejects a batch-level agent instead of silently spawning the default agent", () => {
+		for (const options of [
+			{ isolationEnabled: false, batchEnabled: true },
+			{ isolationEnabled: true, batchEnabled: true, defaultAgent: "scout", effortEnabled: true },
+		]) {
+			const schema = getTaskSchema(options);
+			const parsed = schema({ context: "Review changes", agent: "reviewer", tasks: [{ task: "Review the patch" }] });
+			expect(parsed instanceof type.errors).toBe(true);
+			if (parsed instanceof type.errors) expect(parsed.summary).toContain("tasks[].agent");
+			const corrected = parsedItems(
+				schema({ context: "Review changes", tasks: [{ agent: "reviewer", task: "Review the patch" }] }),
+			);
+			expect(corrected[0]?.agent).toBe("reviewer");
+		}
+	});
 });
 
 // Contract: `agent` and `name` shape the spawned subagent's identity and the
