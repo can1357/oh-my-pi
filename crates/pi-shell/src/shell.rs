@@ -327,6 +327,21 @@ pub async fn execute_shell_streams(
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
 
+/// How long a cancelled run waits for its task to wind down before aborting
+/// it (discarding any output still queued in the pipe readers).
+///
+/// On Windows the wait covers more hops: in-process pipeline producers stop on
+/// a poll between writes and consumers cannot observe cancellation out of a
+/// blocked pipe read (readiness polling is unix-only in the builtin stdin
+/// layer), so producer exit, pipe EOF, the consumer's final flush and the
+/// reader's last read each need a separate thread wakeup. Under heavy load
+/// that chain exceeded 2s, the abort then discarded the consumer's final
+/// output mid-flight (`yes x | tail -5` lost its 5 lines).
+#[cfg(windows)]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(not(windows))]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
@@ -375,7 +390,7 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
 			if graceful.is_err() {
 				run_task.abort();
 				let _ = run_task.await;
@@ -452,7 +467,7 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -518,7 +533,7 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -1298,7 +1313,13 @@ async fn run_shell_command_once(
 	});
 	// Let pipeline consumers flush output after cancellation kills their
 	// producers. The outer run cancellation remains bounded, and this delayed
-	// fallback still releases readers whose writers never close.
+	// fallback still releases readers whose writers never close. Windows needs
+	// a wider budget for the same reason as `CANCEL_RUN_GRACE`: the consumer's
+	// flush depends on the producer's exit becoming visible through several
+	// thread wakeups.
+	#[cfg(windows)]
+	const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
+	#[cfg(not(windows))]
 	const CANCEL_READER_GRACE: Duration = Duration::from_millis(500);
 	let cancel_bridge = tokio::spawn({
 		let cancel_token = cancel_token.clone();
