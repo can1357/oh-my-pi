@@ -936,9 +936,8 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 
-		// Keep unmanaged fd-2 writes (macOS libmalloc/framework diagnostics) off
-		// the viewport while we own the terminal; released in stop(). See
-		// stderr-guard in pi-utils (mirrors openai/codex#24459).
+		// Keep unmanaged native fd-2 writes off the viewport while we own the
+		// terminal; released in stop(). See stderr-guard in pi-utils.
 		suppressTerminalStderr();
 
 		// Set up resize handler immediately. The OS refreshes process.stdout

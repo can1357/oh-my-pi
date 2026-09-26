@@ -2,20 +2,17 @@
  * Terminal stderr guard: keeps unmanaged fd-2 writes off the terminal while a
  * TUI owns the viewport.
  *
- * On macOS, runtime diagnostics are written by the platform directly to file
- * descriptor 2 at arbitrary times — e.g. libmalloc's "MallocStackLogging:
- * can't turn off malloc stack logging because it was not enabled" when the OS
- * broadcasts a memory-diagnostic event to long-lived processes. Those bytes
- * bypass the renderer and paint straight into the viewport. Stripping the
- * MallocStackLogging* env vars (cli.ts) only protects child processes; it
- * cannot stop libmalloc inside THIS process from logging.
+ * Native runtimes and libraries can write directly to file descriptor 2 at
+ * arbitrary times. Examples include macOS libmalloc diagnostics and Bun HTTP
+ * decompression diagnostics on Linux. Those bytes bypass the renderer and
+ * paint straight into the viewport.
  *
- * Fix (mirrors openai/codex#24459): while the TUI owns the terminal, dup fd 2
- * aside and dup2 a redirect target over it; restore the saved fd whenever
- * terminal ownership is released (external editor, Ctrl+Z suspend, shutdown,
- * crash restore). Unlike codex we redirect to the omp log file — not
- * /dev/null — so the diagnostics stay greppable and Bun native-crash reports
- * (which abort before any JS cleanup can restore fd 2) are preserved.
+ * While the TUI owns the terminal, dup fd 2 aside and dup2 a redirect target
+ * over it; restore the saved fd whenever terminal ownership is released
+ * (external editor, Ctrl+Z suspend, shutdown, crash restore). This mirrors
+ * openai/codex#24459, but redirects to the omp log file instead of /dev/null
+ * so diagnostics stay greppable and Bun native-crash reports (which abort
+ * before any JS cleanup can restore fd 2) are preserved.
  *
  * Only dup/dup2 go through bun:ffi. fcntl is deliberately avoided: it is
  * variadic, and the arm64-darwin ABI passes variadic arguments on the stack,
@@ -82,21 +79,19 @@ let savedStderrFd: number | null = null;
 export interface SuppressTerminalStderrOptions {
 	/** Redirect target path; defaults to today's omp log file, then /dev/null. */
 	redirectPath?: string;
-	/** Bypass the macOS + same-terminal gate. Tests only. */
+	/** Bypass the same-terminal gate. Tests only. */
 	force?: boolean;
 }
 
 /**
  * Redirect fd 2 away from the terminal while the TUI owns the viewport.
  * Returns true when suppression is (already) active. No-op — returning
- * false — off macOS, when stderr does not target the stdout terminal, or
- * when the libc fd ops are unavailable.
+ * false — when stderr does not target the stdout terminal or when libc fd
+ * operations are unavailable.
  */
 export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions): boolean {
 	if (savedStderrFd !== null) return true;
-	if (!options?.force && (process.platform !== "darwin" || !stderrSharesStdoutTerminal())) {
-		return false;
-	}
+	if (!options?.force && !stderrSharesStdoutTerminal()) return false;
 	const libc = libcFdOps();
 	if (!libc) return false;
 
