@@ -840,7 +840,10 @@ export class PluginManager {
 		// Whatever is there — a stale link, or a real directory from a git install.
 		await fs.promises.rm(linkPath, { recursive: true, force: true });
 
-		await fs.promises.symlink(absolutePath, linkPath);
+		// A junction needs no privilege on Windows; a plain directory symlink
+		// would EPERM outside developer mode (same treatment as the marketplace
+		// link in marketplace/manager.ts).
+		await fs.promises.symlink(absolutePath, linkPath, process.platform === "win32" ? "junction" : "dir");
 
 		const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
 		manifest.version = pkg.version;
