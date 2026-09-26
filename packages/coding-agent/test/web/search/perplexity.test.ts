@@ -495,7 +495,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 			get: async (provider: string) => (provider === "perplexity" ? "oauth-session-jwt" : undefined),
 			source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 		},
-		limits: { rotate: async () => false },
+		limits: { rotate: async () => ({ switched: false }) },
 	} as unknown as AuthStorage;
 
 	it("does not emit a direct api-key config from the OAuth session token", async () => {

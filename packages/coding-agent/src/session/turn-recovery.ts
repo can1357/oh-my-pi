@@ -2420,11 +2420,12 @@ export class TurnRecovery {
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
 		if (accountPolicyDenial && currentModel) {
-			switchedCredential = await this.#host.modelRegistry.authStorage.limits.rotate(
-				currentModel.provider,
-				this.#host.sessionId(),
-				{ error: errorMessage, modelId: currentModel.id },
-			);
+			switchedCredential = (
+				await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
+					error: errorMessage,
+					modelId: currentModel.id,
+				})
+			).switched;
 			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard

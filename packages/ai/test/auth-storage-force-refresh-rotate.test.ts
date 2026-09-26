@@ -149,7 +149,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached");
 		const rotated = await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() });
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		// A hard 401 must NOT take the usage-limit code path.
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 
@@ -274,7 +274,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			.spyOn(authStorage.keys, "getWithCredential")
 			.mockResolvedValueOnce({ apiKey: "quota-blocked-B", credentialId: 1 })
 			.mockResolvedValueOnce({ apiKey: "quota-blocked-A", credentialId: 2 });
-		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(false);
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });
 		const attemptedKeys: string[] = [];
 
 		await expect(
@@ -435,14 +435,14 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: authError(),
 			apiKey: "missing-or-changed-failed-bearer",
 		});
-		expect(rotated).toBe(false);
+		expect(rotated.switched).toBe(false);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const rotatedByMissingId = await authStorage.limits.rotate(PROVIDER, sessionId, {
 			error: authError(),
 			credentialId: missingCredentialId,
 		});
-		expect(rotatedByMissingId).toBe(false);
+		expect(rotatedByMissingId.switched).toBe(false);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const marked = await authStorage.limits.markReached(PROVIDER, sessionId, {
@@ -484,7 +484,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: oldKey,
 			credentialId: targetRow.id,
 		});
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const laterSelections = new Set<string>();
@@ -511,7 +511,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: usageLimitError(),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		// Usage / account-rate-limit errors route to markUsageLimitReached, which
 		// owns the block duration (default + server usage-report reset) — the
 		// resolver never parses retry-after itself.
@@ -539,7 +539,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await authStorage.keys.get(PROVIDER, "cyber-policy")).not.toBe(first);
 	});
@@ -580,14 +580,14 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				error: denial,
 				apiKey: first,
 			}),
-		).toBe(false);
+		).toEqual({ switched: false });
 		expect(
 			await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
 				error: denial,
 				modelId: "gpt-5.3-codex",
 				apiKey: first,
 			}),
-		).toBe(false);
+		).toEqual({ switched: false });
 		expect(await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(first);
 		const usageLimitSpy = vi.spyOn(codexStorage.limits, "markReached");
 		const rotated = await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
@@ -596,7 +596,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: first,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
 			"daybreak-sibling",
@@ -659,7 +659,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: first,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await cursorStorage.keys.get(CURSOR_PROVIDER, sessionId, { modelId: CURSOR_MODEL })).toBe(
 			"cursor-plan-sibling",
@@ -703,7 +703,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: new ProviderHttpError("Generic provider failure", 401, { code: "insufficient_quota" }),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(usageLimitSpy.mock.calls[0]?.[0]).toBe(PROVIDER);
 		expect(usageLimitSpy.mock.calls[0]?.[1]).toBe("machine-code-quota");
@@ -731,7 +731,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: xaiCreditsError,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(await authStorage.keys.get(PROVIDER, "xai-credits")).not.toBe(first);
 	});
@@ -759,7 +759,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 			const rotated = await authStorage.limits.rotate(PROVIDER, sessionId, { error });
 
-			expect(rotated).toBe(true);
+			expect(rotated.switched).toBe(true);
 			expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 			expect(await authStorage.keys.get(PROVIDER, sessionId)).not.toBe(first);
 			usageLimitSpy.mockRestore();
@@ -822,7 +822,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		await authStorage.keys.get(PROVIDER, "sess");
-		expect(await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() })).toBe(false);
+		expect((await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() })).switched).toBe(false);
 	});
 
 	test("rotateSessionCredential returns false when the session has no sticky credential", async () => {
@@ -833,7 +833,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		// Never resolved a key for this session → nothing to rotate away from.
-		expect(await authStorage.limits.rotate(PROVIDER, "untouched", { error: authError() })).toBe(false);
+		expect((await authStorage.limits.rotate(PROVIDER, "untouched", { error: authError() })).switched).toBe(false);
 	});
 
 	test("markUsageLimitReached reports the earliest sibling unblock time when every sibling is blocked", async () => {
@@ -950,7 +950,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: deniedKey,
 		});
 
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 		expect(await authStorage.keys.get("anthropic", sessionId)).toBe("healthy-access");
 	});
 
@@ -975,7 +975,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: anthropicError,
 			apiKey: firstKey,
 		});
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 
 		const secondKey = await authStorage.keys.get("anthropic", sessionId);
 		expect(secondKey).toBe("token-org-2");
@@ -987,6 +987,6 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: anthropicError,
 			apiKey: secondKey,
 		});
-		expect(secondSwitched).toBe(false);
+		expect(secondSwitched.switched).toBe(false);
 	});
 });
