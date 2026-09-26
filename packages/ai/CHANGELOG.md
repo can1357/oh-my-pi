@@ -99,6 +99,10 @@
 - Anthropic organization-level OAuth permission errors now reliably rotate to sibling credentials and persist blocks across usage reports.
 - Fixed error handling for provider responses that do not include token usage information.
 
+### Added
+
+- Added an opt-in RFC 9207 issuer check to OAuth callback flows: `onAuthorizeRedirect(url)` can reject a redirect whose `iss` does not match the discovered issuer ([#11936](https://github.com/can1357/oh-my-pi/pull/11936) by [@bchap1n](https://github.com/bchap1n)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

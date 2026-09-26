@@ -1283,6 +1283,175 @@ describe("mcp oauth flow", () => {
 
 			expect(tokenParams.get("resource")).toBe("https://token.example.com");
 		});
+
+		describe("RFC 9207 issuer validation", () => {
+			type IssuerFlowConfig = Partial<
+				Pick<ConstructorParameters<typeof MCPOAuthFlow>[0], "issuerUrl" | "issParameterSupported">
+			>;
+			function issuerFlow(overrides: IssuerFlowConfig = {}): MCPOAuthFlow {
+				return new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://auth.example.com/tenant/oauth/authorize",
+						tokenUrl: "https://auth.example.com/tenant/oauth/token",
+						issuerUrl: "https://auth.example.com/tenant",
+						...overrides,
+					},
+					{},
+				);
+			}
+
+			/** Drive a full `login()` whose callback URL carries the given `iss`. */
+			async function loginWithIss(iss: string | undefined, overrides: IssuerFlowConfig = {}) {
+				let tokenRequestBody = "";
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://auth.example.com/tenant/oauth/authorize",
+						tokenUrl: "https://provider.example/token",
+						issuerUrl: "https://auth.example.com/tenant",
+						clientId: "client-id",
+						callbackPort: 14571,
+						fetch: mockProviderTokenEndpoint(body => {
+							tokenRequestBody = body;
+						}),
+						...overrides,
+					},
+					{
+						onAuth: info => {
+							const authUrl = new URL(info.url);
+							const state = authUrl.searchParams.get("state") ?? "";
+							const advertised = authUrl.searchParams.get("redirect_uri") ?? "";
+							const port = new URL(advertised).port || "80";
+							const callback = new URL(`http://127.0.0.1:${port}/callback`);
+							callback.searchParams.set("code", "code");
+							callback.searchParams.set("state", state);
+							if (iss !== undefined) callback.searchParams.set("iss", iss);
+							queueMicrotask(() => {
+								void completeLocalOAuthCallback(callback.toString());
+							});
+						},
+						signal: AbortSignal.timeout(1_000),
+					},
+				);
+				const credentials = await flow.login();
+				return { credentials, tokenRequestBody };
+			}
+
+			function callbackUrl(iss?: string): URL {
+				const url = new URL("http://127.0.0.1:3000/callback?code=code&state=state");
+				if (iss !== undefined) url.searchParams.set("iss", iss);
+				return url;
+			}
+
+			it("accepts a callback whose iss matches the discovered issuer, not the endpoint", async () => {
+				// The authorize endpoint appends a path to the issuer; comparing
+				// against the endpoint would falsely reject this legitimate
+				// callback. Asserted through `login()` so the accepted code must
+				// actually reach the token exchange.
+				const { credentials, tokenRequestBody } = await loginWithIss("https://auth.example.com/tenant");
+				const tokenParams = new URLSearchParams(tokenRequestBody);
+				expect(credentials.access).toBe("access-token");
+				expect(tokenParams.get("code")).toBe("code");
+			});
+
+			it("rejects an iss that differs from the issuer only by trailing slash", () => {
+				// Distinct issuer identifiers stay distinct - exact comparison.
+				expect(() => issuerFlow().onAuthorizeRedirect(callbackUrl("https://auth.example.com/tenant/"))).toThrow(
+					/OAuth iss mismatch.*RFC 9207/,
+				);
+			});
+
+			it("rejects a callback whose iss names a different authorization server", () => {
+				expect(() => issuerFlow().onAuthorizeRedirect(callbackUrl("https://attacker.example.com"))).toThrow(
+					/OAuth iss mismatch.*RFC 9207.*expected https:\/\/auth\.example\.com\/tenant, got https:\/\/attacker\.example\.com/,
+				);
+			});
+
+			it("accepts a legacy callback that omits iss", async () => {
+				const { credentials, tokenRequestBody } = await loginWithIss(undefined);
+				const tokenParams = new URLSearchParams(tokenRequestBody);
+				expect(credentials.access).toBe("access-token");
+				expect(tokenParams.get("code")).toBe("code");
+			});
+
+			it("rejects a missing iss when the server advertises RFC 9207 support", async () => {
+				const error = await loginWithIss(undefined, { issParameterSupported: true }).catch(
+					(caught: unknown) => caught,
+				);
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).toMatch(/OAuth iss mismatch.*RFC 9207.*omitted/);
+			});
+
+			it("accepts a matching iss when the server advertises RFC 9207 support", async () => {
+				const { credentials, tokenRequestBody } = await loginWithIss("https://auth.example.com/tenant", {
+					issParameterSupported: true,
+				});
+				const tokenParams = new URLSearchParams(tokenRequestBody);
+				expect(credentials.access).toBe("access-token");
+				expect(tokenParams.get("code")).toBe("code");
+			});
+
+			it("rejects any iss when the server advertises support without an issuer", async () => {
+				// Strict support + no discovered issuer is a malformed configuration:
+				// omitted `iss` is rejected above, so accepting any `iss` here would
+				// redeem codes from an arbitrary issuer via a malicious metadata doc.
+				const error = await loginWithIss("https://attacker.example.com", {
+					issParameterSupported: true,
+					issuerUrl: undefined,
+				}).catch((caught: unknown) => caught);
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).toMatch(/OAuth iss mismatch.*RFC 9207.*no issuer/);
+			});
+
+			// Without a discovered issuer there is no identifier to compare
+			// against and no reliable origin inference (OAuth metadata does not
+			// require endpoint and issuer origins to match), so the guard fails
+			// open; the exact guard covers metadata-publishing servers.
+			it("strips ANSI/C1 controls and truncates both untrusted issuer values in the error", () => {
+				// `iss` arrives on the callback; `expected` can come from a
+				// server-supplied metadata/error body. Both are attacker-influenced.
+				const hostileIss = `https://attacker.example.com/${"x".repeat(200)}\u001b]0;pwned\u0007\u009b1;2H\n\t\rINJECTED`;
+				const hostileExpected = `https://evil.example.com/${"y".repeat(200)}\u009b2J\n\tALSO-INJECTED`;
+				const flow = issuerFlow({ issuerUrl: hostileExpected });
+				try {
+					flow.onAuthorizeRedirect(callbackUrl(hostileIss));
+					throw new Error("expected rejection");
+				} catch (error) {
+					expect(error).toBeInstanceOf(Error);
+					const message = (error as Error).message;
+					expect(message).toContain("OAuth iss mismatch");
+					// Neither ESC (C0) nor CSI (C1) may survive into the message.
+					expect(message).not.toContain("\u001b");
+					expect(message).not.toContain("\u009b");
+					// The message must stay one line so it cannot split or indent
+					// the TUI error render.
+					expect(message).not.toContain("\n");
+					expect(message).not.toContain("\r");
+					expect(message).not.toContain("\t");
+					expect(message).not.toContain("INJECTED");
+					expect(message.split("\n")).toHaveLength(1);
+					expect(message.length).toBeLessThan(300);
+				}
+			});
+
+			it("rejects a mismatching iss even when the expected issuer is hostile text", () => {
+				const flow = issuerFlow({ issuerUrl: `https://evil.example.com/\u009b2J` });
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://auth.example.com/tenant"))).toThrow(
+					/OAuth iss mismatch.*RFC 9207/,
+				);
+			});
+
+			it("without a discovered issuer, fails open for any iss", () => {
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://legacy.example.com/oauth/authorize",
+						tokenUrl: "https://legacy.example.com/oauth/token",
+					},
+					{},
+				);
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://legacy.example.com/tenant"))).not.toThrow();
+				expect(() => flow.onAuthorizeRedirect(callbackUrl("https://attacker.example.com"))).not.toThrow();
+			});
+		});
 	});
 });
 

@@ -758,6 +758,7 @@ export class MCPCommandController {
 									prompt: finalConfig.oauth?.prompt,
 									registrationUrl: oauth.registrationUrl,
 									issuerUrl: oauth.issuerUrl,
+									issParameterSupported: oauth.issParameterSupported,
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
 									stripSameOriginResource: oauthResourceIsFallback,
@@ -842,6 +843,7 @@ export class MCPCommandController {
 			serverUrl?: string;
 			registrationUrl?: string;
 			issuerUrl?: string;
+			issParameterSupported?: boolean;
 			resource?: string;
 			stripSameOriginResource?: boolean;
 			/**
@@ -908,6 +910,7 @@ export class MCPCommandController {
 					tokenUrl: tokenUrl,
 					registrationUrl: opts?.registrationUrl,
 					issuerUrl: opts?.issuerUrl,
+					issParameterSupported: opts?.issParameterSupported,
 					clientId: resolvedClientId,
 					clientSecret: resolvedClientSecret,
 					scopes: scopes || undefined,
@@ -2048,6 +2051,7 @@ export class MCPCommandController {
 					prompt: found.config.oauth?.prompt,
 					registrationUrl: oauth.registrationUrl,
 					issuerUrl: oauth.issuerUrl,
+					issParameterSupported: oauth.issParameterSupported,
 					serverUrl,
 					resource: oauthResource,
 					stripSameOriginResource: oauthResourceIsFallback,
