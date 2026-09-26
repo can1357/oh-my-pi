@@ -218,6 +218,8 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
+
 Compaction triggers are separate from model and service-tier selection: an exact, case-sensitive
 `task.agentCompactionThresholdOverrides[agentName]` entry (`90000` or `"80%"`) replaces the
 `compaction.threshold*` settings for that agent only; agents without an entry, including agents it

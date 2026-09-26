@@ -15,7 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentsHubDeps } from "@oh-my-pi/pi-coding-agent/modes/agents-hub-deps";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -26,8 +28,8 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
-
-import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -156,6 +158,44 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	it("uses the persisted /agents model after replacing a session-only task selection", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, model: ["@task"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const manager = createManager();
+		const session = createSession({ manager });
+		const auth = createInMemoryAuthStorage();
+		try {
+			const deps = createAgentsHubDeps(session.cwd, session.settings, new ModelRegistry(auth), () => ({
+				explicit: [],
+				configured: [],
+				configuredLevel: "user",
+				mode: "explicit-only",
+			}));
+			const tool = await TaskTool.create(session);
+
+			cfgTaskAgentModelOverrides.override(session.settings, { task: "anthropic/claude-opus-5" });
+			const first = await tool.execute("tc-old", { agent: "task", name: "Old", task: "First task" } as TaskParams);
+			const firstJob = manager.getJob(first.details?.async?.jobId ?? "");
+			if (!firstJob) throw new Error("First task did not spawn");
+			await firstJob.promise;
+			deps.setOverrides("model", { task: "anthropic/claude-opus-5-5" });
+			await tool.execute("tc-new", { agent: "task", name: "New", task: "Second task" } as TaskParams);
+			await Promise.all(manager.getAllJobs().map(job => job.promise));
+
+			expect(runSpy.mock.calls.map(([options]) => options.modelOverride)).toEqual([
+				["anthropic/claude-opus-5"],
+				["anthropic/claude-opus-5-5"],
+			]);
+		} finally {
+			auth.close();
+		}
 	});
 
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
