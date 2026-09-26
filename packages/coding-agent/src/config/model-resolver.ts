@@ -700,6 +700,30 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 	return undefined;
 }
 /**
+ * True when `needle` occurs in `haystack` at a token boundary: the match must
+ * start at the string edge or directly after a non-alphanumeric separator.
+ * Keeps prefix selectors like `gem` → `gemini-*` and boundary suffixes like
+ * `mini` → `gpt-5.4-mini` working, while blocking short generic patterns from
+ * matching mid-word inside longer ids (`mini` in `gemini-…`).
+ */
+export function includesAtTokenBoundary(haystack: string, needle: string): boolean {
+	const lowerNeedle = needle.toLowerCase();
+	if (!lowerNeedle) return false;
+	const lowerHaystack = haystack.toLowerCase();
+	let index = lowerHaystack.indexOf(lowerNeedle);
+	while (index !== -1) {
+		const previous = lowerHaystack[index - 1];
+		if (index === 0 || previous === undefined || !isAlphanumeric(previous)) return true;
+		index = lowerHaystack.indexOf(lowerNeedle, index + 1);
+	}
+	return false;
+}
+
+function isAlphanumeric(character: string): boolean {
+	return (character >= "a" && character <= "z") || (character >= "0" && character <= "9");
+}
+
+/**
  * The single model-matching engine. Tries, in order:
  * 1. exact `provider/id` reference (variant-alias and OpenRouter routed/date
  *    fallbacks included),
@@ -814,9 +838,11 @@ function matchModel(
 		}
 	}
 
-	// No exact match - fall back to partial matching
+	// No exact match - fall back to partial matching. Substring hits must sit at
+	// a token boundary so short generic selectors cannot match mid-word
+	// (`mini` must not resolve to `gemini-*`, see issue #13292).
 	const matches = availableModels.filter(
-		m => m.id.toLowerCase().includes(lowerPattern) || m.name?.toLowerCase().includes(lowerPattern),
+		m => includesAtTokenBoundary(m.id, lowerPattern) || (m.name ? includesAtTokenBoundary(m.name, lowerPattern) : false),
 	);
 
 	if (matches.length === 0) {
@@ -2407,8 +2433,8 @@ export async function findSmolModel(
 		const exactMatch = parseModelPattern(pattern, availableModels, undefined).model;
 		if (exactMatch) return exactMatch;
 
-		// Try fuzzy match (substring)
-		const fuzzyMatch = availableModels.find(m => m.id.toLowerCase().includes(pattern));
+		// Try fuzzy match (substring at token boundaries)
+		const fuzzyMatch = availableModels.find(m => includesAtTokenBoundary(m.id, pattern));
 		if (fuzzyMatch) return fuzzyMatch;
 	}
 
@@ -2443,8 +2469,8 @@ export async function findSlowModel(
 		const exactMatch = parseModelPattern(pattern, availableModels, undefined).model;
 		if (exactMatch) return exactMatch;
 
-		// Try fuzzy match (substring)
-		const fuzzyMatch = availableModels.find(m => m.id.toLowerCase().includes(pattern.toLowerCase()));
+		// Try fuzzy match (substring at token boundaries)
+		const fuzzyMatch = availableModels.find(m => includesAtTokenBoundary(m.id, pattern));
 		if (fuzzyMatch) return fuzzyMatch;
 	}
 

@@ -8,7 +8,7 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
+import { getModelMatchPreferences, includesAtTokenBoundary, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
@@ -65,7 +65,7 @@ function getSmolModelCandidates(
 	for (const pattern of MODEL_PRIO.smol) {
 		const needle = pattern.toLowerCase();
 		addCandidate(availableModels.find(m => m.id.toLowerCase() === needle));
-		addCandidate(availableModels.find(m => m.id.toLowerCase().includes(needle)));
+		addCandidate(availableModels.find(m => includesAtTokenBoundary(m.id, needle)));
 	}
 
 	for (const model of availableModels) {
