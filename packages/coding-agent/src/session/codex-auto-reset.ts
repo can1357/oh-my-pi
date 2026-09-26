@@ -297,7 +297,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			skipped.push({ accountKey: "*", rule: "account", reason: "credits-unknown" });
 			continue;
 		}
-		const accountKey = `openai-codex|${orgId?.trim().toLowerCase() ?? "-"}|${credentialId}`;
+		const accountKey = codexResetAccountKey(orgId, credentialId);
 		const isActive =
 			report.metadata?.resetCreditActive === true || reportMatchesActiveAccount(report, input.identity);
 		if (nowMs - report.fetchedAt > REPORT_FRESHNESS_MS) {
@@ -537,6 +537,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	return { actions, skipped };
 }
 
+/** Stable per-credential identity for cross-session redemption coordination. */
+export function codexResetAccountKey(orgId: string | undefined, credentialId: number): string {
+	return `openai-codex|${orgId?.trim().toLowerCase() ?? "-"}|${credentialId}`;
+}
+
 /** One attempt per (account, weekly-reset-minute) block episode. */
 export function blockedAttemptKey(accountKey: string, weeklyResetsAtMs: number): string {
 	return `block|${accountKey}|${Math.round(weeklyResetsAtMs / DEBOUNCE_BUCKET_MS)}`;
@@ -673,6 +678,8 @@ export interface CodexAutoRedeemCoordinator {
 	attemptedKeys: Set<string>;
 	deferredUntilByKey: Map<string, number>;
 	lastAttemptAtByAccount: Map<string, number>;
+	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
+	resetLockPath?: string;
 	inFlightByAccount: Map<string, Promise<boolean>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;

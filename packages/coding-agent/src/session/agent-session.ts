@@ -93,6 +93,7 @@ import {
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
+	isEnoent,
 	isBunTestRuntime,
 	isInteractiveHost,
 	isRecord,
@@ -102,6 +103,7 @@ import {
 	Snowflake,
 	stringProperty,
 	withTimeout,
+	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -309,6 +311,8 @@ import {
 	type CodexResetAction,
 	type CodexResetPlan,
 	type CodexResetTrigger,
+	ATTEMPT_COOLDOWN_MS,
+	codexResetAccountKey,
 	defaultCodexAutoRedeemCoordinator,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
@@ -11409,6 +11413,40 @@ export class AgentSession implements SettingsScope {
 		return plan;
 	}
 
+	#codexResetLockPath(accountKey: string, coordinator: CodexAutoRedeemCoordinator): string {
+		return `${coordinator.resetLockPath ?? getAgentDbPath()}.reset-${Bun.hash(accountKey).toString(16)}`;
+	}
+
+	async #readCodexResetMarker(lockPath: string): Promise<{ state: string; atMs: number }> {
+		let text: string;
+		try {
+			text = await Bun.file(lockPath).text();
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			text = "";
+		}
+		const [state, timestamp] = text.split(":");
+		return { state, atMs: Number(timestamp) };
+	}
+
+	async #adoptRecentCodexReset(
+		statuses: readonly ResetCreditAccountStatus[],
+		coordinator: CodexAutoRedeemCoordinator,
+	): Promise<boolean> {
+		const active = statuses.find(status => status.active && status.provider === "openai-codex");
+		if (!active) return false;
+		const lockPath = this.#codexResetLockPath(codexResetAccountKey(active.orgId, active.credentialId), coordinator);
+		await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
+		return withFileLock(
+			lockPath,
+			async () => {
+				const marker = await this.#readCodexResetMarker(lockPath);
+				return marker.state === "reset" && Date.now() - marker.atMs < ATTEMPT_COOLDOWN_MS;
+			},
+			{ retries: 300, retryDelayMs: 100 },
+		);
+	}
+
 	/**
 	 * Shared consume executor for Codex and Claude plans. Attempt keys enter the
 	 * process-wide set before mutation, while nonterminal outcomes release and
@@ -11427,16 +11465,57 @@ export class AgentSession implements SettingsScope {
 			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
 			coordinator.attemptedKeys.add(action.attemptKey);
 			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
-			let outcome: ResetCreditRedeemOutcome;
+			let outcome: ResetCreditRedeemOutcome | undefined;
+			let sharedReset = false;
 			try {
-				outcome = await authStorage.resets.redeem({
+				const redeemOptions = {
 					target: action.target,
-					baseUrlResolver: candidate => this.#modelRegistry.getProviderBaseUrl?.(candidate),
-					// A caller abort must not leave a non-idempotent consume in an
-					// unknown state; Claude's Cedar UUID is retained by AuthStorage
-					// when an ambiguous request is considered again.
+					baseUrlResolver: (candidate: string) => this.#modelRegistry.getProviderBaseUrl?.(candidate),
+					// Caller cancellation must not leave an ambiguous consume in flight.
 					signal: AbortSignal.timeout(15_000),
-				});
+				};
+				if (provider === "anthropic") {
+					outcome = await authStorage.resets.redeem(redeemOptions);
+				} else {
+					// The coordinator is process-local. Fence concurrent processes and
+					// remember a recent attempt so a late 429 cannot spend again.
+					const lockPath = this.#codexResetLockPath(action.accountKey, coordinator);
+					await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
+					outcome = await withFileLock(
+						lockPath,
+						async () => {
+							const marker = await this.#readCodexResetMarker(lockPath);
+							if (Date.now() - marker.atMs < ATTEMPT_COOLDOWN_MS) {
+								sharedReset = marker.state === "reset";
+								return undefined;
+							}
+							const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
+							const live = statuses.find(
+								status => status.credentialId === action.target.credentialId && !status.error,
+							);
+							if (!live) {
+								return { ok: false, code: "credit_list_failed", provider } satisfies ResetCreditRedeemOutcome;
+							}
+							if (action.availableCount !== undefined && live.availableCount < action.availableCount) {
+								// The offer changed while waiting; only a confirmed reset
+								// marker can authorize this caller's immediate retry.
+								return undefined;
+							}
+							if (live.availableCount < 1) {
+								return { ok: false, code: "no_credit", provider } satisfies ResetCreditRedeemOutcome;
+							}
+							const attemptedAt = Date.now();
+							await Bun.write(lockPath, `pending:${attemptedAt}`);
+							const result = await authStorage.resets.redeem(redeemOptions);
+							if (result.code === "reset") await Bun.write(lockPath, `reset:${attemptedAt}`);
+							else if (result.code === "no_credit" || result.code === "nothing_to_reset") {
+								await Bun.write(lockPath, "");
+							}
+							return result;
+						},
+						{ retries: 300, retryDelayMs: 100 },
+					);
+				}
 			} catch (error) {
 				coordinator.attemptedKeys.delete(action.attemptKey);
 				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
@@ -11444,6 +11523,10 @@ export class AgentSession implements SettingsScope {
 					account: action.accountKey,
 					error: String(error),
 				});
+				continue;
+			}
+			if (!outcome) {
+				if (sharedReset) redeemed++;
 				continue;
 			}
 			if (!isTerminalRedeemOutcome(outcome.code)) {
@@ -11537,7 +11620,9 @@ export class AgentSession implements SettingsScope {
 							coordinator,
 							activeBlockUnblockAtMs,
 						);
-			if (plan.actions.length === 0) return false;
+			if (plan.actions.length === 0) {
+				return provider === "openai-codex" && (await this.#adoptRecentCodexReset(statuses, coordinator));
+			}
 			if (
 				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
 				!(await this.#confirmAutoRedeem(provider, plan.actions, coordinator))

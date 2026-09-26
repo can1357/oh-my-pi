@@ -23,6 +23,9 @@
  * sweep scheduling — is real. Each test injects its own coordinator, so the
  * process-wide default is never touched.
  */
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
@@ -110,16 +113,20 @@ describe("codex saved-reset trigger integration", () => {
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
+	let lockRoot: string;
+	let extraStorages: AuthStorage[];
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	});
 
-	beforeEach(() => {
+	beforeEach(async () => {
+		lockRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-reset-"));
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
 		sessions = [];
 		managers = [];
+		extraStorages = [];
 	});
 
 	afterEach(async () => {
@@ -130,6 +137,8 @@ describe("codex saved-reset trigger integration", () => {
 			await manager.close();
 		}
 		vi.restoreAllMocks();
+		for (const storage of extraStorages) storage.close();
+		await fs.rm(lockRoot, { recursive: true, force: true });
 	});
 
 	afterAll(() => {
@@ -141,6 +150,7 @@ describe("codex saved-reset trigger integration", () => {
 		report: UsageReport | null;
 		liveCredits: ResetCreditAccountStatus[];
 		streamErrorFirst?: boolean;
+		storage?: AuthStorage;
 	}
 
 	interface Harness {
@@ -150,14 +160,15 @@ describe("codex saved-reset trigger integration", () => {
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
+		const storage = opts.storage ?? authStorage;
 		const model = getBundledModel("openai-codex", "gpt-5.5");
 		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
-		authStorage.keys.setRuntime("openai-codex", "test-key");
-		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => (opts.report ? [opts.report] : null));
-		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => opts.liveCredits);
+		storage.keys.setRuntime("openai-codex", "test-key");
+		vi.spyOn(storage.oauth, "identity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
+		vi.spyOn(storage.usage, "reports").mockImplementation(async () => (opts.report ? [opts.report] : null));
+		vi.spyOn(storage.resets, "list").mockImplementation(async () => opts.liveCredits);
 		const redeemTargets: ResetCreditTarget[] = [];
-		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async options => {
+		vi.spyOn(storage.resets, "redeem").mockImplementation(async options => {
 			redeemTargets.push(options.target);
 			return { ok: true, code: "reset", accountId: ACCOUNT_ID, email: EMAIL, creditId: "credit-1" };
 		});
@@ -190,11 +201,14 @@ describe("codex saved-reset trigger integration", () => {
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
+		coordinator.resetLockPath = path.join(lockRoot, "agent.db");
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
-			modelRegistry,
+			modelRegistry: opts.storage
+				? new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true })
+				: modelRegistry,
 			codexResetCoordinator: coordinator,
 		});
 		sessions.push(session);
@@ -299,6 +313,77 @@ describe("codex saved-reset trigger integration", () => {
 		await session.fetchUsageReports();
 		await coordinator.sweepPromise;
 		expect(redeemTargets).toHaveLength(1);
+	});
+
+	it("spends one credit when independent sessions encounter the same blocked account together", async () => {
+		const options: HarnessOpts = {
+			settings: { "codexResets.autoRedeem": "yes", "codexResets.salvageHorizonHours": 0 },
+			report: codexReport({ primaryUsed: 0.6, weeklyUsed: 1, limitReached: true, credits: 2 }),
+			liveCredits: [liveCreditStatus(2)],
+			streamErrorFirst: true,
+		};
+		const first = buildSession(options);
+		const secondStorage = await AuthStorage.create(":memory:");
+		extraStorages.push(secondStorage);
+		const second = buildSession({ ...options, storage: secondStorage });
+		const originalReports = options.report;
+		let redeemed = false;
+		let listed = 0;
+		const bothListed = Promise.withResolvers<void>();
+		const firstRedeemed = Promise.withResolvers<void>();
+		let spends = 0;
+		for (const [index, storage] of [authStorage, secondStorage].entries()) {
+			vi.spyOn(storage.usage, "reports").mockImplementation(async () =>
+				redeemed
+					? [codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 1 })]
+					: [originalReports!],
+			);
+			vi.spyOn(storage.resets, "list").mockImplementation(async () => {
+				if (++listed === 2) bothListed.resolve();
+				if (index === 1) await firstRedeemed.promise;
+				return redeemed ? [liveCreditStatus(1)] : [liveCreditStatus(2)];
+			});
+			vi.spyOn(storage.resets, "redeem").mockImplementation(async () => {
+				await bothListed.promise;
+				spends++;
+				redeemed = true;
+				firstRedeemed.resolve();
+				return { ok: true, code: "reset", accountId: ACCOUNT_ID, creditId: `credit-${spends}` };
+			});
+		}
+		mockSchedulerWaitWithClock();
+
+		await Promise.all([
+			first.session.prompt("trigger first blocked turn"),
+			second.session.prompt("trigger second blocked turn"),
+		]);
+		await Promise.all([first.session.waitForIdle(), second.session.waitForIdle()]);
+		const lastCreditStorage = await AuthStorage.create(":memory:");
+		extraStorages.push(lastCreditStorage);
+		const lastCredit = buildSession({
+			...options,
+			storage: lastCreditStorage,
+			report: codexReport({ primaryUsed: 0, weeklyUsed: 0, limitReached: false, credits: 0 }),
+			liveCredits: [liveCreditStatus(0)],
+		});
+		await lastCredit.session.prompt("retry a stale 429 after the final credit was spent");
+		await lastCredit.session.waitForIdle();
+		expect(lastCredit.redeemTargets).toEqual([]);
+		expect(spends).toBe(1);
+		for (const { session } of [first, second, lastCredit]) {
+			expect(
+				session.sessionManager
+					.getEntries()
+					.some(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.content.some(
+								block => block.type === "text" && block.text === "recovered after reset redemption",
+							),
+					),
+			).toBe(true);
+		}
 	});
 
 	it("asks before spending in unset mode and never spends headless", async () => {
