@@ -17,6 +17,7 @@ from omp_rpc import (
     AgentEndEvent,
     OpenSessionResult,
     PromptResultEvent,
+    RecapUpdateEvent,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
@@ -555,6 +556,20 @@ FAKE_SERVER = textwrap.dedent(
                 compact_terminal=message == "compacted turn",
             )
             settle_pending_prompt(background_job=message == "background job")
+            if message == "recap notification":
+                print(
+                    json.dumps(
+                        {
+                            "type": "recap_update",
+                            "recap": {
+                                "text": "Tests pass. Next: publish.",
+                                "trigger": "idle",
+                                "timestamp": 1787911200000,
+                            },
+                        }
+                    ),
+                    flush=True,
+                )
         elif command_type == "host_tool_update":
             print(
                 json.dumps(
@@ -1343,6 +1358,23 @@ class RpcClientTests(unittest.TestCase):
         self.assertIn("ready", notification_types)
         self.assertIn("turn_start", notification_types)
         self.assertIn("agent_end", notification_types)
+
+    def test_recap_update_listener(self) -> None:
+        recaps: list[RecapUpdateEvent] = []
+        received = threading.Event()
+
+        def record(event: RecapUpdateEvent) -> None:
+            recaps.append(event)
+            received.set()
+
+        with self.make_client() as client:
+            client.on_recap_update(record)
+            client.prompt_and_wait("recap notification", timeout=2.0)
+            self.assertTrue(received.wait(2.0))
+
+        self.assertEqual(len(recaps), 1)
+        assert recaps[0].recap is not None
+        self.assertEqual(recaps[0].recap.text, "Tests pass. Next: publish.")
 
     def test_set_todos_supports_flat_items(self) -> None:
         with self.make_client() as client:

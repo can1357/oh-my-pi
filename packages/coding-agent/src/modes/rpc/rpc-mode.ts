@@ -46,6 +46,7 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
+import { RpcIdleRecapController } from "./rpc-idle-recap";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcOutputWriter } from "./rpc-output";
@@ -821,6 +822,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
+	const idleRecapController = new RpcIdleRecapController(session, frame => sessionEvents.forwardRecap(frame));
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -1042,6 +1044,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		sessionEvents.forward(event);
 		promptResults.observe(event);
 		settleWatcher.observe(event);
+		idleRecapController.handleSessionEvent(event);
 	});
 
 	// Discriminates a store failure from any other dispose rejection below.
@@ -1129,6 +1132,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "prompt": {
+				// Host input is activity: drop a pending recap even when a local builtin
+				// (e.g. `/compact`, which emits no auto_compaction_* events) handles it.
+				idleRecapController.cancel();
 				// Taken before any dispatch so a builtin that schedules a turn (e.g. `/retry`)
 				// cannot start its run ahead of the prompt's event-stream position.
 				const ticket = promptResults.begin(id);
@@ -1226,6 +1232,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "abort": {
+				idleRecapController.cancel();
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
@@ -1251,16 +1258,21 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					promptResults.abortOpen();
 					// The detached run publishes no terminal agent_end to settle on.
 					void settleWatcher.check();
+					idleRecapController.resetForSessionChange();
 					await emitAvailableCommandsUpdate();
 				}
 				return success(id, result.type, result.data);
 			}
 
 			case "open_session": {
+				// The file identifies the session: provider ids can be pinned and copied files share header ids.
+				const previousSessionFile = session.sessionFile;
 				const result = await openRpcSession(session, command.sessionDir, subagentRegistry);
 				if (!result.cancelled) {
 					promptResults.abortOpen();
 					void settleWatcher.check();
+					// Reopening the active session is a no-op; its recap stays valid.
+					if (session.sessionFile !== previousSessionFile) idleRecapController.resetForSessionChange();
 					await emitAvailableCommandsUpdate();
 				}
 				return success(id, "open_session", result);
@@ -1287,6 +1299,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					hasPendingAsyncWork: session.hasPendingAsyncWork(),
 					isSettled: isRpcSessionSettled(session),
 					todoPhases: session.getTodoPhases(),
+					latestRecap: idleRecapController.latestRecap,
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
@@ -1501,6 +1514,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "compact": {
+				// Manual compaction emits no auto_compaction_* events; drop a recap of the pre-compaction context.
+				idleRecapController.cancel();
 				const result = await session.compact(command.customInstructions);
 				return success(id, "compact", result);
 			}
@@ -1750,6 +1765,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
+	idleRecapController.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
 	// prior pi.shutdown() through the coordinator makes this await settle

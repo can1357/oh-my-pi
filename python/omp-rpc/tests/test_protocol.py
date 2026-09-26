@@ -12,6 +12,7 @@ from omp_rpc import (
     MessageUpdateEvent,
     PromptError,
     PromptResultEvent,
+    RecapUpdateEvent,
     SessionSettledEvent,
     SessionState,
     TodoReminderEvent,
@@ -191,6 +192,11 @@ class ProtocolParsingTests(unittest.TestCase):
                         ],
                     }
                 ],
+                "latestRecap": {
+                    "text": "Mapped the RPC surface. Next: implement the client adapter.",
+                    "trigger": "idle",
+                    "timestamp": 1787911200000,
+                },
                 "systemPrompt": "You are useful.",
                 "dumpTools": [
                     {
@@ -232,6 +238,36 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(state.tokens_per_second, 12.5)
         self.assertTrue(state.has_pending_async_work)
         self.assertFalse(state.is_settled)
+        assert state.latest_recap is not None
+        self.assertEqual(
+            state.latest_recap.text,
+            "Mapped the RPC surface. Next: implement the client adapter.",
+        )
+        self.assertEqual(state.latest_recap.trigger, "idle")
+        self.assertEqual(state.latest_recap.timestamp, 1787911200000)
+
+    def test_parse_recap_update_and_clear(self) -> None:
+        update = parse_notification(
+            {
+                "type": "recap_update",
+                "recap": {
+                    "text": "Tests pass. Next: publish.",
+                    "trigger": "idle",
+                    "timestamp": 1787911200000,
+                },
+            }
+        )
+        cleared = parse_notification({"type": "recap_update", "recap": None})
+
+        self.assertIsInstance(update, RecapUpdateEvent)
+        assert isinstance(update, RecapUpdateEvent)
+        assert update.recap is not None
+        self.assertEqual(update.recap.text, "Tests pass. Next: publish.")
+        self.assertEqual(update.recap.trigger, "idle")
+        self.assertEqual(update.recap.timestamp, 1787911200000)
+        self.assertIsInstance(cleared, RecapUpdateEvent)
+        assert isinstance(cleared, RecapUpdateEvent)
+        self.assertIsNone(cleared.recap)
 
     def test_parse_session_state_defaults_missing_fast_mode_and_throughput(
         self,

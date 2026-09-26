@@ -3,7 +3,7 @@
  * `messageId` and applies the host's `set_event_filter` selection.
  */
 import type { AgentSessionEvent } from "../../session/agent-session";
-import type { RpcAgentSessionEventFrame } from "./rpc-types";
+import type { RpcAgentSessionEventFrame, RpcRecapUpdateFrame } from "./rpc-types";
 
 /**
  * Writes session events to the RPC output. Message ids are assigned whether or
@@ -15,9 +15,9 @@ export class RpcSessionEventForwarder {
 	#messageCount = 0;
 	/** Ids of started, unfinished messages. External records (advisor cards, IRC) nest inside a streaming reply. */
 	#openMessageIds: string[] = [];
-	readonly #output: (frame: RpcAgentSessionEventFrame) => void;
+	readonly #output: (frame: RpcAgentSessionEventFrame | RpcRecapUpdateFrame) => void;
 
-	constructor(output: (frame: RpcAgentSessionEventFrame) => void) {
+	constructor(output: (frame: RpcAgentSessionEventFrame | RpcRecapUpdateFrame) => void) {
 		this.#output = output;
 	}
 
@@ -29,6 +29,12 @@ export class RpcSessionEventForwarder {
 
 	forward(event: AgentSessionEvent): void {
 		const frame = this.#stamp(event);
+		if (this.#filter && !this.#filter.has(frame.type)) return;
+		this.#output(frame);
+	}
+
+	/** Write a session event RPC mode synthesizes itself (`recap_update`); the filter applies as to any session event. */
+	forwardRecap(frame: RpcRecapUpdateFrame): void {
 		if (this.#filter && !this.#filter.has(frame.type)) return;
 		this.#output(frame);
 	}
