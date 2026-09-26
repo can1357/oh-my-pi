@@ -85,6 +85,15 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	getSessionSettingsRevision(session: TSession): number;
 	goalStatusInFooter(session: TSession): boolean;
 	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
+	/**
+	 * Advisor roster whose provider usage windows the cost segment may show
+	 * instead of the token-imputed dollar amount: one entry per configured
+	 * advisor, identified by provider plus that advisor's own OAuth session.
+	 * Empty when no advisors are configured, and no advisor windows are then
+	 * rendered. Account identities are derived inside the component through
+	 * {@link activeAccount}, so hosts report the roster alone.
+	 */
+	getAdvisorUsageAccounts(session: TSession): readonly { provider: string; providerSessionId?: string }[];
 	canFetchUsageReports(session: TSession): boolean;
 	fetchUsageReports(session: TSession, signal: AbortSignal): Promise<unknown>;
 	resolveActiveRepo(cwd: string): ActiveRepoContext | null;
