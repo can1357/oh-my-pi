@@ -59,6 +59,12 @@ export interface Args {
 	mode?: Mode;
 	noSession?: boolean;
 	sessionDir?: string;
+	/**
+	 * Delegated cgroup-v2 leaf that external tool workloads are placed in
+	 * (`--tool-cgroup`). Linux-only, validated before command dispatch; unset
+	 * means the inherited `OMP_TOOL_CGROUP` applies, if any.
+	 */
+	toolCgroup?: string;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;

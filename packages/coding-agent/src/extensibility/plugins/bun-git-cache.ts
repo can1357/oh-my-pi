@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type { GitSource } from "./git-url";
 
 interface CommandResult {
@@ -11,7 +12,7 @@ interface CommandResult {
 }
 
 async function runCommand(command: string[], cwd: string): Promise<CommandResult> {
-	const proc = Bun.spawn(command, {
+	const proc = Bun.spawn(wrapToolCommand(command), {
 		cwd,
 		stdin: "ignore",
 		stdout: "pipe",

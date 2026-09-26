@@ -36,7 +36,9 @@ impl Compressor {
 		stdout: impl Into<Stdio>,
 		decompress: bool,
 	) -> SortResult<(Child, thread::JoinHandle<()>)> {
-		let mut command = self.env.command(&self.prog)
+		let mut command = self
+			.env
+			.command(&self.prog)
 			.map_err(|error| SortError::CompressProgExecutionFailed {
 				prog: self.prog.clone(),
 				error,

@@ -49,7 +49,7 @@ use pi_vfs::{BlockingFs, Metadata, absolute_path};
 
 use brush_core::{
 	CommandArg, Error, ExecutionContext, ExecutionExitCode, ExecutionParameters, ExecutionResult,
-	ExecutionSpawnResult, Shell, ShellExtensions,
+	ExecutionSpawnResult, Shell, ShellExtensions, SpawnPlacement,
 	builtins::{self, Registration},
 	commands::{ShellForCommand, SimpleCommand},
 	openfiles::{self, OpenFile, OpenFiles},
@@ -132,6 +132,8 @@ pub(crate) struct Host {
 	/// Requests to the adapter's [`CommandRunner`]; `None` unless the utility
 	/// set [`Utility::RUNS_COMMANDS`].
 	commands:              Option<flume::Sender<CommandRequest>>,
+	/// Resource placement inherited by external children, never this builtin's thread.
+	spawn_placement:        Option<Arc<dyn SpawnPlacement>>,
 }
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
@@ -603,7 +605,15 @@ impl Host {
 					.collect(),
 			),
 			stderr: self.stderr.dup_file(),
+			placement: self.spawn_placement.clone(),
 		}
+	}
+
+	pub fn prepare_child(&self, command: &mut std::process::Command) -> io::Result<()> {
+		if let Some(placement) = self.spawn_placement.as_ref() {
+			placement.prepare(command)?;
+		}
+		Ok(())
 	}
 
 	/// Runs `command` in a subshell of the invoking shell and waits for it.
@@ -988,6 +998,7 @@ pub(crate) struct ChildEnv {
 	filesystem: BlockingFs,
 	env:    Arc<Vec<(String, String)>>,
 	stderr: OpenFile,
+	placement: Option<Arc<dyn SpawnPlacement>>,
 }
 
 fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<&'a Path> {
@@ -1012,6 +1023,9 @@ impl ChildEnv {
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
+		if let Some(placement) = self.placement.as_ref() {
+			placement.prepare(&mut command)?;
+		}
 		Ok(command)
 	}
 
@@ -1506,6 +1520,7 @@ fn build_host<SE: ShellExtensions>(
 		merged_out,
 		sigpipe,
 		commands: None,
+		spawn_placement: context.params.spawn_placement().cloned(),
 	})
 }
 
@@ -1657,6 +1672,7 @@ mod testing {
 				merged_out:            None,
 				sigpipe,
 				commands:              None,
+				spawn_placement:       None,
 			};
 			(host, capture)
 		}

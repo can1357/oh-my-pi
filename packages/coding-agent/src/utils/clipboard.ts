@@ -6,6 +6,7 @@ import {
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
 type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<string, string | undefined> };
@@ -32,7 +33,7 @@ async function spawnCapture(
 	options: SpawnCaptureOptions & { encoding?: "bytes" } = {},
 ): Promise<string | Uint8Array> {
 	const timeoutMs = options.timeoutMs ?? 2000;
-	const proc = Bun.spawn(cmd, {
+	const proc = Bun.spawn(wrapToolCommand(cmd), {
 		stdout: "pipe",
 		stderr: "ignore",
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
@@ -228,7 +229,14 @@ const POWERSHELL_TIMEOUT_MS = 8000;
 async function readImageViaPowerShell(): Promise<ClipboardImage | null> {
 	try {
 		const proc = Bun.spawn(
-			["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", POWERSHELL_IMAGE_SCRIPT],
+			wrapToolCommand([
+				"powershell.exe",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Sta",
+				"-Command",
+				POWERSHELL_IMAGE_SCRIPT,
+			]),
 			{
 				stdout: "pipe",
 				stderr: "ignore",
@@ -287,11 +295,14 @@ $ErrorActionPreference = 'Stop'
  */
 async function readTextViaPowerShell(): Promise<string | null> {
 	try {
-		const proc = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_TEXT_SCRIPT], {
-			stdout: "pipe",
-			stderr: "ignore",
-			stdin: "ignore",
-		});
+		const proc = Bun.spawn(
+			wrapToolCommand(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_TEXT_SCRIPT]),
+			{
+				stdout: "pipe",
+				stderr: "ignore",
+				stdin: "ignore",
+			},
+		);
 		const timer = setTimeout(() => proc.kill(), POWERSHELL_TIMEOUT_MS);
 		let stdout = "";
 		try {

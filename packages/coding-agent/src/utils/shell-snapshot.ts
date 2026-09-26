@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
@@ -283,7 +284,7 @@ export async function getOrCreateSnapshot(
 				spawnEnv[key] = value;
 			}
 		}
-		const child = Bun.spawn([shell, "-c", script], {
+		const child = Bun.spawn(wrapToolCommand([shell, "-c", script]), {
 			cwd: getSafeProjectCwd(),
 			env: spawnEnv,
 			stdin: "ignore",

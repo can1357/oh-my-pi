@@ -88,6 +88,9 @@ ${chalk.bold("Available Tools (default-enabled unless noted):")}
   web_search    - Search the web
   ask           - Ask user questions (interactive mode only)
 
+${chalk.bold("Resource Control:")}
+  --tool-cgroup <path>       Linux cgroup-v2 leaf for external tool workloads
+  OMP_TOOL_CGROUP            Placement target inherited by child processes
 ${chalk.bold("Plugin Options:")}
   --plugin-dir <path>        Load plugin from directory (repeatable)
 

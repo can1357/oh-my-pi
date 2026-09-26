@@ -23,6 +23,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import type { TerminalId, TerminalNotification } from "./terminal-capabilities";
 
 /** Application name surfaced as the notification source. */
@@ -180,7 +181,7 @@ export function sendDesktopNotification(message: string | TerminalNotification):
 		// exit. Ignored stdio alone does not detach the child from the parent's
 		// reference count.
 		const child = Bun.spawn({
-			cmd: buildDesktopNotifyCommand(notifier, message),
+			cmd: wrapToolCommand(buildDesktopNotifyCommand(notifier, message)),
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",

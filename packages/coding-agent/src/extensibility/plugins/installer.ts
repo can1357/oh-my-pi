@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
+import { wrapToolCommand } from "@oh-my-pi/pi-utils/tool-cgroup";
 import { extractPackageName } from "./parser";
 import type { InstalledPlugin } from "./types";
 
@@ -45,7 +46,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	}
 
 	// Run npm install in plugins directory
-	const proc = Bun.spawn(["bun", "install", packageName], {
+	const proc = Bun.spawn(wrapToolCommand(["bun", "install", packageName]), {
 		cwd: PLUGINS_DIR,
 		stdin: "ignore",
 		stdout: "pipe",
@@ -92,7 +93,7 @@ export async function uninstallPlugin(name: string): Promise<void> {
 
 	await ensurePluginsDir();
 
-	const proc = Bun.spawn(["bun", "uninstall", name], {
+	const proc = Bun.spawn(wrapToolCommand(["bun", "uninstall", name]), {
 		cwd: PLUGINS_DIR,
 		stdin: "ignore",
 		stdout: "pipe",
