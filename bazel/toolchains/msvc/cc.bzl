@@ -49,8 +49,9 @@ _ARCHES = {
         "cmake_processor": "ARM64",
         # opus' ARM runtime CPU detection (celt/arm/armcpu.c) uses the MSVC-only
         # __emit intrinsic under _MSC_VER, which clang-cl lacks. Every aarch64
-        # Windows CPU has NEON, so presume it and compile RTCD out.
-        "cmake_extra": 'set(OPUS_PRESUME_NEON ON CACHE BOOL "aarch64 always has NEON")\n',
+        # Windows CPU has NEON, so presume it and compile RTCD out (opus only
+        # auto-presumes when CMAKE_SYSTEM_PROCESSOR matches "aarch64").
+        "cmake_extra": 'set(OPUS_PRESUME_NEON ON CACHE BOOL "aarch64 always has NEON")\nset(OPUS_MAY_HAVE_NEON OFF CACHE BOOL "no RTCD: armcpu.c needs MSVC __emit")\n',
     },
 }
 
