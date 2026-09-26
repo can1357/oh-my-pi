@@ -913,6 +913,7 @@ describe("tool path arrays", () => {
 
 	it("grep keeps directory-prefixed globs out of subdirectories", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
+		await Bun.write(path.join(tmp, "root.go"), "depth-needle root\n");
 		await Bun.write(path.join(tmp, "internal", "awsapi", "client.go"), "depth-needle awsapi-root\n");
 		await Bun.write(path.join(tmp, "internal", "awsapi", "svc", "nested.go"), "depth-needle awsapi-nested\n");
 		await Bun.write(path.join(tmp, "internal", "crypto_util.go"), "depth-needle crypto-root\n");
@@ -950,6 +951,20 @@ describe("tool path arrays", () => {
 		const bareGlob = getText(await tool.execute("grep-bare-glob", { pattern: "depth-needle", path: "*.go" }));
 		expect(bareGlob).toContain("awsapi-nested");
 		expect(bareGlob).toContain("kms");
+		const explicitCwdGlob = getText(
+			await tool.execute("grep-explicit-cwd-glob", { pattern: "depth-needle", path: "./*.go" }),
+		);
+		expect(explicitCwdGlob).toContain("depth-needle root");
+		expect(explicitCwdGlob).not.toContain("awsapi-root");
+		const absoluteCwdGlob = getText(
+			await tool.execute("grep-absolute-cwd-glob", { pattern: "depth-needle", path: path.join(tmp, "*.go") }),
+		);
+		expect(absoluteCwdGlob).toContain("depth-needle root");
+		expect(absoluteCwdGlob).not.toContain("awsapi-root");
+		const mixedGlobs = getText(
+			await tool.execute("grep-mixed-globs", { pattern: "depth-needle", path: "*.go; ./root.go" }),
+		);
+		expect(mixedGlobs).toContain("awsapi-nested");
 		await removeWithRetries(tmp);
 	});
 
