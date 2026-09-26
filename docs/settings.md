@@ -635,7 +635,7 @@ lsp:
 | `lsp.diagnosticsOnEdit`           | boolean | `false`   | Run diagnostics after an edit.                                                                                                                              |
 | `lsp.formatOnWrite`               | boolean | `false`   | Format files on write.                                                                                                                                      |
 | `lsp.diagnosticsDeduplicate`      | boolean | `true`    | Collapse duplicate diagnostics.                                                                                                                             |
-| `shellPath`                       | string  | _(unset)_ | Override the shell binary used by bash.                                                                                                                     |
+| `shellPath`                       | string  | _(unset)_ | External shell for services, terminals, and `!`; plain bash tool calls use embedded brush.                                                                  |
 
 ### Files: editing and reading
 
