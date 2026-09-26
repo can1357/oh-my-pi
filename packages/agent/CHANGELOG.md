@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.3.2] - 2026-09-25
+
 ### Fixed
 
 - Fixed tool calls that put their payload in the intent field `i` (for example a file body in `write`) silently running with the leftover arguments; they now fail with an error telling the model to retry ([#13140](https://github.com/can1357/oh-my-pi/issues/13140), [#13141](https://github.com/can1357/oh-my-pi/pull/13141) by [@radkawar](https://github.com/radkawar))

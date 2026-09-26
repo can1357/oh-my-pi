@@ -13,7 +13,9 @@ name: Warm bazel disk cache
 #                             bump rewrites Cargo.toml/Cargo.lock), so
 #                             without warming here every release rebuilt the
 #                             darwin addons cold (~40-50 min on
-#                             macos-15-intel — run 30357804722).
+#                             macos-15-intel — run 30357804722). Both scopes
+#                             now build on Apple silicon (darwin-x64 cross-
+#                             compiles; see release_binary_hosted in ci.yml).
 #   warm_bun (ubuntu-22.04)-> the shared `bun-<os>-<lockhash>` store entry.
 #                             PR jobs restore it but never save (per-PR-ref
 #                             copies of the ~500 MB store once ate ~9.4 GB of
@@ -70,7 +72,7 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: macos-15-intel, target: darwin-x64-baseline, scope: release-darwin-x64 }
+               - { os: macos-15, target: darwin-x64-baseline, scope: release-darwin-x64 }
                - { os: macos-14, target: darwin-arm64, scope: release-darwin-arm64 }
       runs-on: ${{ matrix.os }}
       steps:
