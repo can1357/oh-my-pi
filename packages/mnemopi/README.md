@@ -29,6 +29,8 @@ console.log(id, results[0]?.content);
 memory.close();
 ```
 
+Lexical recall matches whole tokens, declared synonyms, underscore-separated identifier parts, and other forms of a word of at least four characters: the word plus `s`, `es`, `d`, `ed`, `ing`, `er`, `ers`, `ment` or `ments`, a final `e` replaced by `ing`/`ion`/`ions`, or a final `y` replaced by `ies`/`ied`. `backup` matches `backups`, `facts` matches `fact` and `caching` matches `cache`, but `1Password` does not match `pass` or `word`, and `redis` does not match `redistribution`.
+
 ## Configuration
 
 `Mnemopi` accepts LLM and embedding options directly. `MNEMOPI_*` environment variables remain fallbacks/defaults when the matching constructor option is omitted.

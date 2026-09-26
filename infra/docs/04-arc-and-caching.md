@@ -255,9 +255,12 @@ Field by field:
   to create the PVC subdirectories as root before the runner starts. This avoids
   relying on kubelet's subPath auto-create permissions and does not pull another
   image.
-- **`volumeMounts`** - mounts the shared PVC only at `~/.bun/install/cache` and
-  `~/.cargo/registry`. `node_modules`, Cargo `target/`, and Cargo git checkouts
-  stay inside the throwaway VM filesystem.
+- **`volumeMounts`** - mounts the shared PVC only at `~/.bun/install/cache`,
+  `~/.cargo/registry`, and `/opt/bazel-repo-cache` (Bazel's repository cache,
+  plus the `xwin/` sysroot cache and CI's `ci-natives/` linux-x64 addon stash,
+  which `native_addons` writes content-addressed and prunes after two days).
+  `node_modules`, Cargo `target/`, and Cargo git checkouts stay inside the
+  throwaway VM filesystem.
 - **`volumes[].persistentVolumeClaim.claimName: runner-cache`** - binds those
   mounts to the `arc-runners/runner-cache` PVC. `ReadWriteOnce` is enough on this
   single-node k3s host; use a RWX-capable storage class before spreading runners
