@@ -142,8 +142,8 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 /// through to reach the declaration. Braced `block`s never match because they
 /// begin at `{`; requiring the next sibling to start a later row at `node`'s
 /// column also rules out a leading label (`'a: {` in Rust). Extras (comments)
-/// trailing `node` on its last row are skipped so `if … {} // note` still
-/// stops the climb.
+/// between statements are skipped so `if … {} // note` and comment-only
+/// lines still stop the climb.
 fn is_statement_sequence(parent: Node<'_>, node: Node<'_>) -> bool {
 	if !matches!(
 		parent.kind(),
@@ -163,7 +163,7 @@ fn is_statement_sequence(parent: Node<'_>, node: Node<'_>) -> bool {
 	}
 	let end_row = node.end_position().row;
 	let mut next = node.next_named_sibling();
-	while let Some(sibling) = next.filter(|s| s.is_extra() && s.start_position().row == end_row) {
+	while let Some(sibling) = next.filter(|s| s.is_extra()) {
 		next = sibling.next_named_sibling();
 	}
 	next.is_some_and(|next| {
@@ -576,6 +576,12 @@ mod tests {
 		assert_eq!(resolve(go, "x.go", 4), Some(BlockRange { start_line: 4, end_line: 6 }));
 		let py = "def f(x):\n    y = 2  # note\n    z = 3\n    return y\n";
 		assert_eq!(resolve(py, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn leading_statement_with_intervening_comment_excludes_following_siblings() {
+		let code = "def f(x):\n    y = 2\n    # next assignment\n    z = 3\n    return y\n";
+		assert_eq!(resolve(code, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
 	}
 
 	#[test]
