@@ -139,6 +139,7 @@ import {
 	SubagentResultSchema,
 	ThinkingMessageSchema,
 	ToolCallSchema,
+	type TurnEndedUpdate,
 	UserMessageActionSchema,
 	UserMessageSchema,
 	WebFetchAllowlistPrecheckResultSchema,
@@ -193,6 +194,7 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
@@ -1199,7 +1201,7 @@ export async function handleServerMessage(
 		// permission prompt).
 		handleInteractionQuery(msg.message.value, h2Request);
 	} else if (msgCase === "conversationCheckpointUpdate") {
-		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
+		handleConversationCheckpointUpdate(msg.message.value, output, onConversationCheckpoint);
 	}
 }
 
@@ -1932,12 +1934,21 @@ async function handleExecServerMessage(
 				);
 				return;
 			}
-			if (execHandlers?.mcp) {
+			// Without a local MCP handler an external executor — an auth-gateway
+			// client whose own tools Cursor sees as MCP tools — is the one that
+			// runs the call, so the block must reach that client unresolved:
+			// `isClientToolUse` (anthropic-messages-server) and the OpenAI chat
+			// finish-reason mapper both report a handoff only for a toolCall that
+			// carries no `kCursorExecResolved` marker. Answering the frame while
+			// emitting nothing made the turn look like plain text that ended on
+			// `stop`, so the client never saw the call it was meant to execute.
+			const externalHandoff = externalToolExecutor && !execHandlers?.mcp;
+			if (execHandlers?.mcp || externalHandoff) {
 				const existingBlock = output.content.find(
 					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
 				);
 				if (existingBlock) {
-					markCursorExecResolved(existingBlock);
+					if (!externalHandoff) markCursorExecResolved(existingBlock);
 				} else {
 					synthesizeCursorExecToolCall(
 						output,
@@ -1946,8 +1957,9 @@ async function handleExecServerMessage(
 						mcpCall.toolCallId,
 						mcpCall.toolName || mcpCall.name,
 						mcpCall.args,
+						{ executed: !externalHandoff },
 					);
-					state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
+					if (!externalHandoff) state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
 				}
 			}
 			const { execResult } = await resolveExecHandler(
@@ -1955,10 +1967,7 @@ async function handleExecServerMessage(
 				execHandlers?.mcp?.bind(execHandlers),
 				onToolResult,
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
-				_reason =>
-					externalToolExecutor && !execHandlers?.mcp
-						? buildMcpExternalHandoffResult()
-						: buildMcpToolNotFoundResult(mcpCall),
+				_reason => (externalHandoff ? buildMcpExternalHandoffResult() : buildMcpToolNotFoundResult(mcpCall)),
 				error => buildMcpErrorResult(error),
 				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
@@ -4135,7 +4144,9 @@ function endCurrentThinkingBlock(
  * `agent-loop.ts` execution pass skips it — Cursor's server-driven exec
  * channel already ran the tool via the bridge and buffered the result, so
  * treating this block as runnable would re-execute the same side-effecting
- * tool a second time.
+ * tool a second time. Pass `{ executed: false }` for a frame nothing ran: a
+ * call handed to an external executor is only a handoff while the marker is
+ * absent, and the consumer that runs it needs a runnable block.
  *
  * Exported for tests to exercise ordering with adjacent text/thinking blocks.
  */
@@ -4146,6 +4157,7 @@ export function synthesizeCursorExecToolCall(
 	toolCallId: string,
 	toolName: string,
 	args: Record<string, unknown>,
+	{ executed = true }: { executed?: boolean } = {},
 ): void {
 	endCurrentTextBlock(output, stream, state);
 	endCurrentThinkingBlock(output, stream, state);
@@ -4159,7 +4171,7 @@ export function synthesizeCursorExecToolCall(
 		arguments: omitUndefinedArgs(args),
 		[kStreamingBlockIndex]: output.content.length,
 		[kStreamingBlockKind]: "cursor-exec",
-		[kCursorExecResolved]: true,
+		...(executed ? { [kCursorExecResolved]: true as const } : {}),
 	};
 	output.content.push(block);
 	const idx = output.content.length - 1;
@@ -4296,7 +4308,11 @@ export function processInteractionUpdate(
 				const args = mcpCall.args || {};
 				const id = args.toolCallId || crypto.randomUUID();
 				const resolvedByExec = state.resolvedMcpToolCallIds.delete(id);
-				if (resolvedByExec && output.content.some(block => block.type === "toolCall" && block.id === id)) {
+				// The exec channel may have emitted this block first — executed
+				// (marked resolved) or handed to an external executor (deliberately
+				// unmarked). Either way the call is already in the transcript, so a
+				// second block for the same id would duplicate it.
+				if (output.content.some(block => block.type === "toolCall" && block.id === id)) {
 					return;
 				}
 				const block: ToolCallState = {
@@ -4549,6 +4565,7 @@ export function processInteractionUpdate(
 		}
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
+		applyTurnEndedUsage(output.usage, update.message.value);
 		if (
 			classifyModel("cursor", output.model).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
@@ -4566,23 +4583,48 @@ export function processInteractionUpdate(
 	}
 }
 
+/**
+ * Adopt the authoritative per-turn counters Cursor sends on `TurnEndedUpdate`.
+ *
+ * `tokenDelta` frames carry a running output estimate only — a captured turn
+ * summed 22 against a final 36 — and never report input, cache, or reasoning
+ * tokens, so every bucket the final frame reports replaces the streamed
+ * estimate. Unreported counters decode as `undefined`; a frame that reports
+ * nothing at all leaves the streamed totals untouched.
+ */
+function applyTurnEndedUsage(usage: Usage, update: TurnEndedUpdate): void {
+	const input = Number(update.inputTokens ?? 0n);
+	const output = Number(update.outputTokens ?? 0n);
+	const cacheRead = Number(update.cacheReadTokens ?? 0n);
+	const cacheWrite = Number(update.cacheWriteTokens ?? 0n);
+	const reasoning = Number(update.reasoningTokens ?? 0n);
+	if (input <= 0 && output <= 0 && cacheRead <= 0 && cacheWrite <= 0) return;
+	if (input > 0) usage.input = input;
+	if (output > 0) usage.output = output;
+	if (cacheRead > 0) usage.cacheRead = cacheRead;
+	if (cacheWrite > 0) usage.cacheWrite = cacheWrite;
+	if (reasoning > 0) usage.reasoningTokens = reasoning;
+	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+}
+
+/**
+ * Record the context occupancy Cursor reports on every conversation checkpoint.
+ *
+ * `tokenDetails.usedTokens` counts the whole conversation, not this turn's
+ * output, so it is independent of the `tokenDelta` estimate: compaction and
+ * handoff read `usage.contextTokens` and otherwise see an output-only turn.
+ */
 function handleConversationCheckpointUpdate(
 	checkpoint: ConversationStateStructure,
 	output: AssistantMessage,
-	usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
-	if (usageState.sawTokenDelta) {
-		return;
-	}
 	const usedTokens = checkpoint.tokenDetails?.usedTokens ?? 0;
 	if (usedTokens <= 0) {
 		return;
 	}
-	if (output.usage.contextTokens !== usedTokens) {
-		output.usage.contextTokens = usedTokens;
-	}
+	output.usage.contextTokens = usedTokens;
 }
 
 function createBlobId(data: Uint8Array): Uint8Array {

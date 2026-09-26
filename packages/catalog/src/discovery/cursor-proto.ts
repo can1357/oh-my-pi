@@ -7837,9 +7837,19 @@ export const TruncatedToolCallSuccessSchema: MessageCodec<TruncatedToolCallSucce
 
 /** Cursor agent message agent.v1.TurnEndedUpdate. */
 export interface TurnEndedUpdate extends ProtoMessage {
+	inputTokens?: bigint;
+	outputTokens?: bigint;
+	cacheReadTokens?: bigint;
+	cacheWriteTokens?: bigint;
+	reasoningTokens?: bigint;
 }
 
 export const TurnEndedUpdateSchema: MessageCodec<TurnEndedUpdate> = pb<TurnEndedUpdate>("agent.v1.TurnEndedUpdate", [
+	{ no: 1, name: "inputTokens", kind: "int64", optional: true },
+	{ no: 2, name: "outputTokens", kind: "int64", optional: true },
+	{ no: 3, name: "cacheReadTokens", kind: "int64", optional: true },
+	{ no: 4, name: "cacheWriteTokens", kind: "int64", optional: true },
+	{ no: 5, name: "reasoningTokens", kind: "int64", optional: true },
 ]);
 
 /** Cursor agent message agent.v1.TypeAction. */

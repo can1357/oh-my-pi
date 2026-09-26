@@ -462,6 +462,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
   - Stream completion verifies `turnEnded` (`sawTurnEnded`) or throws `incomplete-stream`.
 - **Tool Call Synthesis**:
   - `synthesizeCursorExecToolCall` generates display `toolCall` blocks on assistant output messages to mirror local tool execution in the UI and transcript.
+  - An MCP frame with no local handler on a stream flagged `externalToolExecutor` (auth-gateway) synthesizes the block **without** `kCursorExecResolved` and pairs no result: the gateway client is the executor, and `isClientToolUse` only reports a handoff for an unresolved call.
 
 ### Auth & usage
 - **Credentials & Headers**:
@@ -474,6 +475,9 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
   - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).
   - For OAuth credentials with WorkOS user sessions (`WorkosCursorSessionToken=${userId}::${accessToken}`), fetches personal usage from `https://cursor.com/api/usage-summary` (`parseCursorIndividualUsage`) and user profile email from `https://cursor.com/api/auth/me`.
+- **Turn Usage Accounting (`packages/ai/src/providers/cursor.ts`)**:
+  - `tokenDelta` frames accumulate a running output estimate; `TurnEndedUpdate` then reports the turn's final `input`/`output`/`cache_read`/`cache_write`/`reasoning` counters and every reported bucket replaces that estimate. A frame with no counters leaves the estimate in place.
+  - `conversationCheckpointUpdate.tokenDetails.usedTokens` is whole-conversation occupancy and lands on `usage.contextTokens`, independent of the output estimate — compaction and handoff size the context from it.
 
 ### Catalog model handling
 - **Descriptor Config (`packages/catalog/src/provider-models/descriptors.ts`)**:
