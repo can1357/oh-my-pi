@@ -2306,10 +2306,12 @@ describe("ModelRegistry", () => {
 
 			expect(registry.find("github-copilot", bundled.id)).toBeUndefined();
 			expect(await registry.getApiKey(bundled)).toBeUndefined();
+			expect(await registry.getApiKeyForProvider("github-copilot")).toBeUndefined();
 
 			const enabled = new ModelRegistry(authStorage, modelsJsonPath, { settings: Settings.isolated({}) });
 			expect(enabled.find("github-copilot", bundled.id)?.id).toBe(bundled.id);
 			expect(await enabled.getApiKey(bundled)).toBeDefined();
+			expect(await enabled.getApiKeyForProvider("github-copilot")).toBeDefined();
 		});
 	});
 	describe("extended context", () => {
