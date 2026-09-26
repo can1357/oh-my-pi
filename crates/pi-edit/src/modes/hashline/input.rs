@@ -278,7 +278,9 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	} else {
 		(body.trim_end(), None)
 	};
-	if path_text.contains('#') || header_path_has_orphan_bracket(path_text) {
+	// Only a recovered tag disambiguates a `#` inside the path; untagged, it is
+	// a malformed tag (`a.ts#1A2B copied`), not part of a file name.
+	if (file_hash.is_none() && path_text.contains('#')) || header_path_has_orphan_bracket(path_text) {
 		return None;
 	}
 	let path = normalize_hashline_path(path_text, cwd);

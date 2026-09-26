@@ -556,6 +556,11 @@ pub fn header_path_has_orphan_bracket(path: &str) -> bool {
 	false
 }
 
+/// Split a `[PATH]` / `[PATH#TAG]` header row.
+///
+/// A valid trailing 4-hex tag disambiguates the path, so a tagged path may
+/// itself contain `#` (yadm alt files: `conf.yaml##hostname.home`). An
+/// untagged path may not: `[a.ts#1A2G]` is a malformed tag, not a file name.
 fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	let line = line.trim_end();
 	let body = line
@@ -566,7 +571,6 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	}
 	if let Some((path, hash)) = body.rsplit_once(HL_FILE_HASH_SEP) {
 		if path.is_empty()
-			|| path.contains('#')
 			|| header_path_has_orphan_bracket(path)
 			|| hash.len() != HL_FILE_HASH_LENGTH
 			|| !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -575,7 +579,7 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 		}
 		return Some((path.to_string(), Some(hash.to_ascii_uppercase())));
 	}
-	if body.contains('#') || header_path_has_orphan_bracket(body) {
+	if header_path_has_orphan_bracket(body) {
 		None
 	} else {
 		Some((body.to_string(), None))

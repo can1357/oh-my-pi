@@ -555,6 +555,25 @@ fn input_recovers_apply_patch_header_noise_and_spaces() {
 }
 
 #[test]
+fn input_accepts_hash_in_tagged_paths_only() {
+	// yadm alt files (`conf.yaml##hostname.home`) are real; the trailing tag
+	// separates path from tag, on both the strict and the recovery path.
+	for (header, path) in [
+		("[conf.yaml##hostname.home#1a2b]", "conf.yaml##hostname.home"),
+		("[*** Update File: conf.yaml##os.Linux#1A2B]", "conf.yaml##os.Linux"),
+	] {
+		let patch = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options()).unwrap();
+		assert_eq!(patch.sections[0].path, path, "{header}");
+		assert_eq!(patch.sections[0].file_hash.as_deref(), Some("1A2B"), "{header}");
+	}
+	// Untagged, a `#` is a malformed tag, not a file name.
+	let error = Patch::parse("[conf.yaml##hostname.home]\nPUT 1:\n+x", &options())
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("Input header must be"), "{error}");
+}
+
+#[test]
 fn input_recovers_headers_nested_in_apply_patch_envelope_markers() {
 	// Observed in an edit-benchmark trace: the model wrapped the section
 	// header in apply_patch framing. The bracketed sentinel must be consumed

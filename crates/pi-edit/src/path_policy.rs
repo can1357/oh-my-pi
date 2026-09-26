@@ -309,25 +309,20 @@ fn unknown_uri_target(display: &str, suggestion: Option<&str>) -> String {
 }
 
 /// Strip a strict `[path]` / `[path#XXXX]` hashline header wrapper.
+///
+/// Mirrors the hashline tokenizer: a valid trailing tag lets the path contain
+/// `#`; an untagged `#` is a malformed tag and leaves `target` untouched.
 pub fn unwrap_hashline_header_path(target: &str) -> &str {
 	let trimmed = target.trim_end();
 	let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
 		return target;
 	};
-	let path = if let Some((path, tag)) = inner.rsplit_once('#') {
-		if tag.len() == 4 && tag.bytes().all(|b| b.is_ascii_hexdigit()) {
-			path
-		} else {
-			return target;
-		}
-	} else {
-		inner
+	let path = match inner.rsplit_once('#') {
+		Some((path, tag)) if tag.len() == 4 && tag.bytes().all(|b| b.is_ascii_hexdigit()) => path,
+		Some(_) => return target,
+		None => inner,
 	};
-	if path.is_empty() || path.contains('#') {
-		target
-	} else {
-		path
-	}
+	if path.is_empty() { target } else { path }
 }
 
 /// Snapshot key: realpath, parent realpath plus basename, or input.
@@ -699,7 +694,8 @@ mod tests {
 		assert_eq!(unwrap_hashline_header_path("[src/a.ts#Ab12]  \n"), "src/a.ts");
 		assert_eq!(unwrap_hashline_header_path("[src/a.ts]"), "src/a.ts");
 		assert_eq!(unwrap_hashline_header_path("[src/a.ts#bad]"), "[src/a.ts#bad]");
-		assert_eq!(unwrap_hashline_header_path("[a#b#1234]"), "[a#b#1234]");
+		assert_eq!(unwrap_hashline_header_path("[conf##host.a#1234]"), "conf##host.a");
+		assert_eq!(unwrap_hashline_header_path("[conf##host.a]"), "[conf##host.a]");
 	}
 
 	#[test]

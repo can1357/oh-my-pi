@@ -48,8 +48,10 @@ function isWithinRoot(absolutePath: string, root: string): boolean {
  *  filesystem path drives both authorization and resolution. Only unwraps inputs
  *  that match the strict hashline header shape (`[path]` or `[path#XXXX]` with a
  *  4-hex tag); anything else returns the original string so the downstream
- *  resolver surfaces the real error. Exported for callers (e.g. `write`) that
- *  make scheme/bridge-routing decisions before {@link resolvePlanPath} runs. */
+ *  resolver surfaces the real error. A valid tag disambiguates a `#` inside the
+ *  path (yadm alt files: `conf.yaml##hostname.home`), matching the Rust
+ *  tokenizer. Exported for callers (e.g. `write`) that make scheme/bridge-routing
+ *  decisions before {@link resolvePlanPath} runs. */
 export function unwrapHashlineHeaderPath(targetPath: string): string {
 	const trimmed = targetPath.trimEnd();
 	if (
@@ -63,9 +65,9 @@ export function unwrapHashlineHeaderPath(targetPath: string): string {
 	const tagMatch = HL_TRAILING_TAG_RE.exec(inner);
 	const pathPart = tagMatch ? inner.slice(0, tagMatch.index) : inner;
 	// A valid header is exactly `PATH` or `PATH#XXXX`; reject any other shape
-	// (selectors, non-hex tags, embedded `#`) so we never silently rewrite a
+	// (selectors, non-hex tags, untagged `#`) so we never silently rewrite a
 	// path the model did not author.
-	if (pathPart.length === 0 || pathPart.includes(HL_FILE_HASH_SEP)) return targetPath;
+	if (pathPart.length === 0 || (!tagMatch && pathPart.includes(HL_FILE_HASH_SEP))) return targetPath;
 	return pathPart;
 }
 
