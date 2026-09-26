@@ -15,6 +15,7 @@ import {
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
+	isBunTestRuntime,
 	isEexist,
 	isEnoent,
 	isEnotdir,
@@ -365,6 +366,25 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 	if (message.role === "assistant") return message.usage;
 	if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
 	return undefined;
+}
+
+/**
+ * Give a usage-less assistant message zero usage so renderers and totals never
+ * dereference `undefined`. Every producer should set usage, so under test a
+ * missing one throws to surface the producer instead of hiding it.
+ */
+function repairMissingUsage(entry: SessionEntry): boolean {
+	if (entry.type !== "message" || entry.message.role !== "assistant" || entry.message.usage) return false;
+	if (isBunTestRuntime()) throw new Error(`Assistant message ${entry.id} has no usage`);
+	entry.message.usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	return true;
 }
 
 function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
@@ -1582,6 +1602,7 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		if (repairMissingUsage(entry)) logger.warn("Assistant message recorded without usage", { id: entry.id });
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -3119,11 +3140,16 @@ export class SessionManager {
 		});
 	}
 
-	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */
+	/**
+	 * Repair loaded assistant entries: strip stale OpenAI Responses replay
+	 * metadata and give usage-less messages zero usage.
+	 */
 	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
 		let changed = false;
+		let missingUsage = 0;
 		for (const entry of this.#entries) {
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			if (repairMissingUsage(entry)) missingUsage++;
 
 			const sanitized = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
 			if (sanitized === entry.message) continue;
@@ -3131,8 +3157,11 @@ export class SessionManager {
 			entry.message = sanitized;
 			changed = true;
 		}
+		if (missingUsage > 0) {
+			logger.warn("Loaded assistant messages without usage; treating as zero", { count: missingUsage });
+		}
 
-		return changed;
+		return changed || missingUsage > 0;
 	}
 
 	getHeader(): SessionHeader | null {
