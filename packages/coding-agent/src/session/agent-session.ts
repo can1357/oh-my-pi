@@ -771,7 +771,6 @@ export class AgentSession implements SettingsScope {
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
 	 *  the session cwd changes. */
 	#titleSystemPrompt: string | undefined;
-	#titleGenerationStart: (() => (() => void) | void) | undefined;
 	#titleGenerationInFlightFor: string | undefined;
 	/** First-message auto-title that may be retried from conversation context.
 	 *  Once the title model declines the message (greeting-like or too ambiguous,
@@ -8179,14 +8178,17 @@ export class AgentSession implements SettingsScope {
 	 *  kept (abort()'s #extractQueuedAdvisorCards preserves them as visible advice) and every other
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
-	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
+	 *  fires while agent.hasQueuedMessages()). `forInterrupt` also withdraws live-steered input the
+	 *  aborted response took but never recorded, returning it first (it was queued first).
+	 *  Plain Alt+Up dequeue preserves those non-user steers. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
 	} {
 		const steeringAll = this.agent.peekSteeringQueue();
 		const followUpAll = this.agent.peekFollowUpQueue();
-		const steering = steeringAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
+		const withdrawn = options?.forInterrupt ? this.agent.withdrawLiveSteering() : [];
+		const steering = [...withdrawn, ...steeringAll].filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
 		const followUp = followUpAll.filter(isUserQueuedMessage).map(toRestoredQueuedMessage);
 		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
 			? isAdvisorCard
@@ -8212,9 +8214,20 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
+	/** Whether an empty submit should interrupt the streaming turn: displayable input is
+	 *  queued, or live steering sits in the in-flight response, which the abort requeues
+	 *  for the continuation turn. */
+	get hasInterruptibleInput(): boolean {
+		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
+	}
+
+	/** Chip texts for the queue display. Steering the provider already took live stays listed
+	 *  until the transcript records it, when the model actually switches to it. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
-			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
+			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+				.filter(isUserQueuedMessage)
+				.map(queueChipText),
 			followUp: this.agent.peekFollowUpQueue().filter(isUserQueuedMessage).map(queueChipText),
 		};
 	}
@@ -8420,7 +8433,7 @@ export class AgentSession implements SettingsScope {
 	 * user message persists titles with the same environment, signal, and local
 	 * extension-command policy.
 	 */
-	maybeStartTitleGeneration(firstMessage: string, onStart?: () => (() => void) | void): void {
+	maybeStartTitleGeneration(firstMessage: string): void {
 		const extensionCommandSpace = firstMessage.indexOf(" ");
 		const isLocalExtensionCommand =
 			firstMessage.startsWith("/") &&
@@ -8438,7 +8451,7 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		this.#deferredTitle = { sessionId, declined: false, replied: false };
-		this.#startAutoTitle(firstMessage, sessionId, onStart ?? this.#titleGenerationStart);
+		this.#startAutoTitle(firstMessage, sessionId);
 	}
 
 	/**
@@ -8446,17 +8459,8 @@ export class AgentSession implements SettingsScope {
 	 * unless the session was renamed or replaced meanwhile. A settled request
 	 * that left the session unnamed advances {@link #deferredTitle}.
 	 */
-	#startAutoTitle(input: string, sessionId: string, onStart: (() => (() => void) | void) | undefined): void {
+	#startAutoTitle(input: string, sessionId: string): void {
 		this.#titleGenerationInFlightFor = sessionId;
-		let cleanupProgress: (() => void) | void;
-		try {
-			cleanupProgress = onStart?.();
-		} catch (error) {
-			if (this.#titleGenerationInFlightFor === sessionId) {
-				this.#titleGenerationInFlightFor = undefined;
-			}
-			throw error;
-		}
 		const signal = this.#titleGenerationAbortController.signal;
 		this.generateTitle(input)
 			.then(async title => {
@@ -8479,7 +8483,6 @@ export class AgentSession implements SettingsScope {
 				if (this.#titleGenerationInFlightFor === sessionId) {
 					this.#titleGenerationInFlightFor = undefined;
 				}
-				cleanupProgress?.();
 				// An interrupted request is cancelled inference, not a decline.
 				if (signal.aborted) this.#deferredTitle = undefined;
 				else this.#advanceDeferredTitle("declined");
@@ -8506,7 +8509,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#titleGenerationInFlightFor === sessionId || $env.PI_NO_TITLE) return;
 		const context = this.#buildReplanTitleContext();
 		if (!context || isLowSignalTitleInput(context)) return;
-		this.#startAutoTitle(context, sessionId, this.#titleGenerationStart);
+		this.#startAutoTitle(context, sessionId);
 	}
 
 	#resolveTitleProviderSessionId(parentSessionId: string): string {
@@ -8587,18 +8590,6 @@ export class AgentSession implements SettingsScope {
 	 *  against the destination project's override. */
 	setTitleSystemPrompt(prompt: string | undefined): void {
 		this.#titleSystemPrompt = prompt;
-	}
-
-	/** Install the interactive title-download UI hook. Used when `/skill:` starts
-	 *  titling from {@link promptCustomMessage} without the input-controller callback.
-	 *  The hook may return cleanup to run when generation settles. */
-	setTitleGenerationStart(handler: (() => (() => void) | void) | undefined): void {
-		this.#titleGenerationStart = handler;
-	}
-
-	/** Notify the host before a user-requested title generation; return its cleanup. */
-	notifyTitleGenerationStart(): (() => void) | void {
-		return this.#titleGenerationStart?.();
 	}
 
 	/** Install the host hook that receives a typed user prompt dropped before

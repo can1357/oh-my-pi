@@ -26,7 +26,7 @@ import {
 	type TextPredictTarget,
 	textPredictReadyBanner,
 } from "./protocol";
-import { ensureSmolLmWeights } from "./smollm-weights";
+import { getSmolLmModelDir, smolLmWeightsReady } from "./smollm-weights";
 
 /** Exit after this long without a request; clients restart the daemon on demand. */
 const IDLE_EXIT_MS = 15 * 60_000;
@@ -37,6 +37,8 @@ const INGEST_BATCH = 1_000;
 /** After an engine fails to open, requests for it fail fast for this long before a retry. */
 const OPEN_RETRY_MS = 60_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
+/** `auto` re-checks for SmolLM weights at most this often while serving ngram. */
+const WEIGHTS_CHECK_INTERVAL_MS = 2_000;
 const CURSOR_FILE = "cursor.json";
 
 async function readCursor(stateDir: string): Promise<number> {
@@ -50,6 +52,15 @@ async function readCursor(stateDir: string): Promise<number> {
 		if (isEnoent(error)) return 0;
 		logger.warn("text-predict: unreadable history cursor; re-ingesting", { stateDir, error: String(error) });
 		return 0;
+	}
+}
+
+/** SmolLM was requested before its weights exist; not a load failure, so no retry backoff. */
+class SmolLmWeightsMissingError extends Error {
+	constructor() {
+		super(
+			"SmolLM weights are not downloaded yet (the editor fetches them on first use, or run `omp tiny-models download smollm`)",
+		);
 	}
 }
 
@@ -139,6 +150,7 @@ class TextPredictDaemon {
 	#engines = new Map<TextPredictMethod, Promise<Engine>>();
 	/** Engines whose open finished, so `auto` can tell "loaded" from "still opening" without waiting. */
 	#loaded = new Map<TextPredictMethod, Engine>();
+	#weightsCheckedAt = 0;
 	#failedAt = new Map<TextPredictMethod, number>();
 	#connections = new Set<net.Socket>();
 	#server: net.Server | undefined;
@@ -270,16 +282,27 @@ class TextPredictDaemon {
 
 	/**
 	 * Engine serving `target`. `auto` prefers SmolLM but never waits for it:
-	 * until SmolLM has loaded (first-use weight download, engine open) or while
-	 * it cannot load, ngram answers and SmolLM keeps opening in the background.
+	 * until its weights are downloaded (by the composer, see
+	 * `prefetchSmolLmWeights`) and the engine has opened, or while it cannot
+	 * load, ngram answers.
 	 */
 	#target(target: TextPredictTarget): Promise<Engine> {
 		if (target !== "auto") return this.#engine(target);
 		const smollm = this.#loaded.get("smollm");
 		if (smollm) return Promise.resolve(smollm);
-		// Start (or retry after OPEN_RETRY_MS) the SmolLM open; its failure is logged in #engine.
-		this.#engine("smollm").catch(() => {});
+		this.#openSmolLmWhenReady();
 		return this.#engine("ngram");
+	}
+
+	/** Start opening SmolLM once its weights exist; the daemon never downloads them. */
+	#openSmolLmWhenReady(): void {
+		const now = Date.now();
+		if (now - this.#weightsCheckedAt < WEIGHTS_CHECK_INTERVAL_MS) return;
+		this.#weightsCheckedAt = now;
+		void smolLmWeightsReady().then(ready => {
+			// Opens, or reuses the pending open; a failed open retries after OPEN_RETRY_MS.
+			if (ready) this.#engine("smollm").catch(() => {});
+		});
 	}
 
 	#engine(method: TextPredictMethod): Promise<Engine> {
@@ -295,6 +318,11 @@ class TextPredictDaemon {
 			pending.then(
 				engine => this.#loaded.set(method, engine),
 				error => {
+					if (error instanceof SmolLmWeightsMissingError) {
+						// Checked again on the next request: the composer is fetching them.
+						this.#engines.delete(method);
+						return;
+					}
 					this.#failedAt.set(method, Date.now());
 					logger.warn("text-predict: engine unavailable", { method, error: String(error) });
 				},
@@ -306,7 +334,11 @@ class TextPredictDaemon {
 	async #open(method: TextPredictMethod): Promise<Engine> {
 		const stateDir = path.join(this.#agentDir, "predict", method);
 		await fs.mkdir(stateDir, { recursive: true });
-		const modelDir = method === "smollm" ? await ensureSmolLmWeights() : undefined;
+		let modelDir: string | undefined;
+		if (method === "smollm") {
+			if (!(await smolLmWeightsReady())) throw new SmolLmWeightsMissingError();
+			modelDir = getSmolLmModelDir();
+		}
 		const startedAt = performance.now();
 		let predictor = new TextPredictor({ method, stateDir, modelDir });
 		let cursor: number;

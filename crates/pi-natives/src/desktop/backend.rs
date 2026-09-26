@@ -10,10 +10,11 @@ use super::{
 
 /// How window-targeted input reaches its target.
 ///
-/// `Background` never activates, raises, or moves the user's pointer and
-/// refuses with `BackgroundUnavailable` when it cannot target the event
-/// safely. `Foreground` is the explicit `takeover: true` escalation: it
-/// activates the target, posts real input, then restores focus and pointer.
+/// `Background` avoids deliberate activation and physical pointer movement;
+/// unsupported routes refuse, and detected focus side effects surface as
+/// potentially delivered input. `Foreground` is the explicit `takeover: true`
+/// escalation: it activates the target and restores state where the OS allows,
+/// without overwriting a newer user focus choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
 	#[default]
@@ -111,7 +112,8 @@ pub trait Backend: Send {
 pub trait AxBackend {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle>;
 	/// Resolves an element's owning top-level window for coordinate input.
-	/// Refuses missing or ambiguous ownership instead of hit-testing unrelated windows.
+	/// Refuses missing or ambiguous ownership instead of hit-testing unrelated
+	/// windows.
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String>;
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;

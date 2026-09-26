@@ -38,9 +38,9 @@ impl DiscoveryTargets {
 }
 
 struct EiDevice {
-	device: Device,
+	device:  Device,
 	resumed: bool,
-	layout: Option<KeyboardLayout>,
+	layout:  Option<KeyboardLayout>,
 }
 
 type RemoteDesktopSession = Session<'static, RemoteDesktop<'static>>;
@@ -115,8 +115,13 @@ impl Libei {
 		};
 		let (connection, mut events) = runtime
 			.block_on(async {
-				tokio::time::timeout(Duration::from_secs(5), backend.context
-					.handshake_tokio("omp-computer", ei::handshake::ContextType::Sender)).await
+				tokio::time::timeout(
+					Duration::from_secs(5),
+					backend
+						.context
+						.handshake_tokio("omp-computer", ei::handshake::ContextType::Sender),
+				)
+				.await
 			})
 			.map_err(|_| DesktopError::input_failed("libei handshake timed out"))?
 			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
@@ -215,16 +220,19 @@ impl Libei {
 					Ok(Some(event)) => event.map_err(|err| {
 						DesktopError::input_failed(format!("libei device discovery: {err}"))
 					})?,
-					Ok(None) => return Err(DesktopError::input_failed("libei disconnected during discovery")),
+					Ok(None) => {
+						return Err(DesktopError::input_failed("libei disconnected during discovery"));
+					},
 					Err(_) => break,
 				};
 				self.handle_event(event)?;
 				// Drain the initial burst even after the first matching devices:
 				// other monitors and initial modifier state can follow.
-				if drain_deadline.is_none() && targets.is_complete(
-					self.has_capability(DeviceCapability::PointerAbsolute),
-					self.has_capability(DeviceCapability::Keyboard),
-				) {
+				if drain_deadline.is_none()
+					&& targets.is_complete(
+						self.has_capability(DeviceCapability::PointerAbsolute),
+						self.has_capability(DeviceCapability::Keyboard),
+					) {
 					drain_deadline = Some(tokio::time::Instant::now() + DEVICE_DISCOVERY_DRAIN_TIMEOUT);
 				}
 			}
@@ -233,45 +241,74 @@ impl Libei {
 	}
 
 	fn serial(&self) -> u32 {
-		self.connection.as_ref().map_or(0, reis::event::Connection::serial)
+		self
+			.connection
+			.as_ref()
+			.map_or(0, reis::event::Connection::serial)
 	}
 
 	fn has_capability(&self, capability: DeviceCapability) -> bool {
-		self.devices.iter().any(|device| device.resumed && device.device.has_capability(capability))
+		self
+			.devices
+			.iter()
+			.any(|device| device.resumed && device.device.has_capability(capability))
 	}
 
 	fn handle_event(&mut self, event: EiEvent) -> CoreResult<()> {
 		match event {
 			EiEvent::SeatAdded(event) => {
 				event.seat.bind_capabilities(&[
-					DeviceCapability::PointerAbsolute, DeviceCapability::Pointer,
-					DeviceCapability::Button, DeviceCapability::Scroll, DeviceCapability::Keyboard,
+					DeviceCapability::PointerAbsolute,
+					DeviceCapability::Pointer,
+					DeviceCapability::Button,
+					DeviceCapability::Scroll,
+					DeviceCapability::Keyboard,
 				]);
 			},
 			EiEvent::DeviceAdded(event) => {
 				let layout = event.device.keymap().and_then(read_keymap);
-				self.devices.push(EiDevice { device: event.device, resumed: false, layout });
+				self
+					.devices
+					.push(EiDevice { device: event.device, resumed: false, layout });
 			},
 			EiEvent::DeviceResumed(event) => {
 				let serial = self.serial();
-				if let Some(device) = self.devices.iter_mut().find(|device| device.device == event.device) {
+				if let Some(device) = self
+					.devices
+					.iter_mut()
+					.find(|device| device.device == event.device)
+				{
 					device.resumed = true;
 					// An emulation transaction lasts until pause/disconnect, not
 					// one command. Mutter can discard frames stopped in the same
 					// batch; modifiers also need their own keyboard emulating.
-					device.device.device().start_emulating(serial, self.sequence);
+					device
+						.device
+						.device()
+						.start_emulating(serial, self.sequence);
 					self.sequence = self.sequence.wrapping_add(1);
 				}
 			},
 			EiEvent::DevicePaused(event) => {
-				if let Some(device) = self.devices.iter_mut().find(|device| device.device == event.device) {
+				if let Some(device) = self
+					.devices
+					.iter_mut()
+					.find(|device| device.device == event.device)
+				{
 					device.resumed = false;
 				}
 			},
-			EiEvent::DeviceRemoved(event) => self.devices.retain(|device| device.device != event.device),
-			EiEvent::SeatRemoved(event) => self.devices.retain(|device| device.device.seat() != &event.seat),
+			EiEvent::DeviceRemoved(event) => {
+				self.devices.retain(|device| device.device != event.device)
+			},
+			EiEvent::SeatRemoved(event) => self
+				.devices
+				.retain(|device| device.device.seat() != &event.seat),
 			EiEvent::KeyboardModifiers(event) => {
-				if let Some(device) = self.devices.iter_mut().find(|device| device.device == event.device)
+				if let Some(device) = self
+					.devices
+					.iter_mut()
+					.find(|device| device.device == event.device)
 					&& let Some(layout) = device.layout.as_mut()
 				{
 					layout.update_modifiers(event.depressed, event.latched, event.locked, event.group);
@@ -279,7 +316,10 @@ impl Libei {
 			},
 			EiEvent::Disconnected(event) => {
 				self.devices.clear();
-				return Err(DesktopError::input_failed(format!("libei disconnected: {}", event.explanation)));
+				return Err(DesktopError::input_failed(format!(
+					"libei disconnected: {}",
+					event.explanation
+				)));
 			},
 			_ => {},
 		}
@@ -287,9 +327,10 @@ impl Libei {
 	}
 
 	fn refresh_devices(&mut self) -> CoreResult<()> {
-		let mut events = self.events.take().ok_or_else(|| {
-			DesktopError::input_failed("libei event stream is unavailable")
-		})?;
+		let mut events = self
+			.events
+			.take()
+			.ok_or_else(|| DesktopError::input_failed("libei event stream is unavailable"))?;
 		let runtime = self.runtime;
 		let result = runtime.block_on(async {
 			for _ in 0..256 {
@@ -321,10 +362,12 @@ impl Libei {
 		// supported Linux clock and clock_gettime retains no pointer.
 		if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut time) } != 0 {
 			return Err(DesktopError::input_failed(format!(
-				"libei monotonic clock: {}", std::io::Error::last_os_error()
+				"libei monotonic clock: {}",
+				std::io::Error::last_os_error()
 			)));
 		}
-		Ok((time.tv_sec as u64).saturating_mul(1_000_000)
+		Ok((time.tv_sec as u64)
+			.saturating_mul(1_000_000)
 			.saturating_add(time.tv_nsec as u64 / 1_000))
 	}
 
@@ -336,11 +379,14 @@ impl Libei {
 		serial: u32,
 		time: &mut u64,
 	) {
-		keyboard.key(keycode, if pressed {
-			ei::keyboard::KeyState::Press
-		} else {
-			ei::keyboard::KeyState::Released
-		});
+		keyboard.key(
+			keycode,
+			if pressed {
+				ei::keyboard::KeyState::Press
+			} else {
+				ei::keyboard::KeyState::Released
+			},
+		);
 		device.device.device().frame(serial, *time);
 		*time = time.saturating_add(1);
 	}
@@ -351,62 +397,104 @@ impl Libei {
 		// In particular, an invalid later drag point must not leave a button
 		// or modifier held after returning an error.
 		let (modifiers, button) = match &event {
-			PointerEvent::Click { modifiers, button, .. } | PointerEvent::Drag { modifiers, button, .. } => {
-				(*modifiers, Some(match button {
-					MouseButton::Left => 0x110, MouseButton::Right => 0x111, MouseButton::Middle => 0x112,
-				}))
-			},
+			PointerEvent::Click { modifiers, button, .. }
+			| PointerEvent::Drag { modifiers, button, .. } => (
+				*modifiers,
+				Some(match button {
+					MouseButton::Left => 0x110,
+					MouseButton::Right => 0x111,
+					MouseButton::Middle => 0x112,
+				}),
+			),
 			_ => (Modifiers::default(), None),
 		};
 		let scroll_units = match &event {
-			PointerEvent::Scroll { dx, dy, .. } => Some((discrete_detents(*dx)?, discrete_detents(*dy)?)),
+			PointerEvent::Scroll { dx, dy, .. } => {
+				Some((discrete_detents(*dx)?, discrete_detents(*dy)?))
+			},
 			_ => None,
 		};
 		if matches!(&event, PointerEvent::Drag { path, .. } if path.is_empty()) {
 			return Err(DesktopError::input_failed("libei drag path is empty"));
 		}
-		let device = self.devices.iter().find(|device| {
-			device.resumed
-				&& device.device.has_capability(DeviceCapability::PointerAbsolute)
-				&& (button.is_none() || device.device.has_capability(DeviceCapability::Button))
-				&& (scroll_units.is_none() || device.device.has_capability(DeviceCapability::Scroll))
-				&& match &event {
-					PointerEvent::Click { x, y, .. } | PointerEvent::Move { x, y }
-					| PointerEvent::Scroll { x, y, .. } => device_contains(&device.device, *x, *y),
-					PointerEvent::Drag { path, .. } => path.iter().all(|&(x, y)| device_contains(&device.device, x, y)),
-				}
-		}).ok_or_else(|| DesktopError::input_failed(
-			"no resumed libei pointer provides the required capabilities and covers every gesture point; no input was sent",
-		))?;
-		let pointer = device.device.interface::<ei::PointerAbsolute>().ok_or_else(|| {
-			DesktopError::input_failed("libei absolute pointer interface is unavailable")
-		})?;
-		let button_interface = if button.is_some() {
-			Some(device.device.interface::<ei::Button>().ok_or_else(|| {
-				DesktopError::input_failed("libei button interface is unavailable")
-			})?)
-		} else { None };
-		let scroll_interface = if scroll_units.is_some() {
-			Some(device.device.interface::<ei::Scroll>().ok_or_else(|| {
-				DesktopError::input_failed("libei scroll interface is unavailable")
-			})?)
-		} else { None };
+		let device = self
+			.devices
+			.iter()
+			.find(|device| {
+				device.resumed
+					&& device
+						.device
+						.has_capability(DeviceCapability::PointerAbsolute)
+					&& (button.is_none() || device.device.has_capability(DeviceCapability::Button))
+					&& (scroll_units.is_none() || device.device.has_capability(DeviceCapability::Scroll))
+					&& match &event {
+						PointerEvent::Click { x, y, .. }
+						| PointerEvent::Move { x, y }
+						| PointerEvent::Scroll { x, y, .. } => device_contains(&device.device, *x, *y),
+						PointerEvent::Drag { path, .. } => path
+							.iter()
+							.all(|&(x, y)| device_contains(&device.device, x, y)),
+					}
+			})
+			.ok_or_else(|| {
+				DesktopError::input_failed(
+					"no resumed libei pointer provides the required capabilities and covers every \
+					 gesture point; no input was sent",
+				)
+			})?;
+		let pointer = device
+			.device
+			.interface::<ei::PointerAbsolute>()
+			.ok_or_else(|| {
+				DesktopError::input_failed("libei absolute pointer interface is unavailable")
+			})?;
+		let button_interface =
+			if button.is_some() {
+				Some(device.device.interface::<ei::Button>().ok_or_else(|| {
+					DesktopError::input_failed("libei button interface is unavailable")
+				})?)
+			} else {
+				None
+			};
+		let scroll_interface =
+			if scroll_units.is_some() {
+				Some(device.device.interface::<ei::Scroll>().ok_or_else(|| {
+					DesktopError::input_failed("libei scroll interface is unavailable")
+				})?)
+			} else {
+				None
+			};
 		let keyboard = if modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta {
-			let keyboard = self.devices.iter().find(|keyboard| {
-				keyboard.resumed && keyboard.device.seat() == device.device.seat()
-					&& keyboard.device.has_capability(DeviceCapability::Keyboard)
-			}).ok_or_else(|| DesktopError::permission_denied(
-				"no resumed libei keyboard on the pointer's seat can hold the gesture's modifiers",
-			))?;
-			Some((keyboard, keyboard.device.interface::<ei::Keyboard>().ok_or_else(|| {
-				DesktopError::input_failed("libei keyboard interface is unavailable")
-			})?))
-		} else { None };
+			let keyboard = self
+				.devices
+				.iter()
+				.find(|keyboard| {
+					keyboard.resumed
+						&& keyboard.device.seat() == device.device.seat()
+						&& keyboard.device.has_capability(DeviceCapability::Keyboard)
+				})
+				.ok_or_else(|| {
+					DesktopError::permission_denied(
+						"no resumed libei keyboard on the pointer's seat can hold the gesture's \
+						 modifiers",
+					)
+				})?;
+			Some((
+				keyboard,
+				keyboard.device.interface::<ei::Keyboard>().ok_or_else(|| {
+					DesktopError::input_failed("libei keyboard interface is unavailable")
+				})?,
+			))
+		} else {
+			None
+		};
 		let serial = self.serial();
 		let mut time = Self::timestamp()?;
 		if let Some((keyboard, interface)) = &keyboard {
 			for (enabled, code) in modifier_keys(modifiers) {
-				if enabled { Self::send_key(keyboard, interface, code, true, serial, &mut time); }
+				if enabled {
+					Self::send_key(keyboard, interface, code, true, serial, &mut time);
+				}
 			}
 		}
 		let move_to = |x: f64, y: f64, time: &mut u64| {
@@ -415,7 +503,9 @@ impl Libei {
 			*time = time.saturating_add(1);
 		};
 		match event {
-			PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => move_to(x, y, &mut time),
+			PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => {
+				move_to(x, y, &mut time)
+			},
 			PointerEvent::Click { x, y, count, .. } => {
 				move_to(x, y, &mut time);
 				if let (Some(code), Some(interface)) = (button, &button_interface) {
@@ -435,7 +525,9 @@ impl Libei {
 					interface.button(code, ei::button::ButtonState::Press);
 					device.device.device().frame(serial, time);
 					time = time.saturating_add(1);
-					for &(x, y) in path.iter().skip(1) { move_to(x, y, &mut time); }
+					for &(x, y) in path.iter().skip(1) {
+						move_to(x, y, &mut time);
+					}
 					interface.button(code, ei::button::ButtonState::Released);
 					device.device.device().frame(serial, time);
 					time = time.saturating_add(1);
@@ -449,7 +541,9 @@ impl Libei {
 		}
 		if let Some((keyboard, interface)) = &keyboard {
 			for (enabled, code) in modifier_keys(modifiers).into_iter().rev() {
-				if enabled { Self::send_key(keyboard, interface, code, false, serial, &mut time); }
+				if enabled {
+					Self::send_key(keyboard, interface, code, false, serial, &mut time);
+				}
 			}
 		}
 		self.flush()
@@ -457,40 +551,68 @@ impl Libei {
 
 	pub(super) fn key_chord(&mut self, keys: &[KeyName]) -> CoreResult<()> {
 		self.refresh_devices()?;
-		let device = self.devices.iter_mut().find(|device| {
-			device.resumed && device.device.has_capability(DeviceCapability::Keyboard)
-		}).ok_or_else(|| DesktopError::permission_denied("no resumed libei keyboard is available"))?;
+		let device = self
+			.devices
+			.iter_mut()
+			.find(|device| device.resumed && device.device.has_capability(DeviceCapability::Keyboard))
+			.ok_or_else(|| {
+				DesktopError::permission_denied("no resumed libei keyboard is available")
+			})?;
 		let mut codes = Vec::with_capacity(keys.len());
 		for &key in keys {
 			let stroke = match key {
 				KeyName::Char(character) => char_stroke(device.layout.as_mut(), character)?,
 				_ => KeyStroke { keycode: evdev_keycode(key)?, modifiers: Vec::new() },
 			};
-			for code in stroke.modifiers.into_iter().chain(std::iter::once(stroke.keycode)) {
-				if !codes.contains(&code) { codes.push(code); }
+			for code in stroke
+				.modifiers
+				.into_iter()
+				.chain(std::iter::once(stroke.keycode))
+			{
+				if !codes.contains(&code) {
+					codes.push(code);
+				}
 			}
 		}
-		let interface = device.device.interface::<ei::Keyboard>().ok_or_else(|| {
-			DesktopError::input_failed("libei keyboard interface is unavailable")
-		})?;
-		let serial = self.connection.as_ref().map_or(0, reis::event::Connection::serial);
+		let interface = device
+			.device
+			.interface::<ei::Keyboard>()
+			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
+		let serial = self
+			.connection
+			.as_ref()
+			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
-		for &code in &codes { Self::send_key(device, &interface, code, true, serial, &mut time); }
-		for &code in codes.iter().rev() { Self::send_key(device, &interface, code, false, serial, &mut time); }
+		for &code in &codes {
+			Self::send_key(device, &interface, code, true, serial, &mut time);
+		}
+		for &code in codes.iter().rev() {
+			Self::send_key(device, &interface, code, false, serial, &mut time);
+		}
 		self.flush()
 	}
 
 	pub(super) fn type_text(&mut self, text: &str) -> CoreResult<()> {
 		self.refresh_devices()?;
-		let device = self.devices.iter_mut().find(|device| {
-			device.resumed && device.device.has_capability(DeviceCapability::Keyboard)
-		}).ok_or_else(|| DesktopError::permission_denied("no resumed libei keyboard is available"))?;
-		let strokes = text.chars().map(|character| char_stroke(device.layout.as_mut(), character))
+		let device = self
+			.devices
+			.iter_mut()
+			.find(|device| device.resumed && device.device.has_capability(DeviceCapability::Keyboard))
+			.ok_or_else(|| {
+				DesktopError::permission_denied("no resumed libei keyboard is available")
+			})?;
+		let strokes = text
+			.chars()
+			.map(|character| char_stroke(device.layout.as_mut(), character))
 			.collect::<CoreResult<Vec<_>>>()?;
-		let interface = device.device.interface::<ei::Keyboard>().ok_or_else(|| {
-			DesktopError::input_failed("libei keyboard interface is unavailable")
-		})?;
-		let serial = self.connection.as_ref().map_or(0, reis::event::Connection::serial);
+		let interface = device
+			.device
+			.interface::<ei::Keyboard>()
+			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
+		let serial = self
+			.connection
+			.as_ref()
+			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
 		for stroke in strokes {
 			for &modifier in &stroke.modifiers {
@@ -506,14 +628,16 @@ impl Libei {
 	}
 }
 
-fn modifier_keys(modifiers: Modifiers) -> [(bool, u32); 4] {
+const fn modifier_keys(modifiers: Modifiers) -> [(bool, u32); 4] {
 	[(modifiers.ctrl, 29), (modifiers.alt, 56), (modifiers.shift, 42), (modifiers.meta, 125)]
 }
 
 fn device_contains(device: &Device, x: f64, y: f64) -> bool {
 	device.regions().iter().any(|region| {
-		x.is_finite() && y.is_finite()
-			&& x >= f64::from(region.x) && y >= f64::from(region.y)
+		x.is_finite()
+			&& y.is_finite()
+			&& x >= f64::from(region.x)
+			&& y >= f64::from(region.y)
 			&& x < f64::from(region.x) + f64::from(region.width)
 			&& y < f64::from(region.y) + f64::from(region.height)
 	})
@@ -529,7 +653,10 @@ fn discrete_detents(value: f64) -> CoreResult<i32> {
 }
 
 fn read_keymap(keymap: &Keymap) -> Option<KeyboardLayout> {
-	if keymap.type_ != ei::keyboard::KeymapType::Xkb || keymap.size == 0 || keymap.size > 16 * 1024 * 1024 {
+	if keymap.type_ != ei::keyboard::KeymapType::Xkb
+		|| keymap.size == 0
+		|| keymap.size > 16 * 1024 * 1024
+	{
 		return None;
 	}
 	let fd = keymap.fd.as_fd().try_clone_to_owned().ok()?;
@@ -560,7 +687,9 @@ fn char_stroke(layout: Option<&mut KeyboardLayout>, character: char) -> CoreResu
 			layout.active_group()
 		)));
 	}
-	if character.is_control() && let Some((keycode, shift)) = evdev_char(character) {
+	if character.is_control()
+		&& let Some((keycode, shift)) = evdev_char(character)
+	{
 		return Ok(KeyStroke { keycode, modifiers: if shift { vec![42] } else { Vec::new() } });
 	}
 	Err(DesktopError::input_failed(format!(

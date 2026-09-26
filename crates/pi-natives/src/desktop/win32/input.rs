@@ -23,7 +23,9 @@ pub(super) fn create_global_input() -> CoreResult<Enigo> {
 	// on the dedicated desktop worker, whose Win32 queries must stay physical
 	// even when the embedding process has already fixed a different DPI mode.
 	if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE) }.is_null() {
-		return Err(DesktopError::input_failed("cannot enable physical desktop coordinates on the input worker"));
+		return Err(DesktopError::input_failed(
+			"cannot enable physical desktop coordinates on the input worker",
+		));
 	}
 	Enigo::new(&Settings { open_prompt_to_get_permissions: false, ..Settings::default() }).map_err(
 		|error| DesktopError::input_failed(format!("Win32 input initialization failed: {error}")),
@@ -126,7 +128,10 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 				input
 					.button(button_to_enigo(button), Direction::Press)
 					.map_err(enigo_error)?;
-				let movement = path.iter().skip(1).try_for_each(|&(x, y)| foreground::move_pointer(x, y));
+				let movement = path
+					.iter()
+					.skip(1)
+					.try_for_each(|&(x, y)| foreground::move_pointer(x, y));
 				let release = input
 					.button(button_to_enigo(button), Direction::Release)
 					.map_err(enigo_error);
@@ -186,12 +191,12 @@ mod background {
 		Foundation::{ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, POINT, WPARAM},
 		UI::{
 			Input::KeyboardAndMouse::{
-				IsWindowEnabled, MAPVK_VK_TO_VSC, MapVirtualKeyW, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN,
-				VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
-				VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F20,
-				VK_F21, VK_F22, VK_F23, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT,
-				VK_NUMLOCK, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB,
-				VK_UP, VkKeyScanW,
+				IsWindowEnabled, MAPVK_VK_TO_VSC, MapVirtualKeyW, VK_BACK, VK_CAPITAL, VK_CONTROL,
+				VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7,
+				VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18,
+				VK_F19, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
+				VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
+				VK_SPACE, VK_TAB, VK_UP, VkKeyScanW,
 			},
 			WindowsAndMessaging::{
 				CS_DBLCLKS, GCL_STYLE, GetClassLongW, IsWindow, PostMessageW, SMTO_ABORTIFHUNG,
@@ -326,17 +331,19 @@ mod background {
 	}
 
 	/// Window, display and AX coordinates all use physical desktop pixels.
-	fn screen_point(x: f64, y: f64) -> POINT {
+	const fn screen_point(x: f64, y: f64) -> POINT {
 		POINT { x: x.round() as i32, y: y.round() as i32 }
 	}
 
 	/// Deepest child of `root` under a physical screen point, with the point in
 	/// that child's client coordinates.
 	fn child_under(root: HWND, point: POINT) -> CoreResult<(HWND, POINT)> {
-		window::deepest_child(root, point)
-			.ok_or_else(|| DesktopError::background_unavailable(
-				"cannot map this point into an enabled target client area; use ax actions or takeover:true",
-			))
+		window::deepest_child(root, point).ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot map this point into an enabled target client area; use ax actions or \
+				 takeover:true",
+			)
+		})
 	}
 
 	/// Deepest child of `root` under a physical desktop coordinate, with the
@@ -423,7 +430,11 @@ mod background {
 						if index > 0 {
 							thread::sleep(CLICK_GAP);
 						}
-						let press = if posts_double_click(index, wants_double) { double } else { down };
+						let press = if posts_double_click(index, wants_double) {
+							double
+						} else {
+							down
+						};
 						post(target, WM_MOUSEMOVE, flags, point)?;
 						post(target, press, flags | button_flag, point)?;
 						thread::sleep(CLICK_HOLD);
@@ -595,7 +606,8 @@ mod background {
 		fn focused(root: HWND) -> CoreResult<Self> {
 			let hwnd = window::focused_descendant(root).ok_or_else(|| {
 				DesktopError::background_unavailable(
-					"no unambiguous focused control in the target window; use ax actions or takeover:true",
+					"no unambiguous focused control in the target window; use ax actions or \
+					 takeover:true",
 				)
 			})?;
 			Ok(Self { hwnd, alt_depth: 0 })
@@ -766,8 +778,8 @@ mod foreground {
 			},
 			WindowsAndMessaging::{
 				GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-				IsWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-				SM_YVIRTUALSCREEN, SetCursorPos, WindowFromPoint,
+				IsWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+				SetCursorPos, WindowFromPoint,
 			},
 		},
 	};
@@ -839,22 +851,26 @@ mod foreground {
 			if current == self.previous {
 				return Ok(());
 			}
-			if current != self.target
-				&& unsafe { GetAncestor(current, GA_ROOTOWNER) } != self.target
-			{
+			// SAFETY: GetAncestor validates the observed handle, including null.
+			let owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
+			if current != self.target && owner != self.target {
 				return Err(DesktopError::input_failed(
 					"foreground changed during takeover; left the newly active window untouched",
 				));
 			}
 			// SAFETY: IsWindow validates the previously observed handle.
 			if unsafe { IsWindow(self.previous) } == 0 {
-				return Err(DesktopError::input_failed("the previous foreground window no longer exists"));
+				return Err(DesktopError::input_failed(
+					"the previous foreground window no longer exists",
+				));
 			}
 			window::activate(self.previous);
 			if window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT) {
 				Ok(())
 			} else {
-				Err(DesktopError::input_failed("Windows refused to restore the previous foreground window"))
+				Err(DesktopError::input_failed(
+					"Windows refused to restore the previous foreground window",
+				))
 			}
 		}
 	}
@@ -878,16 +894,22 @@ mod foreground {
 			let mut point = POINT { x: 0, y: 0 };
 			// SAFETY: `point` is writable for the call.
 			if unsafe { GetCursorPos(&mut point) } == 0 {
-				return Err(DesktopError::input_failed("cannot save the pointer position; no input was sent"));
+				return Err(DesktopError::input_failed(
+					"cannot save the pointer position; no input was sent",
+				));
 			}
 			Ok(Self(Some(point)))
 		}
 
 		fn restore(&mut self) -> CoreResult<()> {
-			let Some(point) = self.0.take() else { return Ok(()) };
+			let Some(point) = self.0.take() else {
+				return Ok(());
+			};
 			// SAFETY: coordinates were returned by GetCursorPos.
 			if unsafe { SetCursorPos(point.x, point.y) } == 0 {
-				return Err(DesktopError::input_failed("Windows refused to restore the pointer position"));
+				return Err(DesktopError::input_failed(
+					"Windows refused to restore the pointer position",
+				));
 			}
 			Ok(())
 		}
@@ -932,7 +954,8 @@ mod foreground {
 			for release in releases.iter().rev() {
 				// SAFETY: release is one initialized INPUT copied synchronously.
 				if unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } != 1 {
-					cleanup = Err(DesktopError::input_failed("SendInput could not release inserted input"));
+					cleanup =
+						Err(DesktopError::input_failed("SendInput could not release inserted input"));
 				}
 			}
 			super::completed(
@@ -946,11 +969,14 @@ mod foreground {
 	}
 
 	/// Reconstructs unmatched key/button downs from the accepted prefix.
-	/// Allocation occurs only after a short SendInput, never on successful sends.
+	/// Allocation occurs only after a short `SendInput`, never on successful
+	/// sends.
 	fn pending_releases(events: &[INPUT]) -> Vec<INPUT> {
 		let mut pending = Vec::new();
 		for event in events {
-			let Some((down, release)) = release_transition(event) else { continue };
+			let Some((down, release)) = release_transition(event) else {
+				continue;
+			};
 			let previous = pending.iter().position(|held| same_release(held, &release));
 			if down {
 				if previous.is_none() {
@@ -993,7 +1019,7 @@ mod foreground {
 		}
 	}
 
-	fn same_release(left: &INPUT, right: &INPUT) -> bool {
+	const fn same_release(left: &INPUT, right: &INPUT) -> bool {
 		if left.r#type != right.r#type {
 			return false;
 		}
@@ -1033,7 +1059,8 @@ mod foreground {
 		send(&[move_event(x, y)?])
 	}
 
-	/// Absolute move to a physical desktop coordinate across the virtual desktop.
+	/// Absolute move to a physical desktop coordinate across the virtual
+	/// desktop.
 	fn move_event(x: f64, y: f64) -> CoreResult<INPUT> {
 		let (x, y) = (x.round() as i32, y.round() as i32);
 		// SAFETY: GetSystemMetrics has no preconditions.
@@ -1048,8 +1075,10 @@ mod foreground {
 		if width <= 1 || height <= 1 {
 			return Err(DesktopError::input_failed("Win32 virtual desktop geometry is unavailable"));
 		}
-		let nx = (((i64::from(x) - i64::from(origin_x)) * 65_535) / i64::from(width - 1)).clamp(0, 65_535) as i32;
-		let ny = (((i64::from(y) - i64::from(origin_y)) * 65_535) / i64::from(height - 1)).clamp(0, 65_535) as i32;
+		let nx = (((i64::from(x) - i64::from(origin_x)) * 65_535) / i64::from(width - 1))
+			.clamp(0, 65_535) as i32;
+		let ny = (((i64::from(y) - i64::from(origin_y)) * 65_535) / i64::from(height - 1))
+			.clamp(0, 65_535) as i32;
 		let mut event =
 			mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0);
 		event.Anonymous.mi.dx = nx;
@@ -1095,7 +1124,8 @@ mod foreground {
 		// SAFETY: WindowFromPoint takes a scalar physical screen point.
 		if window::root(unsafe { WindowFromPoint(POINT { x, y }) }) != target {
 			return Err(DesktopError::input_failed(
-				"the pointer location is occluded or outside the exact target; no pointer input was sent",
+				"the pointer location is occluded or outside the exact target; no pointer input was \
+				 sent",
 			));
 		}
 		match event {
@@ -1103,7 +1133,9 @@ mod foreground {
 				let at = move_event(x, y)?;
 				let (down, up) = button_flags(button);
 				with_modifiers(target, modifiers, || {
-					(0..count).try_for_each(|_| send_to(target, &[at, mouse_event(down, 0), mouse_event(up, 0)]))
+					(0..count).try_for_each(|_| {
+						send_to(target, &[at, mouse_event(down, 0), mouse_event(up, 0)])
+					})
 				})
 			},
 			PointerEvent::Move { x, y } => send_to(target, &[move_event(x, y)?]),

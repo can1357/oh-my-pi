@@ -138,8 +138,8 @@ impl Win32Ax {
 				window::ensure_pattern_safe(root)?;
 				press.run().map_err(|error| {
 					DesktopError::ax_failed(format!(
-						"UIA coordinate action failed and may already have taken effect; \
-						 do not replay it automatically: {error}"
+						"UIA coordinate action failed and may already have taken effect; do not replay \
+						 it automatically: {error}"
 					))
 				})?;
 				return Ok(true);
@@ -209,7 +209,10 @@ fn positionless_press(element: &UIElement) -> Option<PositionlessPress> {
 		}
 	}
 	if control_type == ControlType::CheckBox {
-		return element.get_pattern::<UITogglePattern>().ok().map(PositionlessPress::Toggle);
+		return element
+			.get_pattern::<UITogglePattern>()
+			.ok()
+			.map(PositionlessPress::Toggle);
 	}
 	if matches!(control_type, ControlType::TabItem | ControlType::RadioButton) {
 		return element
@@ -251,7 +254,10 @@ fn actions(element: &UIElement) -> Vec<String> {
 		.and_then(|pattern| pattern.get_default_action())
 		.is_ok_and(|action| !action.is_empty());
 	let mut actions = Vec::with_capacity(8);
-	if can_invoke || can_toggle || can_select || can_legacy_press
+	if can_invoke
+		|| can_toggle
+		|| can_select
+		|| can_legacy_press
 		|| (can_expand && element.get_control_type().ok() == Some(ControlType::MenuItem))
 	{
 		actions.push("press".to_string());
@@ -347,9 +353,9 @@ impl AxBackend for Win32Ax {
 		// UIA rectangles already use physical desktop pixels, the same
 		// native coordinate space as window metadata and capture geometry.
 		let bounds = element.get_bounding_rectangle().ok().map(|rect| AxBounds {
-			x: f64::from(rect.get_left()),
-			y: f64::from(rect.get_top()),
-			width: f64::from(rect.get_right()) - f64::from(rect.get_left()),
+			x:      f64::from(rect.get_left()),
+			y:      f64::from(rect.get_top()),
+			width:  f64::from(rect.get_right()) - f64::from(rect.get_left()),
 			height: f64::from(rect.get_bottom()) - f64::from(rect.get_top()),
 		});
 		Ok(AxProps {
@@ -399,7 +405,9 @@ impl AxBackend for Win32Ax {
 				if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
 					return pattern.select().map_err(ax_error);
 				}
-				let pattern = element.get_pattern::<UILegacyIAccessiblePattern>().map_err(ax_error)?;
+				let pattern = element
+					.get_pattern::<UILegacyIAccessiblePattern>()
+					.map_err(ax_error)?;
 				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
 					return Err(DesktopError::ax_failed("UIA element has no default press action"));
 				}

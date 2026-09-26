@@ -9,9 +9,9 @@ use super::super::{
 
 #[derive(Debug)]
 pub(super) struct PhysicalLayout {
-	left: i32,
-	top: i32,
-	pub(super) width: u32,
+	left:              i32,
+	top:               i32,
+	pub(super) width:  u32,
 	pub(super) height: u32,
 }
 
@@ -33,10 +33,12 @@ impl PhysicalLayout {
 		if right == i64::MIN {
 			return Err(DesktopError::capture_failed("Win32 reported no active displays"));
 		}
-		let width = u32::try_from(right - i64::from(left))
-			.map_err(|_| DesktopError::capture_failed("Win32 desktop width exceeds the native range"))?;
-		let height = u32::try_from(bottom - i64::from(top))
-			.map_err(|_| DesktopError::capture_failed("Win32 desktop height exceeds the native range"))?;
+		let width = u32::try_from(right - i64::from(left)).map_err(|_| {
+			DesktopError::capture_failed("Win32 desktop width exceeds the native range")
+		})?;
+		let height = u32::try_from(bottom - i64::from(top)).map_err(|_| {
+			DesktopError::capture_failed("Win32 desktop height exceeds the native range")
+		})?;
 		if u64::from(width) * u64::from(height) > MAX_COMPOSITE_PIXELS {
 			return Err(DesktopError::capture_failed(format!(
 				"Win32 composite {width}x{height} exceeds the native safety limit"
@@ -80,10 +82,7 @@ mod tests {
 
 	#[test]
 	fn adjacent_mixed_dpi_monitors_do_not_overlap_or_rescale() {
-		let mut displays = [
-			display(0, 0, 1920, 1080, 1.0),
-			display(1920, 0, 3840, 2160, 2.0),
-		];
+		let mut displays = [display(0, 0, 1920, 1080, 1.0), display(1920, 0, 3840, 2160, 2.0)];
 		let layout = PhysicalLayout::new(displays.iter()).unwrap();
 		for display in &mut displays {
 			layout.place(display);
@@ -98,10 +97,7 @@ mod tests {
 
 	#[test]
 	fn negative_monitor_origins_round_trip_from_normalized_capture_pixels() {
-		let mut displays = [
-			display(-2560, -200, 2560, 1440, 2.0),
-			display(0, 0, 1920, 1080, 1.0),
-		];
+		let mut displays = [display(-2560, -200, 2560, 1440, 2.0), display(0, 0, 1920, 1080, 1.0)];
 		let layout = PhysicalLayout::new(displays.iter()).unwrap();
 		for display in &mut displays {
 			layout.place(display);

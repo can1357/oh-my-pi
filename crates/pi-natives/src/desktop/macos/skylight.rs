@@ -352,8 +352,8 @@ enum FocusDecision {
 /// resurrect this action's old focus claim.
 struct BackgroundFocusLease {
 	previous: ProcessSerialNumber,
-	target: ProcessSerialNumber,
-	key: u32,
+	target:   ProcessSerialNumber,
+	key:      u32,
 	activity: [u32; 5],
 	disarmed: bool,
 }
@@ -394,21 +394,30 @@ pub(super) fn with_background_guard<T>(
 	pid: pid_t,
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let spi = FOREGROUND.as_ref().ok_or_else(|| DesktopError::background_unavailable(
-		"focus-restoration SPI is unavailable; use ax actions that do not activate the app or takeover:true",
-	))?;
-	let previous = front_process(spi.get_front).ok_or_else(|| DesktopError::background_unavailable(
-		"cannot establish the current front process before background input; retry with takeover:true",
-	))?;
+	let spi = FOREGROUND.as_ref().ok_or_else(|| {
+		DesktopError::background_unavailable(
+			"focus-restoration SPI is unavailable; use ax actions that do not activate the app or \
+			 takeover:true",
+		)
+	})?;
+	let previous = front_process(spi.get_front).ok_or_else(|| {
+		DesktopError::background_unavailable(
+			"cannot establish the current front process before background input; retry with \
+			 takeover:true",
+		)
+	})?;
 	if previous.pid == Some(pid) {
 		return action();
 	}
-	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| DesktopError::background_unavailable(
-		"cannot resolve the background target process; retry with takeover:true or use ax actions",
-	))?;
+	let target = process_psn(spi.psn, pid, 0).ok_or_else(|| {
+		DesktopError::background_unavailable(
+			"cannot resolve the background target process; retry with takeover:true or use ax actions",
+		)
+	})?;
 	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot establish the user's key window for background focus restoration; retry with takeover:true or use ax actions",
+			"cannot establish the user's key window for background focus restoration; retry with \
+			 takeover:true or use ax actions",
 		)
 	})?;
 	let mut lease = BackgroundFocusLease {
@@ -426,7 +435,9 @@ pub(super) fn with_background_guard<T>(
 				let mut restored = false;
 				loop {
 					let Some(front) = front_process(spi.get_front) else {
-						return Err(DesktopError::input_failed("lost the front process during background input"));
+						return Err(DesktopError::input_failed(
+							"lost the front process during background input",
+						));
 					};
 					let key = if front.psn == previous.psn {
 						previous.pid.and_then(ax::key_window_id)
@@ -444,18 +455,27 @@ pub(super) fn with_background_guard<T>(
 							{
 								set_front(spi, previous.psn, previous_key)?;
 								restored = true;
-								if !post_record(spi.post_record, previous.psn, &focus_record(previous_key, FOCUS_MARKER)) {
-									return Err(DesktopError::input_failed("background key-window restoration was rejected"));
+								if !post_record(
+									spi.post_record,
+									previous.psn,
+									&focus_record(previous_key, FOCUS_MARKER),
+								) {
+									return Err(DesktopError::input_failed(
+										"background key-window restoration was rejected",
+									));
 								}
 							}
 						},
 					}
 					match wake.recv_timeout(ACTIVATION_POLL) {
 						Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-							if restored && front_process(spi.get_front).is_some_and(|front| front.psn == target) {
+							if restored
+								&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+							{
 								return Err(DesktopError::input_failed(
 									"the background target reactivated after focus restoration; input may \
-									 already have landed; inspect the desktop and use takeover:true or ax actions",
+									 already have landed; inspect the desktop and use takeover:true or ax \
+									 actions",
 								));
 							}
 							return Ok(());
@@ -464,9 +484,12 @@ pub(super) fn with_background_guard<T>(
 					}
 				}
 			})
-			.map_err(|error| DesktopError::background_unavailable(format!(
-				"could not start the background focus guard: {error}; retry with takeover:true or use ax actions"
-			)))?;
+			.map_err(|error| {
+				DesktopError::background_unavailable(format!(
+					"could not start the background focus guard: {error}; retry with takeover:true or \
+					 use ax actions"
+				))
+			})?;
 		let result = action();
 		thread::sleep(BACKGROUND_SETTLE);
 		// Dropping the sender also wakes the observer if it has already disarmed.
@@ -482,7 +505,9 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 	// SAFETY: The PSN was resolved from WindowServer. kCPSNoWindows changes
 	// only the front process; no activate-all-windows fallback is permitted.
 	if unsafe { (spi.set_front)(&psn, wid, CPS_NO_WINDOWS) } != 0 {
-		return Err(DesktopError::input_failed("WindowServer rejected front-process restoration/activation"));
+		return Err(DesktopError::input_failed(
+			"WindowServer rejected front-process restoration/activation",
+		));
 	}
 	Ok(())
 }
@@ -516,7 +541,8 @@ pub(super) fn with_focus_without_raise<T>(
 	})?;
 	let previous_key = previous.pid.and_then(ax::key_window_id).ok_or_else(|| {
 		DesktopError::background_unavailable(
-			"cannot identify the previous key window to restore; retry with takeover:true or use ax actions",
+			"cannot identify the previous key window to restore; retry with takeover:true or use ax \
+			 actions",
 		)
 	})?;
 	if previous.psn == target && previous_key == wid {
@@ -539,7 +565,10 @@ pub(super) fn with_focus_without_raise<T>(
 	thread::sleep(FOCUS_SETTLE);
 	let result = action();
 	thread::sleep(FOCUS_SETTLE);
-	after_cleanup(result, restore_focus_after_without_raise(spi, previous, previous_key, target, wid))
+	after_cleanup(
+		result,
+		restore_focus_after_without_raise(spi, previous, previous_key, target, wid),
+	)
 }
 
 /// Reverses [`with_focus_without_raise`]: defocuses the target and hands key
@@ -562,13 +591,16 @@ fn restore_focus_after_without_raise(
 	if front.psn != previous.psn {
 		return Ok(());
 	}
-	if previous.pid.and_then(ax::key_window_id).is_some_and(|key| {
-		key != previous_key && !(previous.psn == target && key == wid)
-	}) {
+	if previous
+		.pid
+		.and_then(ax::key_window_id)
+		.is_some_and(|key| key != previous_key && !(previous.psn == target && key == wid))
+	{
 		return Ok(());
 	}
 	let defocused = post_record(spi.post_record, target, &focus_record(wid, DEFOCUS_MARKER));
-	let focused = post_record(spi.post_record, previous.psn, &focus_record(previous_key, FOCUS_MARKER));
+	let focused =
+		post_record(spi.post_record, previous.psn, &focus_record(previous_key, FOCUS_MARKER));
 	if !defocused || !focused {
 		return Err(DesktopError::input_failed("background focus restoration records were rejected"));
 	}
@@ -588,38 +620,44 @@ pub(super) fn with_foreground<T>(
 	wid: u32,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let spi = FOREGROUND.as_ref().ok_or_else(|| DesktopError::input_failed(
-		"exact-window takeover SPI is unavailable; no input was sent",
-	))?;
-	let previous = front_process(spi.get_front).ok_or_else(|| DesktopError::input_failed(
-		"cannot identify the front process for takeover restoration; no input was sent",
-	))?;
-	let target = process_psn(spi.psn, pid, wid).ok_or_else(|| DesktopError::input_failed(
-		"cannot resolve the exact takeover target; no input was sent",
-	))?;
+	let spi = FOREGROUND.as_ref().ok_or_else(|| {
+		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
+	})?;
+	let previous = front_process(spi.get_front).ok_or_else(|| {
+		DesktopError::input_failed(
+			"cannot identify the front process for takeover restoration; no input was sent",
+		)
+	})?;
+	let target = process_psn(spi.psn, pid, wid).ok_or_else(|| {
+		DesktopError::input_failed("cannot resolve the exact takeover target; no input was sent")
+	})?;
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
 		let result = action(false);
 		thread::sleep(FOREGROUND_SETTLE);
 		return result;
 	}
-	let previous_pid = previous.pid.ok_or_else(|| DesktopError::input_failed(
-		"cannot identify the previous application for takeover restoration; no input was sent",
-	))?;
-	let previous_key = ax::key_window_id(previous_pid).ok_or_else(|| DesktopError::input_failed(
-		"cannot identify the previous key window for takeover restoration; no input was sent",
-	))?;
+	let previous_pid = previous.pid.ok_or_else(|| {
+		DesktopError::input_failed(
+			"cannot identify the previous application for takeover restoration; no input was sent",
+		)
+	})?;
+	let previous_key = ax::key_window_id(previous_pid).ok_or_else(|| {
+		DesktopError::input_failed(
+			"cannot identify the previous key window for takeover restoration; no input was sent",
+		)
+	})?;
 	let restore = |preparation_failed: bool| {
-		let front = front_process(spi.get_front).ok_or_else(|| DesktopError::input_failed(
-			"cannot establish current focus for takeover restoration",
-		))?;
+		let front = front_process(spi.get_front).ok_or_else(|| {
+			DesktopError::input_failed("cannot establish current focus for takeover restoration")
+		})?;
 		// A user-selected third app or sibling window must not be overwritten.
 		if front.psn != target {
 			return Ok(());
 		}
-		if ax::focused_window_id(pid).is_some_and(|key| {
-			key != wid && (!preparation_failed || Some(key) != focused)
-		}) {
+		if ax::focused_window_id(pid)
+			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
+		{
 			return Ok(());
 		}
 		set_front(spi, previous.psn, previous_key)?;
@@ -677,15 +715,23 @@ fn preserves_exact_existing_focus(
 /// `NSWindow` key, and menu validation and first-responder installation follow
 /// the latter. This marks the front-process request as user generated and
 /// posts the paired make-key records for the one window.
-fn make_exact_window_key(spi: &ForegroundSpi, target: ProcessSerialNumber, wid: u32) -> CoreResult<()> {
+fn make_exact_window_key(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+) -> CoreResult<()> {
 	// SAFETY: Target PSN is valid and kCPSUserGenerated only changes how the
 	// request is attributed.
 	if unsafe { (spi.set_front)(&target, wid, CPS_USER_GENERATED) } != 0 {
-		return Err(DesktopError::input_failed(format!("window {wid} rejected exact key-window activation")));
+		return Err(DesktopError::input_failed(format!(
+			"window {wid} rejected exact key-window activation"
+		)));
 	}
 	for kind in [0x01, 0x02] {
 		if !post_record(spi.post_record, target, &make_key_record(wid, kind)) {
-			return Err(DesktopError::input_failed(format!("window {wid} rejected its make-key record")));
+			return Err(DesktopError::input_failed(format!(
+				"window {wid} rejected its make-key record"
+			)));
 		}
 	}
 	Ok(())
@@ -814,9 +860,8 @@ mod tests {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
 		let third = ProcessSerialNumber { high: 0, low: 9 };
-		let lease = || BackgroundFocusLease {
-			previous, target, key: 42, activity: [0; 5], disarmed: false,
-		};
+		let lease =
+			|| BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
 		let mut guard = lease();
 		assert_eq!(guard.observe(target, None, [0; 5]), FocusDecision::Restore);
 		assert_eq!(guard.observe(third, None, [0; 5]), FocusDecision::Disarm);
@@ -834,9 +879,8 @@ mod tests {
 	fn typing_in_the_original_window_does_not_claim_a_user_focus_switch() {
 		let previous = ProcessSerialNumber { high: 0, low: 7 };
 		let target = ProcessSerialNumber { high: 0, low: 8 };
-		let mut guard = BackgroundFocusLease {
-			previous, target, key: 42, activity: [0; 5], disarmed: false,
-		};
+		let mut guard =
+			BackgroundFocusLease { previous, target, key: 42, activity: [0; 5], disarmed: false };
 		assert_eq!(guard.observe(previous, Some(42), [1; 5]), FocusDecision::Observe);
 		assert_eq!(guard.observe(target, None, [1; 5]), FocusDecision::Restore);
 	}

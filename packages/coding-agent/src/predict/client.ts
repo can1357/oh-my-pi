@@ -18,6 +18,7 @@ import { daemonClientForGlobal } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
 import { connectJsonlSocket, LineParser, writeJsonLine } from "../tiny/jsonl-socket";
+import { prefetchSmolLmWeights } from "./smollm-weights";
 import {
 	TEXT_PREDICT_AGENT_DIR_ENV,
 	TEXT_PREDICT_BROKER_SCOPE,
@@ -230,6 +231,9 @@ class TextPredictionClient {
 	 * (e.g. it failed to load).
 	 */
 	async complete(target: TextPredictTarget, before: string, prefix: string): Promise<TextPrediction> {
+		// SmolLM's weights download here, in the interactive process (shown in the
+		// download HUD); the daemon serves ngram for `auto` until they land.
+		if (target === "auto" || target === "smollm") prefetchSmolLmWeights();
 		const response = await this.#request(
 			id => ({ id, op: "complete", method: target, before, prefix }),
 			COMPLETE_TIMEOUT_MS,

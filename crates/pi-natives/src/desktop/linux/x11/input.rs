@@ -4,9 +4,9 @@
 //!   `XTest`.
 //! - Background window targets prefer the XI2-MPX virtual master pair (real
 //!   XI2-only input on independent devices), refusing when the point is covered
-//!   by another window. Without MPX they fall back to
-//!   `XSendEvent`, except for toolkits known to drop synthetic events, which
-//!   get an explicit `background_unavailable` instead of a silent no-op.
+//!   by another window. Without MPX they fall back to `XSendEvent`, except for
+//!   toolkits known to drop synthetic events, which get an explicit
+//!   `background_unavailable` instead of a silent no-op.
 //! - Foreground (`takeover`) activates the target, confirms the WM made it the
 //!   active, focused window, injects through `XTest`, then restores the user's
 //!   pointer position and previously active window.
@@ -66,18 +66,18 @@ const FOREGROUND_RESTORE_SETTLE: Duration = Duration::from_millis(150);
 const FOREGROUND_RESTORE_BUDGET: Duration = Duration::from_millis(400);
 
 pub struct X11Input {
-	conn:            Arc<RustConnection>,
-	root:            Window,
-	atoms:           Atoms,
-	keymap:          Keymap,
-	takeover_target: Option<Window>,
+	conn:             Arc<RustConnection>,
+	root:             Window,
+	atoms:            Atoms,
+	keymap:           Keymap,
+	takeover_target:  Option<Window>,
 	takeover_pointer: Cell<Option<(i16, i16)>>,
 	/// Session-lived virtual master pair, created on first background use.
-	mpx:             Option<Mpx>,
+	mpx:              Option<Mpx>,
 	/// Why the XI2-MPX route is unusable. Set once, so a host that cannot
 	/// hot-plug devices is not re-probed (and its hierarchy not churned) on
 	/// every action.
-	mpx_unavailable: Option<String>,
+	mpx_unavailable:  Option<String>,
 }
 
 /// Keyboard input to plan against a keymap.
@@ -116,8 +116,14 @@ impl X11Input {
 		let atoms = Atoms::intern(&conn)?;
 		let mpx_unavailable = mpx_probe(&conn).err();
 		Ok(Self {
-			conn, root, atoms, keymap, takeover_target: None,
-			takeover_pointer: Cell::new(None), mpx: None, mpx_unavailable,
+			conn,
+			root,
+			atoms,
+			keymap,
+			takeover_target: None,
+			takeover_pointer: Cell::new(None),
+			mpx: None,
+			mpx_unavailable,
 		})
 	}
 
@@ -143,8 +149,11 @@ impl X11Input {
 				let window = parse_window(id)?;
 				if self.requires_core_events(window) {
 					if self.drops_synthetic_input(window) {
-						return Err(background_unavailable(id, event_kind(&event),
-							"its toolkit needs core input, which cannot preserve MPX focus isolation"));
+						return Err(background_unavailable(
+							id,
+							event_kind(&event),
+							"its toolkit needs core input, which cannot preserve MPX focus isolation",
+						));
 					}
 					return self.pointer_send_event(window, &event);
 				}
@@ -221,8 +230,11 @@ impl X11Input {
 	fn background_keys(&mut self, id: &str, window: Window, keys: Keys<'_>) -> CoreResult<()> {
 		if self.requires_core_events(window) {
 			if self.drops_synthetic_input(window) {
-				return Err(background_unavailable(id, keys.kind(),
-					"its toolkit needs core input, which cannot preserve MPX focus isolation"));
+				return Err(background_unavailable(
+					id,
+					keys.kind(),
+					"its toolkit needs core input, which cannot preserve MPX focus isolation",
+				));
 			}
 			let steps = keys.plan(&self.keymap)?;
 			return self.send_key_steps(window, &steps);
@@ -234,10 +246,14 @@ impl X11Input {
 				if let Some(pid) = pid
 					&& let Some(popup) = wm.grab_popup_of(pid)
 				{
-					return Err(background_unavailable(id, keys.kind(), &format!(
-						"popup {popup} may hold an input grab; background input cannot safely \
-						 substitute the user's core keyboard"
-					)));
+					return Err(background_unavailable(
+						id,
+						keys.kind(),
+						&format!(
+							"popup {popup} may hold an input grab; background input cannot safely \
+							 substitute the user's core keyboard"
+						),
+					));
 				}
 				let snapshot = FocusSnapshot::capture(wm);
 				let result = match keys {
@@ -356,7 +372,9 @@ impl X11Input {
 			};
 			// Never overwrite a deliberate switch to a third window.
 			if wm.active_window() != Some(window)
-				|| !wm.input_focus().is_some_and(|(focus, _)| wm.is_within(focus, window))
+				|| !wm
+					.input_focus()
+					.is_some_and(|(focus, _)| wm.is_within(focus, window))
 			{
 				return;
 			}
@@ -369,7 +387,9 @@ impl X11Input {
 		}
 		if let Some((focus, revert)) = previous_focus
 			&& focus > 1
-			&& wm.input_focus().is_some_and(|(now, _)| wm.is_within(now, window))
+			&& wm
+				.input_focus()
+				.is_some_and(|(now, _)| wm.is_within(now, window))
 			&& let Ok(cookie) = self.conn.set_input_focus(revert, focus, CURRENT_TIME)
 		{
 			let _ = cookie.check();
@@ -530,7 +550,12 @@ impl X11Input {
 	}
 
 	fn xtest_steps(&self, steps: &[KeyStep]) -> CoreResult<()> {
-		self.check_released_keys(steps.iter().filter(|step| step.press).map(|step| step.keycode))?;
+		self.check_released_keys(
+			steps
+				.iter()
+				.filter(|step| step.press)
+				.map(|step| step.keycode),
+		)?;
 		keymap::run_steps(steps, |step| self.xtest_key(step.keycode, step.press))?;
 		self.conn.flush().map_err(input_failed)
 	}
@@ -801,8 +826,16 @@ impl X11Input {
 	}
 
 	fn check_released_keys(&self, keycodes: impl IntoIterator<Item = u8>) -> CoreResult<()> {
-		let state = self.conn.query_keymap().map_err(input_failed)?.reply().map_err(input_failed)?;
-		if keycodes.into_iter().any(|code| state.keys[usize::from(code / 8)] & (1 << (code % 8)) != 0) {
+		let state = self
+			.conn
+			.query_keymap()
+			.map_err(input_failed)?
+			.reply()
+			.map_err(input_failed)?;
+		if keycodes
+			.into_iter()
+			.any(|code| state.keys[usize::from(code / 8)] & (1 << (code % 8)) != 0)
+		{
 			return Err(DesktopError::input_failed(
 				"a requested key is already physically held; refusing to release the user's key",
 			));
@@ -823,9 +856,11 @@ impl X11Input {
 	}
 
 	fn requires_core_events(&self, window: Window) -> bool {
-		let class = self.conn
+		let class = self
+			.conn
 			.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
-			.ok().and_then(|cookie| cookie.reply().ok())
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
 			.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
 			.unwrap_or_default();
 		toolkit::requires_core_events(&class, self.wm().owning_pid(window))
@@ -935,7 +970,8 @@ fn mpx_probe(conn: &RustConnection) -> Result<(), String> {
 
 fn pointer_endpoint(event: &PointerEvent) -> CoreResult<(i16, i16)> {
 	match event {
-		PointerEvent::Click { x, y, .. } | PointerEvent::Move { x, y }
+		PointerEvent::Click { x, y, .. }
+		| PointerEvent::Move { x, y }
 		| PointerEvent::Scroll { x, y, .. } => validate_xtest_point(*x, *y),
 		PointerEvent::Drag { path, .. } => {
 			let mut last = None;
@@ -943,7 +979,7 @@ fn pointer_endpoint(event: &PointerEvent) -> CoreResult<(i16, i16)> {
 				last = Some(validate_xtest_point(x, y)?);
 			}
 			last.ok_or_else(|| DesktopError::input_failed("drag path is empty"))
-		}
+		},
 	}
 }
 

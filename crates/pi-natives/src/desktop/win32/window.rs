@@ -189,7 +189,7 @@ fn in_window_dpi<T>(hwnd: HWND, query: impl FnOnce() -> T) -> Option<T> {
 }
 
 /// Converts physical screen coordinates to the target's logical screen
-/// coordinates (also required by posted wheel and WM_NCHITTEST messages).
+/// coordinates (also required by posted wheel and `WM_NCHITTEST` messages).
 pub(super) fn logical_screen_point(hwnd: HWND, mut screen: POINT) -> Option<POINT> {
 	// SAFETY: screen is writable and Win32 validates hwnd. This API explicitly
 	// uses the target's DPI awareness regardless of the calling thread's.
@@ -253,22 +253,26 @@ pub(super) fn focused_descendant(root: HWND) -> Option<HWND> {
 		let focused = info.hwndFocus;
 		// SAFETY: these predicates validate the handles; a sibling window on
 		// the same GUI thread is not a focused descendant of this target.
+		let eligible = unsafe {
+			(focused == root || IsChild(root, focused) != 0)
+				&& IsWindowVisible(focused) != 0
+				&& IsWindowEnabled(focused) != 0
+		};
 		if focused.is_null()
-			|| (focused != root && unsafe { IsChild(root, focused) } == 0)
-			|| unsafe { IsWindowVisible(focused) } == 0
-			|| unsafe { IsWindowEnabled(focused) } == 0
+			|| !eligible
 			|| (!info.hwndActive.is_null() && self::root(info.hwndActive) != root)
 		{
 			continue;
 		}
-		let Some(depth) = depth_below(root, focused) else { continue };
+		let Some(depth) = depth_below(root, focused) else {
+			continue;
+		};
 		if let Some((_, previous)) = best
 			&& previous != focused
 			// SAFETY: IsChild validates both handles. Independent child
 			// threads can retain stale focus in different branches; neither
 			// branch is an unambiguous keyboard target.
-			&& unsafe { IsChild(previous, focused) } == 0
-			&& unsafe { IsChild(focused, previous) } == 0
+			&& unsafe { IsChild(previous, focused) == 0 && IsChild(focused, previous) == 0 }
 		{
 			return None;
 		}
@@ -305,7 +309,9 @@ pub(super) fn uipi_block(hwnd: HWND) -> Option<String> {
 	}
 	// SAFETY: the pseudo-handle for the current process needs no cleanup.
 	let Some(own) = integrity_level(unsafe { GetCurrentProcess() }) else {
-		return Some("cannot establish this process's integrity level; no input was sent".to_string());
+		return Some(
+			"cannot establish this process's integrity level; no input was sent".to_string(),
+		);
 	};
 	// SAFETY: scalar arguments; a null result is handled below.
 	let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -458,7 +464,7 @@ pub(super) fn wait_for_foreground(target: HWND, timeout: Duration) -> bool {
 }
 
 /// Known self-activating providers cannot be made background-safe by changing
-/// WS_EX_NOACTIVATE (explicit SetForegroundWindow bypasses it), disabling
+/// `WS_EX_NOACTIVATE` (explicit `SetForegroundWindow` bypasses it), disabling
 /// foreign windows (synchronous, racy and potentially permanent on a hang), or
 /// restoring focus afterward (already disturbed the user and changed z-order).
 pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {

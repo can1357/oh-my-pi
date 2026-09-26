@@ -22,7 +22,6 @@ import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-tui/overlays/tiny-title-download-progress";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { chipLabel, compactImageMarkers, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -42,9 +41,8 @@ import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
-import { getTinyLocalModelSpec, isTinyLocalModelKey } from "../../tiny/models";
+import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
-import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { resolveReadPath } from "../../tools/path-utils";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
@@ -197,12 +195,6 @@ function safeAbort(label: string, fn: () => void): void {
 	}
 }
 
-const TINY_TITLE_PROGRESS_DONE_TTL_MS = 3_000;
-// A cached model fires its file-load events in a short burst and then goes silent
-// while onnxruntime builds the session; a genuine download keeps streaming progress
-// events for seconds. Only reveal the bar once a still-incomplete event arrives after
-// this grace window, so an already-downloaded model never flashes the bar.
-const TINY_TITLE_PROGRESS_REVEAL_DELAY_MS = 1_000;
 // Double-tap ← on an empty editor opens the Agent Hub (and, in a focused
 // subagent view, ←← returns to the main session). The second tap must land
 // inside this window. The lower bound rejects terminal-synthesized arrow-key
@@ -245,12 +237,6 @@ export class InputController {
 		if (modelKey) tinyTitleClient.prewarm(modelKey);
 	}
 
-	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
-	notifyTitleGenerationStart(): (() => void) | undefined {
-		const modelKey = this.#resolveTinyTitleLocalModelKey();
-		return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
-	}
-
 	#enhancedPaste?: EnhancedPasteController;
 	#draftText: string | undefined;
 	#focusedLeftTapListenerInstalled = false;
@@ -279,54 +265,6 @@ export class InputController {
 	// Visible-chip signature from the last editor change; a difference escapes the
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
-
-	#showTinyTitleDownloadProgress(modelKey: string | undefined): (() => void) | undefined {
-		if (!modelKey || !isTinyLocalModelKey(modelKey)) return;
-		const spec = getTinyLocalModelSpec(modelKey);
-		if (!spec) return;
-		const component = new TinyTitleDownloadProgressComponent(spec.label);
-		let added = false;
-		let disposed = false;
-		let removeTimer: NodeJS.Timeout | undefined;
-		const remove = (): void => {
-			if (disposed) return;
-			disposed = true;
-			unsubscribe();
-			if (removeTimer) {
-				clearTimeout(removeTimer);
-				removeTimer = undefined;
-			}
-			if (added) {
-				this.ctx.chatContainer.removeChild(component);
-				this.ctx.ui.requestRender();
-			}
-		};
-		const scheduleRemove = (): void => {
-			if (removeTimer) clearTimeout(removeTimer);
-			removeTimer = setTimeout(remove, TINY_TITLE_PROGRESS_DONE_TTL_MS);
-			removeTimer.unref?.();
-		};
-		let revealAt = 0;
-		const update = (event: TinyTitleProgressEvent): void => {
-			if (disposed || event.modelKey !== modelKey) return;
-			component.update(event);
-			if (revealAt === 0) revealAt = performance.now() + TINY_TITLE_PROGRESS_REVEAL_DELAY_MS;
-			const complete = component.isComplete();
-			// Reveal only for a download still in flight past the grace window. Cache hits
-			// either complete or fall silent (onnx init emits no events) before this fires.
-			if (!added && !complete && performance.now() >= revealAt) {
-				this.ctx.chatContainer.addChild(component);
-				added = true;
-			}
-			if (added) this.ctx.ui.requestRender();
-			if (complete) {
-				if (added) scheduleRemove();
-				else remove();
-			}
-		};
-		const unsubscribe = tinyTitleClient.onProgress(update);
-		return remove;
-	}
 
 	#abortStreamingTurn(): void {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -939,10 +877,11 @@ export class InputController {
 				return;
 			}
 
-			// Empty submit while streaming with queued messages: abort the active
-			// turn and let the post-unwind drain deliver the agent-core queue.
+			// Empty submit while streaming with queued (or live-steered) messages:
+			// abort the active turn and let the post-unwind drain deliver the
+			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
-				if (this.ctx.session.queuedMessageCount > 0) {
+				if (this.ctx.session.hasInterruptibleInput) {
 					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
@@ -1320,10 +1259,7 @@ export class InputController {
 		if (this.#isLocalExtensionCommand(text)) {
 			return;
 		}
-		this.ctx.session.maybeStartTitleGeneration(text, () => {
-			const modelKey = this.#resolveTinyTitleLocalModelKey();
-			return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
-		});
+		this.ctx.session.maybeStartTitleGeneration(text);
 	}
 
 	/** Submit editor text to the focused subagent session (chat-only focus policy). */
@@ -1333,7 +1269,7 @@ export class InputController {
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) {
-			if (target.isStreaming && target.queuedMessageCount > 0) {
+			if (target.isStreaming && target.hasInterruptibleInput) {
 				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL });
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();

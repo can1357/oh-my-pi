@@ -44,17 +44,12 @@ async function generateRenameTitle(session: AgentSession, signal?: AbortSignal):
 	const revision = sessionManager.reserveTitleRevision();
 	const sessionId = sessionManager.getSessionId();
 	const titleSignal = session.titleGenerationSignal;
-	const cleanupProgress = session.notifyTitleGenerationStart();
-	try {
-		const title = await session.generateTitle(context, undefined, signal);
-		return !titleSignal.aborted &&
-			sessionManager.getSessionId() === sessionId &&
-			sessionManager.titleRevision === revision
-			? title
-			: undefined;
-	} finally {
-		cleanupProgress?.();
-	}
+	const title = await session.generateTitle(context, undefined, signal);
+	return !titleSignal.aborted &&
+		sessionManager.getSessionId() === sessionId &&
+		sessionManager.titleRevision === revision
+		? title
+		: undefined;
 }
 
 export const shutdownHandlerTui = (

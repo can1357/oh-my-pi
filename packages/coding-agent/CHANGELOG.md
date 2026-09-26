@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a centralized download and installation progress HUD to surface background tool and model fetches
+- Added support for SmolLM2-135M word-completion model weights with background prefetching
 - Added unified predictive text engine with pluggable N-gram, SmolLM2, and macOS native providers
 - Added `omp predict` CLI command for evaluating completion engine performance
 - Added cross-process prediction daemon for managing state, history ingestion, and engine fallbacks
@@ -16,9 +18,15 @@
 
 ### Changed
 
+- Updated empty-submit interrupt policy to account for live-steered messages alongside queued input
+- Updated UI chip display to surface live-steered messages pending transcript recording
+- Updated ps command to list exited global services with --all and show live globals by default
+- Migrated all internal download progress UI to a unified activity registry, replacing legacy per-model overlay logic
+- Updated `omp tiny-models download` to support downloading the word-completion model
+- Updated window input policy to default to background actions and replaced the `delivery` option with a `takeover` boolean flag for opt-in activation
 - Updated `spelling.autocomplete` to an enum-based configuration for engine selection
 - Optimized mid-session `/computer` toggles to bypass full system-prompt rebuilds
-- Updated window input policy to default to background actions and replaced the `delivery` option with a `takeover` boolean flag for opt-in activation
+- Updated window input policy to default to background-only delivery, requiring explicit `takeover` for foreground escalation, and clarified cross-platform coordinate and activation semantics
 - Aligned orchestrator task documentation and prompts to a Target/Change/Acceptance format
 - Migrated all hardcoded keyboard and slash-command shortcut labels to dynamic, platform-aware UI hints
 - Centralized usage tracking for slash commands and hints to a persistent, namespaced storage system

@@ -4,13 +4,14 @@ use image::{RgbaImage, imageops};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use xcap::{Monitor, Window};
 
-use super::super::{
-	error::{CoreResult, DesktopError},
-	frame::FrameGeometry,
-	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
+use super::{
+	super::{
+		error::{CoreResult, DesktopError},
+		frame::FrameGeometry,
+		types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
+	},
+	geometry::PhysicalLayout,
 };
-
-use super::geometry::PhysicalLayout;
 
 const MAX_LISTED_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;

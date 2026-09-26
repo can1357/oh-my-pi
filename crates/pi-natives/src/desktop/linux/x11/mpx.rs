@@ -345,7 +345,8 @@ impl Mpx {
 		let result = body(self);
 		let released_button = button.map_or(Ok(()), |button| self.pointer.button(button, false));
 		let released_keys = self.release_keys(&held);
-		let result = result.and_then(|confirmed| released_button.map(|()| confirmed && released_keys));
+		let result =
+			result.and_then(|confirmed| released_button.map(|()| confirmed && released_keys));
 		self.uncertain = !matches!(result, Ok(true));
 		match result {
 			Ok(true) => {
@@ -355,8 +356,8 @@ impl Mpx {
 				Ok(())
 			},
 			Ok(false) => Err(DesktopError::input_failed(
-				"the X server did not confirm virtual input or key release; delivery is uncertain, \
-				 so do not retry blindly; use ax actions or takeover:true for subsequent input",
+				"the X server did not confirm virtual input or key release; delivery is uncertain, so \
+				 do not retry blindly; use ax actions or takeover:true for subsequent input",
 			)),
 			Err(error) => Err(error),
 		}
@@ -457,15 +458,15 @@ impl Mpx {
 		)))
 	}
 
-	pub(super) fn inhibit(&mut self) {
+	pub(super) const fn inhibit(&mut self) {
 		self.uncertain = true;
 	}
 
 	fn check_ready(&self) -> CoreResult<()> {
 		if self.uncertain {
 			return Err(DesktopError::background_unavailable(
-				"the virtual input device could not confirm isolated delivery of a prior action \
-				 and cannot be retargeted; use ax actions or takeover:true",
+				"the virtual input device could not confirm isolated delivery of a prior action and \
+				 cannot be retargeted; use ax actions or takeover:true",
 			));
 		}
 		Ok(())
@@ -766,7 +767,9 @@ fn attach(conn: &RustConnection, slave: u16, master: u16) -> CoreResult<()> {
 /// the user's core devices. Kernel hot-unplug is asynchronous.
 fn remove_master(conn: &RustConnection, master_pointer: u16) {
 	if let Ok(devices) = query_devices(conn)
-		&& let Some(pointer) = devices.iter().find(|device| device.deviceid == master_pointer)
+		&& let Some(pointer) = devices
+			.iter()
+			.find(|device| device.deviceid == master_pointer)
 		&& let Ok(cookie) = conn.xinput_xi_set_focus(NONE, CURRENT_TIME, pointer.attachment)
 	{
 		let _ = cookie.check();
@@ -774,9 +777,9 @@ fn remove_master(conn: &RustConnection, master_pointer: u16) {
 	let change = HierarchyChange {
 		len:  3,
 		data: HierarchyChangeData::RemoveMaster(HierarchyChangeDataRemoveMaster {
-			deviceid: master_pointer,
-			return_mode: ChangeMode::FLOAT,
-			return_pointer: 0,
+			deviceid:        master_pointer,
+			return_mode:     ChangeMode::FLOAT,
+			return_pointer:  0,
 			return_keyboard: 0,
 		}),
 	};

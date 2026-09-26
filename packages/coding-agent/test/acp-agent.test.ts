@@ -2480,7 +2480,6 @@ describe("ACP agent", () => {
 			Object.assign(session, {
 				messages: session.sessionManager.buildSessionContext().messages,
 				titleGenerationSignal: new AbortController().signal,
-				notifyTitleGenerationStart: () => undefined,
 				generateTitle: (_context: string, _systemPrompt?: string, signal?: AbortSignal) => {
 					const inference = inferences[inferenceIndex++];
 					titleSignals.push(signal);

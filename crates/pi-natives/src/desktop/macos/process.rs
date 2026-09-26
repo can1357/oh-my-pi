@@ -185,7 +185,12 @@ fn is_chromium_bundle(bundle: &str) -> bool {
 		"com.operasoftware.Opera",
 	]
 	.iter()
-	.any(|base| bundle == *base || bundle.strip_prefix(*base).is_some_and(|suffix| suffix.starts_with('.')))
+	.any(|base| {
+		bundle == *base
+			|| bundle
+				.strip_prefix(*base)
+				.is_some_and(|suffix| suffix.starts_with('.'))
+	})
 }
 
 /// Whether `pid` is Apple's Screen Sharing client.
@@ -200,23 +205,26 @@ pub(super) fn is_screen_sharing(pid: libc::pid_t) -> bool {
 }
 
 /// Terminal AX text areas represent a rendered grid, not the pty input. Even a
-/// successful AXSelectedText/AXValue write is not proof that the shell received it.
+/// successful AXSelectedText/AXValue write is not proof that the shell received
+/// it.
 pub(super) fn is_terminal(pid: libc::pid_t) -> bool {
 	NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
 		.and_then(|app| app.bundleIdentifier())
-		.is_some_and(|bundle| matches!(
-			bundle.to_string().as_str(),
-			"co.zeit.hyper"
-				| "com.apple.Terminal"
-				| "com.github.wez.wezterm"
-				| "com.googlecode.iterm2"
-				| "com.mitchellh.ghostty"
-				| "dev.warp.Warp-Stable"
-				| "dev.zed.Zed.Helper"
-				| "io.alacritty"
-				| "net.kovidgoyal.kitty"
-				| "org.alacritty"
-		))
+		.is_some_and(|bundle| {
+			matches!(
+				bundle.to_string().as_str(),
+				"co.zeit.hyper"
+					| "com.apple.Terminal"
+					| "com.github.wez.wezterm"
+					| "com.googlecode.iterm2"
+					| "com.mitchellh.ghostty"
+					| "dev.warp.Warp-Stable"
+					| "dev.zed.Zed.Helper"
+					| "io.alacritty"
+					| "net.kovidgoyal.kitty"
+					| "org.alacritty"
+			)
+		})
 }
 
 #[cfg(test)]
