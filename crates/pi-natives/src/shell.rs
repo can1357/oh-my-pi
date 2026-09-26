@@ -762,29 +762,50 @@ mod tests {
 	async fn timeout_drains_pipeline_output_before_stopping_reader() {
 		let shell = CoreShell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
-		// `tail` runs as an in-process builtin, so cancellation kills only the
-		// external `yes`; tail then sees EOF and flushes its final 5 lines into
-		// the post-cancel reader grace window. The deadline must be generous
-		// enough that `yes` has demonstrably spawned and produced before the
-		// timeout fires — a 50ms budget lost that race on cold CI runners and
-		// tail flushed an empty ring buffer.
-		const TIMEOUT_MS: u32 = 750;
-		let result = shell
-			.run(
-				CoreShellRunOptions {
-					command:    "yes x | tail -5".to_string(),
-					cwd:        None,
-					env:        None,
-					timeout_ms: Some(TIMEOUT_MS),
-					filesystem: None,
-				},
-				Some(tx),
-				CancelToken::new(Some(TIMEOUT_MS)),
-			)
-			.await
-			.expect("shell run");
-
+		// The producer writes five lines, signals readiness on stderr, then
+		// holds the pipe open. `tail` flushes its buffered lines only after
+		// timeout cancellation stops that producer. Waiting for readiness avoids
+		// cancelling before the producer starts under concurrent CI load.
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let handle = tokio::spawn(async move {
+			shell
+				.run(
+					CoreShellRunOptions {
+						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; printf 'READY\\n' >&2; sleep 30; \
+						             } | tail -5"
+							.to_string(),
+						cwd:        None,
+						env:        None,
+						timeout_ms: None,
+						filesystem: None,
+					},
+					Some(tx),
+					cancel,
+				)
+				.await
+		});
 		let mut output = String::new();
+		time::timeout(Duration::from_secs(10), async {
+			while !output.contains("READY") {
+				output.push_str(
+					&rx.recv_async()
+						.await
+						.expect("shell output closed before readiness"),
+				);
+			}
+		})
+		.await
+		.expect("producer did not become ready");
+		// Give the downstream builtin a turn to consume the queued pipe data
+		// before cancellation closes the producer.
+		time::sleep(Duration::from_millis(200)).await;
+		abort.abort(AbortReason::Timeout);
+		let result = time::timeout(Duration::from_secs(10), handle)
+			.await
+			.expect("shell run did not stop after timeout")
+			.expect("shell task panicked")
+			.expect("shell run");
 		while let Ok(chunk) = rx.recv_async().await {
 			output.push_str(&chunk);
 		}
