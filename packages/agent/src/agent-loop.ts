@@ -1206,6 +1206,10 @@ async function runLoopBody(
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
 		try {
+			if (!signal?.aborted) {
+				const beforeDequeue = config.beforeQueuedMessageDequeue?.(currentContext.messages, "steering", signal);
+				if (beforeDequeue) await beforeDequeue;
+			}
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
 			stream.push({ type: "turn_start" });
@@ -1715,6 +1719,10 @@ async function runLoopBody(
 					// for the next boundary (or is steered into that response).
 					pendingMessages = live;
 				} else {
+					if (!signal?.aborted) {
+						const beforeDequeue = config.beforeQueuedMessageDequeue?.(currentContext.messages, "steering", signal);
+						if (beforeDequeue) await beforeDequeue;
+					}
 					const steering = signal?.aborted
 						? []
 						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
@@ -1747,8 +1755,16 @@ async function runLoopBody(
 			// Re-poll steering too: a steer can land between the stop-boundary dequeue
 			// above and this yield point (e.g. queued while onBeforeYield ran). Without
 			// this poll it would strand in the queue until the next manual prompt.
+			if (!signal?.aborted) {
+				const beforeDequeue = config.beforeQueuedMessageDequeue?.(currentContext.messages, "steering", signal);
+				if (beforeDequeue) await beforeDequeue;
+			}
 			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
+			if (!signal?.aborted) {
+				const beforeDequeue = config.beforeQueuedMessageDequeue?.(currentContext.messages, "followUp", signal);
+				if (beforeDequeue) await beforeDequeue;
+			}
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.

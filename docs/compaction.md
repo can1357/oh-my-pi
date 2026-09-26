@@ -501,7 +501,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.v2RetainedMessageBudget` = `64000`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
-- `compaction.idleEnabled` = `false`
+- `compaction.idleEnabled` = `false`. When enabled, oversized context compacts while idle; smaller cached context is shaken only after its provider cache expires, immediately before the next user turn. Expiry uses the active model's cache policy and persisted assistant timestamps, so it also applies to the first turn after reopening a session.
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`
 - `compaction.supersedeReads` = `true`

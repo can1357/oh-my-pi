@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Queued-message hooks that rewrite history now update the active provider context before the queued turn runs.
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

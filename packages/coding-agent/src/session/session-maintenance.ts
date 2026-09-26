@@ -49,13 +49,14 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type {
-	AssistantMessage,
-	CodexCompactionContext,
-	Message,
-	Model,
-	OpenAIResponsesHistoryPayload,
-	ProviderSessionState,
+import {
+	type AssistantMessage,
+	type CodexCompactionContext,
+	getPromptCacheExpiryMs,
+	type Message,
+	type Model,
+	type OpenAIResponsesHistoryPayload,
+	type ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -102,6 +103,7 @@ import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactio
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+import { resolveConfiguredCacheRetention } from "./settings-stream-fn";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
@@ -111,6 +113,7 @@ import {
 	cfgCompaction,
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
+	cfgCompactionIdleEnabled,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
@@ -535,6 +538,7 @@ export class SessionMaintenance {
 	 */
 	#failedNativeSpeculation: string | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	#lastCacheExpiryShakeKey: string | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
 	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
@@ -1969,6 +1973,63 @@ export class SessionMaintenance {
 	async runIdleCompaction(): Promise<void> {
 		if (this.#host.isStreaming() || this.isCompacting) return;
 		await this.runAutoCompaction("idle", false, true);
+	}
+
+	/**
+	 * Last assistant turn that reached the provider, so it can have
+	 * warmed the reusable prefix. An aborted or errored turn never wrote a cache
+	 * entry, and counting its fresh timestamp as "cache touched" would postpone a
+	 * shake the cold cache already needs.
+	 */
+	#lastCacheWarmingAssistantMessage(): AssistantMessage | undefined {
+		const messages = this.#host.messages();
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.stopReason === "aborted" || assistant.stopReason === "error") continue;
+			return assistant;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Epoch at which the active model's reusable prompt cache goes cold. Live
+	 * provider state wins while this process remains open; otherwise the last
+	 * durable assistant timestamp makes the decision survive session resume.
+	 */
+	promptCacheColdAtMs(): number | undefined {
+		const lastAssistant = this.#lastCacheWarmingAssistantMessage();
+		const model = this.#model;
+		if (!lastAssistant || !model || !Number.isFinite(lastAssistant.timestamp)) return undefined;
+		if (
+			lastAssistant.api !== model.api ||
+			lastAssistant.provider !== model.provider ||
+			lastAssistant.model !== model.id
+		) {
+			return lastAssistant.timestamp;
+		}
+
+		return getPromptCacheExpiryMs({
+			model,
+			cacheTouchedAtMs: lastAssistant.timestamp,
+			cacheRetention: resolveConfiguredCacheRetention(this.#host.settings),
+			providerSessionState: this.#host.providerSessionState,
+		});
+	}
+
+	/** Shake a cold reusable prefix immediately before its next user-authored turn. */
+	async runCacheExpiredPrePromptShakeIfNeeded(): Promise<void> {
+		if (!cfgCompactionIdleEnabled.get(this.#host.settings)) return;
+		const lastAssistant = this.#lastCacheWarmingAssistantMessage();
+		const model = this.#model;
+		if (!lastAssistant || !model) return;
+		const shakeKey = `${lastAssistant.timestamp}:${model.api}:${model.provider}:${model.id}`;
+		if (this.#lastCacheExpiryShakeKey === shakeKey) return;
+		const coldAtMs = this.promptCacheColdAtMs();
+		if (coldAtMs === undefined || Date.now() < coldAtMs) return;
+		this.#lastCacheExpiryShakeKey = shakeKey;
+		await this.#runAutoShake("idle", false, this.#host.promptGeneration(), false, false, undefined, true);
 	}
 
 	/**
