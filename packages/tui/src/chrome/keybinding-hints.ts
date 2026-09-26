@@ -6,6 +6,7 @@ import {
 	type AppKeybinding,
 	formatKeyHint,
 	formatKeyHints,
+	KEYBINDINGS,
 	type KeyName,
 	type KeybindingsManager,
 } from "../app-keybindings";
@@ -40,9 +41,14 @@ export function interruptKey(): string {
 	return formatKeyHint(boundKeys("app.interrupt", ["escape"])[0] ?? "escape");
 }
 
-/** Primary key bound to an app action (see {@link editorKey}); all keys: `getDisplayString`. */
-export function appKey(keybindings: KeybindingsManager, action: AppKeybinding): string {
-	const [key] = keybindings.getKeys(action);
+/**
+ * Primary key bound to an app action (see {@link editorKey}); all keys: `getDisplayString`.
+ * Falls back to the action's default binding when no manager is at hand, which
+ * happens in tests that drive controllers with a partial context.
+ */
+export function appKey(keybindings: KeybindingsManager | undefined, action: AppKeybinding): string {
+	const defaultKeys = KEYBINDINGS[action].defaultKeys;
+	const [key] = keybindings?.getKeys(action) ?? (Array.isArray(defaultKeys) ? defaultKeys : [defaultKeys]);
 	return key ? formatKeyHint(key) : "";
 }
 

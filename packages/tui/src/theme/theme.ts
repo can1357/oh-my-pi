@@ -876,3 +876,4 @@ export async function getThemeExportColors(themeName?: string): Promise<{
 		return {};
 	}
 }
+

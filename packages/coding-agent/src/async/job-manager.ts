@@ -527,6 +527,7 @@ export class AsyncJobManager {
 		job.endTime = Date.now();
 		job.errorText = errorText;
 		job.status = "failed";
+		this.#recordAgentReply(job);
 		this.#enqueueDelivery(jobId, errorText);
 		rejectFailure(error);
 		job.abortController.abort(error);
