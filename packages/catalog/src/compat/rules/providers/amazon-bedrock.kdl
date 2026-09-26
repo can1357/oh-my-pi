@@ -7,11 +7,6 @@ provider "amazon-bedrock" {
 	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
 	stream-revision "possible"
 	class "anthropic" {
-		family "fable" {
-			revision ">=5.1 <5.2" {
-				thinking-efforts "low" "medium" "high" "xhigh" "max"
-			}
-		}
 		family "opus" {
 			revision ">=4.6 <4.7" {
 				thinking-mode "anthropic-adaptive"
@@ -21,6 +16,13 @@ provider "amazon-bedrock" {
 			// Replaces the adaptive Anthropic Bedrock timeout branch.
 			stream-idle-timeout-ms 900000
 			thinking-efforts "low" "medium" "high" "max"
+		}
+		// Claude 5.1+ (Fable 5.1, Opus 5.5) accepts `xhigh` on Bedrock. Bounded
+		// like the class-level adaptive mode (`>=4.7 <45.1` in
+		// classes/anthropic.kdl) so every newer adaptive release gets the
+		// adaptive ladder instead of the generic `minimal..high` default.
+		revision ">=5.1 <45.1" {
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
 		}
 	}
 	class "openai" {

@@ -806,12 +806,18 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
-	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
+	it("uses the five-tier ladder for Bedrock Claude 5.1 and newer", () => {
 		const ids = [
 			"global.anthropic.claude-fable-5-1",
 			"eu.anthropic.claude-fable-5-1",
 			"us.anthropic.claude-fable-5-1",
 			"us-gov.anthropic.claude-fable-5-1",
+			"anthropic.claude-opus-5-5",
+			"au.anthropic.claude-opus-5-5",
+			"jp.anthropic.claude-opus-5-5",
+			"us-gov.anthropic.claude-opus-5-5",
+			// A release newer than any rule names must not fall back to minimal..high.
+			"us.anthropic.claude-opus-6",
 		];
 
 		for (const id of ids) {
@@ -827,13 +833,15 @@ describe("model thinking derivation", () => {
 			expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.Max)).toBe("max");
 		}
 
-		const previousRevision = createModel({
-			id: "global.anthropic.claude-fable-5",
-			api: "bedrock-converse-stream",
-			provider: "amazon-bedrock",
-		});
-		expect(getSupportedEfforts(previousRevision)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
-		expect(() => mapEffortToAnthropicAdaptiveEffort(previousRevision, Effort.XHigh)).toThrow(/not supported/);
+		for (const id of ["global.anthropic.claude-fable-5", "us.anthropic.claude-opus-5"]) {
+			const previousRevision = createModel({
+				id,
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+			});
+			expect(getSupportedEfforts(previousRevision)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+			expect(() => mapEffortToAnthropicAdaptiveEffort(previousRevision, Effort.XHigh)).toThrow(/not supported/);
+		}
 	});
 
 	it("does not advertise mid-conversation system messages on Claude Sonnet 5", () => {
