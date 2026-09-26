@@ -5,6 +5,7 @@ provider "openai-codex" {
 	env "OPENAI_CODEX_OAUTH_TOKEN"
 	kind-apis {
 		image "openai-codex-responses"
+		stt "openai-codex-transcriptions"
 	}
 	web-search "codex"
 
@@ -16,10 +17,25 @@ provider "openai-codex" {
 			limits
 			supports-tools #false
 		}
+		// Dictation funded by the ChatGPT subscription. The backend route
+		// accepts only the audio file and picks its own transcription model, so
+		// the id names the capability rather than a selectable model, and the
+		// tariff is zero: the subscription pays, not per-token API billing.
+		model "chatgpt-transcribe" name="ChatGPT Transcribe" api="openai-codex-transcriptions" base-url="https://chatgpt.com/backend-api" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 
 	models "gpt-image-1" {
 		kind "image"
+	}
+
+	models "chatgpt-transcribe" {
+		kind "stt"
 	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.

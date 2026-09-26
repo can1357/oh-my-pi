@@ -55,6 +55,8 @@ export const OPENAI_HEADER_VALUES = {
 export const URL_PATHS = {
 	RESPONSES: "/responses",
 	CODEX_RESPONSES: "/codex/responses",
+	/** ChatGPT backend dictation route; it is not under `/codex` (that prefix 404s). */
+	TRANSCRIBE: "/transcribe",
 } as const;
 
 export const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;

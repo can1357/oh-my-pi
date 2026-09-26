@@ -35,6 +35,9 @@
 - Fixed GitHub Copilot Grok 4.x models failing to make requests.
 
 ## [18.2.10] - 2026-09-22
+### Added
+
+- Added the ChatGPT-subscription dictation model `openai-codex/chatgpt-transcribe`, which routes speech-to-text through the ChatGPT backend instead of paid API transcription ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
 
 ### Changed
 

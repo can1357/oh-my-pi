@@ -58,6 +58,7 @@ export const RUNNER_APIS = [
 	"openrouter-rerank",
 	"openrouter-video",
 	"openai-transcriptions",
+	"openai-codex-transcriptions",
 ] as const;
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
