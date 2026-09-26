@@ -11,6 +11,7 @@ import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import * as daemonClient from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
+import * as bashExecutor from "../../src/exec/bash-executor";
 import { BashTool } from "../../src/tools/bash";
 import { WriteTool } from "../../src/tools/write";
 import type { ToolSession } from "../../src/tools";
@@ -353,8 +354,10 @@ describe("bash services via proc://", () => {
 			const restarted = await bash.execute("restart", {
 				command: "printf 'REPLACED\\n'; read line",
 				name: "echo-service",
-				ready: { log: "REPLACED", timeout: 5 },
+				ready: { log: "REPLACED", host: "", timeout: 5 },
 				pty: false,
+				async: false,
+				env: {},
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
 			const write = new WriteTool(session);
@@ -382,9 +385,6 @@ describe("bash services via proc://", () => {
 			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
 				"does not accept async or timeout",
 			);
-			await expect(bash.execute("invalid", { command: "true", name: "bad", async: false })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
 			await expect(bash.execute("invalid", { command: "true", name: "bad", timeout: 1 })).rejects.toThrow(
 				"does not accept async or timeout",
 			);
@@ -399,4 +399,62 @@ describe("bash services via proc://", () => {
 			spy.mockRestore();
 		}
 	}, 25_000);
+
+	it("keeps empty or default optional fields out of service-mode selection", async () => {
+		const bash = new BashTool(toolSession(process.cwd()));
+		const textOf = (result: { content: Array<{ type: string; text?: string }> }): string =>
+			result.content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("");
+		const commands: string[] = [];
+		const spy = vi.spyOn(bashExecutor, "executeBash").mockImplementation(async command => {
+			commands.push(command);
+			return {
+				output: "PLAIN",
+				exitCode: 0,
+				cancelled: false,
+				timedOut: false,
+				truncated: false,
+				totalBytes: 5,
+				totalLines: 1,
+				outputBytes: 5,
+				outputLines: 1,
+			};
+		});
+		try {
+			// Argument shape produced by tool-call layers that materialize every
+			// optional field: a plain command, not a service start.
+			const materialized = await bash.execute("materialized", {
+				command: "printf 'PLAIN\\n'",
+				timeout: 120,
+				cwd: process.cwd(),
+				pty: false,
+				async: false,
+				name: "",
+				ready: { log: "", port: 1, host: "", timeout: 1 },
+				env: {},
+			});
+			expect(materialized.details?.service).toBeUndefined();
+			expect(textOf(materialized)).toContain("PLAIN");
+			expect(textOf(materialized)).toContain("Ignored ready");
+
+			const blank = await bash.execute("blank", {
+				command: "printf 'BLANK\\n'",
+				name: "   ",
+				ready: { log: "", host: "" },
+				env: {},
+			});
+			expect(blank.details?.service).toBeUndefined();
+			expect(textOf(blank)).not.toContain("Ignored");
+
+			const orphanEnv = await bash.execute("orphan-env", {
+				command: "printf 'ENV\\n'",
+				env: { SERVICE_ONLY: "1" },
+			});
+			expect(orphanEnv.details?.service).toBeUndefined();
+			expect(textOf(orphanEnv)).toContain("Ignored env");
+
+			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'", "printf 'ENV\\n'"]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
 });
