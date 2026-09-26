@@ -889,6 +889,20 @@ describe("role priorities and chains", () => {
 		expect(rolePriorityDefaults("memory")).toEqual(rolePriorityDefaults("smol"));
 	});
 
+	test("built-in smol priorities match `*-mini` ids but not gemini or minimax ids", () => {
+		const settings = Settings.isolated({});
+		const large = [
+			roleChainModel("custom", "google/gemini-3.1-pro-preview"),
+			roleChainModel("google", "gemini-2.5-pro"),
+			roleChainModel("minimax", "MiniMax-M2"),
+		];
+
+		expect(resolveModelRoleValue("@smol", large, { settings }).model).toBeUndefined();
+		expect(
+			resolveModelRoleValue("@smol", [...large, roleChainModel("openai", "o4-mini")], { settings }).model?.id,
+		).toBe("o4-mini");
+	});
+
 	test("appends non-explicit web defaults after a configured primary", () => {
 		const exa = roleChainModel("web", "exa");
 		const parallel = roleChainModel("web", "parallel");
