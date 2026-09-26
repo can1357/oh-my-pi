@@ -1,5 +1,5 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 
 export const acpHelp = {
 	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",

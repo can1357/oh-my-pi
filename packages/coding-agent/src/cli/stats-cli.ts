@@ -4,7 +4,7 @@
  * Handles `omp stats` subcommand for viewing AI usage statistics.
  */
 
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";

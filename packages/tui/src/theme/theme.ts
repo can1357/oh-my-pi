@@ -5,6 +5,7 @@ import type { Terminal, TerminalAppearance } from "../terminal";
 import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
@@ -99,6 +100,7 @@ export function bindTheme(binding: ThemeBinding): () => void {
 
 function assignTheme(value: Theme): void {
 	theme = value;
+	setActiveSymbolTheme(value);
 	if (themeBindings) {
 		for (const binding of themeBindings) binding(value);
 	}
