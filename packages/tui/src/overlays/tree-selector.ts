@@ -164,6 +164,13 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#containsActive: Map<TreeSelectorNode, boolean> = new Map();
+	/** Subtrees the user folded with Tab/Space. */
+	#collapsedIds: Set<string> = new Set();
+	/** Off-thread branches folded by Shift+Tab; cleared by a second Shift+Tab. */
+	#bulkCollapsedIds: Set<string> = new Set();
+	#bulkFocusActive = false;
+	/** Rows each visible fold hides that the current filter would otherwise show. */
+	#hiddenDescendantCounts: Map<string, number> = new Map();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -298,7 +305,108 @@ class TreeList implements Component {
 	#applyFilter(): void {
 		// TreeView retains the nearest visible selection (including an anchor
 		// through empty filter results) when the predicate is replaced.
-		this.#tree.setFilter(this.#buildFilter());
+		this.#tree.setFilter(this.#withCollapse(this.#buildFilter()));
+	}
+
+	/**
+	 * Layer folds over the base filter in one pre-order pass. A fold hides its
+	 * whole subtree, and rows under a nested fold count toward the outermost
+	 * visible one. Only rows the base filter shows are counted.
+	 */
+	#withCollapse(
+		base: (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean,
+	): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
+		this.#hiddenDescendantCounts.clear();
+		if (this.#collapsedIds.size === 0 && this.#bulkCollapsedIds.size === 0) return base;
+		const baseVisible = new Set<string>();
+		const hiddenUnder = new Map<string, string>();
+		for (const row of this.#tree.allRows) {
+			const visible = base(row.item, row);
+			if (visible) baseVisible.add(row.key);
+			const parentKey = row.parentKey;
+			if (parentKey === undefined) continue;
+			const foldRoot =
+				hiddenUnder.get(parentKey) ??
+				(this.isCollapsed(parentKey) && baseVisible.has(parentKey) ? parentKey : undefined);
+			if (foldRoot === undefined) continue;
+			hiddenUnder.set(row.key, foldRoot);
+			if (visible) this.#hiddenDescendantCounts.set(foldRoot, (this.#hiddenDescendantCounts.get(foldRoot) ?? 0) + 1);
+		}
+		return (_node, row) => baseVisible.has(row.key) && !hiddenUnder.has(row.key);
+	}
+
+	/**
+	 * Nearest filter-visible ancestor of each filter-visible row, ignoring folds.
+	 * Pre-order guarantees a parent resolves before its children.
+	 */
+	#projectedParents(): Map<string, string | undefined> {
+		const base = this.#buildFilter();
+		const visible = new Set<string>();
+		const nearestVisible = new Map<string, string | undefined>();
+		const parentOf = new Map<string, string | undefined>();
+		for (const row of this.#tree.allRows) {
+			const parentKey = row.parentKey;
+			const projected =
+				parentKey === undefined ? undefined : visible.has(parentKey) ? parentKey : nearestVisible.get(parentKey);
+			nearestVisible.set(row.key, projected);
+			if (base(row.item, row)) {
+				visible.add(row.key);
+				parentOf.set(row.key, projected);
+			}
+		}
+		return parentOf;
+	}
+
+	/** Entry ids currently drawn, in display order. */
+	getVisibleEntryIds(): string[] {
+		return this.#tree.rows.map(row => row.key);
+	}
+
+	isCollapsed(entryId: string): boolean {
+		return this.#collapsedIds.has(entryId) || this.#bulkCollapsedIds.has(entryId);
+	}
+
+	/**
+	 * Fold or unfold the selected node's subtree. A node with nothing visible
+	 * below it stays as is, so the key only makes changes the user can see.
+	 */
+	toggleCollapse(): void {
+		const selected = this.#tree.selectedKey;
+		if (selected === undefined) return;
+		if (this.#collapsedIds.delete(selected) || this.#bulkCollapsedIds.delete(selected)) {
+			this.#applyFilter();
+			return;
+		}
+		let hasVisibleChild = false;
+		for (const parent of this.#projectedParents().values()) {
+			if (parent === selected) {
+				hasVisibleChild = true;
+				break;
+			}
+		}
+		if (!hasVisibleChild) return;
+		this.#collapsedIds.add(selected);
+		this.#applyFilter();
+	}
+
+	/**
+	 * Fold every branch hanging off the current thread to its first visible
+	 * row, leaving the path to the active leaf open. Pressing it again drops
+	 * these folds and keeps the ones the user made by hand.
+	 */
+	focusCurrentThread(): void {
+		this.#bulkCollapsedIds.clear();
+		this.#bulkFocusActive = !this.#bulkFocusActive;
+		if (this.#bulkFocusActive) {
+			const parentOf = this.#projectedParents();
+			const hasVisibleChild = new Set<string>();
+			for (const parent of parentOf.values()) if (parent !== undefined) hasVisibleChild.add(parent);
+			for (const [id, parent] of parentOf) {
+				if (this.#activePathIds.has(id) || parent === undefined || !this.#activePathIds.has(parent)) continue;
+				if (hasVisibleChild.has(id)) this.#bulkCollapsedIds.add(id);
+			}
+		}
+		this.#applyFilter();
 	}
 
 	/** Visible-row predicate combining the assistant-text rule, filter mode, and fuzzy query. */
@@ -557,7 +665,11 @@ class TreeList implements Component {
 		const isOnActivePath = this.#activePathIds.has(node.entry.id);
 		const pathMarker = isOnActivePath ? theme.fg("accent", `${theme.md.bullet} `) : "";
 		const label = node.label ? theme.fg("warning", `[${node.label}] `) : "";
-		return `${pathMarker}${label}${this.#getEntryDisplayText(node, selected)}`;
+		// Only folded rows carry a marker, so ordinary rows keep their alignment.
+		const hidden = this.#hiddenDescendantCounts.get(node.entry.id) ?? 0;
+		const foldMarker = hidden > 0 ? theme.fg("warning", `${theme.nav.expand} `) : "";
+		const hiddenCount = hidden > 0 ? theme.fg("muted", ` (+${hidden})`) : "";
+		return `${foldMarker}${pathMarker}${label}${this.#getEntryDisplayText(node, selected)}${hiddenCount}`;
 	}
 
 	/**
@@ -956,6 +1068,11 @@ class TreeList implements Component {
 				this.#searchQuery = this.#searchQuery.slice(0, -1);
 				this.#applyFilter();
 			}
+		} else if (matchesKey(keyData, "shift+tab")) {
+			this.focusCurrentThread();
+		} else if (matchesKey(keyData, "tab") || (matchesKey(keyData, "space") && !this.#searchQuery)) {
+			// Space is also a search character, so it folds only while no search is typed.
+			this.toggleCollapse();
 		} else if (matchesKey(keyData, "shift+l") && !this.#searchQuery) {
 			const selected = this.#tree.selectedItem;
 			if (selected && this.onLabelEdit) {
@@ -1068,7 +1185,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					"Enter: switch. Space/Tab: fold. Shift+Tab: fold other branches. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
 				),
 				0,
 				0,
