@@ -75,6 +75,15 @@
 
 ### Added
 
+- Added `ANTHROPIC_CACHE_REFRESH_HOSTS` to opt Anthropic-protocol gateways (`ANTHROPIC_BASE_URL`, `models.yml` `baseUrl`) into the idle prompt-cache keep-alive, which previously ran only against the official Anthropic API ([#12574](https://github.com/can1357/oh-my-pi/pull/12574) by [@bse-ai](https://github.com/bse-ai)).
+- Added `TypeSafeJudgeOptions.headers`, sent on every System One judgment request so proxy gateways can require routing or custom authentication headers.
+- Added support for text embeddings
+- Added support for document reranking
+- Added support for video generation
+- Added support for image generation across multiple providers
+- Added support for audio speech synthesis
+- Added support for audio transcription services
+- Added System One judgment API route
 - Added support for text embeddings, document reranking, video generation, image generation across multiple providers, audio speech synthesis, and audio transcription services.
 - Added support for the System One judgment API, including configurable request headers for proxy routing and custom authentication.
 

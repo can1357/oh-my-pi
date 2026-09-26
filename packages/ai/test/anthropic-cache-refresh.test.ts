@@ -10,10 +10,11 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { withOfficialAnthropicEndpoint } from "./helpers";
+import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
 
 const CACHE_REFRESH_DELAY_MS = 5 * 60_000 - 15_000;
 const CACHE_TOKENS = 1_200;
+const CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
 
 const model: Model<"anthropic-messages"> = buildModel({
 	id: "claude-sonnet-4-6",
@@ -31,6 +32,18 @@ const model: Model<"anthropic-messages"> = buildModel({
 const thinkingModel: Model<"anthropic-messages"> = buildModel({
 	...model,
 	reasoning: true,
+});
+
+const GATEWAY_BASE_URL = "https://llm-gateway.example.com/anthropic";
+
+const gatewayModel: Model<"anthropic-messages"> = buildModel({
+	...model,
+	baseUrl: GATEWAY_BASE_URL,
+});
+
+const piNativeGatewayModel: Model<"anthropic-messages"> = buildModel({
+	...gatewayModel,
+	transport: "pi-native",
 });
 
 const context: Context = {
@@ -382,5 +395,99 @@ describe("Anthropic prompt-cache refresh", () => {
 		for (const cc of breakpoints) {
 			expect(cc.ttl).toBe("1h");
 		}
+	});
+});
+
+describe("Anthropic prompt-cache refresh through gateways", () => {
+	it("arms no refresh for a non-official baseUrl without an allow-list", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write"], capture);
+		const states = createProviderSessionState();
+
+		await finishRequest(fetch, states, { model: gatewayModel });
+		vi.advanceTimersByTime(CACHE_REFRESH_DELAY_MS * 2);
+		await Promise.resolve();
+
+		expect(capture.bodies).toHaveLength(1);
+		expect(states.has(CACHE_REFRESH_STATE_KEY)).toBe(false);
+	});
+
+	it("replays the payload through a gateway listed in ANTHROPIC_CACHE_REFRESH_HOSTS", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write", "refresh-read"], capture);
+		const states = createProviderSessionState();
+
+		await withEnv({ ANTHROPIC_CACHE_REFRESH_HOSTS: "other.example.com, llm-gateway.example.com" }, async () => {
+			await finishRequest(fetch, states, { model: gatewayModel });
+			await advanceToRefresh(capture, 2);
+		});
+
+		const [original, refresh] = capture.bodies;
+		expect(refresh?.max_tokens).toBe(0);
+		expect(refresh?.stream).toBe(false);
+		expect(refresh?.messages).toEqual(original?.messages);
+	});
+
+	it("matches the ANTHROPIC_BASE_URL reroute against a URL-form allow-list entry", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write", "refresh-read"], capture);
+		const states = createProviderSessionState();
+
+		await withEnv(
+			{ ANTHROPIC_BASE_URL: GATEWAY_BASE_URL, ANTHROPIC_CACHE_REFRESH_HOSTS: `${GATEWAY_BASE_URL}/v1` },
+			async () => {
+				await finishRequest(fetch, states);
+				await advanceToRefresh(capture, 2);
+			},
+		);
+
+		expect(capture.bodies).toHaveLength(2);
+		expect(capture.bodies[1]?.max_tokens).toBe(0);
+	});
+
+	it("keeps the pi-native transport excluded even when its host is allow-listed", async () => {
+		vi.useFakeTimers();
+		const requests: string[] = [];
+		const fetch: FetchImpl = async input => {
+			requests.push(input instanceof Request ? input.url : String(input));
+			const done = {
+				type: "done",
+				reason: "stop",
+				message: {
+					role: "assistant",
+					content: [],
+					api: piNativeGatewayModel.api,
+					provider: piNativeGatewayModel.provider,
+					model: piNativeGatewayModel.id,
+					usage: {
+						input: 0,
+						output: 1,
+						cacheRead: CACHE_TOKENS,
+						cacheWrite: 0,
+						totalTokens: CACHE_TOKENS + 1,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			};
+			return new Response(`data: ${JSON.stringify(done)}\n\n`, {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const states = createProviderSessionState();
+
+		await withEnv({ ANTHROPIC_CACHE_REFRESH_HOSTS: "llm-gateway.example.com" }, async () => {
+			await finishRequest(fetch, states, { model: piNativeGatewayModel });
+			vi.advanceTimersByTime(CACHE_REFRESH_DELAY_MS * 2);
+			await Promise.resolve();
+		});
+
+		expect(requests).toHaveLength(1);
+		expect(states.has(CACHE_REFRESH_STATE_KEY)).toBe(false);
 	});
 });
