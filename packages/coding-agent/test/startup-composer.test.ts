@@ -46,6 +46,8 @@ import {
 	cfgTuiResizeScrollback,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
+const noRecentSessions = async () => [];
+
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
 	stops = 0;
@@ -149,7 +151,12 @@ describe("outer startup collaboration gate", () => {
 		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(testSession.tempDir, "startup-auth.db"));
-		beginStartupComposer({ terminal: new VirtualTerminal(), version: "test", cache: false });
+		beginStartupComposer({
+			terminal: new VirtualTerminal(),
+			version: "test",
+			cache: false,
+			recentSessions: noRecentSessions,
+		});
 		const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
 		const running = runRootCommand(parseArgs(rawArgs), rawArgs, {
 			settings: activeSettings,
@@ -744,6 +751,7 @@ describe("Composer prepaint", () => {
 			terminal,
 			version: "9.9.9",
 			cache: false,
+			recentSessions: noRecentSessions,
 		});
 		await terminal.waitForRender(() =>
 			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
@@ -793,6 +801,7 @@ describe("Composer prepaint", () => {
 			terminal,
 			version: "9.9.9",
 			cache: false,
+			recentSessions: noRecentSessions,
 		});
 		await terminal.waitForRender(() =>
 			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
@@ -840,7 +849,13 @@ describe("Composer prepaint", () => {
 		// startup module-load stall; losing the enable leaves the keyboard dead
 		// for the whole session.
 		const terminal = new InputTrackingTerminal(80, 32);
-		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "9.9.9",
+			cache: false,
+			recentSessions: noRecentSessions,
+		});
 		// The prepaint must be physically written before any async runtime import
 		// can monopolize the event loop; a merely queued render is still a blind gap.
 		expect(terminal.getViewport().some(row => Bun.stripANSI(row).includes("9.9.9"))).toBeTrue();
@@ -859,7 +874,13 @@ describe("Composer prepaint", () => {
 
 	it("adoption enables raw input when settings never resolved", () => {
 		const terminal = new InputTrackingTerminal(80, 32);
-		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "9.9.9",
+			cache: false,
+			recentSessions: noRecentSessions,
+		});
 		const lease = takeStartupComposerLease();
 		lease?.adopt();
 		expect(terminal.inputEnables).toBe(1);

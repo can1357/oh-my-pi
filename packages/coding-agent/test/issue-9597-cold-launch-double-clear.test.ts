@@ -83,7 +83,13 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		scrollBuffer: string;
 	}> {
 		const terminal = new CapturingTerminal(100, 30);
-		beginStartupComposer({ preferences: config, terminal, version: "18.0.4", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "18.0.4",
+			cache: false,
+			recentSessions: async () => [],
+		});
 		await terminal.waitForRender();
 		const lease = takeStartupComposerLease();
 		expect(lease).toBeDefined();
