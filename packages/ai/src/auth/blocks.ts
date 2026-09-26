@@ -386,12 +386,12 @@ export class CredentialBlocks implements BlocksApi {
 	/**
 	 * Whether a fresh report could lift what currently blocks this credential.
 	 *
-	 * A strategy that names healable scopes can only vouch for those scopes, so
-	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
-	 * keeps the credential unusable whatever the report says about a tier. A
-	 * probe then cannot change the outcome and must not be spent; the tier scope
-	 * heals on a later pass, once the block that actually holds the credential
-	 * has lifted.
+	 * A strategy vouches only for the scopes it names, so unless it also heals
+	 * the unscoped block ({@link CredentialRankingStrategy.healsUnscopedBlock}),
+	 * a live unscoped block — a usage limit, a refresh failure — keeps the
+	 * credential unusable whatever the report says about a scope. A probe then
+	 * cannot change the outcome and must not be spent; the scoped block heals on
+	 * a later pass, once the block that actually holds the credential has lifted.
 	 */
 	canHeal(
 		provider: Provider,
@@ -400,7 +400,12 @@ export class CredentialBlocks implements BlocksApi {
 		blockScopeOrScopes: string | readonly string[] | undefined,
 	): boolean {
 		if (!this.supportsHealing(provider)) return false;
-		if (this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
+		if (
+			!this.#deps.strategies(provider)?.healsUnscopedBlock &&
+			this.blockedUntil(provider, providerKey, credentialIndex) !== undefined
+		) {
+			return false;
+		}
 		return this.blockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
 	}
 
@@ -413,8 +418,7 @@ export class CredentialBlocks implements BlocksApi {
 	 */
 	reconcile(provider: Provider, credentialId: number, report: UsageReport): void {
 		const providerKey = providerTypeKey(provider, "oauth");
-		const credentialIndex = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
-		if (credentialIndex < 0) return;
+		if (!this.#deps.pool.entries(provider).some(entry => entry.id === credentialId)) return;
 		const strategy = this.#deps.strategies(provider);
 		// Only a live report proves recovery. A broker can serve its retained
 		// last-good report for hours after `/usage` starts failing, and those
@@ -423,7 +427,7 @@ export class CredentialBlocks implements BlocksApi {
 		for (const { blockScope, limits, healthy } of strategy?.healableBlockScopes?.(report) ?? []) {
 			if (healthy === false || isUsageLimitReached(limits) || (healthy === undefined && limits.length === 0))
 				continue;
-			this.#clearHealedBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope);
+			this.#clearHealedBlockScope(provider, providerKey, credentialId, blockScope);
 		}
 	}
 
@@ -437,13 +441,17 @@ export class CredentialBlocks implements BlocksApi {
 		provider: Provider,
 		providerKey: string,
 		credentialId: number,
-		credentialIndex: number,
 		blockScope: string | undefined,
 	): void {
-		const blockedUntilMs = this.blockedUntil(provider, providerKey, credentialIndex, blockScope);
-		if (blockedUntilMs === undefined) return;
 		const nowMs = Date.now();
 		const scopedKey = scopedBackoffKey(providerKey, blockScope);
+		// Only the deadline stored under this scope: `blockedUntil` also merges
+		// the unscoped block, which a scoped heal neither owns nor clears.
+		const blockedUntilMs = Math.max(
+			this.#getCredentialBlockedUntilForKey(scopedKey, credentialId, nowMs) ?? 0,
+			this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope) ?? 0,
+		);
+		if (blockedUntilMs === 0) return;
 		const globalProbeAfterMs = this.#credentialBackoff.get(providerKey)?.get(credentialId)?.probeAfter ?? 0;
 		const scopedProbeAfterMs = this.#credentialBackoff.get(scopedKey)?.get(credentialId)?.probeAfter ?? 0;
 		const storeGlobalProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(credentialId, providerKey, "");

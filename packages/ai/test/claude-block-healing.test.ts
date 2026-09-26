@@ -217,24 +217,57 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
-	it("spends no usage request on a block its scopes cannot heal", async () => {
-		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
-		// every scope the strategy vouches for, so probing cannot change it.
-		const { storage, clearedScopes, probeCount } = makeHarness(
-			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+	it("lifts a stale unscoped block once shared windows and Opus/Sonnet rows have headroom", async () => {
+		// An Opus/Sonnet usage limit blocks the credential unscoped until the 7d
+		// reset. Anthropic can restore the window early; the live report reading
+		// 0% must return the account to selection instead of idling it for days.
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([
+				sharedLimit("5h", "5h", 0),
+				sharedLimit("7d", "7d", 0),
+				tierLimit("opus", 0),
+				tierLimit("sonnet", 0),
+			]),
 			"",
 		);
 		storages.push(storage);
 		await storage.credentials.reload();
 
-		const health = await storage.health.model("anthropic", {
-			modelId: "claude-fable-5-1",
-			reserveFraction: 0.1,
-		});
+		expect(await storage.keys.get("anthropic", "s-unscoped", { modelId: "claude-opus-4-5" })).toBe("access-1");
+		expect(clearedScopes).toContain("");
+	});
 
-		expect(probeCount()).toBe(0);
+	it("keeps an unscoped block while the Opus weekly row is spent", async () => {
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0), tierLimit("opus", 1)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		expect(await storage.keys.get("anthropic", "s-opus-spent", { modelId: "claude-opus-4-5" })).toBe("access-2");
+		expect(clearedScopes).not.toContain("");
+	});
+
+	it("never reports a tier heal for an unscoped block it does not own", async () => {
+		// Fable has headroom while the Opus row still holds the unscoped block:
+		// the tier heal must not delete or log the unscoped deadline as cleared.
+		const { storage, clearedScopes } = makeHarness(
+			claudeReport([
+				sharedLimit("5h", "5h", 0),
+				sharedLimit("7d", "7d", 0),
+				tierLimit("fable", 0),
+				tierLimit("opus", 1),
+			]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-fable-5-1", reserveFraction: 0.1 });
+
 		expect(clearedScopes).toEqual([]);
-		expect(health.accounts[0]?.state).toBe("depleted");
+		expect(await storage.keys.get("anthropic", "s-tier-only", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
 	it("keeps the block when the report predates it", async () => {
@@ -253,25 +286,5 @@ describe("claude usage-block healing", () => {
 
 		expect(clearedScopes).not.toContain("tier:fable");
 		expect(await storage.keys.get("anthropic", "s-stale", { modelId: "claude-fable-5-1" })).toBe("access-2");
-	});
-
-	it("spends no probe while an unscoped block also holds the credential", async () => {
-		// A tier block written after a global one carries the later deadline, but
-		// the global block still makes the credential unusable, so clearing the
-		// tier early buys nothing and the request must not be spent.
-		const { storage, probeCount, blocks } = makeHarness(
-			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
-		);
-		storages.push(storage);
-		blocks.set("1:", Date.now() + 60 * 60_000);
-		await storage.credentials.reload();
-
-		const health = await storage.health.model("anthropic", {
-			modelId: "claude-fable-5-1",
-			reserveFraction: 0.1,
-		});
-
-		expect(probeCount()).toBe(0);
-		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
 	});
 });

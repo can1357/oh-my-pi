@@ -916,20 +916,26 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
 	/**
-	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
-	 * Anthropic can restore the tier earlier (plan change, corrected counter),
-	 * and the block then idles a usable account for days. Judge each tier scope
-	 * against the limits that actually gate a request of that kind — its own
-	 * weekly row plus the shared umbrella windows — so a healthy report lifts
-	 * the block while a spent shared 5-hour wall keeps it.
+	 * A usage-limit block carries the reset the 429 or exhausted report stated,
+	 * but Anthropic can restore a window earlier (plan change, corrected
+	 * counter, early weekly reset), and the block then idles a usable account
+	 * for days. Judge each scope against the limits that actually gate a
+	 * request under it, so a healthy report lifts the block while a spent
+	 * shared 5-hour wall keeps it:
 	 *
-	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
-	 * those tiers alone, so no other scope can exist to heal.
+	 * - unscoped (Opus/Sonnet and unclassified models): the shared windows plus
+	 *   the Opus/Sonnet weekly rows, since the block does not record which one
+	 *   tripped;
+	 * - `tier:fable` / `tier:mythos`: the shared windows plus the tier's own
+	 *   weekly row.
+	 *
+	 * Short unscoped blocks from refresh failures never heal here: their
+	 * deadline falls inside the reconcile guard window.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
-		// The endpoint returns a report as soon as one window parses, and a tier
-		// 429 can be caused by a shared wall. A payload missing a shared gate
+		// The endpoint returns a report as soon as one window parses, and a
+		// 429 can be caused by any shared wall. A payload missing a shared gate
 		// leaves the block's cause unknown, so vouch for nothing rather than
 		// clear a block that still holds.
 		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
@@ -941,10 +947,20 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const tier = limit.scope.tier;
 			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 		}
-		return [...tiers].map(tier => ({
-			blockScope: `tier:${tier}`,
-			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
-		}));
+		return [
+			{
+				blockScope: undefined,
+				limits: [
+					...sharedLimits,
+					...report.limits.filter(limit => limit.scope.tier === "opus" || limit.scope.tier === "sonnet"),
+				],
+			},
+			...[...tiers].map(tier => ({
+				blockScope: `tier:${tier}`,
+				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
+			})),
+		];
 	},
+	healsUnscopedBlock: true,
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };
