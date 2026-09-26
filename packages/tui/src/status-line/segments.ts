@@ -6,6 +6,7 @@ import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
@@ -35,7 +36,8 @@ function withIcon(icon: string, text: string): string {
 }
 
 function statusValue(ctx: SegmentContext, value: string): string {
-	return ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : value;
+	if (!ctx.startupPlaceholder) return value;
+	return `${STARTUP_PLACEHOLDER}${" ".repeat(Math.max(0, Bun.stringWidth(value) - 1))}`;
 }
 /**
  * Hash-derived accent ANSI for the session title (or preview stand-in title).
@@ -81,6 +83,14 @@ function stripDisplayRoot(pwd: string): string {
 		if (relative) return relative;
 	}
 	return pwd;
+}
+
+export function formatCompactContextPercent(percent: number | null | undefined): string {
+	if (percent === null || percent === undefined) return "?";
+	if (percent === 0) return "0%";
+	if (percent > 0 && percent < 1) return `${percent.toFixed(1)}%`;
+	if (Number.isInteger(percent)) return `${percent}%`;
+	return `${percent.toFixed(1)}%`;
 }
 
 /**
@@ -456,6 +466,18 @@ const pathSegment: StatusLineSegment = {
 	},
 };
 
+const profileSegment: StatusLineSegment = {
+	id: "profile",
+	render(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return { content: "", visible: false };
+
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		const content = `p:${label}`;
+		return { content: theme.fg("accent", content), visible: true };
+	},
+};
+
 const gitSegment: StatusLineSegment = {
 	id: "git",
 	render(ctx) {
@@ -535,10 +557,23 @@ const tokenTotalSegment: StatusLineSegment = {
 		// Excludes cacheRead: that field re-reads the full cached context every
 		// turn, making the cumulative sum N×context_size. Orchestration cache read
 		// follows the same rule; orchestration input/output remain in the total so
-		// provider-side service work is preserved without labeling it prompt input.
+		// provider-side service work is preserved (surfaced under its own orch:
+		// label in the breakdown rather than folded into in:/out:).
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
+
+		if (ctx.options.token_total?.breakdown === true) {
+			const inTotal = input + cacheWrite;
+			const outTotal = output;
+			const orchTotal = orchestrationInput + orchestrationOutput;
+			const parts: string[] = [];
+			if (inTotal > 0) parts.push(`in:${statusValue(ctx, formatNumber(inTotal))}`);
+			if (outTotal > 0) parts.push(`out:${statusValue(ctx, formatNumber(outTotal))}`);
+			if (orchTotal > 0) parts.push(`orch:${statusValue(ctx, formatNumber(orchTotal))}`);
+			if (parts.length === 0) return { content: "", visible: false };
+			return { content: theme.fg("statusLineSpend", parts.join(" ")), visible: true };
+		}
 
 		const content = formatMetric({
 			leading: theme.icon.tokens || undefined,
@@ -623,11 +658,17 @@ const contextPctSegment: StatusLineSegment = {
 						: theme.fg(color, theme.icon.auto)
 			}`;
 		}
-		const text = theme.fg(
-			color,
-			ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : formatContextUsage(pct, window, ctx.contextTokens),
-		);
-		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const compact = ctx.options.context_pct?.compact === true;
+		const liveCompactDisplay = `ctx:${formatCompactContextPercent(pct)}`;
+		const display = ctx.startupPlaceholder
+			? compact
+				? `ctx:${STARTUP_PLACEHOLDER}`.padEnd(liveCompactDisplay.length)
+				: STARTUP_PLACEHOLDER
+			: compact
+				? liveCompactDisplay
+				: formatContextUsage(pct, window, ctx.contextTokens);
+		const text = theme.fg(color, display);
+		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
 	},
@@ -921,6 +962,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	status: statusSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	profile: profileSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,
