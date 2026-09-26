@@ -35,11 +35,17 @@ async function writeJsonl(filePath: string, records: Record<string, unknown>[]):
 	await Bun.write(filePath, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
 }
 
+// Claude Code's project-dir encoding; on Windows the drive colon must be
+// replaced too, or the encoded name is not a valid directory segment.
+function encodeProjectDir(cwd: string): string {
+	return cwd.replaceAll(/[/\\:]/g, "-");
+}
+
 async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store: ClaudeSessionStore }> {
 	const root = path.join(tempRoot, ".claude");
 	const cwd = path.join(tempRoot, "project-with-hyphen");
 	const id = "11111111-1111-4111-8111-111111111111";
-	const projectDirectory = cwd.replaceAll(path.sep, "-");
+	const projectDirectory = encodeProjectDir(cwd);
 	const sessionPath = path.join(root, "projects", projectDirectory, `${id}.jsonl`);
 	await writeJsonl(path.join(root, "history.jsonl"), [
 		{ sessionId: id, timestamp: 1_767_225_600_000, display: "First prompt", project: cwd },
@@ -98,7 +104,7 @@ describe("ClaudeSessionStore", () => {
 		const cwd = path.join(tempRoot, "my-project.dir");
 		const id = "33333333-3333-4333-8333-333333333333";
 		// No history entry, and a directory name whose "-" separators are ambiguous.
-		await writeJsonl(path.join(root, "projects", cwd.replace(/[/\\._]/g, "-"), `${id}.jsonl`), [
+		await writeJsonl(path.join(root, "projects", cwd.replace(/[/\\._:]/g, "-"), `${id}.jsonl`), [
 			{ type: "file-history-snapshot", timestamp: "2026-01-01T00:00:00.000Z" },
 			{
 				type: "user",
@@ -117,7 +123,7 @@ describe("ClaudeSessionStore", () => {
 	it("bounds cwd discovery to the transcript prefix before using the encoded fallback", async () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "late-project.dir");
-		const encoded = cwd.replace(/[/\\._]/g, "-");
+		const encoded = cwd.replace(/[/\\._:]/g, "-");
 		const id = "55555555-5555-4555-8555-555555555555";
 		await writeJsonl(path.join(root, "projects", encoded, `${id}.jsonl`), [
 			{ type: "file-history-snapshot", snapshot: "x".repeat(128 * 1024) },
@@ -125,7 +131,9 @@ describe("ClaudeSessionStore", () => {
 		]);
 
 		const info = (await new ClaudeSessionStore(root).list()).find(item => item.id === id);
-		expect(info?.cwd).toBe(encoded.replaceAll("-", path.sep));
+		// The encoded fallback only round-trips POSIX-absolute names; a Windows
+		// drive-letter prefix (`C--…`) is not decodable and is returned verbatim.
+		expect(info?.cwd).toBe(process.platform === "win32" ? encoded : encoded.replaceAll("-", path.sep));
 	});
 
 	it("prefers the history index cwd over the transcript's", async () => {
@@ -135,7 +143,7 @@ describe("ClaudeSessionStore", () => {
 		await writeJsonl(path.join(root, "history.jsonl"), [
 			{ sessionId: id, timestamp: 1_767_225_600_000, display: ".", project: indexedCwd },
 		]);
-		await writeJsonl(path.join(root, "projects", indexedCwd.replaceAll(path.sep, "-"), `${id}.jsonl`), [
+		await writeJsonl(path.join(root, "projects", encodeProjectDir(indexedCwd), `${id}.jsonl`), [
 			{
 				type: "user",
 				uuid: "u",
@@ -157,7 +165,7 @@ describe("ClaudeSessionStore", () => {
 		await writeJsonl(path.join(root, "history.jsonl"), [
 			{ sessionId: id, timestamp: 1_767_225_600_000, display: ".", project: cwd },
 		]);
-		await writeJsonl(path.join(root, "projects", cwd.replaceAll(path.sep, "-"), `${id}.jsonl`), [
+		await writeJsonl(path.join(root, "projects", encodeProjectDir(cwd), `${id}.jsonl`), [
 			{
 				type: "user",
 				uuid: "u",
@@ -232,7 +240,7 @@ describe("ClaudeSessionStore", () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "legacy");
 		const id = "22222222-2222-4222-8222-222222222222";
-		const sessionPath = path.join(root, ".projects", cwd.replaceAll(path.sep, "-"), `${id}.jsonl`);
+		const sessionPath = path.join(root, ".projects", encodeProjectDir(cwd), `${id}.jsonl`);
 		await writeJsonl(path.join(root, "history.jsonl"), [
 			{ session_id: id, ts: 1_735_689_600_000, text: "Legacy prompt" },
 		]);
@@ -256,9 +264,10 @@ describe("ClaudeSessionStore", () => {
 
 	it("defaults to CLAUDE_CONFIG_DIR and reads its colocated project registry", async () => {
 		const root = path.join(tempRoot, "relocated-claude");
-		const cwd = path.join(tempRoot, "project-with-hyphen");
+		const nativeCwd = path.join(tempRoot, "project-with-hyphen");
+		const cwd = process.platform === "win32" ? nativeCwd.replaceAll("\\", "/") : nativeCwd;
 		const id = "22222222-2222-4222-8222-333333333333";
-		const encoded = cwd.replaceAll(path.sep, "-");
+		const encoded = encodeProjectDir(cwd);
 		process.env.CLAUDE_CONFIG_DIR = root;
 		await Bun.write(path.join(root, ".claude.json"), JSON.stringify({ projects: { [cwd]: {} } }));
 		await writeJsonl(path.join(root, "projects", encoded, `${id}.jsonl`), [
