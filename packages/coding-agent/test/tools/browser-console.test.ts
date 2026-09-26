@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { CMUX_CONSOLE_CAPTURE_SCRIPT } from "@oh-my-pi/pi-coding-agent/tools/browser/console-capture";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
@@ -125,6 +126,56 @@ await wait(5_000);`,
 			expect(timeoutMessage).toContain("1 page error(s) since run start — see tab.errors()");
 		} finally {
 			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
+	it("captures JSON objects with non-callable primitive methods without poisoning subsequent reads", async () => {
+		const html = `<!doctype html><script>
+			console.log("hostile", { toString: "x", valueOf: "y" });
+		</script>`;
+		await invoke({ action: "open", name: "console-hostile", url: `data:text/html,${encodeURIComponent(html)}` });
+		try {
+			const first = (await call("console")) as CaptureResult;
+			expect(first.entries.find(entry => entry.text === 'hostile {"toString":"x","valueOf":"y"}')).toMatchObject({
+				type: "console",
+				args: ["hostile", { toString: "x", valueOf: "y" }],
+			});
+			await call("evaluate", ['console.info("after hostile")']);
+			const next = (await call("console", [{ since: first.nextSeq }])) as CaptureResult;
+			expect(next.entries.map(entry => entry.text)).toEqual(["after hostile"]);
+			expect(((await call("errors")) as CaptureResult).entries).toEqual([]);
+		} finally {
+			await invoke({ action: "close", name: "console-hostile" });
+		}
+	}, 30_000);
+
+	it("keeps the cmux page hook from throwing on values whose text conversion throws", async () => {
+		await invoke({ action: "open", name: "console-cmux-hook", url: "data:text/html,<title>cmux hook</title>" });
+		try {
+			const result = await call("evaluate", [
+				`(() => {
+					${CMUX_CONSOLE_CAPTURE_SCRIPT};
+					console.log("hostile", { toString: "x", valueOf: "y" });
+					const { proxy, revoke } = Proxy.revocable({}, {});
+					revoke();
+					console.log("revoked", proxy);
+					return globalThis.__ompConsoleCapture.entries;
+				})()`,
+			]);
+			expect(result).toEqual([
+				expect.objectContaining({
+					type: "console",
+					text: 'hostile {"toString":"x","valueOf":"y"}',
+					args: ["hostile", { toString: "x", valueOf: "y" }],
+				}),
+				expect.objectContaining({
+					type: "console",
+					text: "revoked [unserializable]",
+					args: ["revoked", "[unserializable]"],
+				}),
+			]);
+		} finally {
+			await invoke({ action: "close", name: "console-cmux-hook" });
 		}
 	}, 30_000);
 
