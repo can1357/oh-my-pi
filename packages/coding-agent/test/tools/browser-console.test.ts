@@ -149,13 +149,16 @@ await wait(5_000);`,
 		}
 	}, 30_000);
 
-	it("keeps the cmux page hook from throwing on JSON objects with non-callable primitive methods", async () => {
+	it("keeps the cmux page hook from throwing on values whose text conversion throws", async () => {
 		await invoke({ action: "open", name: "console-cmux-hook", url: "data:text/html,<title>cmux hook</title>" });
 		try {
 			const result = await call("evaluate", [
 				`(() => {
 					${CMUX_CONSOLE_CAPTURE_SCRIPT};
 					console.log("hostile", { toString: "x", valueOf: "y" });
+					const { proxy, revoke } = Proxy.revocable({}, {});
+					revoke();
+					console.log("revoked", proxy);
 					return globalThis.__ompConsoleCapture.entries;
 				})()`,
 			]);
@@ -164,6 +167,11 @@ await wait(5_000);`,
 					type: "console",
 					text: 'hostile {"toString":"x","valueOf":"y"}',
 					args: ["hostile", { toString: "x", valueOf: "y" }],
+				}),
+				expect.objectContaining({
+					type: "console",
+					text: "revoked [unserializable]",
+					args: ["revoked", "[unserializable]"],
 				}),
 			]);
 		} finally {

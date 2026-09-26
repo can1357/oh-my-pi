@@ -88,7 +88,8 @@ function boundedText(value: string, limit: number): string {
  *
  * `String()` throws for objects whose `toString`/`valueOf` are not callable
  * (e.g. JSON payloads `{ toString: "x" }`); those fall back to JSON, then to
- * the object's `Object.prototype.toString` tag. Mirrored page-side in
+ * the object's `Object.prototype.toString` tag, then to a fixed marker (the tag
+ * itself throws for revoked proxies). Mirrored page-side in
  * {@link CMUX_CONSOLE_CAPTURE_SCRIPT}.
  */
 function consoleArgumentText(value: unknown): string {
@@ -101,7 +102,11 @@ function consoleArgumentText(value: unknown): string {
 		} catch {
 			// Cyclic or otherwise unserializable; use the object tag below.
 		}
-		return Object.prototype.toString.call(value);
+		try {
+			return Object.prototype.toString.call(value);
+		} catch {
+			return "[unserializable]";
+		}
 	}
 }
 
@@ -473,7 +478,7 @@ export const CMUX_CONSOLE_CAPTURE_SCRIPT = String.raw`(() => {
 	const text = value => {
 		try { return String(value); } catch {
 			try { const json = JSON.stringify(value); if (json !== undefined) return json; } catch {}
-			return Object.prototype.toString.call(value);
+			try { return Object.prototype.toString.call(value); } catch { return "[unserializable]"; }
 		}
 	};
 	const safe = value => {
