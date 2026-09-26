@@ -69,6 +69,21 @@ describe("GlobTool.execute", () => {
 		}
 	});
 
+	test("returns matches for a limit above the native u32 range", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-u32-"));
+		try {
+			await Promise.all(["a.txt", "b.txt"].map(filename => Bun.write(path.join(cwd, filename), "")));
+			const result = await new GlobTool(createSession(cwd)).execute("glob-limit-u32", {
+				path: "*.txt",
+				limit: 2 ** 32,
+				gitignore: false,
+			});
+			expect(result.details?.files?.toSorted()).toEqual(["a.txt", "b.txt"]);
+		} finally {
+			await removeWithRetries(cwd);
+		}
+	});
+
 	test("rejects a caller abort during preparation without launching a native scan", async () => {
 		const controller = new AbortController();
 		const statStarted = Promise.withResolvers<void>();

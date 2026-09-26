@@ -41,6 +41,8 @@ const findSchema = type({
 export type GlobToolInput = typeof findSchema.infer;
 
 const DEFAULT_LIMIT = 200;
+/** Largest `maxResults` the native glob binding accepts (`u32`); larger values wrap and return nothing. */
+const NATIVE_MAX_RESULTS = 0xffff_ffff;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
 
 /**
@@ -217,7 +219,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (!Number.isFinite(requestedLimit) || requestedLimit <= 0) {
 				throw new ToolError("Limit must be a positive number");
 			}
-			const effectiveLimit = Math.max(1, Math.floor(requestedLimit));
+			const effectiveLimit = Math.min(NATIVE_MAX_RESULTS, Math.max(1, Math.floor(requestedLimit)));
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
