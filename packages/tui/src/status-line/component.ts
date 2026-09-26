@@ -47,6 +47,7 @@ import type {
 	StatusLineSettings,
 } from "./types";
 
+const GIT_STATUS_REFRESH_TTL_MS = 5_000;
 const JJ_REFRESH_TTL_MS = 5000;
 const JJ_COMMAND_TIMEOUT_MS = 5_000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
@@ -546,7 +547,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
-	// Git status caching (1s TTL)
+	// Git status caching; idle sessions retain their last snapshot.
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
@@ -1453,7 +1454,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#gitStatusInFlightCwd !== undefined) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
-		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < 1000) {
+		if (
+			this.#cachedGitStatusCwd === gitCwd &&
+			(!this.session.isStreaming || Date.now() - this.#gitStatusLastFetch < GIT_STATUS_REFRESH_TTL_MS)
+		) {
 			return this.#cachedGitStatus;
 		}
 
@@ -2461,7 +2465,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return Math.floor(nowMs / 60_000);
 		}
 		if (this.#gitEnabled() && (hasGitBackedSegment(leftSegments) || hasGitBackedSegment(rightSegments))) {
-			return Math.floor(nowMs / 1_000);
+			return Math.floor(nowMs / GIT_STATUS_REFRESH_TTL_MS);
 		}
 		if (this.#gitEnabled() && (hasPathSegment(leftSegments) || hasPathSegment(rightSegments))) {
 			return Math.floor(nowMs / WATCHER_FAILURE_POLL_TTL_MS);
