@@ -937,6 +937,18 @@ export interface KeysApi {
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver;
 }
 
+/** Options for {@link OAuthApi.refresh}. */
+export interface OAuthRefreshByIdOptions {
+	/**
+	 * The caller refreshes because the provider rejected the current token
+	 * (auth broker `POST /v1/credential/:id/refresh`). Return the stored row
+	 * instead of re-minting when it still holds a fresh token this process
+	 * minted moments ago; another refresh cannot fix a provider-side 401 and
+	 * only rotates the refresh token. Scheduled expiry refreshes leave it unset.
+	 */
+	reuseRecentMint?: boolean;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1015,9 +1027,10 @@ export interface OAuthApi {
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream
 	 * refresh attempt, which is required for providers that rotate refresh tokens
-	 * on every successful refresh.
+	 * on every successful refresh. Mints unconditionally unless
+	 * {@link OAuthRefreshByIdOptions.reuseRecentMint} is set.
 	 */
-	refresh(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry>;
 	/**
 	 * Refresh one stored OAuth credential under durable row ownership.
 	 */

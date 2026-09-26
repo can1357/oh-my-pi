@@ -345,8 +345,14 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			throw new Error("expected target and sibling OAuth rows");
 		}
 
+		// Step past the re-mint cooldown (`OAUTH_REMINT_COOLDOWN_MS` in
+		// auth/refresh.ts) so every forced refresh mints a distinct bearer.
+		const realNow = Date.now.bind(Date);
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
 		const resolvedKeys = [initialKey];
 		for (let index = 0; index < 9; index += 1) {
+			clockOffset += 5 * 60_000;
 			const refreshed = await authStorage.keys.get(PROVIDER, sessionId, { forceRefresh: true });
 			if (!refreshed) throw new Error("expected refreshed OAuth bearer");
 			resolvedKeys.push(refreshed);

@@ -24,6 +24,7 @@ import type {
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 	AuthCredentialSnapshotEntry,
+	OAuthRefreshByIdOptions,
 } from "./types";
 
 type StoredOAuthSelection = {
@@ -338,8 +339,8 @@ export class OAuthAccounts implements OAuthApi {
 	}
 
 	/** Force-refresh one stored credential by its durable row id. */
-	refresh(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry> {
-		return this.#deps.refresher.refreshById(id, signal);
+	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry> {
+		return this.#deps.refresher.refreshById(id, signal, options);
 	}
 
 	/** Refresh one stored OAuth credential through the durable ownership path. */
