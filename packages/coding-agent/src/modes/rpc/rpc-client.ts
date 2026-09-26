@@ -162,6 +162,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"thinking_level_changed",
 	"model_changed",
 	"goal_updated",
+	"queue_update",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
@@ -646,6 +647,14 @@ export class RpcClient {
 	 */
 	async followUp(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "follow_up", message, images });
+	}
+
+	/**
+	 * Remove the first matching user message and its companions from one pending queue.
+	 */
+	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
+		const response = await this.#send({ type: "remove_queued_message", message, queue });
+		return this.#getData(response);
 	}
 
 	/**

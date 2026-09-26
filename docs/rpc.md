@@ -118,6 +118,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -271,6 +272,27 @@ Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (o
 
 `resumed` is `false` when a fresh session was started. The command fails when the process runs without persistence (`--no-session`).
 
+### `remove_queued_message` payload
+
+Remove the first matching user-authored message from the selected pending queue:
+
+```json
+{"id":"req_2","type":"remove_queued_message","message":"Use the existing parser","queue":"steering"}
+{"id":"req_2","type":"response","command":"remove_queued_message","success":true,"data":{"removed":true}}
+```
+
+`message` matches the queue-chip text or its prompt-template expansion. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
+
+Companions and their prompt are enqueued and dequeued as a complete group, including in `one-at-a-time` mode. Once that group leaves the pending queue for delivery, a removal request cannot report success after only part of its context has been emitted.
+
+Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
+
+The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
+
+Clients must hide the chip or restore its draft only after `removed: true`. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
+
+The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
+
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
@@ -304,6 +326,7 @@ is re-armed.
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
+  "queuedMessages": { "steering": [], "followUp": [] },
   "todoPhases": [
     {
       "id": "phase-1",
@@ -332,6 +355,13 @@ is re-armed.
   }
 }
 ```
+
+`queuedMessages` holds the same displayable queue-chip text as the `queue_update`
+event below — every entry is a `message` value that `remove_queued_message`
+will match against that queue. Clients should render the pending-message queue
+from these snapshots instead of tracking chips independently, and treat
+`remove_queued_message` responses as confirmation of the change rather than a
+second source of truth.
 
 ### `set_fast_mode` payload
 
@@ -527,6 +557,25 @@ Common event types:
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
+- `queue_update`
+
+### `queue_update` event
+
+```json
+{ "type": "queue_update", "steering": ["Use the existing parser"], "followUp": [] }
+```
+
+Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
+`follow_up`, or queued `prompt` adds to it; delivery at the start of the next
+turn, `remove_queued_message`, an abort that drops in-flight queued messages,
+or a session switch removes from or clears it. The server coalesces this
+against the last value sent — a mutation that leaves the snapshot unchanged
+(for example, an agent-authored aside that never renders as a chip) never
+re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
+carry the exact `message` text `remove_queued_message` expects back. Render
+the queue from this event rather than tracking chips independently, and treat
+`remove_queued_message`/promotion replies as confirmation of a change this
+event will also report.
 
 Extension runner errors are emitted separately as:
 

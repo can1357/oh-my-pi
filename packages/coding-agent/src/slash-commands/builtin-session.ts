@@ -1,3 +1,4 @@
+import { clearSubmittedText } from "./helpers/draft";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
@@ -209,7 +210,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handle: handleTodoAcp,
 		handleTui: async (command, runtime) => {
 			await runtime.ctx.handleTodoCommand(command.args);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -268,7 +269,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			if (verb === "delete" && !rest) {
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				await runtime.ctx.handleSessionDeleteCommand();
 				return;
 			}
@@ -279,7 +280,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				} else {
 					await runtime.ctx.showSessionPinSelector();
 				}
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (!verb || (verb === "info" && !rest)) {
@@ -287,7 +288,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			} else {
 				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
 			}
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -331,7 +332,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.handleJobsCommand();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -365,7 +366,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const { verb, rest } = parseSubcommand(command.args);
 			if (!verb || (verb === "show" && !rest)) {
 				await runtime.ctx.handleUsageCommand();
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (verb === "reset") {
@@ -374,11 +375,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				} else {
 					await runtime.ctx.showResetUsageSelector();
 				}
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -427,7 +428,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			await runtime.ctx.handleChangelogCommand(command.args);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -436,7 +437,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Show all keyboard shortcuts",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleHotkeysCommand();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -465,7 +466,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleToolsCommand();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -484,7 +485,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleContextCommand();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -494,7 +495,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open Extension Control Center dashboard",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showExtensionsDashboard();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -503,7 +504,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open the agents hub (per-agent model, prewalk, and advisor)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentsDashboard();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -514,7 +515,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handleTui: (command, runtime) => {
 			runtime.ctx.showGitUi(command.args.trim() || undefined);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -523,7 +524,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open the live Agent Hub",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentHub({ initialSection: "activity" });
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -533,7 +534,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Rewind to a previous message, keeping the old path as a branch",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showUserMessageSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -541,7 +542,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "branch",
 		description: "Create a new fork from a previous message",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleForkCommand();
 		},
 	},
@@ -551,7 +552,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Navigate session tree (switch branches)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showTreeSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -576,11 +577,11 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							? `OAuth login already in progress for ${pendingProvider}. Paste the redirect URL with /login <url>.`
 							: "OAuth login already in progress. Paste the redirect URL with /login <url>.";
 						runtime.ctx.showWarning(message);
-						runtime.ctx.editor.setText("");
+						clearSubmittedText(runtime);
 						return;
 					}
 					void runtime.ctx.showOAuthSelector("login", matchedProvider.id);
-					runtime.ctx.editor.setText("");
+					clearSubmittedText(runtime);
 					return;
 				}
 				const submitted = manualInput.submit(args);
@@ -589,7 +590,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				} else {
 					runtime.ctx.showWarning("No OAuth login is waiting for a manual callback.");
 				}
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 
@@ -599,12 +600,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					? `OAuth login already in progress for ${provider}. Paste the redirect URL with /login <url>.`
 					: "OAuth login already in progress. Paste the redirect URL with /login <url>.";
 				runtime.ctx.showWarning(message);
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 
 			void runtime.ctx.showOAuthSelector("login");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -619,15 +620,15 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const matchedProvider = getOAuthProviders().find(provider => provider.id === providerId);
 				if (!matchedProvider) {
 					runtime.ctx.showWarning(`Unknown OAuth provider: ${providerId}`);
-					runtime.ctx.editor.setText("");
+					clearSubmittedText(runtime);
 					return;
 				}
 				void runtime.ctx.showOAuthSelector("logout", matchedProvider.id);
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			void runtime.ctx.showOAuthSelector("logout");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -666,7 +667,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: handleMcpAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleMCPCommand(command.text);
 		},
 	},
