@@ -17,6 +17,14 @@ inputs:
       description: Disk-cache key discriminator (see bazel-cache action)
       required: false
       default: natives
+   fallback-scope:
+      description: Optional second scope whose newest archive seeds this one when it has none (same runner image only)
+      required: false
+      default: ""
+   save:
+      description: Save the refreshed disk-cache archive when the bazel-cache action says one is needed
+      required: false
+      default: "true"
 
 runs:
    using: composite
@@ -25,6 +33,7 @@ runs:
         uses: ./.github/actions/bazel-cache
         with:
            scope: ${{ inputs.cache-scope }}
+           fallback-scope: ${{ inputs.fallback-scope }}
 
       - name: Build native addons
         shell: bash
@@ -40,7 +49,7 @@ runs:
            read -r -a targets <<< "$NATIVE_TARGETS"
            bun scripts/bazel-natives.ts "${targets[@]}" --dest "$NATIVE_DEST"
       - name: Save bazel disk cache
-        if: steps.cache.outputs.save-needed == 'true'
+        if: steps.cache.outputs.save-needed == 'true' && inputs.save == 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
            # Must mirror the restore path list in the bazel-cache action.
