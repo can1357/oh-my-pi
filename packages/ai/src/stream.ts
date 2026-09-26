@@ -1350,6 +1350,11 @@ function isAnthropicThinkingActive(model: Model<Api>, payload: MessageCreatePara
 	return model.thinking?.mode === "anthropic-adaptive" && payload.output_config?.effort != null;
 }
 
+function isOutputForcingAnthropicToolChoice(payload: MessageCreateParamsStreaming): boolean {
+	const choiceType = payload.tool_choice?.type;
+	return choiceType === "tool" || choiceType === "any";
+}
+
 function createAnthropicCacheRefreshPlan<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1458,7 +1463,19 @@ function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
 			message.usage.cacheRead + message.usage.cacheWrite <= 0 ||
 			cacheTouchedAtMs === undefined ||
 			capturedPayload === undefined ||
-			!hasShortAnthropicMessageBreakpoint(capturedPayload)
+			!hasShortAnthropicMessageBreakpoint(capturedPayload) ||
+			// #12597: the zero-output refresh replays the captured payload with
+			// `max_tokens: 0`. Anthropic rejects a forced `tool_choice`
+			// (`tool`/`any`) paired with `max_tokens: 0` (400), and stripping the
+			// choice is not cache-safe either: any `tool_choice` change invalidates
+			// the messages cache, so the replay would write a newly billed messages
+			// entry instead of refreshing the pinned one and fail the plan's
+			// `cacheRead > 0 && cacheWrite === 0` contract. Skip the keep-alive for
+			// forced-choice turns on the zero-output path and let the entry expire
+			// naturally; thinking-active payloads replay with their original
+			// positive `max_tokens`, which keeps both the wire shape and the cache
+			// key intact, so those may still refresh.
+			(!isAnthropicThinkingActive(model, capturedPayload) && isOutputForcingAnthropicToolChoice(capturedPayload))
 		) {
 			return;
 		}
