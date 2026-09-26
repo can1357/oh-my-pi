@@ -125,11 +125,53 @@ function decodedResponseStream(message: IncomingMessage): stream.Readable {
 	return stream.pipeline(message, decoder, () => {});
 }
 
-function createResponse(message: IncomingMessage, method: string): Response {
+/**
+ * Bun's `node:http` shim reports a response body cut off mid-stream (peer reset,
+ * dead connection) as a bare `Error("aborted")` with code `ECONNRESET` — wording
+ * indistinguishable from a cancellation, so retry classification treated every
+ * mid-stream drop on this transport as terminal. Native `fetch` reports the same
+ * failure as "The socket connection was closed unexpectedly", a recognized
+ * transient. Re-raise with that wording, keeping the original as `cause`; a
+ * caller abort keeps its own error.
+ */
+function withFetchParityErrors(
+	body: ReadableStream<Uint8Array>,
+	signal: AbortSignal | undefined,
+): ReadableStream<Uint8Array> {
+	const reader = body.getReader();
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			try {
+				const chunk = await reader.read();
+				if (chunk.done) controller.close();
+				else controller.enqueue(chunk.value);
+			} catch (error) {
+				const prematureClose =
+					!signal?.aborted &&
+					error instanceof Error &&
+					error.message === "aborted" &&
+					(error as NodeJS.ErrnoException).code === "ECONNRESET";
+				controller.error(
+					prematureClose
+						? Object.assign(
+								new Error("The socket connection was closed unexpectedly before the response completed", {
+									cause: error,
+								}),
+								{ code: "ECONNRESET" },
+							)
+						: error,
+				);
+			}
+		},
+		cancel: reason => reader.cancel(reason),
+	});
+}
+
+function createResponse(message: IncomingMessage, method: string, signal: AbortSignal | undefined): Response {
 	const status = message.statusCode;
 	if (status === undefined) throw new Error("Cowork transport received a response without an HTTP status.");
 	const hasBody = method !== "HEAD" && status !== 204 && status !== 304;
-	const body = hasBody ? stream.Readable.toWeb(decodedResponseStream(message)) : null;
+	const body = hasBody ? withFetchParityErrors(stream.Readable.toWeb(decodedResponseStream(message)), signal) : null;
 	return new Response(body, {
 		status,
 		statusText: message.statusMessage,
@@ -190,7 +232,7 @@ async function sendCoworkRequest(
 				});
 			}
 			try {
-				result.resolve(createResponse(message, method));
+				result.resolve(createResponse(message, method, signal));
 			} catch (error) {
 				message.destroy();
 				release();
