@@ -77,6 +77,8 @@ export interface RewindSelectorDeps {
 	siblingPaths?: (entryId: string) => BranchVariantPath[];
 	/** Rewind the session to `entryId` (a message entry anywhere in the tree). */
 	onSelect: (entryId: string) => void;
+	/** `c` copies the outlined turn without moving the session leaf. */
+	onCopy?: (target: OutlineTarget) => void;
 	onCancel: () => void;
 }
 
@@ -262,6 +264,11 @@ export class RewindSelectorComponent implements Component {
 			this.#siblingSelected = 0;
 			this.#stopSlide();
 			this.deps.requestRender();
+			return;
+		}
+		if (matchesKey(data, "c") && this.deps.onCopy) {
+			const target = this.#outlinedTarget();
+			if (target) this.deps.onCopy(target);
 			return;
 		}
 		if (matchesAppToolsExpand(data)) {
@@ -492,7 +499,7 @@ export class RewindSelectorComponent implements Component {
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const leftRight = formatKeyHints(["left", "right"]);
 		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
-		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${this.deps.onCopy ? `${formatKeyHint("c")} copy  ` : ""}${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
 			header: [this.#header()],
 			body: {

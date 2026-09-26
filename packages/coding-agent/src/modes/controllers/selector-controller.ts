@@ -87,7 +87,7 @@ import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-o
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { CopySelectorComponent, copyOutlineTarget } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
@@ -1095,6 +1095,15 @@ export class SelectorController {
 			requestRender: () => this.ctx.ui.requestRender(),
 			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
+			onCopy: target => {
+				const item = copyOutlineTarget(target);
+				if (!item.content.trim()) {
+					this.ctx.showStatus("Nothing to copy in that item");
+					return;
+				}
+				void copyToClipboard(item.content);
+				this.ctx.showStatus(`Copied ${item.label} to clipboard`);
+			},
 			onCancel: done,
 		});
 		if (selector.targetCount === 0) {
@@ -1233,6 +1242,7 @@ export class SelectorController {
 				void copyToClipboard(content);
 				this.ctx.showStatus(`Copied ${label} to clipboard`);
 			},
+			onRewind: entryId => void this.#rewindFromTranscript(entryId, done),
 			onOpen: (href, label) => {
 				done();
 				openPath(href);

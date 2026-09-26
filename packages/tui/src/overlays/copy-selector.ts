@@ -60,6 +60,8 @@ export interface CopySelectorDeps {
 	 * `source` names the transcript entry (and inner block, when descended) it came from.
 	 */
 	onPick: (content: string, label: string, source: CopyPickSource) => void;
+	/** `r` on a whole turn rewinds to that turn; omitted by other picker users. */
+	onRewind?: (entryId: string) => void;
 	/** `o` on a link block — open `href` with the system opener. Absent: `o` is ignored. */
 	onOpen?: (href: string, label: string) => void;
 	onCancel: () => void;
@@ -253,6 +255,11 @@ export class CopySelectorComponent implements Component {
 			if (this.#blocks) this.#ascend();
 			return;
 		}
+		if (matchesKey(data, "r") && !this.#blocks && this.deps.onRewind) {
+			const target = this.#targets[this.#selected];
+			if (target) this.deps.onRewind(target.entryId);
+			return;
+		}
 		if ((data === "a" || data === "A") && !this.#blocks) {
 			this.#loadFullHistory();
 			return;
@@ -392,7 +399,7 @@ export class CopySelectorComponent implements Component {
 		const cancel = editorKey("tui.select.cancel");
 		const hint = this.#blocks
 			? `${this.#blockSelected + 1}/${this.#blocks.length}  ${upDown} block  ${formatKeyHint("left")}/${cancel} back  ${enter} ${action}${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
-			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}${upDown} step  ${blocks.length > 0 ? `${formatKeyHint("right")} blocks  ` : ""}${enter} ${action}  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${cancel} close`;
+			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}${upDown} step  ${blocks.length > 0 ? `${formatKeyHint("right")} blocks  ` : ""}${enter} ${action}  ${this.deps.onRewind ? `${formatKeyHint("r")} rewind  ` : ""}${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${cancel} close`;
 		const anchorId = target
 			? this.#blocks
 				? `copy:${target.turnId}:block:${this.#blockSelected}`
@@ -649,4 +656,9 @@ function targetCopy(target: OutlineTarget, blocks: readonly CopyBlock[]): { cont
 	}
 	// No direct prose (e.g. a pure tool turn): fall back to its blocks joined.
 	return { content: blocks.map(block => block.content).join("\n\n"), label: "turn content" };
+}
+
+/** Use the same whole-turn clipboard semantics from other transcript selectors. */
+export function copyOutlineTarget(target: OutlineTarget): { content: string; label: string } {
+	return targetCopy(target, collectBlocks(target.entries));
 }
