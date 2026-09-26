@@ -298,7 +298,7 @@ In compiled mode (`PI_COMPILED`, Bun embedded URL markers, or populated embedded
    - versioned cache dir,
    - legacy compiled-binary dir (`%LOCALAPPDATA%/omp` on Windows, `~/.local/bin` elsewhere),
    - package/executable directories.
-4. First successfully loaded addon with the expected version sentinel is returned.
+4. First successfully loaded addon whose `__piNativesBuildVersion()` reports the package version is returned.
 
 This is why packaging + runtime loader expectations must align: filenames, platform tags, CPU variants, and embedded manifest version must match what `native/loader-state.js` probes.
 
@@ -329,7 +329,7 @@ Generated declarations currently include exports from these Rust modules:
 - Unsupported platform tag: throws with supported platform list after probing fails.
 - No candidate could load: throws with full candidate error list and mode-specific remediation hints.
 - Embedded extraction and Windows staging problems: archive/mkdir/write/copy errors are recorded and included in final diagnostics if load fails.
-- Version mismatch: install/compiled loads that lack the package-version sentinel are rejected during candidate probing.
+- Version mismatch: install/compiled loads whose post-link release stamp differs from the package version are rejected during candidate probing. Addons get the stamp only when installed through `scripts/bazel-natives.ts` (bazel or `--source`) or built by `packages/natives/scripts/build-bindings.ts`; a raw `bazel-bin` output copied elsewhere is unstamped and reports no version.
 
 ## Troubleshooting matrix
 

@@ -633,24 +633,13 @@ export declare class VcsRepo {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
- * Version sentinel — exists solely so the JS loader can prove at load time
- * that the `.node` file on disk is from the same package release as the
- * `index.js` ESM wrapper invoking it.
+ * Release version stamped into this `.node` after linking.
  *
- * The `js_name` is bumped by `scripts/release.ts` to match the new
- * `Cargo.toml` / `package.json` version on every release. The JS loader
- * computes the expected name from `package.json#version` and refuses to use
- * a `.node` that doesn't expose it, turning the silent
- * `<sym> is not a function` crash from a locked-file update (the canonical
- * Windows `bun install -g` failure mode) into a clear load-time error.
- *
- * Bump policy: `__piNativesV{major}_{minor}_{patch}` — non-alphanumerics in
- * the version string are mapped to `_` to keep it a valid JS identifier.
- * MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
- * `packages/natives/native/index.js` (which derives the name from
- * `package.json#version`).
+ * `None` for an unstamped build. The JS loader compares it against
+ * `package.json#version` so a `.node` from another release fails at load time
+ * with an actionable error instead of a later `<sym> is not a function` crash.
  */
-export declare function __piNativesV18_3_2(): void
+export declare function __piNativesBuildVersion(): string | null
 
 /**
  * Reports whether the on-device model can generate, as an `availability`

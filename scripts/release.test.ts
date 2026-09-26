@@ -96,11 +96,15 @@ describe("decideCIGate", () => {
 	});
 
 	test("latest run wins (rerun after failure)", () => {
-		expect(decideCIGate([{ sha: "h", runs: [run(1, "completed", "failure"), run(5, "completed", "success")] }])).toMatchObject({
+		expect(
+			decideCIGate([{ sha: "h", runs: [run(1, "completed", "failure"), run(5, "completed", "success")] }]),
+		).toMatchObject({
 			kind: "pass",
 			runId: 5,
 		});
-		expect(decideCIGate([{ sha: "h", runs: [run(5, "queued", null), run(1, "completed", "success")] }])).toMatchObject({
+		expect(
+			decideCIGate([{ sha: "h", runs: [run(5, "queued", null), run(1, "completed", "success")] }]),
+		).toMatchObject({
 			kind: "wait",
 			runId: 5,
 		});
@@ -114,7 +118,12 @@ describe("decideCIGate", () => {
 			{ sha: "p3", runs: [run(2, "completed", "failure")] },
 		];
 		expect(decideCIGate(chain)).toEqual({ kind: "pass", sha: "p2", runId: 3, ancestor: true });
-		expect(decideCIGate([{ sha: "h", runs: [] }, { sha: "p", runs: [run(1, "completed", "failure")] }])).toMatchObject({
+		expect(
+			decideCIGate([
+				{ sha: "h", runs: [] },
+				{ sha: "p", runs: [run(1, "completed", "failure")] },
+			]),
+		).toMatchObject({
 			kind: "fail",
 			sha: "p",
 			ancestor: true,
