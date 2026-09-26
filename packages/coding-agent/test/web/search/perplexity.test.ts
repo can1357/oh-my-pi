@@ -616,6 +616,34 @@ describe("Perplexity anonymous fallback", () => {
 		]);
 	});
 
+	it("classifies the source-less anonymous signup wall as a provider failure (issue #12756)", async () => {
+		// Anonymous quota exhausted: HTTP 200, a (localized) signup-wall answer, no web_results.
+		const answerPayload = { answer: "Sign up and repeat your request." };
+		const event = {
+			final: true,
+			display_model: "turbo",
+			uuid: "req-wall",
+			text: JSON.stringify([{ step_type: "FINAL", content: { answer: JSON.stringify(answerPayload) }, uuid: "" }]),
+		};
+		const sseBody = `data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === OAUTH_ASK_URL) {
+				return new Response(sseBody, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			}
+			return new Response("not mocked", { status: 500 });
+		};
+
+		await expect(
+			searchPerplexity({
+				query: "Zen Browser version",
+				authStorage: anonymousAuthStorage,
+				fetch: fetchMock,
+				explicit: true,
+			}),
+		).rejects.toThrow(/anonymous quota is exhausted/);
+	});
+
 	it("rejects an automatic authless request before using the anonymous transport", async () => {
 		const fetchMock = vi.fn<FetchImpl>();
 

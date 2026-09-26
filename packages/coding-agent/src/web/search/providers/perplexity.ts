@@ -766,6 +766,21 @@ async function callPerplexityAsk(
 		}
 	}
 
+	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
+	// message ("Sign up and repeat your request.", localized by the upstream
+	// service) and zero sources. A grounded anonymous ask (skip_search_enabled
+	// false + always_search_override) always returns web_results, so a
+	// source-less anonymous response is the wall — classify it as a provider
+	// failure so the fallback chain advances, matching the DuckDuckGo/Startpage/
+	// Google/SearXNG wall paths. The check is locale-independent (no text match).
+	if (auth.type === "anonymous" && sourcesByUrl.size === 0) {
+		throw new SearchProviderError(
+			"perplexity",
+			"Perplexity's anonymous quota is exhausted (signup wall); sign in with `/login perplexity` or configure another provider.",
+			429,
+		);
+	}
+
 	return {
 		answer,
 		sources: [...sourcesByUrl.values()],
