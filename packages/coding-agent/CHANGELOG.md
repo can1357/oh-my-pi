@@ -5,6 +5,7 @@
 ### Added
 
 - Added an optional `scope` to the `retain` and `learn` tools, offered when `mnemopi.scoping` is `global` or `per-project-tagged`: `scope: "global"` stores a memory or lesson in the Mnemopi bank every project recalls instead of the current project's bank ([#13324](https://github.com/can1357/oh-my-pi/pull/13324) by [@alphastorm](https://github.com/alphastorm)).
+- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed after the other keyed providers in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Fixed
 

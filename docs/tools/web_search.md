@@ -31,6 +31,7 @@
   - `packages/coding-agent/src/web/search/providers/perplexity.ts` — Perplexity API / OAuth adapter.
   - `packages/coding-agent/src/web/search/providers/public.ts` — Public Web aggregate over all credential-free engines.
   - `packages/coding-agent/src/web/search/providers/searxng.ts` — self-hosted SearXNG adapter.
+  - `packages/coding-agent/src/web/search/providers/serply.ts` — Serply Google SERP API adapter.
   - `packages/coding-agent/src/web/search/providers/startpage.ts` — Startpage (Google-proxied) form-flow scraper.
   - `packages/coding-agent/src/web/search/providers/synthetic.ts` — Synthetic search adapter.
   - `packages/coding-agent/src/web/search/providers/ollama.ts` — Ollama web search adapter.
@@ -47,7 +48,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Raw query. The orchestrator parses Google-style directives (`site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `filetype:`, quoted phrases, exclusions, and `OR`) so providers can map them to native filters or supported syntax; the original string remains available to adapters. |
-| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
+| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, Serply, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
 | `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`. |
 | `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
 | `temperature` | `number` | No | Passed through only by Anthropic models that support sampling parameters, Gemini, xAI, and Perplexity API-key mode. Ignored or omitted by the other provider/model paths. |
@@ -111,7 +112,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Fallbacks**: `retry.fallbackChains.web`. If it is set (even as an empty list), exactly those selectors follow the primary and are explicit. If it is unset, every entry of the built-in `web` priority list that matches an available model follows as a non-explicit candidate. Duplicate models are dropped, and a model listed by any explicit selector stays explicit.
   - **Explicit vs automatic**: explicit candidates use `isExplicitlyAvailable()`, so Perplexity, Exa, Firecrawl, and Public Web can run their unauthenticated/keyless paths when you select them. Automatic candidates use `isAvailable()` and are skipped when their credentials are missing.
   - **Per-request selector**: `SearchQueryParams.model` (`omp q --model web/duckduckgo "…"`) replaces the whole chain with that single explicit candidate.
-  - **Default chain** (the `web` list in `packages/coding-agent/src/priority.json`): `web/parallel`, `web/perplexity`, `google/gemini-2.5-flash`, `google-antigravity/gemini-2.5-flash`, `anthropic/claude-haiku-4-5`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.6`, `openai-codex/gpt-5.5`, `xai/grok-4.5`, `xai-oauth/grok-4.5`, `web/zai`, `web/exa`, `web/tinyfish`, `web/jina`, `web/kagi`, `web/tavily`, `web/firecrawl`, `web/brave`, `web/kimi`, `web/synthetic`, `web/ollama`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel uses authenticated search when configured and its credential-free MCP otherwise. `public` is explicit-only: its `isAvailable()` returns `false`, so the automatic chain never fans out to it.
+  - **Default chain** (the `web` list in `packages/coding-agent/src/priority.json`): `web/parallel`, `web/perplexity`, `google/gemini-2.5-flash`, `google-antigravity/gemini-2.5-flash`, `anthropic/claude-haiku-4-5`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.6`, `openai-codex/gpt-5.5`, `xai/grok-4.5`, `xai-oauth/grok-4.5`, `web/zai`, `web/exa`, `web/tinyfish`, `web/jina`, `web/kagi`, `web/tavily`, `web/firecrawl`, `web/brave`, `web/kimi`, `web/synthetic`, `web/ollama`, `web/serply`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel uses authenticated search when configured and its credential-free MCP otherwise. `public` is explicit-only: its `isAvailable()` returns `false`, so the automatic chain never fans out to it.
   - **Legacy settings**: on load, `packages/coding-agent/src/config/settings.ts` migrates `providers.webSearch`, `providers.webSearchOrder`, `providers.webSearchExclude`, and `providers.webSearchGeminiModel` into `modelRoles.web` plus `retry.fallbackChains.web`, then deletes the old keys. The migration never overwrites a role or chain that is already set. The migrated chain is the listed providers followed by the default chain, with the Gemini entries using the configured Gemini model and excluded providers removed.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
@@ -221,6 +222,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Ignores `recency`, `max_tokens`, and `temperature`.
     - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..10`, default `5`.
     - Output: `sources` only.
+  - **Serply** — `packages/coding-agent/src/web/search/providers/serply.ts`
+    - Availability: env or `agent.db` credential for `serply`.
+    - Querying: GET `https://api.serply.io/v1/search/` with `X-Api-Key`, `q`, and `num`. Serply proxies Google, so the whole parsed operator set is re-emitted into `q` with `GOOGLE_QUERY_SYNTAX` (including `after:`/`before:`) rather than mapped onto side-channel parameters; `recency` becomes `tbs=qdr:d|w|m|y`, and is dropped when the query already carries absolute date bounds.
+    - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..10`, default `10`.
+    - Output: `sources` only (`publishedDate` from `metadata.published_time` when the SERP reports one), `authMode: "api_key"`.
   - **SearXNG** — `packages/coding-agent/src/web/search/providers/searxng.ts`
     - Availability: endpoint from `searxng.endpoint` setting or `SEARXNG_ENDPOINT` env.
     - Querying: GET `<endpoint>/search?format=json&q=...`; optional settings add `categories` and `language`.
@@ -274,6 +280,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).
+- Serply result count: default `10`, max `10`; the API serves one Google result page per call (`packages/coding-agent/src/web/search/providers/serply.ts`).
 - xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => default `10`, max `30`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
 - Anthropic defaults: model `claude-haiku-4-5`, `DEFAULT_MAX_TOKENS = 4096` when the provider omits `max_tokens` (`packages/coding-agent/src/web/search/providers/anthropic.ts`).
@@ -296,7 +303,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - The model-facing schema does not expose a provider or model; CLI/internal callers can pin one through `SearchQueryParams.model`.
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
-- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
+- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, Serply, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
 - `SEARCH_PROVIDER_OPTIONS` in `packages/coding-agent/src/web/search/types.ts` lists `auto` plus every provider in the auto chain; the setup wizard (`packages/coding-agent/src/modes/setup.ts`) uses it to map a `web/<provider>` model in the `web` role to its search provider.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.

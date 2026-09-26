@@ -362,6 +362,7 @@ therefore completes through the paste-code path.
 | `FIRECRAWL_API_KEY`                                 | Firecrawl search provider (keyless fallback when unset) and fetch reader backend (required) |
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
+| `SERPLY_API_KEY`                                    | Serply search provider                                                    |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
 | `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search model availability/auth                                      |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
