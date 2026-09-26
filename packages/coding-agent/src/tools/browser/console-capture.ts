@@ -83,6 +83,28 @@ function boundedText(value: string, limit: number): string {
 	return value.length <= limit ? value : `${value.slice(0, limit)}…`;
 }
 
+/**
+ * Render one console argument as text without throwing.
+ *
+ * `String()` throws for objects whose `toString`/`valueOf` are not callable
+ * (e.g. JSON payloads `{ toString: "x" }`); those fall back to JSON, then to
+ * the object's `Object.prototype.toString` tag. Mirrored page-side in
+ * {@link CMUX_CONSOLE_CAPTURE_SCRIPT}.
+ */
+function consoleArgumentText(value: unknown): string {
+	try {
+		return String(value);
+	} catch {
+		try {
+			const json = JSON.stringify(value);
+			if (json !== undefined) return json;
+		} catch {
+			// Cyclic or otherwise unserializable; use the object tag below.
+		}
+		return Object.prototype.toString.call(value);
+	}
+}
+
 function consoleLevel(message: ConsoleMessage): BrowserConsoleLevel {
 	const type = message.type();
 	switch (type) {
@@ -272,7 +294,7 @@ export class PageConsoleCapture {
 				this.#pending = this.#pending.then(async () => {
 					const args = await serializedArgs;
 					if (this.#generation !== generation) return;
-					const text = args.map(value => String(value)).join(" ");
+					const text = args.map(consoleArgumentText).join(" ");
 					this.#push({
 						seq,
 						ts: event.timestamp,
@@ -448,16 +470,22 @@ export const CMUX_CONSOLE_CAPTURE_SCRIPT = String.raw`(() => {
 		state.entries.push({ seq: state.nextSeq++, ts: Date.now(), ...entry });
 		while (state.entries.length > 500) { state.entries.shift(); state.dropped++; }
 	};
+	const text = value => {
+		try { return String(value); } catch {
+			try { const json = JSON.stringify(value); if (json !== undefined) return json; } catch {}
+			return Object.prototype.toString.call(value);
+		}
+	};
 	const safe = value => {
 		try {
 			const json = JSON.stringify(value);
 			return json && json.length > 8192 ? json.slice(0, 8192) + "…" : value;
-		} catch { return String(value); }
+		} catch { return text(value); }
 	};
 	for (const level of ["log", "info", "warn", "error", "debug"]) {
 		const original = console[level].bind(console);
 		console[level] = (...args) => {
-			push({ type: "console", level, text: args.map(value => String(value)).join(" ").slice(0, 16384), args: args.map(safe) });
+			push({ type: "console", level, text: args.map(text).join(" ").slice(0, 16384), args: args.map(safe) });
 			return original(...args);
 		};
 	}
