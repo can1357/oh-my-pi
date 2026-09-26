@@ -255,6 +255,25 @@ describe("InputController skill queue chip metadata", () => {
 		});
 	});
 
+	it("keeps a draft typed while a Ctrl+Enter skill submission was failing", async () => {
+		const { ctx, editor, promptCustomMessage, showError } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		promptCustomMessage.mockImplementation(async () => {
+			// The user keeps typing while dispatch is in flight.
+			editor.setText("typed while dispatching");
+			throw new Error("dispatch failed");
+		});
+		const controller = new InputController(ctx);
+
+		editor.setText("/skill:test-skill go");
+		await controller.handleFollowUp();
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("/skill:test-skill go\n\ntyped while dispatching");
+	});
+
 	it("streaming follow-up applies builtin slash commands instead of queueing them", async () => {
 		const { ctx, editor, prompt, handleGoalModeCommand } = createStubInputControllerContext({
 			skillCommands,

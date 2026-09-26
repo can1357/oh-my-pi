@@ -89,6 +89,30 @@ describe("RpcPromptResults", () => {
 		]);
 	});
 
+	test("restarts run ownership when a prompt leaves delayed ingress", async () => {
+		const { frames, results } = createHarness();
+		const ticket = results.begin("req_hook");
+		// Another run starts and yields while the prompt's input handler is still pending.
+		results.observe(agentStart);
+		results.observe(agentEnd([assistant({ stopReason: "stop" })]));
+		results.routed(ticket);
+		results.observe(agentStart);
+		results.observe(agentEnd([assistant({ stopReason: "error", errorMessage: "own failure" })]));
+		results.settle(ticket);
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{
+				type: "prompt_result",
+				id: "req_hook",
+				agentInvoked: true,
+				status: "error",
+				sessionSettled: true,
+				error: { message: "own failure", provider: "anthropic", model: "claude-sonnet-4-5", retryable: false },
+			},
+		]);
+	});
+
 	test("waits for the continuation when the prompt resolves idle after a non-terminal settle", async () => {
 		const { frames, results } = createHarness();
 		const ticket = results.begin("req_3");
@@ -266,6 +290,42 @@ describe("reportPromptResult", () => {
 
 		expect(frames).toEqual([
 			{ type: "prompt_result", id: "req_1", agentInvoked: false, status: "completed", sessionSettled: true },
+		]);
+	});
+
+	test("a delayed input request does not inherit another request's extension turn", async () => {
+		const { frames, session, results } = createHarness();
+		const tracker = new RpcExtensionUserMessageTracker();
+		const releaseInput = Promise.withResolvers<void>();
+		const localRequest = tracker.watchPrompt(async () => {
+			await releaseInput.promise;
+			return false;
+		});
+		const generatedRequest = tracker.watchPrompt(async () => {
+			tracker.markAgentMessageTask();
+			return false;
+		});
+		const report = (id: string, tracked: typeof localRequest) =>
+			reportPromptResult({
+				ticket: results.begin(id),
+				prompt: tracked.prompt,
+				results,
+				onError: error => {
+					throw error;
+				},
+				hasExtensionAgentMessageTask: tracked.hasAgentMessageTask,
+				waitForExtensionAgentMessageTasks: tracked.waitForAgentMessageTasks,
+			});
+		// The generated request's turn is live, so only its own run can complete it.
+		session.isStreaming = true;
+		const localResult = report("local", localRequest);
+		await report("generated", generatedRequest);
+		releaseInput.resolve();
+		await localResult;
+		await flushFrames();
+
+		expect(frames).toEqual([
+			{ type: "prompt_result", id: "local", agentInvoked: false, status: "completed", sessionSettled: false },
 		]);
 	});
 
@@ -523,8 +583,8 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 			reportSendError: () => {},
 			reportRuntimeError: () => {},
 			// Wired exactly like RPC mode: trackAgentInvokingMessage delegates to the tracker,
-			// which only attaches a handler to the task while a prompt scope is active
-			// (`#activePromptScopes`). No `watchPrompt` call below, so that set is empty.
+			// which only attaches a handler to the task inside an active `watchPrompt` scope.
+			// No `watchPrompt` call below, so no scope is active.
 			trackAgentInvokingMessage: task => {
 				extensionUserMessages.trackAgentMessageTask(task);
 			},

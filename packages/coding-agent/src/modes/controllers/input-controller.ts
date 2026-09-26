@@ -31,7 +31,7 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
-import type { InteractiveModeContext } from "../../modes/types";
+import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -918,6 +918,38 @@ export class InputController {
 		return compacted.text.trim();
 	}
 
+	#dropSubmittedPending(images: ImageContent[] | undefined, links: (string | undefined)[] | undefined): void {
+		if (!images?.length) return;
+		const pending = this.ctx.editor.pendingImages;
+		// Drop the snapshot only while it is still the live prefix: attachments
+		// added while the handler was pending stay in place.
+		if (!images.every((image, index) => pending[index] === image)) return;
+		pending.splice(0, images.length);
+		const linkCount = Math.min(links?.length ?? 0, this.ctx.editor.pendingImageLinks.length);
+		this.ctx.editor.pendingImageLinks.splice(0, linkCount);
+		this.ctx.editor.imageLinks =
+			this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
+	}
+
+	async #runInputHandlers(
+		text: string,
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+	): Promise<{ text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] } | undefined> {
+		const result = await this.ctx.session.extensionRunner?.emitInput(text, images, "interactive");
+		if (result?.handled) return undefined;
+		if (result?.text !== undefined) text = result.text.trim();
+		if (result?.images !== undefined) {
+			images = result.images;
+			imageLinks = await materializeImageReferenceLinks(
+				images,
+				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
+			);
+		}
+		if (!text && !images?.length) return undefined;
+		return { text, images, imageLinks };
+	}
+
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			text = this.#compactDraftImages(text.trim());
@@ -971,21 +1003,16 @@ export class InputController {
 			const submittedImages = inputImages;
 
 			if (runner?.hasHandlers("input")) {
-				const result = await runner.emitInput(text, inputImages, "interactive");
-				if (result?.handled) {
-					this.ctx.editor.clearDraft();
+				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+				if (!input) {
+					// The handler consumed the submission: drop only the submitted
+					// snapshot. Text or attachments added while the handler was
+					// pending belong to the next submission and must survive.
+					if (this.ctx.editor.getText() === text) this.ctx.editor.clearDraft();
+					this.#dropSubmittedPending(inputImages, inputImageLinks);
 					return;
 				}
-				if (result?.text !== undefined) {
-					text = result.text.trim();
-				}
-				if (result?.images !== undefined) {
-					inputImages = result.images;
-					inputImageLinks = await materializeImageReferenceLinks(
-						inputImages,
-						this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
-					);
-				}
+				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
@@ -1024,7 +1051,25 @@ export class InputController {
 					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
 						? { images: inputImages, imageLinks: inputImageLinks }
 						: undefined;
-				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+				let slashResult: string | boolean;
+				try {
+					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+				} catch (error) {
+					// Detached mode commands (plan/vibe/goal/guided-goal) rethrow so
+					// this caller — the one that took the draft's images out of the
+					// editor before dispatch — restores the submission and reports
+					// the error, mirroring `handleFollowUp`'s Ctrl+Enter path.
+					if (!draftDetached) throw error;
+					const editor = this.ctx.editor;
+					if (!editor.getText() && editor.pendingImages.length === 0) {
+						editor.setText(text);
+						editor.pendingImages = inputImages ? [...inputImages] : [];
+						editor.pendingImageLinks = inputImageLinks ? [...inputImageLinks] : [];
+						editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
+					}
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					return;
+				}
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
@@ -1149,7 +1194,9 @@ export class InputController {
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages });
 				} catch (error) {
-					if (inputImages && inputImages.length > 0) {
+					// Restore the snapshot only when nothing newer was attached
+					// while the command ran; otherwise the newer draft wins.
+					if (inputImages && inputImages.length > 0 && this.ctx.editor.pendingImages.length === 0) {
 						this.ctx.editor.pendingImages = [...inputImages];
 						this.ctx.editor.pendingImageLinks = inputImageLinks
 							? [...inputImageLinks]
@@ -1528,6 +1575,19 @@ export class InputController {
 		return { text: last.text, images: last.images };
 	}
 
+	/** Restore a failed submission without replacing a draft typed while it awaited dispatch. */
+	#restoreInputDraft(text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): void {
+		const editor = this.ctx.editor;
+		const currentText = editor.getExpandedText();
+		const restoredText = shiftImageMarkers(text, editor.pendingImages.length);
+		if (images?.length) {
+			editor.pendingImages.push(...images);
+			editor.pendingImageLinks.push(...(imageLinks ?? images.map(() => undefined)));
+			editor.imageLinks = editor.pendingImageLinks;
+		}
+		editor.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
+	}
+
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns false when the text is not
@@ -1540,23 +1600,30 @@ export class InputController {
 		streamingBehavior: "steer" | "followUp",
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
+		preserveDraft = false,
 	): Promise<boolean> {
 		if (!isKnownSkillCommand(this.ctx, text)) return false;
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
 		const draftImageLinks = draftImages && imageLinks && imageLinks.length > 0 ? [...imageLinks] : undefined;
 		const restoreDraft = () => {
-			if (draftImages && draftImages.length > 0) {
-				this.ctx.editor.pendingImages = [...draftImages];
-				this.ctx.editor.pendingImageLinks = draftImageLinks
-					? [...draftImageLinks]
-					: draftImages.map(() => undefined);
-				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+			if (preserveDraft) {
+				this.#restoreInputDraft(text, draftImages, draftImageLinks);
+			} else {
+				this.ctx.editor.setText(text);
+				if (draftImages && draftImages.length > 0) {
+					this.ctx.editor.pendingImages = [...draftImages];
+					this.ctx.editor.pendingImageLinks = draftImageLinks
+						? [...draftImageLinks]
+						: draftImages.map(() => undefined);
+					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				}
+				// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
+				this.ctx.editor.setCollapsedText(text);
 			}
-			// Images first: collapsing reads `pendingImages.length` to decide which markers become chips.
-			this.ctx.editor.setCollapsedText(text);
 		};
 
-		this.ctx.editor.clearDraft(text);
+		if (preserveDraft) this.ctx.editor.addToHistory(text);
+		else this.ctx.editor.clearDraft(text);
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,
@@ -1591,12 +1658,19 @@ export class InputController {
 		}
 	}
 
-	/** Queue `/queue` input behind an active turn, or start it immediately when idle. */
-	async handleQueueCommand(text: string): Promise<void> {
-		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-		const imageLinks =
-			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
-		await this.#queueForYield(text, { images, imageLinks });
+	/**
+	 * Queue `/queue` input behind an active turn, or start it immediately when idle.
+	 * `detached` carries the attachments of a submission whose draft already left
+	 * the editor; without it, the live editor draft is the submission.
+	 */
+	async handleQueueCommand(text: string, detached?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<void> {
+		const source = detached ?? {
+			images: this.ctx.editor.pendingImages,
+			imageLinks: this.ctx.editor.pendingImageLinks,
+		};
+		const images = source.images?.length ? [...source.images] : undefined;
+		const imageLinks = images && source.imageLinks?.length ? [...source.imageLinks] : undefined;
+		await this.#queueForYield(text, { images, imageLinks, draftDetached: detached !== undefined });
 	}
 
 	async #queueForYield(
@@ -1605,11 +1679,13 @@ export class InputController {
 			historyText?: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
+			/** The submitted draft already left the editor; anything there now is newer. */
+			draftDetached?: boolean;
 		},
 	): Promise<void> {
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
-			this.ctx.editor.clearDraft();
+			if (!options.draftDetached) this.ctx.editor.clearDraft();
 			this.ctx.showWarning("Usage: /queue <message> (or start a prompt with -> / =>)");
 			return;
 		}
@@ -1622,7 +1698,7 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		this.ctx.editor.clearDraft(options.historyText);
+		if (!options.draftDetached) this.ctx.editor.clearDraft(options.historyText);
 
 		if (this.ctx.session.isCompacting) {
 			for (let index = 0; index < messages.length; index++) {
@@ -1714,8 +1790,8 @@ export class InputController {
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
 		let text = this.#compactDraftImages(this.ctx.editor.getExpandedText().trim());
-		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-		const imageLinks =
+		let images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
+		let imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) return;
 
@@ -1725,36 +1801,58 @@ export class InputController {
 			return;
 		}
 
+		// Detach before the first await: another Ctrl+Enter cannot submit the
+		// same draft, and later typing belongs to the next submission.
+		this.ctx.editor.clearDraft();
+
+		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
+			try {
+				const input = await this.#runInputHandlers(text, images, imageLinks);
+				if (!input) return;
+				({ text, images, imageLinks } = input);
+			} catch (error) {
+				this.#restoreInputDraft(text, images, imageLinks);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return;
+			}
+		}
+
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
 		// skill typed during compaction is not lost or short-circuited through
 		// `promptCustomMessage`. The compaction-resume path re-parses the
 		// queued text into a user-attributed skill invocation before delivery.
 		if (this.ctx.session.isCompacting) {
-			const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			this.ctx.queueCompactionMessage(text, "followUp", images);
+			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
 			return;
 		}
 
 		if (text) {
-			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
-			if (slashResult === true) {
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+			try {
+				const input =
+					(images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
+				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached: true });
+				if (slashResult === true) {
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					return;
+				}
+				if (typeof slashResult === "string") {
+					// Command handled but returned remaining text to use as prompt.
+					// Record the original slash command text so Up Arrow recalls it.
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					text = slashResult;
+				}
+			} catch (error) {
+				this.#restoreInputDraft(text, images, imageLinks);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
 				return;
-			}
-			if (typeof slashResult === "string") {
-				// Command handled but returned remaining text to use as prompt.
-				// Record the original slash command text so Up Arrow recalls it.
-				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
-				text = slashResult;
 			}
 		}
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
 			return;
 		}
 
@@ -1762,18 +1860,12 @@ export class InputController {
 		// queue rejection): restore both text AND pending images so an image-only
 		// or text+image draft can be retried, mirroring the main submit error path.
 		const restoreOnError = (error: unknown) => {
-			if (images && images.length > 0) {
-				this.ctx.editor.pendingImages = [...images];
-				this.ctx.editor.pendingImageLinks = imageLinks ? [...imageLinks] : images.map(() => undefined);
-				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-			}
-			// Collapse restores the chip tokens (and their band cards) for the failed draft.
-			this.ctx.editor.setCollapsedText(text);
+			this.#restoreInputDraft(text, images, imageLinks);
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		};
 
 		if (this.ctx.session.isStreaming) {
-			this.ctx.editor.clearDraft(text);
+			this.ctx.editor.addToHistory(text);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -1789,7 +1881,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.addToHistory(text);
 		try {
 			await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 				imageCount: images?.length ?? 0,

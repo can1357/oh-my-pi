@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,8 +22,15 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	convertToLlm,
+	type CustomMessage,
+	SKILL_PROMPT_MESSAGE_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { assistantMsg } from "./utilities";
 
 interface BtwBranchResult {
@@ -54,12 +61,19 @@ describe("AgentSession concurrent prompt dispatch", () => {
 		sessionDir = undefined;
 	});
 
-	function createSession(sessionManager = SessionManager.inMemory(), extensionRunner?: ExtensionRunner) {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	function createSession(
+		responses?: MockHandler[],
+		textOnly = false,
+		sessionManager = SessionManager.inMemory(),
+		extensionRunner?: ExtensionRunner,
+	) {
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const model = textOnly ? { ...bundledModel, input: ["text" as const] } : bundledModel;
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
+			convertToLlm,
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
@@ -67,14 +81,22 @@ describe("AgentSession concurrent prompt dispatch", () => {
 				messages: sessionManager.buildSessionContext().messages,
 			},
 			streamFn: createMockModel({
-				responses: [{ content: ["First done"] }, { content: ["Second done"] }, { content: ["Third done"] }],
+				responses: responses ?? [
+					{ content: ["First done"] },
+					{ content: ["Second done"] },
+					{ content: ["Third done"] },
+				],
 			}).stream,
 		});
 
 		session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"magicKeywords.enabled": true,
+				"magicKeywords.ultrathink": true,
+			}),
 			modelRegistry,
 			extensionRunner,
 		});
@@ -87,7 +109,7 @@ describe("AgentSession concurrent prompt dispatch", () => {
 			const manager = SessionManager.create(sessionDir, sessionDir);
 			const retained = manager.appendMessage({ role: "user", content: "Retained", timestamp: 1 });
 			const abandoned = manager.appendMessage({ role: "user", content: "Abandoned", timestamp: 2 });
-			createSession(manager);
+			createSession(undefined, false, manager);
 			const reached = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
 			const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
@@ -155,7 +177,12 @@ describe("AgentSession concurrent prompt dispatch", () => {
 			runtime,
 			"cancel-tree",
 		);
-		createSession(manager, new ExtensionRunner([extension], runtime, manager.getCwd(), manager, modelRegistry));
+		createSession(
+			undefined,
+			false,
+			manager,
+			new ExtensionRunner([extension], runtime, manager.getCwd(), manager, modelRegistry),
+		);
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
@@ -185,6 +212,350 @@ describe("AgentSession concurrent prompt dispatch", () => {
 				),
 		).toBe(true);
 	});
+
+	it("does not dispatch a custom image prompt after aborting its normalization", async () => {
+		createSession();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+			entered.resolve();
+			await release.promise;
+			return images;
+		});
+		const provider = vi.spyOn(session.agent, "streamFn");
+		const prompt = session.promptCustomMessage({
+			customType: "collab-prompt",
+			content: [
+				{ type: "text", text: "cancel this attachment" },
+				{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+			],
+			display: true,
+			attribution: "user",
+		});
+		await entered.promise;
+		const abort = session.abort();
+		release.resolve();
+		expect(await prompt).toBe(false);
+		await abort;
+		expect(provider).not.toHaveBeenCalled();
+		expect(session.messages).toEqual([]);
+	});
+
+	for (const mode of ["steer", "followUp"] as const) {
+		for (const stage of ["normalization", "description"] as const) {
+			it(`drops ${mode} attachment preparation when abort overtakes ${stage}`, async () => {
+				createSession(undefined, stage === "description");
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				if (stage === "normalization") {
+					vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+						entered.resolve();
+						await release.promise;
+						return images;
+					});
+				} else {
+					vi.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementationOnce(async () => {
+						entered.resolve();
+						await release.promise;
+						return [{ type: "text", text: "CANCELLED_IMAGE_DESCRIPTION" }];
+					});
+				}
+				const provider = vi.spyOn(session.agent, "streamFn");
+				const queued = session[mode]("CANCELLED_ATTACHMENT", [
+					{
+						type: "image",
+						mimeType: "image/png",
+						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7ioAAAAASUVORK5CYII=",
+					},
+				]);
+				try {
+					await entered.promise;
+					await session.abort();
+				} finally {
+					release.resolve();
+				}
+				await queued;
+				await session.waitForIdle();
+				expect(provider).not.toHaveBeenCalled();
+				expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+				expect(session.messages).toEqual([]);
+			});
+		}
+	}
+
+	it("resolves a queued prompt as unpublished when abort overtakes its attachment preparation", async () => {
+		const active = Promise.withResolvers<void>();
+		const finishActive = Promise.withResolvers<void>();
+		createSession([
+			async () => {
+				active.resolve();
+				await finishActive.promise;
+				return { content: ["Active done"] };
+			},
+			{ content: ["Unexpected orphan turn"] },
+		]);
+		const run = session.prompt("ACTIVE_TURN");
+		await active.promise;
+
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+			entered.resolve();
+			await release.promise;
+			return images;
+		});
+		const queued = session.prompt("CANCELLED_QUEUED", {
+			streamingBehavior: "steer",
+			images: [
+				{
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7ioAAAAASUVORK5CYII=",
+				},
+			],
+		});
+		await entered.promise;
+		await session.abort();
+		release.resolve();
+
+		// An RPC caller waits on this result: reporting `true` for a prompt that
+		// never reached a queue leaves it waiting for an `agent_end` that no
+		// replacement turn will emit.
+		expect(await queued).toBe(false);
+		finishActive.resolve();
+		await run.catch(() => undefined);
+		await session.waitForIdle();
+		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+	});
+
+	it("never publishes queued magic or vision companions without their cancelled user prompt", async () => {
+		const active = Promise.withResolvers<void>();
+		const finishActive = Promise.withResolvers<void>();
+		createSession(
+			[
+				async () => {
+					active.resolve();
+					await finishActive.promise;
+					return { content: ["Active done"] };
+				},
+				{ content: ["Unexpected orphan turn"] },
+			],
+			true,
+		);
+		const provider = vi.spyOn(session.agent, "streamFn");
+		const run = session.prompt("ACTIVE_BEFORE_ATTACHMENT");
+		await active.promise;
+		const describing = Promise.withResolvers<void>();
+		const finishDescription = Promise.withResolvers<void>();
+		vi.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementationOnce(async () => {
+			describing.resolve();
+			await finishDescription.promise;
+			return [{ type: "text", text: "CANCELLED_IMAGE_DESCRIPTION" }];
+		});
+		const pending = session.prompt("ultrathink CANCELLED_USER", {
+			streamingBehavior: "followUp",
+			images: [
+				{
+					type: "image",
+					mimeType: "image/png",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				},
+			],
+		});
+		try {
+			await describing.promise;
+			finishActive.resolve();
+			await run;
+			await session.waitForIdle();
+			await session.abort();
+		} finally {
+			finishActive.resolve();
+			finishDescription.resolve();
+			await pending;
+		}
+		await session.waitForIdle();
+		expect(provider).toHaveBeenCalledTimes(1);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		const transcript = JSON.stringify(session.messages);
+		expect(transcript).not.toContain("ultrathink-notice");
+		expect(transcript).not.toContain("image-attachment-description");
+		expect(transcript).not.toContain("CANCELLED_USER");
+	});
+
+	it("keeps a skill's image companion and queue metadata together while an idle description is in flight", async () => {
+		createSession(undefined, true);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const describeImages = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockImplementationOnce(async () => {
+				entered.resolve();
+				await release.promise;
+				return [{ type: "text", text: "DESCRIBED_SKILL_IMAGE" }];
+			});
+		const image = {
+			type: "image" as const,
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const normalizedImages = (await imageLoading.normalizeModelContextImages([image], { model: session.model }))!;
+		const skill: Pick<CustomMessage, "customType" | "content" | "display" | "details" | "attribution"> = {
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: [{ type: "text", text: "FIRST_SKILL" }, image],
+			display: true,
+			details: { name: "first", args: "image", path: "/skills/first/SKILL.md", lineCount: 1 },
+			attribution: "user",
+		};
+		const first = session.promptCustomMessage(skill, { streamingBehavior: "steer" });
+		await entered.promise;
+		const queuedSkill = {
+			...skill,
+			content: "SECOND_SKILL",
+			details: { name: "second", args: "queued", path: "/skills/second/SKILL.md", lineCount: 1 },
+		};
+		expect(
+			await session.promptCustomMessage(queuedSkill, {
+				streamingBehavior: "followUp",
+				queueChipText: "/skill:second queued",
+			}),
+		).toBe(true);
+		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["/skill:second queued"] });
+		release.resolve();
+		expect(await first).toBe(true);
+		await session.waitForIdle();
+		const custom = session.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" &&
+				(message.customType === "image-attachment-description" || message.customType === SKILL_PROMPT_MESSAGE_TYPE),
+		);
+		expect(custom.map(message => message.customType)).toEqual([
+			"image-attachment-description",
+			SKILL_PROMPT_MESSAGE_TYPE,
+			SKILL_PROMPT_MESSAGE_TYPE,
+		]);
+		expect(custom[1]).toMatchObject({
+			content: [{ type: "text", text: "FIRST_SKILL" }, ...normalizedImages],
+			details: skill.details,
+			attribution: "user",
+		});
+		expect(custom[2]).toMatchObject({
+			content: "SECOND_SKILL",
+			details: { ...queuedSkill.details, __queueChipText: "/skill:second queued" },
+			attribution: "user",
+		});
+		expect(describeImages).toHaveBeenCalledTimes(1);
+	});
+
+	it("restores an image skill from the queue without leaving its hidden companions behind", async () => {
+		const active = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		createSession(
+			[
+				async () => {
+					active.resolve();
+					await release.promise;
+					return { content: ["Active done"] };
+				},
+			],
+			true,
+		);
+		vi.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockResolvedValueOnce([
+			{ type: "text", text: "RESTORABLE_SKILL_IMAGE" },
+		]);
+		const run = session.prompt("active");
+		await active.promise;
+		const image = {
+			type: "image" as const,
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const normalizedImages = (await imageLoading.normalizeModelContextImages([image], { model: session.model }))!;
+		await session.promptCustomMessage(
+			{
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: [{ type: "text", text: "QUEUED_SKILL" }, image],
+				display: true,
+				details: { name: "queued", args: "ultrathink" },
+				attribution: "user",
+			},
+			{ streamingBehavior: "followUp", queueChipText: "/skill:queued ultrathink" },
+		);
+		try {
+			const queued = session.agent.peekFollowUpQueue().filter(message => message.role === "custom");
+			expect(queued.map(message => message.customType)).toEqual([
+				"ultrathink-notice",
+				"image-attachment-description",
+				SKILL_PROMPT_MESSAGE_TYPE,
+			]);
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["/skill:queued ultrathink"] });
+			expect(session.clearQueue()).toEqual({
+				steering: [],
+				followUp: [{ text: "/skill:queued ultrathink", images: normalizedImages }],
+			});
+		} finally {
+			release.resolve();
+			await run;
+		}
+		expect(JSON.stringify(session.messages)).not.toContain("RESTORABLE_SKILL_IMAGE");
+		expect(JSON.stringify(session.messages)).not.toContain("ultrathink-notice");
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	for (const transition of ["abort", "newSession"] as const) {
+		it(`keeps an image aside across abort but not a session replacement: ${transition}`, async () => {
+			createSession(undefined, true);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementationOnce(async () => {
+				entered.resolve();
+				await release.promise;
+				return [{ type: "text", text: "ASIDE_IMAGE_DESCRIPTION" }];
+			});
+			const aside = session.promptCustomMessage(
+				{
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: [
+						{ type: "text", text: "ASIDE_SKILL" },
+						{
+							type: "image",
+							mimeType: "image/png",
+							data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+						},
+					],
+					display: true,
+					details: { name: "aside", args: "image" },
+					attribution: "user",
+				},
+				{ queueOnly: true, streamingBehavior: "aside" },
+			);
+			await entered.promise;
+			try {
+				if (transition === "abort") await session.abort();
+				else await session.newSession();
+			} finally {
+				release.resolve();
+			}
+			expect(await aside).toBe(transition === "abort");
+			await session.waitForIdle();
+			const custom = session.messages.filter(
+				(message): message is CustomMessage =>
+					message.role === "custom" &&
+					(message.customType === "image-attachment-description" ||
+						message.customType === SKILL_PROMPT_MESSAGE_TYPE),
+			);
+			if (transition === "abort") {
+				expect(custom.map(message => message.customType)).toEqual([
+					"image-attachment-description",
+					SKILL_PROMPT_MESSAGE_TYPE,
+				]);
+				expect(custom[0]).toMatchObject({ attribution: "user", display: false });
+				expect(custom[1]).toMatchObject({ attribution: "user", details: { name: "aside", args: "image" } });
+			} else {
+				expect(session.messages).toEqual([]);
+				expect(session.agent.hasQueuedMessages()).toBe(false);
+			}
+		});
+	}
 
 	it("queues a prompt that loses the pre-dispatch race instead of racing a second turn", async () => {
 		createSession();

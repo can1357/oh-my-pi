@@ -11,8 +11,10 @@
  * - Prompt completion: one `prompt_result` per accepted prompt, correlated by the command `id`
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
@@ -51,6 +53,7 @@ import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } f
 import { RpcOutputWriter } from "./rpc-output";
 import {
 	RpcExtensionUserMessageTracker,
+	type RpcPromptDispatchResult,
 	RpcPromptResults,
 	type RpcPromptTicket,
 	watchAndReportPromptResult,
@@ -85,11 +88,26 @@ export type PendingExtensionRequest = {
 	reject: (error: Error) => void;
 };
 
+// EOF cancels only ingress that depended on a disconnected UI request. Other
+// accepted input still drains, including one-shot piped prompts.
+const rpcInputScope = new AsyncLocalStorage<{ disconnected: boolean }>();
+
 /** Pending extension UI request map that can fail closed when the RPC client disconnects. */
 export class RpcPendingExtensionRequests extends Map<string, PendingExtensionRequest> {
 	#closedError: Error | undefined;
 
 	override set(id: string, request: PendingExtensionRequest): this {
+		const scope = rpcInputScope.getStore();
+		if (scope) {
+			const reject = request.reject;
+			request = {
+				resolve: request.resolve,
+				reject: error => {
+					scope.disconnected = true;
+					reject(error);
+				},
+			};
+		}
 		if (this.#closedError) {
 			request.reject(this.#closedError);
 			return this;
@@ -141,6 +159,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
 	skill: Skill;
+	queueChipText: string;
 }
 
 /**
@@ -154,68 +173,34 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt };
+	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 
 /**
  * Slow half of a skill invocation: builds the skill prompt message (file I/O)
  * and dispatches it through the full prompt pipeline (usage preflight,
  * compaction checks, provider calls). Resolves once the turn is scheduled.
- * Must not run on the RPC serial queue's response path — register it with
- * watchAndReportLocalOnlyPromptResult and answer the command first.
+ * Must not run on the RPC serial queue's response path — acknowledge the prompt
+ * first and report its completion through watchAndReportPromptResult.
  */
 export async function runRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	images?: ImageContent[],
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: built.message,
+			content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
 			display: true,
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, queueChipText: invocation.queueChipText },
 	);
-}
-
-/**
- * Skill branch of the `prompt` command: resolves the invocation cheaply, then
- * registers the slow dispatch with watchAndReportPromptResult and
- * returns immediately. The caller answers the command right away — building
- * the skill prompt and running the prompt pipeline (usage preflight,
- * compaction, provider calls) can outlast any client's prompt timeout under
- * provider stress; the plain-prompt path responds first for the same reason.
- */
-export async function dispatchRpcSkillPrompt(input: {
-	ticket: RpcPromptTicket;
-	session: RpcSkillCommandSession;
-	message: string;
-	streamingBehavior: "steer" | "followUp" | undefined;
-	results: RpcPromptResults;
-	onError: (error: Error) => void;
-	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): Promise<RpcSkillCommandResult | null> {
-	const invocation = resolveRpcSkillInvocation(input.session, input.message);
-	if (!invocation) return null;
-	// buildSkillPromptMessage is cheap file I/O and covers the failure the old
-	// synchronous path reported immediately (a removed or unreadable SKILL.md);
-	// keep that error contract by awaiting it before answering. The expensive
-	// promptCustomMessage pipeline (usage preflight, compaction, provider
-	// calls) is what moves behind the acknowledgement.
-	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
-	watchAndReportPromptResult({
-		ticket: input.ticket,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
-		results: input.results,
-		onError: input.onError,
-		extensionUserMessageTracker: input.extensionUserMessageTracker,
-	});
-	return { agentInvoked: true };
 }
 
 export async function tryRunRpcSkillCommand(
@@ -346,6 +331,18 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			if (command.type === "bash") {
 				dispatchRpcInputFrame(command, this.#deps);
+				return;
+			}
+
+			// An input hook may be waiting on asynchronous work. Aborting must
+			// overtake it, including an explicit steer/follow-up awaiting ingress.
+			if (command.type === "abort" || command.type === "abort_and_prompt") {
+				const task = this.#dispatchSerialCommand(command);
+				// Overtake earlier ingress, but retain it and every still-live
+				// abort as barriers for commands accepted after this one.
+				this.#tail = Promise.allSettled([this.#tail, task]).then(() => {});
+				this.#tasks.add(task);
+				void task.finally(() => this.#tasks.delete(task));
 				return;
 			}
 
@@ -1113,39 +1110,85 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	});
 	await emitAvailableCommandsUpdate();
 
-	// Handle a single command
-	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
-		const id = command.id;
-
-		switch (command.type) {
-			case "negotiate_protocol": {
-				if (command.protocolVersion !== 2)
-					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
-				return success(id, "negotiate_protocol", { protocolVersion: 2 });
-			}
-
-			// =================================================================
-			// Prompting
-			// =================================================================
-
-			case "prompt": {
-				// Taken before any dispatch so a builtin that schedules a turn (e.g. `/retry`)
-				// cannot start its run ahead of the prompt's event-stream position.
-				const ticket = promptResults.begin(id);
-				try {
-					const skillResult = await dispatchRpcSkillPrompt({
-						ticket,
-						session,
-						message: command.message,
-						streamingBehavior: command.streamingBehavior,
-						results: promptResults,
-						onError: onPromptError(id, "prompt"),
-						extensionUserMessageTracker,
-					});
-					if (skillResult) {
-						return success(id, "prompt", skillResult);
+	// Serialize interception and route scheduling, not model turns. A delayed
+	// hook must not reorder later user submissions or hold acknowledgements/UI.
+	let inputTail: Promise<void> = Promise.resolve();
+	let inputGeneration = 0;
+	let abortTail: Promise<void> = Promise.resolve();
+	let inputTransition: Promise<void> | undefined;
+	const abortUserInput = () => {
+		const generation = ++inputGeneration;
+		const abort = async () => {
+			if (inputTransition) await inputTransition;
+			await session.abort({ reason: USER_INTERRUPT_LABEL });
+		};
+		const completion = abortTail.then(abort);
+		abortTail = completion.catch(() => {});
+		return { generation, completion };
+	};
+	type UserInputCommand = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
+	type UserInputDispatch = { completion: Promise<RpcPromptDispatchResult> };
+	const cancelledInput = (): UserInputDispatch => ({
+		completion: Promise.resolve<RpcPromptDispatchResult>("cancelled"),
+	});
+	const localInput = (): UserInputDispatch => ({ completion: Promise.resolve(false) });
+	const dispatchUserInput = (
+		command: UserInputCommand,
+		generation = inputGeneration,
+		ticket?: RpcPromptTicket,
+	): Promise<RpcPromptDispatchResult> => {
+		const scope = { disconnected: false };
+		const sessionId = session.sessionId;
+		const isCurrent = () =>
+			!scope.disconnected &&
+			!shutdownState.requested &&
+			!inputTransition &&
+			generation === inputGeneration &&
+			sessionId === session.sessionId;
+		const dispatch = inputTail.then(() =>
+			rpcInputScope.run(scope, async (): Promise<UserInputDispatch> => {
+				await inputTransition;
+				if (!isCurrent()) return cancelledInput();
+				let text = command.message;
+				let images = command.images;
+				const runner = session.extensionRunner;
+				if (runner?.hasHandlers("input")) {
+					const result = await runner.emitInput(text, images, "rpc");
+					if (result.handled) return localInput();
+					if (result.text !== undefined) text = result.text.trim();
+					if (result.images !== undefined) images = result.images;
+				}
+				await inputTransition;
+				// An abort/session switch during a hook must not resurrect its prompt.
+				if (!isCurrent()) return cancelledInput();
+				if (!text.trim() && !images?.length) return localInput();
+				if (ticket) promptResults.routed(ticket);
+				if (command.type === "steer" || command.type === "follow_up") {
+					if (command.type === "steer") await session.steer(text, images);
+					else await session.followUp(text, images);
+					return { completion: Promise.resolve(true) };
+				}
+				if (command.type === "prompt") {
+					const invocation = resolveRpcSkillInvocation(session, text);
+					if (invocation) {
+						const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
+						await inputTransition;
+						if (!isCurrent()) return cancelledInput();
+						// With a prebuilt skill, dispatch selects its queue/idle route synchronously.
+						// Finish queued attachment preparation before later ingress can overtake it;
+						// an idle invocation still leaves its model turn outside the input tail.
+						const queued = session.isStreaming;
+						const completion = runRpcSkillCommand(
+							session,
+							invocation,
+							command.streamingBehavior ?? "steer",
+							built,
+							images,
+						);
+						if (queued) await completion;
+						return { completion };
 					}
-					const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+					const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 						session,
 						sessionManager: session.sessionManager,
 						settings: session.settings,
@@ -1161,108 +1204,142 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 							output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 						},
 					});
+					await inputTransition;
 					if (builtinResult !== false) {
-						if ("prompt" in builtinResult) {
-							watchAndReportPromptResult({
-								ticket,
-								startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
-								results: promptResults,
-								onError: onPromptError(id, "prompt"),
-								extensionUserMessageTracker,
-							});
-							return success(id, "prompt");
+						if (!("prompt" in builtinResult)) {
+							// A consumed builtin is normally local-only, but some (e.g. `/retry`)
+							// schedule an agent turn; its prompt_result follows once the session settles.
+							if (builtinResult.agentInvoked !== true) return localInput();
+							return { completion: session.waitForIdle().then(() => true) };
 						}
-						// A consumed builtin is normally local-only, but some (e.g.
-						// `/retry`) schedule an agent turn whose events stream after
-						// this response. Report that so the host does not finalize the
-						// request as non-agent work while the agent is running; the
-						// turn's prompt_result follows once the session settles.
-						if (builtinResult.agentInvoked === true) {
-							void session.waitForIdle().then(
-								() => promptResults.settle(ticket),
-								(idleError: unknown) =>
-									promptResults.fail(
-										ticket,
-										idleError instanceof Error ? idleError.message : String(idleError),
-									),
-							);
-						} else {
-							// Completed synchronously: `data.agentInvoked: false` is the completion signal.
-							promptResults.discard(ticket);
-						}
-						return success(id, "prompt", { agentInvoked: builtinResult.agentInvoked === true });
+						text = builtinResult.prompt;
 					}
+				}
+				if (!isCurrent()) return cancelledInput();
+				const admitted = Promise.withResolvers<void>();
+				const completion = session.prompt(text, {
+					images,
+					...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
+					onPromptAdmitted: admitted.resolve,
+				});
+				// Hold ingress through preparation and route admission, not a model turn or
+				// an extension command handler. Queued/local/cancelled/failed paths release
+				// through completion instead.
+				await Promise.race([admitted.promise, completion]);
+				return { completion };
+			}),
+		);
+		inputTail = dispatch.then(
+			() => {},
+			() => {},
+		);
+		return dispatch.then(result => result.completion);
+	};
 
-					// Don't await - events will stream
-					// Extension commands are executed immediately, file prompt templates are expanded
-					// If streaming and streamingBehavior specified, queues via steer/followUp
+	// Transitions suspend ingress until they settle. A committed or failed transition
+	// invalidates input accepted for the old session; open prompts complete aborted.
+	const transitionSession = async <T>(change: () => Promise<T>, isCancelled: (result: T) => boolean): Promise<T> => {
+		const transition = Promise.withResolvers<void>();
+		inputTransition = transition.promise;
+		try {
+			const result = await change();
+			if (!isCancelled(result)) {
+				inputGeneration++;
+				promptResults.abortOpen();
+				// The detached run publishes no terminal agent_end to settle on.
+				void settleWatcher.check();
+				await emitAvailableCommandsUpdate();
+			}
+			return result;
+		} catch (error) {
+			// A failed transition may already have disconnected the old session.
+			inputGeneration++;
+			throw error;
+		} finally {
+			inputTransition = undefined;
+			transition.resolve();
+		}
+	};
+
+	// Handle a single command
+	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
+		const id = command.id;
+
+		switch (command.type) {
+			case "negotiate_protocol": {
+				if (command.protocolVersion !== 2)
+					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
+				return success(id, "negotiate_protocol", { protocolVersion: 2 });
+			}
+
+			// =================================================================
+			// Prompting
+			// =================================================================
+
+			case "prompt":
+			case "abort_and_prompt": {
+				let generation = inputGeneration;
+				if (command.type === "abort_and_prompt") {
+					const abort = abortUserInput();
+					generation = abort.generation;
+					await abort.completion;
+				}
+				// Taken before any dispatch so a builtin that schedules a turn (e.g. `/retry`)
+				// cannot start its run ahead of the prompt's event-stream position, and after
+				// abort_and_prompt's abort so the aborted run's terminal agent_end cannot settle it.
+				const ticket = promptResults.begin(id);
+				// Acknowledge before asynchronous hooks, skills, commands or turns.
+				// One scope includes interception and any handler-generated work.
+				shutdownCoordinator.track(
 					watchAndReportPromptResult({
 						ticket,
-						startPrompt: () =>
-							session.prompt(command.message, {
-								images: command.images,
-								streamingBehavior: command.streamingBehavior,
-							}),
+						startPrompt: () => dispatchUserInput(command, generation, ticket),
 						results: promptResults,
-						onError: onPromptError(id, "prompt"),
+						onError: onPromptError(id, command.type),
 						extensionUserMessageTracker,
-					});
-					return success(id, "prompt");
-				} catch (promptSetupError) {
-					// Rejected before acceptance: the error response is the only answer.
-					promptResults.discard(ticket);
-					throw promptSetupError;
-				}
+					}),
+				);
+				return success(id, command.type);
 			}
 
-			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
-			}
-
+			case "steer":
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
-				return success(id, "follow_up");
+				await dispatchUserInput(command);
+				return success(id, command.type);
+			}
+
+			case "remove_queued_message": {
+				if (typeof command.message !== "string") {
+					return error(id, "remove_queued_message", "message must be a string");
+				}
+				if (command.queue !== "steering" && command.queue !== "followUp") {
+					return error(id, "remove_queued_message", 'queue must be "steering" or "followUp"');
+				}
+				return success(id, "remove_queued_message", {
+					removed: session.removeQueuedMessage(command.message, command.queue),
+				});
 			}
 
 			case "abort": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await abortUserInput().completion;
 				return success(id, "abort");
-			}
-
-			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				// After the abort so the aborted run's terminal agent_end cannot settle this prompt.
-				watchAndReportPromptResult({
-					ticket: promptResults.begin(id),
-					startPrompt: () => session.prompt(command.message, { images: command.images }),
-					results: promptResults,
-					onError: onPromptError(id, "abort_and_prompt"),
-					extensionUserMessageTracker,
-				});
-				return success(id, "abort_and_prompt");
 			}
 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
-				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) {
-					promptResults.abortOpen();
-					// The detached run publishes no terminal agent_end to settle on.
-					void settleWatcher.check();
-					await emitAvailableCommandsUpdate();
-				}
+				const result = await transitionSession(
+					() => handleRpcSessionChange(session, command, subagentRegistry),
+					change => change.data.cancelled,
+				);
 				return success(id, result.type, result.data);
 			}
 
 			case "open_session": {
-				const result = await openRpcSession(session, command.sessionDir, subagentRegistry);
-				if (!result.cancelled) {
-					promptResults.abortOpen();
-					void settleWatcher.check();
-					await emitAvailableCommandsUpdate();
-				}
+				const result = await transitionSession(
+					() => openRpcSession(session, command.sessionDir, subagentRegistry),
+					opened => opened.cancelled,
+				);
 				return success(id, "open_session", result);
 			}
 
@@ -1271,6 +1348,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "get_state": {
+				const queuedMessages = session.getQueuedMessages();
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
@@ -1286,6 +1364,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					queuedMessageCount: session.queuedMessageCount,
 					hasPendingAsyncWork: session.hasPendingAsyncWork(),
 					isSettled: isRpcSessionSettled(session),
+					queuedMessages: { steering: [...queuedMessages.steering], followUp: [...queuedMessages.followUp] },
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),

@@ -139,29 +139,32 @@ describe("prefix-bound tool roster changes", () => {
 		expect(harness.session.agent.state.systemPrompt).toEqual(promptBeforeRosterChange);
 	});
 
-	it("delivers one hidden roster notice with the next user prompt", async () => {
-		const harness = newSession(createPrefixBindingModel());
-		sessions.push(harness.session);
-		await harness.session.setActiveToolPresentation(["read"], []);
-		await harness.session.prompt("first");
-		await harness.session.setActiveToolPresentation(["read", "bash"], []);
+	// Subagent task prompts are direct user-role prompts attributed to the parent agent.
+	for (const attribution of ["user", "agent"] as const) {
+		it(`delivers one hidden roster notice with the next ${attribution}-attributed prompt`, async () => {
+			const harness = newSession(createPrefixBindingModel());
+			sessions.push(harness.session);
+			await harness.session.setActiveToolPresentation(["read"], []);
+			await harness.session.prompt("first");
+			await harness.session.setActiveToolPresentation(["read", "bash"], []);
 
-		await harness.session.prompt("second");
+			await harness.session.prompt("second", { attribution });
 
-		const notices = harness.session.agent.state.messages.filter(
-			message => message.role === "custom" && message.customType === "tool-roster-notice",
-		);
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toMatchObject({
-			details: { added: ["bash"], removed: [] },
-			display: false,
-			attribution: "agent",
+			const notices = harness.session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-roster-notice",
+			);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toMatchObject({
+				details: { added: ["bash"], removed: [] },
+				display: false,
+				attribution: "agent",
+			});
+			const secondRequest = providerText(harness.contexts[1]);
+			expect(secondRequest).toContain("Tool availability changed.");
+			expect(secondRequest).toContain("Now available: bash.");
+			expect(secondRequest.match(/Tool availability changed\./g)).toHaveLength(1);
 		});
-		const secondRequest = providerText(harness.contexts[1]);
-		expect(secondRequest).toContain("Tool availability changed.");
-		expect(secondRequest).toContain("Now available: bash.");
-		expect(secondRequest.match(/Tool availability changed\./g)).toHaveLength(1);
-	});
+	}
 
 	it("rebuilds a prefix-bound prompt when the roster changes before the first turn", async () => {
 		const harness = newSession(createPrefixBindingModel());

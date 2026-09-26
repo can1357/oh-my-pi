@@ -1,13 +1,14 @@
 /**
  * Prompt completion reporting for RPC mode.
  *
- * Every accepted `prompt`/`abort_and_prompt` that is not answered synchronously
- * with `data.agentInvoked: false` gets exactly one `prompt_result` frame, emitted
- * once all work the prompt caused has settled: immediately for local-only slash
- * commands and failures, or after the terminal `agent_end` of the run the prompt
- * started or joined. Hosts correlate on the command `id` instead of inferring
- * ownership of an `agent_end` that carries no prompt identity.
+ * Every accepted `prompt`/`abort_and_prompt` gets exactly one `prompt_result`
+ * frame, emitted once all work the prompt caused has settled: immediately for
+ * local-only commands, input consumed or cancelled during RPC ingress, and
+ * failures, or after the terminal `agent_end` of the run the prompt started or
+ * joined. Hosts correlate on the command `id` instead of inferring ownership of
+ * an `agent_end` that carries no prompt identity.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -20,6 +21,13 @@ import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rp
 export interface RpcPromptTicket {
 	readonly id: string | undefined;
 }
+
+/**
+ * How a started prompt resolved: `true` when its work reached the agent, `false`
+ * when it finished locally, `"cancelled"` when an abort, session transition,
+ * shutdown, or disconnect invalidated it before it was routed.
+ */
+export type RpcPromptDispatchResult = boolean | "cancelled";
 
 interface RunOutcome {
 	status: RpcPromptStatus;
@@ -61,16 +69,11 @@ export class RpcPromptResults {
 		this.#output = output;
 	}
 
-	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
+	/** Open a ticket before the prompt starts any work. Close it with exactly one report. */
 	begin(id: string | undefined): RpcPromptTicket {
 		const ticket: RpcPromptTicket = { id };
 		this.#open.set(ticket, { startsAtBegin: this.#agentStarts, waiting: false });
 		return ticket;
-	}
-
-	/** Drop a ticket whose command was rejected before it was accepted (no `prompt_result` is owed). */
-	discard(ticket: RpcPromptTicket): void {
-		this.#open.delete(ticket);
 	}
 
 	/**
@@ -91,6 +94,17 @@ export class RpcPromptResults {
 		}
 	}
 
+	/**
+	 * The prompt left RPC ingress and is about to be routed. Runs that started while
+	 * its input handlers were pending belong to other work, so ownership restarts here.
+	 */
+	routed(ticket: RpcPromptTicket): void {
+		const open = this.#open.get(ticket);
+		if (!open) return;
+		open.startsAtBegin = this.#agentStarts;
+		open.ownOutcome = undefined;
+	}
+
 	/** The prompt was handled locally without an agent turn. */
 	completeLocal(ticket: RpcPromptTicket): void {
 		this.#report(ticket, false, { status: "completed" });
@@ -99,6 +113,11 @@ export class RpcPromptResults {
 	/** The prompt failed before reaching the agent. */
 	fail(ticket: RpcPromptTicket, message: string): void {
 		this.#report(ticket, false, { status: "error", error: { message, retryable: false } });
+	}
+
+	/** The prompt was invalidated during RPC ingress, before it was routed. */
+	cancel(ticket: RpcPromptTicket): void {
+		this.#report(ticket, false, { status: "aborted" });
 	}
 
 	/**
@@ -187,6 +206,7 @@ function promptError(message: AssistantMessage): RpcPromptError {
 }
 
 type RpcExtensionUserMessageScope = {
+	active: boolean;
 	hasAgentMessageTask: boolean;
 	pendingAgentMessageTasks: Set<Promise<void>>;
 };
@@ -196,20 +216,20 @@ type RpcExtensionUserMessageScope = {
  * A slash command can resolve the outer prompt as local-only while also
  * scheduling agent work through pi.sendUserMessage() or pi.sendMessage()
  * with triggerTurn; that prompt's result must wait for the agent work.
+ * Attribution follows the async context of the request that sent the message,
+ * so one request's extension work never marks another concurrent request.
  */
 export class RpcExtensionUserMessageTracker {
-	#activePromptScopes = new Set<RpcExtensionUserMessageScope>();
+	#promptScope = new AsyncLocalStorage<RpcExtensionUserMessageScope>();
 
 	markAgentMessageTask(): void {
-		for (const scope of this.#activePromptScopes) {
-			scope.hasAgentMessageTask = true;
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) scope.hasAgentMessageTask = true;
 	}
 
 	trackAgentMessageTask(task: Promise<unknown>): void {
-		for (const scope of this.#activePromptScopes) {
-			this.#trackAgentMessageTaskForScope(scope, task);
-		}
+		const scope = this.#promptScope.getStore();
+		if (scope?.active) this.#trackAgentMessageTaskForScope(scope, task);
 	}
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
@@ -237,20 +257,20 @@ export class RpcExtensionUserMessageTracker {
 		waitForAgentMessageTasks: () => Promise<void>;
 	} {
 		const scope: RpcExtensionUserMessageScope = {
+			active: true,
 			hasAgentMessageTask: false,
 			pendingAgentMessageTasks: new Set(),
 		};
-		this.#activePromptScopes.add(scope);
 		let prompt: Promise<T>;
 		try {
-			prompt = startPrompt();
+			prompt = this.#promptScope.run(scope, startPrompt);
 		} catch (error) {
-			this.#activePromptScopes.delete(scope);
+			scope.active = false;
 			throw error;
 		}
 		return {
 			prompt: prompt.finally(() => {
-				this.#activePromptScopes.delete(scope);
+				scope.active = false;
 			}),
 			hasAgentMessageTask: () => scope.hasAgentMessageTask,
 			waitForAgentMessageTasks: () => this.#waitForAgentMessageTasks(scope),
@@ -261,20 +281,25 @@ export class RpcExtensionUserMessageTracker {
 /**
  * Route a started prompt's resolution into its `prompt_result`: `false` without
  * extension-scheduled agent work completes locally, agent work settles through
- * the run, and a rejection is reported via `onError` and as a failed result.
+ * the run, `"cancelled"` reports an aborted non-invoked result, and a rejection
+ * is reported via `onError` and as a failed result. Resolves once reported.
  */
 export function reportPromptResult(input: {
 	ticket: RpcPromptTicket;
-	prompt: Promise<boolean>;
+	prompt: Promise<RpcPromptDispatchResult>;
 	results: RpcPromptResults;
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
-}): void {
-	void input.prompt
-		.then(async agentInvoked => {
-			if (!agentInvoked) await input.waitForExtensionAgentMessageTasks?.();
-			if (agentInvoked || input.hasExtensionAgentMessageTask?.()) input.results.settle(input.ticket);
+}): Promise<void> {
+	return input.prompt
+		.then(async result => {
+			if (result === "cancelled") {
+				input.results.cancel(input.ticket);
+				return;
+			}
+			if (!result) await input.waitForExtensionAgentMessageTasks?.();
+			if (result || input.hasExtensionAgentMessageTask?.()) input.results.settle(input.ticket);
 			else input.results.completeLocal(input.ticket);
 		})
 		.catch(cause => {
@@ -287,13 +312,13 @@ export function reportPromptResult(input: {
 /** Start a prompt under extension-message tracking and report its `prompt_result`. */
 export function watchAndReportPromptResult(input: {
 	ticket: RpcPromptTicket;
-	startPrompt: () => Promise<boolean>;
+	startPrompt: () => Promise<RpcPromptDispatchResult>;
 	results: RpcPromptResults;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
-}): void {
+}): Promise<void> {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
-	reportPromptResult({
+	return reportPromptResult({
 		ticket: input.ticket,
 		prompt: trackedPrompt.prompt,
 		results: input.results,

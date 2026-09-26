@@ -128,9 +128,9 @@ with RpcClient(no_session=True) as client:
 `prompt_and_wait()` waits for its own `prompt_result` rather than the first
 terminal `agent_end`, so a late `agent_end` from an earlier run cannot end it
 early. The returned `PromptTurn.result` holds that `PromptResultEvent`
-(`status` is `"completed"`, `"aborted"`, or `"error"`); it is `None` when the
-server handled the prompt locally (e.g. a slash command) and answered with
-`agentInvoked: false`. `wait_for_idle()` returns once every prompt this client
+(`status` is `"completed"`, `"aborted"`, or `"error"`); it is `None` only when
+an older server answered a local-only prompt (e.g. a slash command) with
+`agentInvoked: false` on its response instead of a `prompt_result`. `wait_for_idle()` returns once every prompt this client
 submitted has received its `prompt_result`.
 
 ### Yielded vs. settled
@@ -180,6 +180,29 @@ with RpcClient() as client:
 starts a fresh one there (`resumed=False`). The event filter applies only to
 session events; responses, `prompt_result`, and UI/host frames always arrive,
 so `prompt_and_wait()` still completes when `agent_end` is filtered out.
+
+## Removing Queued Messages
+
+`remove_queued_message(message, queue)` removes one matching prompt from the
+`"steering"` or `"followUp"` queue. `QueuedMessageQueue` and
+`RemoveQueuedMessageResult` are exported for typed callers:
+
+```python
+from omp_rpc import QueuedMessageQueue, RpcClient
+
+with RpcClient() as client:
+    client.follow_up("Review the diff")
+    queue: QueuedMessageQueue = "followUp"
+    result = client.remove_queued_message("Review the diff", queue)
+    print(result.removed)
+```
+
+Check `result.removed`, not the truthiness of the result object. `True` means the
+server removed the queued prompt; `False` means it did not, for example because
+the prompt was already claimed or no longer queued. This does not abort a running
+prompt. Native rejection, including an older server that does not support the
+command, raises `RpcCommandError`. Missing or non-boolean `removed` values raise
+`ValueError` rather than being treated as successful cancellation.
 
 ## Host-Owned Custom Tools
 

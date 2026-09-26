@@ -361,6 +361,14 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/**
+	 * Called synchronously once this prompt acquires an idle turn slot or is routed to an
+	 * extension command, before asynchronous preflight, provider dispatch, or the command
+	 * handler. Admission is not proof that a model call will occur.
+	 * Queued, otherwise locally handled, cancelled, or failed prompts may settle without admission;
+	 * hosts ordering input must also observe the returned prompt promise to release their wait.
+	 */
+	onPromptAdmitted?: () => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
