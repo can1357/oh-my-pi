@@ -658,9 +658,7 @@ export async function listAllSessions(
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
-		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
-			path.join(sessionsRoot, name),
-		);
+		const files = storage.listFilesSync(sessionsRoot, "*/*.jsonl");
 		return await collectSessionsFromFiles(files, storage, true);
 	} catch {
 		return [];
