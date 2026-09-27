@@ -88,7 +88,7 @@ describe("createAgentSession cwd after /move", () => {
 				);
 				const settings = await Settings.loadIsolated({ cwd: cwdA, agentDir });
 				const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions"));
-				authStorage.setRuntimeApiKey("openai", "test-key");
+				authStorage.keys.setRuntime("openai", "test-key");
 				({ session } = await createAgentSession({
 					cwd: cwdA,
 					agentDir,

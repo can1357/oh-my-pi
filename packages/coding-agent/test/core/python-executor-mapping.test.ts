@@ -15,6 +15,21 @@ class FakeKernel implements PythonKernelExecutor {
 }
 
 describe("executePythonWithKernel mapping", () => {
+	it("forwards file-backed source filenames", async () => {
+		const filename = "/tmp/loaded-script.py";
+		let receivedFilename: string | undefined;
+		const kernel = new FakeKernel(
+			{ status: "ok", cancelled: false, timedOut: false, stdinRequested: false },
+			options => {
+				receivedFilename = options?.filename;
+			},
+		);
+
+		await executePythonWithKernel(kernel, "value = 1", { filename });
+
+		expect(receivedFilename).toBe(filename);
+	});
+
 	it("annotates timeout cancellations", async () => {
 		const kernel = new FakeKernel({ status: "ok", cancelled: true, timedOut: true, stdinRequested: false });
 		const result = await executePythonWithKernel(kernel, "sleep(10)", { timeoutMs: 5000 });

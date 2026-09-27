@@ -3,6 +3,7 @@ export * from "./compatibility";
 export * from "./dereference";
 export * from "./draft";
 export * from "./equality";
+export * from "./foundation-models";
 export * from "./fields";
 export * from "./json-schema-validator";
 export * from "./meta-validator";

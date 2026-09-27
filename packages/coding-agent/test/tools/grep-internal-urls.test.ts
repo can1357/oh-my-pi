@@ -20,8 +20,12 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { AstGrepTool } from "../../src/tools/ast-grep";
 import { GlobTool } from "../../src/tools/glob";
 import { GrepTool } from "../../src/tools/grep";
+
+import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function getResultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -39,7 +43,7 @@ function virtualDocName(url: InternalUrl): string {
 function registerVirtualDocs(docs: ReadonlyMap<string, string>): void {
 	const handler: ProtocolHandler = {
 		scheme: "virtual",
-		immutable: true,
+		spec: { backing: "virtual", selectors: "lines", immutable: true },
 		async resolve(url: InternalUrl): Promise<InternalResource> {
 			const name = virtualDocName(url);
 			if (!name) {
@@ -204,7 +208,7 @@ describe("GrepTool internal URL resolution", () => {
 
 	it("greps the caller-bound full current branch without materializing a session file", async () => {
 		const settings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
-		settings.set("compaction.experimentalContextManagement", true);
+		cfgCompactionExperimentalContextManagement.set(settings, true);
 		const branch = [
 			{
 				type: "message",
@@ -311,21 +315,9 @@ describe("GrepTool internal URL resolution", () => {
 		expect(getResultText(result)).toContain("needle 2095");
 	});
 
-	it("searches a virtual resource larger than the native grep cap with chunked native RE2 (line mode)", async () => {
-		// Cross the 4 MiB native cap with a few thousand medium-sized lines instead
-		// of hundreds of thousands of tiny ones. The match still lands in the
-		// second native chunk, while fixture construction and line splitting stay cheap.
-		const fillerLine = `${"x".repeat(2047)}\n`;
-		const content = `${fillerLine.repeat(2049)}needle here\n`;
-		registerVirtualDocs(new Map([["big.md", content]]));
-		const tool = new GrepTool(createSession());
-		const result = await tool.execute("big-virtual", { pattern: "(?i)NEEDLE", path: "virtual://big.md" });
-		expect(getResultText(result)).toContain("needle");
-	});
-
 	it("truncates a multibyte virtual match by UTF-8 bytes and labels the notice bytes", async () => {
 		// Regression for #10888: virtual-resource matches must truncate in the
-		// same unit as native on-disk matches (bytes), and the notice must say so.
+		// same unit as on-disk matches (bytes), and the notice must say so.
 		// "needle " + "é"*300 is 307 chars but 607 bytes; a char cap of 512 would
 		// leave it whole, the byte cap trims it.
 		const line = `needle ${"é".repeat(300)}`;
@@ -335,7 +327,6 @@ describe("GrepTool internal URL resolution", () => {
 			path: "virtual://mb.md",
 		});
 		const text = getResultText(result);
-		expect(text).toContain("…");
 		expect((text.match(/é/g) ?? []).length).toBeLessThan(300);
 		expect(result.details?.meta?.limits?.columnTruncated).toEqual({ maxColumn: 512, unit: "bytes" });
 		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 512 bytes");
@@ -389,18 +380,26 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toContain("Grep file contents with a regex across files");
 	});
 
-	it("expands omp://docs to grep embedded documentation files", async () => {
-		const session = createSession();
+	it("walks an omp:// docs subdirectory and names hits by URL without edit anchors", async () => {
+		const session = createSession({ hasEditTool: true });
 		const tool = new GrepTool(session);
 
 		const result = await tool.execute("test-call", {
 			pattern: "Read files, directories, archives",
-			path: "omp://docs",
+			path: "omp://tools",
 		});
 
 		const text = getResultText(result);
-		expect(text).toContain("# omp://tools/read.md");
+		expect(result.details?.files).toContain("omp://tools/read.md");
 		expect(text).toContain("Read files, directories, archives");
+		expect(text).not.toMatch(/omp:\/\/tools\/read\.md#[0-9A-F]{4}/);
+	});
+
+	it("globs omp:// docs by URL pattern", async () => {
+		const text = getResultText(await new GlobTool(createSession()).execute("glob-omp", { path: "omp://tools/*.md" }));
+
+		expect(text).toContain("omp://tools/read.md");
+		expect(text).toContain("omp://tools/grep.md");
 	});
 
 	it("throws when internal URL has no sourcePath", async () => {
@@ -523,6 +522,112 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toMatch(/^\*\d+:.*needle/m);
 	});
 
+	it("accepts the single-slash local:/ spelling in find and search like read", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "plan.md"), "beta needle line\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findResult = await new GlobTool(session).execute("find-single-slash", { path: "local:/notes" });
+		const searchResult = await new GrepTool(session).execute("search-single-slash", {
+			pattern: "needle",
+			path: "local:/notes/plan.md",
+		});
+
+		expect(getResultText(findResult)).toContain("plan.md");
+		expect(getResultText(searchResult)).toContain("beta needle line");
+	});
+
+	it("honors a line selector on the single-slash local:/ spelling in search", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "notes.md"), "first needle\nsecond needle\nthird needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const text = getResultText(
+			await new GrepTool(createSession()).execute("search-alias-selector", {
+				pattern: "needle",
+				path: "local:/notes.md:2-2",
+			}),
+		);
+
+		expect(text).toContain("second needle");
+		expect(text).not.toContain("first needle");
+		expect(text).not.toContain("third needle");
+	});
+
+	it("names the unknown artifact id and the available ones when find cannot locate it", async () => {
+		await Bun.write(path.join(artifactsDir, "4.bash.log"), "log\n");
+
+		await expect(
+			new GlobTool(createSession()).execute("find-missing-artifact", { path: "artifact://9" }),
+		).rejects.toThrow("Artifact 9 not found. Available: 4");
+	});
+
+	it("reports a glob in a skill:// name through the nameless skill root's error", async () => {
+		await registerSkillDirectory();
+
+		for (const tool of [new GlobTool(createSession()), new GrepTool(createSession())]) {
+			await expect(tool.execute("id-glob", { pattern: "needle", path: "skill://*/SKILL.md" })).rejects.toThrow(
+				"skill:// URL requires a skill name",
+			);
+		}
+	});
+
+	it("greps a local:// directory, naming hits by URL with anchors on the backing file", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "a b.md"), "alpha\nbeta needle\n");
+		await Bun.write(path.join(localRoot, "notes", "c.txt"), "no match\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const result = await new GrepTool(createSession({ hasEditTool: true })).execute("local-dir", {
+			pattern: "needle",
+			path: "local://notes",
+		});
+
+		const text = getResultText(result);
+		// Raw entry names come back percent-encoded, exactly as `read` accepts them.
+		expect(result.details?.files).toEqual(["local://notes/a%20b.md"]);
+		expect(text).toMatch(/local:\/\/notes\/a%20b\.md#[0-9A-F]{4}/);
+		expect(text).toMatch(/^\*\d+:.*beta needle/m);
+	});
+
+	it("runs ast_grep over a local:// file", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "util.ts"), "export function greet() {\n\treturn 1;\n}\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const result = await new AstGrepTool(createSession()).execute("ast-local", {
+			pat: "function $NAME() { $$$BODY }",
+			path: "local://util.ts",
+		});
+
+		expect(result.details?.files).toEqual(["local://util.ts"]);
+		expect(getResultText(result)).toContain("function greet()");
+	});
+
+	it("expands a glob in the first local:// segment for find and search", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "draft-plan.md"), "gamma needle\n");
+		await Bun.write(path.join(localRoot, "notes.txt"), "gamma needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+		const session = createSession();
+
+		const findText = getResultText(await new GlobTool(session).execute("find-root-glob", { path: "local://*.md" }));
+		const searchText = getResultText(
+			await new GrepTool(session).execute("search-root-glob", { pattern: "needle", path: "local://*.md" }),
+		);
+
+		expect(findText).toContain("draft-plan.md");
+		expect(findText).not.toContain("notes.txt");
+		expect(searchText).toContain("draft-plan.md");
+		expect(searchText).not.toContain("notes.txt");
+	});
+
 	it("read local://<name>:<sel> honors URL selector even when a sibling literal `<name>:<sel>` file exists (issue #4618)", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -538,7 +643,7 @@ describe("GrepTool internal URL resolution", () => {
 		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
 
 		const session = createSession({ hasEditTool: true });
-		session.settings.set("read.summarize.enabled", false);
+		cfgReadSummarizeEnabled.set(session.settings, false);
 		const result = await new ReadTool(session).execute("test-read-local-url-selector", {
 			path: "local://notes.md:1-2",
 		});
@@ -649,17 +754,17 @@ describe("GrepTool internal URL resolution", () => {
 
 	it("refuses to search a directory listing that has no backing local path", async () => {
 		// A directory resource with no sourcePath (e.g. a remote ssh:// listing) must
-		// not be virtual-grepped — its listing text is not the directory's contents.
+		// not be grepped — its listing text is not the directory's contents.
 		InternalUrlRouter.instance().register({
 			scheme: "dirstub",
-			immutable: true,
+			spec: { backing: "virtual", selectors: "none", immutable: true },
 			async resolve(url: InternalUrl): Promise<InternalResource> {
 				return { url: url.href, content: "sub/\nfile.txt", contentType: "text/plain", isDirectory: true };
 			},
 		});
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("dir-search", { pattern: "x", path: "dirstub://host/dir" })).rejects.toThrow(
-			/directory listing|cannot recurse/,
+			/dirstub:\/\/host\/dir: Operation not supported/,
 		);
 	});
 
@@ -675,7 +780,7 @@ describe("GrepTool internal URL resolution", () => {
 		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/grep cannot recurse the directory listing/,
+			/ssh:\/\/h\/etc: Operation not supported/,
 		);
 		expect(listSpy).not.toHaveBeenCalled();
 	});

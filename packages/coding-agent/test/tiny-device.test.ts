@@ -3,8 +3,6 @@ import {
 	normalizeTinyModelDevice,
 	resolveTinyModelDevicePreference,
 	TINY_MODEL_DEVICE_DEFAULT,
-	TINY_MODEL_DEVICE_SETTING_OPTIONS,
-	TINY_MODEL_DEVICE_SETTING_VALUES,
 	type TinyOnnxDevice,
 	tinyMlxSupported,
 	tinyModelDeviceLoadOrder,
@@ -55,16 +53,5 @@ describe("tiny model device setting → PI_TINY_DEVICE mapping", () => {
 		expect(tinyModelDeviceSettingToEnv(TINY_MODEL_DEVICE_DEFAULT)).toBeUndefined();
 		expect(tinyModelDeviceSettingToEnv(undefined)).toBeUndefined();
 		expect(tinyModelDeviceSettingToEnv("")).toBeUndefined();
-	});
-
-	it("forwards a concrete device value verbatim for the worker to validate", () => {
-		expect(tinyModelDeviceSettingToEnv("metal")).toBe("metal");
-		expect(tinyModelDeviceSettingToEnv("cuda")).toBe("cuda");
-	});
-
-	it("keeps submenu options aligned with the accepted values", () => {
-		expect(TINY_MODEL_DEVICE_SETTING_OPTIONS.map(option => option.value)).toEqual([
-			...TINY_MODEL_DEVICE_SETTING_VALUES,
-		]);
 	});
 });

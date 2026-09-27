@@ -1,9 +1,6 @@
 use std::{fmt::Display, io::Write, path::Path};
 
-use brush_core::{
-	ExecutionResult, builtins, commands, pathsearch,
-	sys::{self, fs::PathExt},
-};
+use brush_core::{ExecutionResult, builtins, commands, pathsearch, sys};
 use clap::Parser;
 
 /// Directly invokes an external command, without going through typical search
@@ -54,7 +51,9 @@ impl builtins::Command for CommandCommand {
 					context.shell,
 					command_name.as_str(),
 					self.use_default_path,
-				) else {
+				)
+				.await
+				else {
 					if self.print_verbose_description {
 						writeln!(context.stderr(), "command: {command_name}: not found")?;
 					}
@@ -105,7 +104,7 @@ impl Display for FoundCommand {
 }
 
 impl CommandCommand {
-	fn try_find_command(
+	async fn try_find_command(
 		shell: &mut brush_core::Shell<impl brush_core::ShellExtensions>,
 		command_name: &str,
 		use_default_path: bool,
@@ -113,7 +112,7 @@ impl CommandCommand {
 		// Look in path.
 		if sys::fs::contains_path_separator(command_name) {
 			let candidate_path = shell.absolute_path(Path::new(command_name));
-			if candidate_path.executable() {
+			if pathsearch::is_executable(shell.filesystem(), &candidate_path).await {
 				Some(FoundCommand::External(candidate_path.to_string_lossy().to_string()))
 			} else {
 				None
@@ -128,12 +127,13 @@ impl CommandCommand {
 			if use_default_path {
 				let dirs = sys::fs::get_default_standard_utils_paths();
 
-				pathsearch::search_for_executable(dirs.iter(), command_name)
-					.next()
+				pathsearch::find_executable(shell.filesystem(), &dirs, Path::new(command_name))
+					.await
 					.map(|path| FoundCommand::External(path.to_string_lossy().to_string()))
 			} else {
 				shell
 					.find_first_executable_in_path_using_cache(command_name)
+					.await
 					.map(|path| FoundCommand::External(path.to_string_lossy().to_string()))
 			}
 		}

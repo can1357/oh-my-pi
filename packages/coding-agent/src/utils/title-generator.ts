@@ -28,6 +28,8 @@ import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
+import { cfgRetryModelFallback } from "../session/settings";
+
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
@@ -128,7 +130,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 	);
 	if (
 		currentModel &&
-		(models.length === 0 || settings.get("retry.modelFallback") !== false) &&
+		(models.length === 0 || cfgRetryModelFallback.get(settings) !== false) &&
 		!models.some(model => formatModelStringWithRouting(model) === formatModelStringWithRouting(currentModel))
 	) {
 		// Append currentModel and expand its own chain separately — never merge it
@@ -306,15 +308,11 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage
-					.listOAuthAccounts(model.provider, credentialSourceSessionId)
+				const foregroundCredential = registry.authStorage.oauth
+					.accounts(model.provider, credentialSourceSessionId)
 					.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.pinSessionOAuthAccount(
-						model.provider,
-						sessionId,
-						foregroundCredential.credentialId,
-					);
+					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

@@ -8,6 +8,8 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
+import { cfgSpeechEnabled, cfgSpeechMode } from "@oh-my-pi/pi-coding-agent/tts/settings";
+
 function zeroUsage(): Usage {
 	return {
 		input: 0,
@@ -125,8 +127,8 @@ describe("EventController message_update coalescing", () => {
 	it("speaks every delta exactly once even when intermediate snapshots are coalesced away", async () => {
 		const { emit } = createStreamingFixture();
 		const pushDelta = vi.spyOn(vocalizer, "pushDelta");
-		settings.set("speech.enabled", true);
-		settings.set("speech.mode", "assistant");
+		cfgSpeechEnabled.set(settings, true);
+		cfgSpeechMode.set(settings, "assistant");
 
 		emit(messageUpdate("one "));
 		emit(messageUpdate("one two "));

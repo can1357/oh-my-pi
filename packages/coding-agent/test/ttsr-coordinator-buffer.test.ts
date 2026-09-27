@@ -310,6 +310,31 @@ describe("TTSR stream buffers", () => {
 
 		expect(emitSessionEvent).toHaveBeenCalledTimes(1);
 	});
+
+	it("emits one ttsr_triggered when a delta match is re-confirmed at toolcall_end (issue #12184)", async () => {
+		const { coordinator, emitSessionEvent } = coordinatorFor("tool:edit");
+		const message = assistantMessage([{ type: "toolCall", id: "call-1", name: "edit", arguments: {} }]);
+
+		coordinator.onTurnStart();
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(toolDelta(message, `{"path":"src/foo.ts","input":"${CONDITION}"}`));
+		await coordinator.checkMessageUpdate(
+			update(message, {
+				type: "toolcall_end",
+				contentIndex: 0,
+				partial: message as never,
+				toolCall: {
+					type: "toolCall",
+					id: "call-1",
+					name: "edit",
+					arguments: { path: "src/foo.ts", input: CONDITION },
+				},
+			}),
+		);
+
+		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
+		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
+	});
 });
 
 /**

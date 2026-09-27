@@ -129,7 +129,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	}
 
 	test("does not discover ClinePass without credentials", async () => {
-		const peek = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		const peek = vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
 		try {
 			await registry.refresh("online");
 		} finally {
@@ -430,7 +430,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		// harnesses) gives the anthropic manager a fetchDynamicModels hook whose
 		// endpoint fetch starts only after the catalog abort — its deadline timer
 		// arms after the last advanceTimersByTime and the refresh hangs forever.
-		const peekSpy = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		const peekSpy = vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
 		let catalogFetches = 0;
 		let abortedFetches = 0;
 		const stalledFetch: FetchImpl = (_input, init) => {
@@ -729,12 +729,12 @@ describe("ModelRegistry runtime provider registration", () => {
 		};
 
 		registry.registerProvider("runtime-provider", config, "ext://runtime");
-		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(true);
+		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(true);
 
 		await registry.refresh("offline");
 
 		// The fallback resolver should still find the API key after refresh
-		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(true);
+		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(true);
 
 		delete process.env.TEST_RUNTIME_KEY;
 	});
@@ -916,7 +916,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("oauth.modifyModels projection survives refresh and refreshProvider", async () => {
-		await authStorage.set("projecting-provider", {
+		await authStorage.credentials.set("projecting-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -975,7 +975,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("oauth.modifyModels output is materialized through buildModel", async () => {
-		await authStorage.set("materializing-provider", {
+		await authStorage.credentials.set("materializing-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1020,7 +1020,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a spec-shaped projected model keeps its sparse compat override", async () => {
-		await authStorage.set("compat-provider", {
+		await authStorage.credentials.set("compat-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1063,7 +1063,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a throwing modifyModels degrades to the unprojected catalog", async () => {
-		await authStorage.set("throwing-provider", {
+		await authStorage.credentials.set("throwing-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1098,7 +1098,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a throwing modifyModels logs once per distinct failure", async () => {
-		await authStorage.set("noisy-provider", {
+		await authStorage.credentials.set("noisy-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1141,7 +1141,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a non-idempotent modifyModels does not compound across refreshes", async () => {
-		await authStorage.set("appending-provider", {
+		await authStorage.credentials.set("appending-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1187,7 +1187,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		// The SDK and CLI loaders drain pending registrations one at a time, so an
 		// earlier provider's projection is still in #models when the next arrives.
 		const registerAppending = async (providerName: string, apiId: string) => {
-			await authStorage.set(providerName, {
+			await authStorage.credentials.set(providerName, {
 				type: "oauth",
 				access: "access-token",
 				refresh: "refresh-token",
@@ -1239,7 +1239,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups preserve whole-catalog modifyModels projections", async () => {
 		const hiddenModel = registry.getAll().find(model => model.provider === "anthropic");
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1277,7 +1277,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups do not intern other providers' transient projections", async () => {
 		const anthropicId = registry.getAll().find(model => model.provider === "anthropic")?.id;
-		await authStorage.set("changing-provider", {
+		await authStorage.credentials.set("changing-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1316,7 +1316,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("registering another provider reapplies whole-catalog modifyModels projections", async () => {
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1357,7 +1357,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("runtime transport overrides reapply whole-catalog modifyModels projections", async () => {
 		const proxyBaseUrl = "https://proxy.example.invalid/v1";
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1390,7 +1390,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("online discovery reapplies modifiers to an unprojected full catalog", async () => {
 		const target = registry.getAll().find(model => model.provider === "anthropic");
-		await authStorage.set("renaming-provider", {
+		await authStorage.credentials.set("renaming-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1436,7 +1436,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a modifyModels that mutates in place then throws cannot corrupt the catalog", async () => {
-		await authStorage.set("mutating-provider", {
+		await authStorage.credentials.set("mutating-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",

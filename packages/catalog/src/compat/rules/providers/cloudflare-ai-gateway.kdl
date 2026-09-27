@@ -1,7 +1,7 @@
 // Provider-wire compat for "cloudflare-ai-gateway"; regenerated from the frozen census using deployment contract selectors.
 
 provider "cloudflare-ai-gateway" {
-	default-model "anthropic/claude-opus-4-8"
+	default-model "anthropic/claude-opus-5"
 	env "CLOUDFLARE_AI_GATEWAY_API_KEY"
 	discovery label="Cloudflare AI Gateway"
 

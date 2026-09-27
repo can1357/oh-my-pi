@@ -9,7 +9,7 @@
 // dials to a few further ids — MiniMaxAI/MiniMax-M3 and meta/muse-spark-1.3's
 // `max` — which stay out of this change.
 provider "commandcode" {
-	default-model "claude-sonnet-4-6"
+	default-model "claude-sonnet-5"
 	env "COMMAND_CODE_API_KEY" "COMMANDCODE_API_KEY"
 	allow-unauthenticated #true
 	dynamic-models-authoritative #true

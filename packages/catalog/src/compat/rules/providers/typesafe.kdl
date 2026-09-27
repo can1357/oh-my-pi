@@ -8,7 +8,8 @@ provider "typesafe" {
 		model "jev-latest" name="TypeSafe jev" {
 			reasoning #false
 			input "text"
-			cost input=0 output=0 cache-read=0 cache-write=0
+			// Jev bills input only; matches the OpenRouter route seed.
+			cost input=0.042 output=0 cache-read=0 cache-write=0
 			limits
 			supports-tools #false
 		}

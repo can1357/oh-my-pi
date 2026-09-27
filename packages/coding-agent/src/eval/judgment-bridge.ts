@@ -23,7 +23,7 @@ import type {
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { type ChainJudge, resolveJudge } from "../judgment";
+import { type ChainJudge, type JudgmentUsage, journalJudgmentUsage, resolveJudge } from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type EvalCompletionBridgeOptions, evalRequestSlots } from "./completion-bridge";
@@ -160,15 +160,31 @@ export function toEvalJudgmentResult(result: JudgmentResult<Questions>): EvalJud
 	return { answers, model: `${result.provider}/${result.model}` };
 }
 
-/** Resolve the judge role chain for a bridge call's session. */
-export function sessionJudge(options: Pick<EvalCompletionBridgeOptions, "session">): ChainJudge {
+/**
+ * Resolve the judge role chain for a bridge call's session; `purpose` labels its
+ * cost on the session ledger. `onUsage` additionally observes every attempt
+ * (retries and failures included) alongside the ledger.
+ */
+export function sessionJudge(
+	options: Pick<EvalCompletionBridgeOptions, "session">,
+	purpose: string,
+	onUsage?: (usage: JudgmentUsage) => void,
+): ChainJudge {
 	const { session } = options;
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
+	const journal = journalJudgmentUsage(session.sessionManager, purpose);
 	return resolveJudge({
 		settings: session.settings,
 		registry,
 		sessionId: session.getSessionId?.() ?? undefined,
+		onUsage:
+			onUsage && journal
+				? usage => {
+						journal(usage);
+						onUsage(usage);
+					}
+				: (onUsage ?? journal),
 	});
 }
 
@@ -180,7 +196,7 @@ export async function runEvalJudgment(
 	if (!isRecord(args)) throw invalid("expected { state, questions }");
 	const state = parseState(args.state);
 	const questions = parseQuestions(args.questions);
-	const judge = sessionJudge(options);
+	const judge = sessionJudge(options, "judge");
 	const signal = options.signal;
 	return withBridgeTimeoutPause(options.emitStatus, async () => {
 		await evalRequestSlots.acquire(signal);

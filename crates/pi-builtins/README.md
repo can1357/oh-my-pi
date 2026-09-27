@@ -24,6 +24,7 @@ argument model plus a synchronous body:
 pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
     const NAME: &'static str;
     const USAGE_ERROR: u8 = 1;
+    const RUNS_COMMANDS: bool = false;
     fn run(self, host: &mut Host) -> i32;
 }
 ```
@@ -36,6 +37,13 @@ is unrelated), the exported environment (`host.var`, `host.env`), cancellation
 (`host.is_cancelled`), a child-process launcher that inherits all of the above
 (`host.child_env()`), and the accumulated exit status (`host.fail`,
 `host.exit_code`).
+
+Utilities that run command lines (`xargs`, `find -exec`, `ifne`) set
+`RUNS_COMMANDS` and call `host.run_command(ShellCommand::new(argv))`. The adapter
+forks a subshell and runs each command through the shell's own dispatch, so
+builtins, and the `scheme://` paths only builtins can open, work as they do at
+the prompt; `host.child_env()` is for helper programs that are always external
+(`sort --compress-program`).
 
 `host::util::<U, SE>()` wraps a `Utility` into a registration that handles, once
 for all of them: process-substitution arguments (`diff <(a) <(b)`),

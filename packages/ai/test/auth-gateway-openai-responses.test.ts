@@ -1390,7 +1390,7 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-file-id-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
+		storage.keys.setRuntime("openai", "test-key");
 		const mock = createMockModel({ provider: "openai", id: "mock/file-id" });
 		mock.push({ content: ["unexpected provider call"] });
 		const gateway = startAuthGateway({
@@ -1433,7 +1433,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-computer-options-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
+		storage.keys.setRuntime("openai", "test-key");
 		const mock = createMockModel({ provider: "openai", id: "mock/computer-options" });
 		mock.push({ content: ["ok"] });
 		const gateway = startAuthGateway({

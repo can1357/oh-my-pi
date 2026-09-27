@@ -32,6 +32,13 @@ function recordingFetch(handler: (url: string) => Response): { fetch: FetchImpl;
 	return { fetch, urls };
 }
 
+function plainUsageUrls(urls: readonly string[]): string[] {
+	return urls.filter(url => {
+		const parsed = new URL(url);
+		return parsed.pathname.endsWith("/usage") && parsed.search === "";
+	});
+}
+
 function params(baseUrl?: string) {
 	return {
 		provider: "anthropic" as const,
@@ -61,7 +68,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 			context(fetch),
 		);
 
-		expect(urls).toEqual(["https://gateway.example.com/claude/api/oauth/usage", CANONICAL_USAGE_URL]);
+		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/claude/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
 		// The model-scoped weekly row is what rate-limit headers cannot refresh
 		// unless the request itself hit that family — it must survive the fallback.
@@ -74,7 +81,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		const report = await claudeUsageProvider.fetchUsage(params("https://mirror.example.com/v1"), context(fetch));
 
-		expect(urls).toEqual(["https://mirror.example.com/api/oauth/usage"]);
+		expect(plainUsageUrls(urls)).toEqual(["https://mirror.example.com/api/oauth/usage"]);
 		expect(report?.metadata?.endpoint).toBe("https://mirror.example.com/api/oauth/usage");
 	});
 
@@ -84,7 +91,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 		const report = await claudeUsageProvider.fetchUsage(params("https://api.anthropic.com/v1"), context(fetch));
 
 		expect(report).toBeNull();
-		expect(urls).toEqual([CANONICAL_USAGE_URL]);
+		expect(plainUsageUrls(urls)).toEqual([CANONICAL_USAGE_URL]);
 	});
 
 	it("keeps the request on a custom baseUrl that refuses the credential", async () => {
@@ -95,7 +102,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 		// A 401 is the configured host's answer about this account, not a missing
 		// endpoint: moving the token to another destination is not ours to decide.
 		expect(report).toBeNull();
-		expect(urls).toEqual(["https://gateway.example.com/api/oauth/usage"]);
+		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage"]);
 	});
 
 	it("keeps the request on a custom baseUrl that fails transiently", async () => {
@@ -105,7 +112,9 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		expect(report).toBeNull();
 		// Retried on the configured host only; the next poll tries it again.
-		expect(urls).toEqual(Array.from({ length: 3 }, () => "https://gateway.example.com/api/oauth/usage"));
+		expect(plainUsageUrls(urls)).toEqual(
+			Array.from({ length: 3 }, () => "https://gateway.example.com/api/oauth/usage"),
+		);
 	});
 
 	it("falls back when a custom baseUrl answers 200 with an unrelated body", async () => {
@@ -115,7 +124,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		const report = await claudeUsageProvider.fetchUsage(params("https://gateway.example.com/v1"), context(fetch));
 
-		expect(urls).toEqual([
+		expect(plainUsageUrls(urls)).toEqual([
 			...Array.from({ length: 3 }, () => "https://gateway.example.com/api/oauth/usage"),
 			CANONICAL_USAGE_URL,
 		]);
@@ -136,7 +145,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		// A single probe is enough: an HTML 200 is not a usage endpoint having a
 		// bad moment, so retrying it only delays the canonical fallback.
-		expect(urls).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
+		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
 	});
 
@@ -147,7 +156,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		const report = await claudeUsageProvider.fetchUsage(params("https://gateway.example.com/v1"), context(fetch));
 
-		expect(urls).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
+		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
 	});
 
@@ -161,7 +170,9 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 		// A JSON content type that fails to parse is a damaged response from a host
 		// that does serve usage — the request must not move.
 		expect(report).toBeNull();
-		expect(urls).toEqual(Array.from({ length: 3 }, () => "https://mirror.example.com/api/oauth/usage"));
+		expect(plainUsageUrls(urls)).toEqual(
+			Array.from({ length: 3 }, () => "https://mirror.example.com/api/oauth/usage"),
+		);
 	});
 
 	it("falls back on 501 without spending retries on it", async () => {
@@ -175,7 +186,7 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 		// 501 is a 5xx, but "not implemented" is permanent: absence must outrank
 		// the generic transient classification.
-		expect(urls).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
+		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
 	});
 });

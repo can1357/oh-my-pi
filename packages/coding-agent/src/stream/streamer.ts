@@ -4,29 +4,31 @@ import * as readline from "node:readline";
 import {
 	STREAM_CHAT_TEXT_MAX,
 	STREAM_CLOSE_HOST_CONFLICT,
-	STREAM_HISTORY_LIMIT,
 	STREAM_PROTO,
 	STREAM_ROUTES,
 	STREAM_TITLE_MAX,
 	type StreamChatMessage,
 	type StreamPaneFrame,
-	type StreamRow,
 	type StreamServerToHost,
 } from "@oh-my-pi/pi-wire";
-import { encodeStreamFrame, STREAM_LOCAL_PROTO, type StreamSessionFrame, type StreamStreamerFrame } from "./protocol";
+import {
+	applyScreenFrame,
+	encodeStreamFrame,
+	isSessionFrame,
+	STREAM_LOCAL_PROTO,
+	type StreamScreen,
+	type StreamSessionFrame,
+	type StreamStreamerFrame,
+} from "./protocol";
 import { streamSocketEndpoint } from "./paths";
 import { runStreamTui, type StreamTuiInfo } from "./console-tui";
 import { StreamServerClient, type StreamServerFatalError } from "./server-client";
 
 const MAX_LOCAL_LINE_BYTES = 4 * 1024 * 1024;
 
-interface PaneState {
+interface PaneState extends StreamScreen {
 	id: number;
 	title: string;
-	cols: number;
-	rows: number;
-	history: StreamRow[];
-	viewport: StreamRow[];
 	paused: boolean;
 }
 
@@ -59,7 +61,7 @@ interface StreamConnectionOptions {
 	projectDir: string;
 	title: string;
 	hostUrl: string;
-	/** Bearer token resolver for the host socket (see `StreamCredential`). */
+	/** Bearer token resolver for the host socket (see `StencilCredential`). */
 	token: () => Promise<string | null>;
 	/** Test seam; production uses the server client's normal retry policy. */
 	reconnectDelay?: (attempt: number) => number;
@@ -310,49 +312,9 @@ export class StreamMuxHost {
 	}
 
 	#applyFrame(pane: PaneState, frame: Exclude<StreamSessionFrame, { t: "hello" }>): void {
-		let wire: StreamPaneFrame;
-		switch (frame.t) {
-			case "resize":
-				pane.cols = frame.cols;
-				pane.rows = frame.rows;
-				if (pane.viewport.length > frame.rows) pane.viewport.length = frame.rows;
-				while (pane.viewport.length < frame.rows) pane.viewport.push("");
-				wire = { ...frame, pane: pane.id };
-				break;
-			case "history": {
-				const overflow = pane.history.length + frame.rows.length - STREAM_HISTORY_LIMIT;
-				if (overflow >= pane.history.length) {
-					pane.history = frame.rows.slice(-STREAM_HISTORY_LIMIT);
-				} else {
-					if (overflow > 0) pane.history.splice(0, overflow);
-					pane.history.push(...frame.rows);
-				}
-				wire = { ...frame, pane: pane.id };
-				break;
-			}
-			case "viewport":
-				pane.viewport = frame.rows.slice();
-				wire = { ...frame, pane: pane.id };
-				break;
-			case "patch":
-				pane.rows = frame.rows;
-				if (pane.viewport.length > frame.rows) pane.viewport.length = frame.rows;
-				while (pane.viewport.length < frame.rows) pane.viewport.push("");
-				for (const [index, row] of frame.ops) {
-					if (index >= 0 && index < frame.rows) pane.viewport[index] = row;
-				}
-				wire = { ...frame, pane: pane.id };
-				break;
-			case "reset":
-				pane.history = [];
-				pane.viewport = [];
-				wire = { ...frame, pane: pane.id };
-				break;
-			case "paused":
-				pane.paused = frame.paused;
-				wire = { ...frame, pane: pane.id };
-				break;
-		}
+		if (frame.t === "paused") pane.paused = frame.paused;
+		else applyScreenFrame(pane, frame);
+		const wire: StreamPaneFrame = { ...frame, pane: pane.id };
 		this.#client.send(wire);
 	}
 
@@ -541,50 +503,6 @@ function probeSocket(endpoint: string): Promise<"missing" | "stale" | "live"> {
 		else result.reject(error);
 	});
 	return result.promise;
-}
-
-function isSessionFrame(value: unknown): value is StreamSessionFrame {
-	if (!value || typeof value !== "object" || !("t" in value) || typeof value.t !== "string") return false;
-	const frame = value as Record<string, unknown>;
-	switch (frame.t) {
-		case "hello":
-			return (
-				typeof frame.proto === "number" &&
-				Number.isInteger(frame.proto) &&
-				typeof frame.sessionId === "string" &&
-				typeof frame.title === "string" &&
-				isDimension(frame.cols) &&
-				isDimension(frame.rows)
-			);
-		case "resize":
-			return isDimension(frame.cols) && isDimension(frame.rows);
-		case "history":
-		case "viewport":
-			return Array.isArray(frame.rows) && frame.rows.every(row => typeof row === "string");
-		case "patch":
-			return (
-				isDimension(frame.rows) &&
-				Array.isArray(frame.ops) &&
-				frame.ops.every(
-					op =>
-						Array.isArray(op) &&
-						op.length === 2 &&
-						typeof op[0] === "number" &&
-						Number.isInteger(op[0]) &&
-						typeof op[1] === "string",
-				)
-			);
-		case "reset":
-			return true;
-		case "paused":
-			return typeof frame.paused === "boolean";
-		default:
-			return false;
-	}
-}
-
-function isDimension(value: unknown): value is number {
-	return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function formatChat(message: StreamChatMessage): string {

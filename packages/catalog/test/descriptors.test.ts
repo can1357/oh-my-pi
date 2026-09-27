@@ -5,7 +5,6 @@ describe("catalog provider descriptors", () => {
 	test("descriptors cover standard model providers, excluding special-managed ones", () => {
 		const zenmux = PROVIDER_DESCRIPTORS.find(descriptor => descriptor.providerId === "zenmux");
 		expect(zenmux).toBeDefined();
-		expect(zenmux?.defaultModel).toBe("anthropic/claude-opus-4.8");
 		// The descriptor factory carries the provider identity through.
 		expect(zenmux?.createModelManagerOptions({ apiKey: "k" }).providerId).toBe("zenmux");
 

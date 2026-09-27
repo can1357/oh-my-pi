@@ -26,12 +26,10 @@ afterAll(() => {
 /** Build a fake AuthStorage that resolves an API key (or undefined). */
 function makeAuthStorage(apiKey: string | undefined): AuthStorage {
 	return {
-		async getApiKey() {
-			return apiKey;
-		},
-		resolver: vi.fn(() => async () => apiKey),
-		hasAuth() {
-			return Boolean(apiKey);
+		keys: {
+			get: async () => apiKey,
+			resolver: vi.fn(() => async () => apiKey),
+			source: () => (apiKey ? { kind: "runtime", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 }
@@ -542,8 +540,10 @@ describe("Ollama searchOllama auth resolution", () => {
 	it("resolves credentials for ollama-cloud provider", async () => {
 		const resolverMock = vi.fn(() => async () => "test-key");
 		const authStorage = {
-			resolver: resolverMock,
-			hasAuth: vi.fn(() => true),
+			keys: {
+				resolver: resolverMock,
+				source: vi.fn(() => ({ kind: "runtime", concrete: true })),
+			},
 		} as unknown as AuthStorage;
 		const fetchMock: FetchImpl = async () =>
 			new Response(JSON.stringify({ results: [] }), {

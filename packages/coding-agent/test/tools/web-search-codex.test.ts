@@ -242,20 +242,20 @@ describe("searchCodex model selection", () => {
 
 	beforeEach(() => {
 		oauthAuthStorage = createAuthStorage();
-		vi.spyOn(oauthAuthStorage, "getOAuthAccess").mockResolvedValue({
+		vi.spyOn(oauthAuthStorage.oauth, "access").mockResolvedValue({
 			accessToken: residencyToken,
 			accountId: "acct-test",
 		});
 		emailOnlyAuthStorage = createAuthStorage();
-		vi.spyOn(emailOnlyAuthStorage, "getOAuthAccess").mockResolvedValue({
+		vi.spyOn(emailOnlyAuthStorage.oauth, "access").mockResolvedValue({
 			accessToken: "email-only-access-token",
 			email: "user@example.com",
 		});
 		proxyAuthStorage = createAuthStorage();
-		proxyAuthStorage.setRuntimeApiKey("openai-codex", "test-proxy-key");
+		proxyAuthStorage.keys.setRuntime("openai-codex", "test-proxy-key");
 		oauthOnlyAuthStorage = createAuthStorage();
-		oauthOnlyAuthStorage.setRuntimeApiKey("openai-codex", "official-oauth-token");
-		vi.spyOn(oauthOnlyAuthStorage, "getCredentialOrigin").mockReturnValue({ kind: "oauth" });
+		oauthOnlyAuthStorage.keys.setRuntime("openai-codex", "official-oauth-token");
+		vi.spyOn(oauthOnlyAuthStorage.keys, "source").mockReturnValue({ kind: "oauth", concrete: true });
 		modelRegistry = new ModelRegistry(oauthAuthStorage);
 		proxyModelRegistry = new ModelRegistry(proxyAuthStorage);
 		oauthModelRegistry = new ModelRegistry(oauthOnlyAuthStorage);

@@ -3,12 +3,14 @@ import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
+import { TtsrToolInspector } from "../../session/ttsr-outputs";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { OmfgPanelComponent } from "@oh-my-pi/pi-tui/overlays/omfg-panel";
 import type { InteractiveModeContext } from "../types";
 import {
 	buildOmfgRuleForPath,
 	extractGeneratedRuleJson,
+	historyOutputs,
 	type OmfgRuleSourceLevel,
 	type ParsedGeneratedRule,
 	parseGeneratedRule,
@@ -39,8 +41,14 @@ const AMEND_OPTION = "Amend with feedback…";
 
 export class OmfgController {
 	#activeRequest: OmfgRequest | undefined;
+	readonly #inspector: TtsrToolInspector;
 
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	constructor(private readonly ctx: InteractiveModeContext) {
+		this.#inspector = new TtsrToolInspector(
+			() => ctx.session.agent.state.tools,
+			() => ctx.sessionManager.getCwd(),
+		);
+	}
 
 	hasActiveRequest(): boolean {
 		return this.#activeRequest !== undefined;
@@ -171,12 +179,21 @@ export class OmfgController {
 
 			request.component.setRule(parsed.fileContent);
 			request.component.setStatus("validating", `Attempt ${attempt}/${MAX_ATTEMPTS} · validating…`);
-			const validated = validateParsedRuleAgainstAssistantHistory(parsed, this.ctx.session.messages);
+			const validated = await validateParsedRuleAgainstAssistantHistory(
+				parsed,
+				historyOutputs(this.ctx.session.messages, this.#inspector),
+				parsed.rule.question !== undefined ? this.ctx.session.ruleJudge() : undefined,
+			);
+			if (this.#shouldStop(request)) return undefined;
 			if (validated.repairedCondition) {
 				request.component.setRule(validated.candidate.fileContent);
 			}
 			if (validated.validation.matched) {
 				return { ...validated.candidate, validated: true };
+			}
+			// Regenerating cannot conjure a judge; let the user decide on this candidate.
+			if (validated.validation.judgeUnavailable) {
+				return { ...validated.candidate, validated: false };
 			}
 
 			lastCandidate = validated.candidate;

@@ -1,18 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { Settings, settings } from "../src/config/settings";
 import * as asrClient from "../src/stt/asr-client";
 import * as downloader from "../src/stt/downloader";
-import { STTController } from "../src/stt/stt-controller";
+import { STTController, type STTControllerDependencies } from "../src/stt/stt-controller";
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import { cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
+
 const DICTATION_MODELS = [getBundledModel("local", "whisper-base")];
-const registry: ModelBrowserRegistry = {
+const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
 	getAvailable: () => DICTATION_MODELS,
 	getAll: () => DICTATION_MODELS,
+	resolver: () => () => "test-key",
 };
 
 describe("STT Submit Trigger Evaluation", () => {
@@ -197,7 +199,7 @@ describe("STTController submit trigger integration", () => {
 	}
 
 	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
-		settings.set("stt.submitTrigger", trigger);
+		cfgSttSubmitTrigger.set(settings, trigger);
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(transcript),
@@ -219,7 +221,7 @@ describe("STTController submit trigger integration", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.setModelRole("dictation", "local/whisper-base");
-		settings.set("stt.submitTrigger", "never");
+		cfgSttSubmitTrigger.set(settings, "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
 	});

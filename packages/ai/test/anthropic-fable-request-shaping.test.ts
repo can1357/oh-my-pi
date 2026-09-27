@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -102,21 +102,42 @@ type CapturedPayload = {
 	anthropic_beta?: string[];
 };
 
-function capturePayload(
+type CapturedTurn = { payload: CapturedPayload; message: AssistantMessage };
+
+/** Builds one request through the real param path; `message` is the terminal message carrying its controls. */
+async function captureTurn(
+	model: Model<"anthropic-messages">,
+	opts: Parameters<typeof streamAnthropic>[2],
+	context: Context = CONTEXT,
+): Promise<CapturedTurn> {
+	let payload: CapturedPayload | undefined;
+	const message = await streamAnthropic(model, context, {
+		apiKey: "sk-ant-oat-test",
+		isOAuth: true,
+		signal: abortedSignal(),
+		onPayload: captured => {
+			payload = captured as CapturedPayload;
+		},
+		...opts,
+	}).result();
+	if (!payload) throw new Error("expected a built payload");
+	return { payload, message };
+}
+
+async function capturePayload(
 	model: Model<"anthropic-messages">,
 	opts: Parameters<typeof streamAnthropic>[2],
 	context: Context = CONTEXT,
 ): Promise<CapturedPayload> {
-	const { promise, resolve } = Promise.withResolvers<CapturedPayload>();
-	streamAnthropic(model, context, {
-		apiKey: "sk-ant-oat-test",
-		isOAuth: true,
-		signal: abortedSignal(),
-		onPayload: payload => resolve(payload as CapturedPayload),
-		...opts,
-	});
-	return promise;
+	return (await captureTurn(model, opts, context)).payload;
 }
+
+/** The reply to `turn`, recording the controls its request declared. */
+function answered(text: string, turn: CapturedTurn): AssistantMessage {
+	return { ...assistant(text, Date.now()), requestControls: turn.message.requestControls };
+}
+
+const READ_TOOL = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
 
 describe("Anthropic preserved-thinking request shaping", () => {
 	it("opts Fable 5.1 into dropping prefix-mismatched thinking", async () => {
@@ -153,29 +174,23 @@ describe("Anthropic preserved-thinking request shaping", () => {
 
 	it("keeps declared tools stable and appends a removal control", async () => {
 		const model = makeAnthropicModel("claude-fable-5-1");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const firstContext: Context = {
-			...CONTEXT,
-			tools: [
-				{
-					name: "read",
-					description: "Read a file.",
-					parameters: { type: "object", properties: {} },
-				},
-			],
-		};
-		await capturePayload(
+		const first = await captureTurn(
 			model,
-			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
-			firstContext,
+			{ thinkingEnabled: true, reasoning: Effort.High },
+			{ ...CONTEXT, tools: [READ_TOOL] },
 		);
 		const payload = await capturePayload(
 			model,
-			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
+			{ thinkingEnabled: true, reasoning: Effort.High },
 			{
 				...CONTEXT,
-				messages: [...CONTEXT.messages, { role: "user", content: "continue", timestamp: Date.now() }],
+				messages: [
+					...CONTEXT.messages,
+					answered("sunny", first),
+					{ role: "user", content: "continue", timestamp: Date.now() },
+				],
 				tools: [],
+				inactiveTools: [READ_TOOL],
 			},
 		);
 
@@ -187,125 +202,6 @@ describe("Anthropic preserved-thinking request shaping", () => {
 			type: "tool_removal",
 			tool: { type: "tool_reference", name: wireToolName },
 		});
-	});
-
-	it("re-baselines tools when the history under a control is rewritten", async () => {
-		const model = makeAnthropicModel("claude-fable-5-1");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
-			{ ...CONTEXT, tools: [readTool] },
-		);
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
-			{
-				...CONTEXT,
-				messages: [...CONTEXT.messages, { role: "user", content: "continue", timestamp: Date.now() }],
-				tools: [],
-			},
-		);
-		// Same length, different first turn: a compaction-style rewrite under the recorded control.
-		const payload = await capturePayload(
-			model,
-			{ thinkingEnabled: true, reasoning: Effort.High, providerSessionState },
-			{
-				...CONTEXT,
-				messages: [
-					{ role: "user", content: "summary of the session so far", timestamp: Date.now() },
-					{ role: "user", content: "continue", timestamp: Date.now() },
-				],
-				tools: [],
-			},
-		);
-
-		expect(payload.tools ?? []).toHaveLength(0);
-		expect(payload.messages?.some(message => message.role === "system")).toBe(false);
-	});
-
-	it("isolates side-request controls from the main conversation", async () => {
-		const model = makeAnthropicModel("claude-fable-5-1");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
-		const grepTool = { name: "grep", description: "Search files.", parameters: { type: "object", properties: {} } };
-		const firstTurn: Context["messages"] = [
-			{ role: "user", content: "start", timestamp: 1 },
-			assistant("ready", 2),
-			{ role: "user", content: "continue", timestamp: 3 },
-		];
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
-			{ systemPrompt: ["Main prompt."], messages: firstTurn, tools: [readTool] },
-		);
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
-			{ systemPrompt: ["Main prompt."], messages: firstTurn, tools: [readTool, grepTool] },
-		);
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState, sessionId: "main:side:1" },
-			{
-				systemPrompt: ["Summarize this."],
-				messages: [{ role: "user", content: "summary", timestamp: 4 }],
-				tools: [],
-			},
-		);
-		const payload = await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
-			{
-				systemPrompt: ["Main prompt."],
-				messages: [...firstTurn, assistant("done", 4), { role: "user", content: "again", timestamp: 5 }],
-				tools: [readTool, grepTool],
-			},
-		);
-
-		expect(payload.tools?.[1]?.defer_loading).toBe(true);
-		const grepWireName = payload.tools?.[1]?.name;
-		expect(grepWireName).toBeDefined();
-		expect(
-			payload.messages?.some(
-				message =>
-					Array.isArray(message.content) &&
-					message.content.some(block => block.type === "tool_addition" && block.tool?.name === grepWireName),
-			),
-		).toBe(true);
-	});
-
-	it("keeps the first declared description when a live tool description changes", async () => {
-		const model = makeAnthropicModel("claude-fable-5-1");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const messages: Context["messages"] = [
-			{ role: "user", content: "start", timestamp: 1 },
-			assistant("ready", 2),
-			{ role: "user", content: "continue", timestamp: 3 },
-		];
-		await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState },
-			{
-				systemPrompt: ["Stable prompt."],
-				messages,
-				tools: [
-					{ name: "bash", description: "Original guidance.", parameters: { type: "object", properties: {} } },
-				],
-			},
-		);
-		const payload = await capturePayload(
-			model,
-			{ thinkingEnabled: true, providerSessionState },
-			{
-				systemPrompt: ["Stable prompt."],
-				messages: [...messages, assistant("done", 4), { role: "user", content: "again", timestamp: 5 }],
-				tools: [{ name: "bash", description: "Updated guidance.", parameters: { type: "object", properties: {} } }],
-			},
-		);
-
-		expect(payload.tools?.[0]?.description).toBe("Original guidance.");
 	});
 
 	it("never caches a turn-scoped system message", async () => {
@@ -337,18 +233,17 @@ describe("Anthropic preserved-thinking request shaping", () => {
 
 	it("changes effort through a system message placed before the latest user turn", async () => {
 		const model = makeAnthropicModel("claude-fable-5-1");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		await capturePayload(model, {
-			thinkingEnabled: true,
-			reasoning: Effort.High,
-			providerSessionState,
-		});
+		const first = await captureTurn(model, { thinkingEnabled: true, reasoning: Effort.High });
 		const payload = await capturePayload(
 			model,
-			{ thinkingEnabled: true, reasoning: Effort.Low, providerSessionState },
+			{ thinkingEnabled: true, reasoning: Effort.Low },
 			{
 				...CONTEXT,
-				messages: [...CONTEXT.messages, { role: "user", content: "continue", timestamp: Date.now() }],
+				messages: [
+					...CONTEXT.messages,
+					answered("sunny", first),
+					{ role: "user", content: "continue", timestamp: Date.now() },
+				],
 			},
 		);
 
@@ -359,9 +254,34 @@ describe("Anthropic preserved-thinking request shaping", () => {
 		expect(payload.messages?.at(-2)?.output_config?.effort).toBe("low");
 		expect(payload.messages?.at(-1)?.role).toBe("user");
 	});
+
+	it("sends an explicit effort as a control when the session started on the API default", async () => {
+		// Omitted effort is the API default (`medium` on Opus 5.5), not `high`:
+		// a later explicit `high` must still reach the wire.
+		const model = makeAnthropicModel("claude-opus-5-5");
+		const first = await captureTurn(model, { thinkingEnabled: true });
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, reasoning: Effort.High },
+			{
+				...CONTEXT,
+				messages: [
+					...CONTEXT.messages,
+					answered("sunny", first),
+					{ role: "user", content: "continue", timestamp: Date.now() },
+				],
+			},
+		);
+
+		expect(first.payload.output_config?.effort).toBeUndefined();
+		expect(payload.output_config?.effort).toBeUndefined();
+		expect(payload.messages?.at(-2)?.role).toBe("system");
+		expect(payload.messages?.at(-2)?.output_config?.effort).toBe("high");
+		expect(payload.messages?.at(-1)?.role).toBe("user");
+	});
 });
 
-describe("Anthropic Fable/Mythos forced tool_choice", () => {
+describe("Anthropic forced tool_choice", () => {
 	it("downgrades a forced tool to auto for Fable (which rejects forced tool use)", async () => {
 		const payload = await capturePayload(adaptiveModel("claude-fable-5"), {
 			toolChoice: { type: "tool", name: "get_weather" },
@@ -376,11 +296,20 @@ describe("Anthropic Fable/Mythos forced tool_choice", () => {
 		expect(payload.tool_choice?.type).toBe("auto");
 	});
 
-	it("preserves a forced tool_choice for non-Fable models (Opus 4.8 supports it)", async () => {
-		const payload = await capturePayload(adaptiveModel("claude-opus-4-8"), {
+	it("downgrades a forced tool to auto for Opus 5.5 (rejects forced tool use)", async () => {
+		const payload = await capturePayload(adaptiveModel("claude-opus-5-5"), {
 			toolChoice: { type: "tool", name: "get_weather" },
 		});
-		expect(payload.tool_choice?.type).toBe("tool");
+		expect(payload.tool_choice?.type).toBe("auto");
+	});
+
+	it("preserves a forced tool_choice below the Opus 5.5 floor (Opus 5, Opus 4.8)", async () => {
+		for (const id of ["claude-opus-5", "claude-opus-4-8"]) {
+			const payload = await capturePayload(adaptiveModel(id), {
+				toolChoice: { type: "tool", name: "get_weather" },
+			});
+			expect(payload.tool_choice?.type).toBe("tool");
+		}
 	});
 });
 

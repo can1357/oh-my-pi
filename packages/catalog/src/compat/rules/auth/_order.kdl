@@ -5,9 +5,9 @@ login-order "openai-codex" "anthropic" "zai" "zai-coding-plan" "kimi-code" "open
 	"cursor" "devin" "google-antigravity" "google-gemini-cli" "openai-codex-device" "xai" "xai-oauth" \
 	"gitlab-duo" "gitlab-duo-agent" "alibaba-coding-plan" "alibaba-token-plan" "aiand" "abliteration" "zhipu-coding-plan" \
 	"umans" "qwen-portal" "sakana" "minimax-code" "minimax-code-cn" "xiaomi" "xiaomi-token-plan-sgp" \
-	"xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "firepass" "cline-pass" "commandcode" "charm-hyper" "deepseek" "muse-code" "meta" "moonshot" \
+	"xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "firepass" "cline-pass" "commandcode" "charm-hyper" "deepseek" "stepfun" "muse-code" "meta" "moonshot" \
 	"cerebras" "baseten" "fireworks" "together" "nvidia" "novita" "deepinfra" "huggingface" "perplexity" \
 	"qianfan" "venice" "siliconflow" "siliconflow-cn" "synthetic" "nanogpt" "wafer-serverless" "coreweave" \
 	"vercel-ai-gateway" "cloudflare-ai-gateway" "litellm" "kilo" "zenmux" "opencode-zen" "opencode-go" \
 	"yolo-auto" "tavily" "kagi" "exa" "parallel" "typesafe" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" "vllm" \
-	"gmi-cloud" "stencil"
+	"gmi-cloud" "stencil" "singularityapi-dev" "singularityapi-tech"

@@ -12,6 +12,8 @@
 //!   - `DeepSeekV3` — `DeepSeek` V3 through V4 (identical base BPE).
 //!   - `KimiK2` — Kimi K2 through K3.
 //!   - `Glm5` — GLM-5.x exact; GLM-4.x near-exact (ID-preserving subset).
+//!   - `Jev` — `TypeSafe` Jev 1.13 `state` input tokens (measured
+//!     reconstruction, request frame excluded).
 //!
 //! `o200k_base` is the default. All vocabularies are zstd-embedded in the
 //! binary and decoded once on first use. Counting consumes the JS string's
@@ -50,6 +52,8 @@ pub enum Encoding {
 	KimiK2,
 	/// GLM-5.x exact; GLM-4.x near-exact.
 	Glm5,
+	/// `TypeSafe` Jev 1.13 judgment `state` (request frame excluded).
+	Jev,
 }
 
 impl Encoding {
@@ -65,6 +69,7 @@ impl Encoding {
 			Self::DeepSeekV3 => utok::Encoding::DeepSeekV3,
 			Self::KimiK2 => utok::Encoding::KimiK2,
 			Self::Glm5 => utok::Encoding::Glm5,
+			Self::Jev => utok::Encoding::Jev,
 		}
 	}
 }
@@ -80,7 +85,7 @@ impl Encoding {
 /// use ordinary encoding (no special-token handling) and the Claude
 /// encodings count message content without the fixed per-message frame.
 /// Defaults to `o200k_base`; pass a `Claude*` encoding for exact Claude
-/// counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM.
+/// counts, or the matching family encoding for Qwen/DeepSeek/Kimi/GLM/Jev.
 #[napi]
 pub fn count_tokens(
 	#[napi(ts_arg_type = "string | string[]")] input: Either<JsString, Array>,

@@ -5,7 +5,7 @@ import { searchZai, ZaiProvider } from "@oh-my-pi/pi-coding-agent/web/search/pro
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("zai", "zai-test-key");
+authStorage.keys.setRuntime("zai", "zai-test-key");
 const modelRegistry = new ModelRegistry(authStorage);
 const zaiModel = modelRegistry.find("web", "zai");
 if (!zaiModel) throw new Error("Expected bundled web/zai model");

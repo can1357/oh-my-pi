@@ -9,7 +9,7 @@ import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 const SELECTED_MODEL_ID = "grok-selected-grounding";
 const SELECTED_BASE_URL = "https://xai-grounding.example.test/v1";
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("xai", "selected-xai-key");
+authStorage.keys.setRuntime("xai", "selected-xai-key");
 const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 const model = buildModel({
 	id: SELECTED_MODEL_ID,

@@ -36,7 +36,7 @@ await createAgentSession({
 console.log("Session with custom auth storage location");
 
 // Runtime API key override (not persisted to disk)
-authStorage.setRuntimeApiKey("anthropic", "sk-my-temp-key");
+authStorage.keys.setRuntime("anthropic", "sk-my-temp-key");
 await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
 	authStorage,

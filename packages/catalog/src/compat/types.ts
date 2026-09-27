@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { Api, ThinkingControlMode, TokenCost } from "../types";
+import type { Api, KindApiKind, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -552,6 +552,10 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
+	orgScopedIdentity?: boolean;
+	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
+	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */
 	nativeAuthApis?: string[];
 	available?: boolean;
@@ -648,7 +652,7 @@ export interface CompiledProvider {
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */
-	kindApis?: Partial<Record<"image" | "tts" | "stt", Api>>;
+	kindApis?: Partial<Record<KindApiKind, Api>>;
 	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
 	seed?: CompiledSeed;
 }

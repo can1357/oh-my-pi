@@ -4,7 +4,8 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
+import { ChainJudge, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
@@ -29,6 +30,14 @@ if (!LOCAL || !ONLINE) throw new Error("Expected bundled local and online judge 
 
 const ONLINE_BACKUP = { ...ONLINE, id: "claude-sonnet-judge-backup", name: "Judge Backup" } as Model<Api>;
 
+const DECISIONS = {
+	...JEV_PREVIEW,
+	id: "~typesafe/jev-latest",
+	api: "openrouter-decisions",
+	provider: "openrouter",
+	baseUrl: "https://decisions.example.test",
+} as Model<Api>;
+
 const BUCKET_QUESTION: ChoiceQuestion<"trivial" | "moderate" | "hard"> = {
 	type: "choice",
 	instructions: "Choose a coarse task bucket.",
@@ -43,7 +52,7 @@ const TIER_QUESTION: ChoiceQuestion<"low" | "high"> = {
 
 function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): ModelRegistry {
 	const authStorage = createInMemoryAuthStorage();
-	for (const provider in keys) authStorage.setRuntimeApiKey(provider, keys[provider]!);
+	for (const provider in keys) authStorage.keys.setRuntime(provider, keys[provider]!);
 	const registry = new ModelRegistry(authStorage, "/nonexistent/judgment-chain-models.yml");
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
@@ -74,28 +83,15 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
-	it("falls from TypeSafe to a coarse local question, then to a tiered online question", async () => {
+	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
-			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": {
-				judge: [`${LOCAL.provider}/${LOCAL.id}`, `${ONLINE.provider}/${ONLINE.id}`],
-			},
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
 		});
-		const registry = makeRegistry([JEV_PREVIEW, LOCAL, ONLINE], {
-			typesafe: "ts-key",
-			[ONLINE.provider]: "online-key",
-		});
+		const registry = makeRegistry([LOCAL, ONLINE], { [ONLINE.provider]: "online-key" });
 		const kinds: string[] = [];
 		let localPrompt = "";
 		let onlinePrompt = "";
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (url, init) => {
-				expect(String(url)).toBe("https://judge.example.test/v1/systemone");
-				const body = JSON.parse(String(init?.body)) as { model: string };
-				expect(body.model).toBe("jev-preview");
-				return new Response("rejected", { status: 400 });
-			}),
-		);
 		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_model, promptText) => {
 			localPrompt = promptText;
 			return "not a bucket";
@@ -126,7 +122,7 @@ describe("ChainJudge", () => {
 		});
 
 		expect(answer).toBe("high");
-		expect(kinds).toEqual(["native", "local", "online"]);
+		expect(kinds).toEqual(["local", "online"]);
 		expect(localPrompt).toContain("trivial");
 		expect(localPrompt).toContain("moderate");
 		expect(localPrompt).toContain("hard");
@@ -168,7 +164,86 @@ describe("ChainJudge", () => {
 		);
 	});
 
-	it("skips a candidate whose account rejected the previous judgment instead of re-paying it every call", async () => {
+	it("journals judgment usage on the active branch and stops once the session changes", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async () =>
+				Response.json({
+					model: "jev-1.13.0",
+					answers: {
+						level: { type: "choice", choice: "high", probabilities: { low: 0.1, high: 0.9 }, confidence: 0.8 },
+					},
+					usage: { input_tokens: 8, output_tokens: 2 },
+				}),
+			),
+		);
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "locate the scheduler", timestamp: 1 });
+		const leafBefore = manager.getLeafId();
+		const judge = new ChainJudge({ settings, registry, onUsage: journalJudgmentUsage(manager, "find") });
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+
+		await judge.judge(request);
+		const usage = manager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			parentId: leafBefore,
+			purpose: "find",
+			role: "typesafe",
+			model: "jev-preview",
+			usage: { input: 8, output: 2 },
+		});
+		expect(manager.getLeafId()).toBe(usage[0]!.id);
+
+		await manager.newSession();
+		await judge.judge(request);
+		expect(manager.getBranch().filter(entry => entry.type === "model_usage")).toHaveLength(0);
+	});
+
+	it("falls back from a failed native judge only to another native judge", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": {
+				judge: [
+					`${LOCAL.provider}/${LOCAL.id}`,
+					`${DECISIONS.provider}/${DECISIONS.id}`,
+					`${ONLINE.provider}/${ONLINE.id}`,
+				],
+			},
+		});
+		const registry = makeRegistry([JEV_PREVIEW, LOCAL, DECISIONS, ONLINE], {
+			typesafe: "ts-key",
+			openrouter: "or-key",
+			[ONLINE.provider]: "online-key",
+		});
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) return new Response("rejected", { status: 400 });
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const local = vi.spyOn(tinyModelClient, "complete");
+		const online = vi.spyOn(ai, "completeSimple");
+
+		const result = await new ChainJudge({ settings, registry, sessionModel: ONLINE_BACKUP }).judge({
+			state: "redesign the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("high");
+		expect(urls).toEqual(["https://judge.example.test/v1/systemone", "https://decisions.example.test/decisions"]);
+		expect(local).not.toHaveBeenCalled();
+		expect(online).not.toHaveBeenCalled();
+	});
+
+	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -179,15 +254,23 @@ describe("ChainJudge", () => {
 			.mockImplementation(
 				asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
 			);
-		vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+		const online = vi.spyOn(ai, "completeSimple");
+		const onUsage = vi.fn();
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
 
-		const first = await new ChainJudge({ settings, registry }).judge(request);
-		const second = await new ChainJudge({ settings, registry }).judge(request);
+		await expect(
+			new ChainJudge({ settings, registry, sessionModel: ONLINE, onUsage }).judge(request),
+		).rejects.toThrow("402");
+		await expect(new ChainJudge({ settings, registry, onUsage }).judge(request)).rejects.toThrow(
+			"rejected the account recently",
+		);
 
-		expect(first.answers.level.choice).toBe("low");
-		expect(second.answers.level.choice).toBe("low");
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
+		expect(online).not.toHaveBeenCalled();
+		expect(onUsage).toHaveBeenCalledTimes(1);
+		expect(onUsage).toHaveBeenCalledWith(
+			expect.objectContaining({ provider: "typesafe", model: "jev-preview", stopReason: "error" }),
+		);
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {
@@ -234,5 +317,55 @@ describe("ChainJudge", () => {
 		// The primary's three entries are its initial completion plus two format
 		// corrections. A duplicated session fallback would add another three.
 		expect(attempted).toEqual([ONLINE.id, ONLINE.id, ONLINE.id, ONLINE_BACKUP.id]);
+	});
+
+	it("resolves and forwards configured headers to native judgment models", async () => {
+		const recordedHeaders: Record<string, string>[] = [];
+		const nativeModel = {
+			...JEV_PREVIEW,
+			id: "jev-custom-headers",
+			api: "openrouter-decisions" as const,
+			provider: "custom-judge",
+			baseUrl: "https://custom.example/v1",
+			resolveHeaders: async () => ({
+				"x-custom-routing": "router-1",
+				"x-custom-tenant": "tenant-abc",
+			}),
+		} as Model<Api>;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "custom-judge/jev-custom-headers" },
+		});
+		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { level: { type: "choice", choice: "low" } },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				});
+			}),
+		);
+
+		const result = await new ChainJudge({ settings, registry }).judge({
+			state: "mechanical task",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("low");
+		expect(recordedHeaders).toEqual([
+			{
+				auth: "Bearer test-key",
+				customRouting: "router-1",
+				customTenant: "tenant-abc",
+			},
+		]);
 	});
 });

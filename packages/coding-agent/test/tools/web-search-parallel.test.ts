@@ -36,17 +36,13 @@ describe("Parallel web search", () => {
 		},
 	} as unknown as AgentStorage;
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return process.env.PARALLEL_API_KEY ?? undefined;
+		keys: {
+			get: async () => process.env.PARALLEL_API_KEY ?? undefined,
+			source: () => (process.env.PARALLEL_API_KEY ? { kind: "env", concrete: true } : undefined),
+			resolver: (_provider: string) => async () => process.env.PARALLEL_API_KEY ?? undefined,
 		},
-		hasAuth() {
-			return Boolean(process.env.PARALLEL_API_KEY);
-		},
-		resolver(_provider: string) {
-			return async () => process.env.PARALLEL_API_KEY ?? undefined;
-		},
-		async rotateSessionCredential() {
-			return false;
+		limits: {
+			rotate: async () => false,
 		},
 	} as unknown as AuthStorage;
 
@@ -420,14 +416,10 @@ describe("Parallel web search", () => {
 		delete process.env.PARALLEL_API_KEY;
 		const storedAuthStorage = {
 			...fakeAuthStorage,
-			async getApiKey() {
-				return "stored-parallel-key";
-			},
-			hasAuth() {
-				return true;
-			},
-			resolver() {
-				return async () => "stored-parallel-key";
+			keys: {
+				get: async () => "stored-parallel-key",
+				source: () => ({ kind: "api_key", concrete: true }),
+				resolver: () => async () => "stored-parallel-key",
 			},
 		} as unknown as AuthStorage;
 		let capturedUrl: string | undefined;
@@ -456,7 +448,7 @@ describe("Parallel web search", () => {
 		delete process.env.PARALLEL_API_KEY;
 		const authStorage = await AuthStorage.create(":memory:", { configValueResolver: resolveConfigValue });
 		try {
-			await authStorage.set("parallel", { type: "api_key", key: "!false" });
+			await authStorage.credentials.set("parallel", { type: "api_key", key: "!false" });
 			const fetchMock = vi.fn(
 				mockMcpFetch({
 					result: { structuredContent: { search_id: "unexpected-anonymous-search", results: [] } },

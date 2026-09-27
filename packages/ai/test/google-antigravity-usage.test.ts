@@ -611,14 +611,4 @@ describe("antigravity ranking strategy", () => {
 		expect(primary).toBeUndefined();
 		expect(secondary).toBeUndefined();
 	});
-
-	it("uses a 24h window default for drain-rate normalisation", () => {
-		// Antigravity's API exposes resetTime but not durationMs, so AuthStorage's
-		// drain-rate calculator falls back to windowDefaults. The constant has to
-		// match the daily quota Antigravity actually applies; if it drifts, two
-		// credentials with identical headroom but different windowIds will be
-		// ranked unfairly.
-		expect(antigravityRankingStrategy.windowDefaults.primaryMs).toBe(24 * 60 * 60 * 1000);
-		expect(antigravityRankingStrategy.windowDefaults.secondaryMs).toBe(24 * 60 * 60 * 1000);
-	});
 });

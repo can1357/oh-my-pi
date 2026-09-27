@@ -11,6 +11,8 @@ import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storag
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+
 describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -27,7 +29,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 		tempDir = TempDir.createSync("@pi-issue-816-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const defaultModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!defaultModel) throw new Error("Expected claude-sonnet-4-5 in registry");
@@ -162,7 +164,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 	});
 
 	it("does not enter plan mode when plan.enabled is false", async () => {
-		session.settings.set("plan.enabled", false);
+		cfgPlanEnabled.set(session.settings, false);
 		const warning = vi.spyOn(mode, "showWarning").mockImplementation(() => {});
 
 		await mode.handlePlanModeCommand();
@@ -175,7 +177,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 		await mode.handlePlanModeCommand();
 		expect(mode.planModeEnabled).toBe(true);
 
-		session.settings.set("plan.enabled", false);
+		cfgPlanEnabled.set(session.settings, false);
 		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 
 		await mode.handlePlanModeCommand();

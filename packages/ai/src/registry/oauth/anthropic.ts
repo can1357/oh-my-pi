@@ -7,14 +7,13 @@
  */
 
 import * as AIError from "../../error";
-import { claudeCodeVersion } from "../../providers/claude-code-fingerprint";
+import { getClaudeCodeVersion } from "../../providers/claude-code-fingerprint";
 import type { FetchImpl } from "../../types";
 import type { AfterExchangeHook } from "../hooks/types";
 import type { OAuthCredentials } from "./types";
 
 const BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap";
 const CLAUDE_CODE_BOOTSTRAP_MODEL = "claude-opus-4-8";
-const CLAUDE_CODE_BOOTSTRAP_USER_AGENT = `claude-code/${claudeCodeVersion}`;
 
 export { ANTHROPIC_OAUTH_GRANT_TTL_MS } from "./anthropic-constants";
 
@@ -56,7 +55,7 @@ export async function fetchAnthropicBootstrapIdentity(
 			Accept: "application/json, text/plain, */*",
 			Authorization: `Bearer ${accessToken}`,
 			"Content-Type": "application/json",
-			"User-Agent": CLAUDE_CODE_BOOTSTRAP_USER_AGENT,
+			"User-Agent": `claude-code/${getClaudeCodeVersion()}`,
 			"anthropic-beta": "oauth-2025-04-20",
 		},
 		signal: AbortSignal.timeout(30_000),

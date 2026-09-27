@@ -28,6 +28,8 @@ interface Harness {
 	scheduler: VirtualRenderScheduler;
 	composer: Composer;
 	widget: InlineWidget;
+	/** Turn-scoped chrome between transcript and editor (loader, todo/subagent HUDs). */
+	hud: InlineWidget;
 }
 
 function makeHarness(): Harness {
@@ -43,13 +45,14 @@ function makeHarness(): Harness {
 		const row = i;
 		transcript.addChild({ render: () => [`${TRANSCRIPT_PREFIX}${row}`] });
 	}
+	const hud = new InlineWidget();
 	const editor = new Container();
 	const widget = new InlineWidget();
 	editor.addChild(widget);
 	editor.addChild(new Text("EDITOR", 0, 0));
-	composer.setRuntimeChildren([transcript, editor]);
+	composer.setRuntimeChildren([transcript, hud, editor], { transient: [editor] });
 	composer.start({ playWelcomeIntro: false });
-	return { terminal, scheduler, composer, widget };
+	return { terminal, scheduler, composer, widget, hud };
 }
 
 /** Settle, grow the inline chrome, settle, shrink it back, settle. */
@@ -154,6 +157,29 @@ describe("composer inline shrink (#11007)", () => {
 		);
 		expect(separators.length).toBeGreaterThan(0);
 		expect(transcriptRows.at(-1)).toBe(`${TRANSCRIPT_PREFIX}${TRANSCRIPT_ROWS - 1}`);
+
+		h.composer.stop();
+	});
+
+	it("retires settled rows displaced by persistent chrome instead of hiding them until it shrinks", async () => {
+		const h = makeHarness();
+		await h.scheduler.settle(h.terminal);
+
+		// A working loader + todo HUD stay up for a whole turn. Settled rows they
+		// displace must reach native scrollback, not vanish between history and
+		// the viewport until the turn ends.
+		h.hud.rows = 4;
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+
+		const indices = h.terminal
+			.getScrollBuffer()
+			.map(row => Bun.stripANSI(row).trimEnd())
+			.filter(row => row.startsWith(TRANSCRIPT_PREFIX))
+			.map(row => Number(row.slice(TRANSCRIPT_PREFIX.length)));
+		expect(indices).toEqual(Array.from({ length: TRANSCRIPT_ROWS }, (_, i) => i));
+		const view = h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		expect(view.findIndex(row => row.includes("EDITOR"))).toBe(ROWS - 1);
 
 		h.composer.stop();
 	});

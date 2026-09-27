@@ -1,18 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { getEvalToolDescription } from "../../src/tools/eval";
+import { getEvalDocTopics } from "../../src/tools/eval";
 
-describe("eval tool description", () => {
+describe("eval agents topic", () => {
 	it("advertises the first allowed spawn as the agent() default", () => {
-		const description = getEvalToolDescription({ py: true, js: false, spawns: "fact-finder,oracle" });
+		const agents = getEvalDocTopics({ py: true, js: false, spawns: "fact-finder,oracle" }).agents;
 
-		expect(description).toContain('agent(prompt, agent?="fact-finder"');
-		expect(description).toContain("Allowed agents: `fact-finder`, `oracle`.");
-	});
-
-	it("omits agent() when spawning is disabled", () => {
-		const description = getEvalToolDescription({ py: true, js: false, spawns: "" });
-
-		expect(description).not.toContain("agent(prompt");
-		expect(description).not.toContain("<dag>");
+		expect(agents).toContain('agent(prompt, agent?="fact-finder"');
+		expect(agents).toContain("Allowed agents: `fact-finder`, `oracle`.");
 	});
 });

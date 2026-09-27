@@ -50,8 +50,10 @@ function makeComponent(
 				fetchUsageReports: async () => reports,
 				modelRegistry: {
 					authStorage: {
-						getOAuthAccountIdentity: (provider: string) =>
-							provider === options.provider ? options.activeIdentity : undefined,
+						oauth: {
+							identity: (provider: string) =>
+								provider === options.provider ? options.activeIdentity : undefined,
+						},
 					},
 				},
 				getAsyncJobSnapshot: () => ({ running: [] }),
@@ -297,10 +299,12 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === provider && provider === "openai-codex"
-							? { accountId: "active-account" }
-							: undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === provider && provider === "openai-codex"
+								? { accountId: "active-account" }
+								: undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
@@ -367,8 +371,10 @@ describe("usage status-line segment", () => {
 			fetchUsageReports: async () => reports,
 			modelRegistry: {
 				authStorage: {
-					getOAuthAccountIdentity: (requestedProvider: string) =>
-						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					oauth: {
+						identity: (requestedProvider: string) =>
+							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+					},
 				},
 			},
 			getAsyncJobSnapshot: () => ({ running: [] }),
@@ -602,6 +608,33 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 		expect(content).toContain("mo");
 		expect(content).toContain("42%");
+	});
+
+	it("renders an alibaba-token-plan monthly-only quota without a reported span", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "alibaba-token-plan",
+					limits: [
+						{
+							id: "credits:monthly",
+							scope: { provider: "alibaba-token-plan", windowId: "monthly" },
+							window: { id: "monthly", label: "Monthly Credits", resetsAt: Date.now() + 335 * 3_600_000 },
+							amount: { used: 1.04, usedFraction: 0.0104, unit: "percent" },
+						},
+					],
+				},
+			],
+			{ provider: "alibaba-token-plan" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("mo");
+		expect(content).toContain("1%");
+		expect(content).toContain("13d 23h");
 	});
 
 	it("does not render monthly usage for providers outside the single-bucket gate", async () => {

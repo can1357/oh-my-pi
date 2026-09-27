@@ -7,6 +7,17 @@ var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
 var relayInitiatedDetachTabs = new Set;
+var instanceId = null;
+async function ensureInstanceId() {
+  if (instanceId)
+    return instanceId;
+  const key = "relayInstanceId";
+  const stored = await chrome.storage.local.get({ [key]: "" });
+  const existing = stored[key];
+  instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
+  await chrome.storage.local.set({ [key]: instanceId });
+  return instanceId;
+}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -112,6 +123,7 @@ async function buildHello() {
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   return {
     t: "hello",
+    instanceId: await ensureInstanceId(),
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     tabs: snapshots,

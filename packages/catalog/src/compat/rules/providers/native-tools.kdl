@@ -1,0 +1,4 @@
+// Cursor always exposes server-owned native operations, even with an empty tool catalog.
+on-api "cursor-agent" {
+	requires-native-tools #true
+}

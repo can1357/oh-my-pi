@@ -37,8 +37,11 @@ export function getExtraHelpText(): string {
   COMMAND_CODE_API_KEY       - Command Code Provider API models
   CHARM_HYPER_API_KEY        - Charm Hyper inference gateway models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
+  STEPFUN_API_KEY            - StepFun Step models
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
+  SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
+  SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

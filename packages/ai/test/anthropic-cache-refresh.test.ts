@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import type { CacheControlEphemeral, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { CacheRetention, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	CacheRetention,
+	Context,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+	ToolChoice,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -175,6 +182,7 @@ interface FinishRequestOptions {
 	model?: Model<"anthropic-messages">;
 	sessionId?: string;
 	apiKey?: string;
+	toolChoice?: ToolChoice;
 }
 
 async function finishRequest(
@@ -190,6 +198,7 @@ async function finishRequest(
 		cacheRetention: options.cacheRetention,
 		providerSessionState,
 		sessionId: options.sessionId ?? "cache-refresh-test-session",
+		...(options.toolChoice ? { toolChoice: options.toolChoice } : {}),
 	});
 	for await (const _event of stream) {
 		// Drain the public response before the idle gap begins.
@@ -243,6 +252,28 @@ describe("Anthropic prompt-cache refresh", () => {
 			expect(refresh.max_tokens).toBe(0);
 			expect(refresh.stream).toBe(false);
 		}
+	});
+
+	it("drops a forced tool_choice from the zero-output keep-alive refresh", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write", "refresh-read"], capture);
+		const states = createProviderSessionState();
+
+		// A forced-yield turn pins `tool_choice` to the yield tool; that full
+		// payload is captured and replayed by the keep-alive refresh. Anthropic
+		// rejects `tool_choice: {type:"tool"|"any"}` paired with `max_tokens: 0`
+		// ("tool_choice ... cannot be used when max_tokens is 0", #12597), so the
+		// zero-output replay must shed the forced selector.
+		await finishRequest(fetch, states, { toolChoice: { type: "tool", name: "yield" } });
+		await advanceToRefresh(capture, 2);
+
+		// The originating turn keeps its forced choice.
+		expect(capture.bodies[0]?.tool_choice?.type).toBe("tool");
+		// The zero-output refresh drops it so the request is not a guaranteed 400.
+		const refresh = capture.bodies[1];
+		expect(refresh?.max_tokens).toBe(0);
+		expect(refresh?.tool_choice).toBeUndefined();
 	});
 
 	it("resets the idle gap when another normal request starts", async () => {

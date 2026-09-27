@@ -74,7 +74,7 @@ describe("#emit listener isolation", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Test model not found");
 			authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
-			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			authStorage.keys.setRuntime("anthropic", "test-key");
 			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 			const mock = createMockModel({ responses: [{ content: ["ok"] }] });
 			const agent = new Agent({

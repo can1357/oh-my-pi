@@ -19,12 +19,15 @@
  *
  * Keys: Up/Down step through rendered items in transcript order (within the
  * active column when a strip is open), Left/Right slide between branch
- * variants at a fork and jump between user turns elsewhere, Enter rewinds to
- * the outlined item, Esc cancels.
+ * variants at a fork and jump between user turns elsewhere, `f` opens a
+ * filter (typing narrows the current path to matching items; Esc leaves the
+ * filter with the selection kept), Enter rewinds to the outlined item, Esc
+ * cancels.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
+	extractPrintableText,
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
@@ -39,6 +42,9 @@ import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesS
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
 import { padToWidth } from "../render/utils";
+import { expandKeyHint } from "../render/render-utils";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	appendOutlineEntries,
 	type ComposedColumn,
@@ -109,6 +115,13 @@ export class RewindSelectorComponent implements Component {
 	/** Camera slide between variant positions (fractional column index). */
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
+
+	/** Filter query while the filter prompt is open; undefined shows the full transcript. */
+	#filter: string | undefined;
+	/** Main transcript rows from the last frame; the filter matches what is on screen. */
+	#mainRows: readonly (readonly string[])[] = [];
+	/** Lowercased plain text per rendered child row array (row arrays are cached, so identity is stable). */
+	#rowText = new WeakMap<readonly string[], string>();
 
 	constructor(
 		entries: TranscriptEntry[],
@@ -235,17 +248,24 @@ export class RewindSelectorComponent implements Component {
 			});
 			return;
 		}
+		if (this.#filter !== undefined) {
+			this.#handleFilterInput(data);
+			return;
+		}
 		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
 			this.deps.onCancel();
 			return;
 		}
-		if (matchesAppToolsExpand(data)) {
-			this.#expanded = !this.#expanded;
-			this.#builder.setExpanded(this.#expanded);
-			for (const columns of this.#variantCache.values()) {
-				for (const column of columns) column.builder.setExpanded(this.#expanded);
-			}
+		if (matchesKey(data, "f")) {
+			this.#filter = "";
+			this.#activeVariant = 0;
+			this.#siblingSelected = 0;
+			this.#stopSlide();
 			this.deps.requestRender();
+			return;
+		}
+		if (matchesAppToolsExpand(data)) {
+			this.#toggleExpanded();
 			return;
 		}
 		if (matchesSelectUp(data)) {
@@ -280,6 +300,115 @@ export class RewindSelectorComponent implements Component {
 		if (this.#browser.handleScrollKey(data)) {
 			this.deps.requestRender();
 		}
+	}
+
+	#toggleExpanded(): void {
+		this.#expanded = !this.#expanded;
+		this.#builder.setExpanded(this.#expanded);
+		for (const columns of this.#variantCache.values()) {
+			for (const column of columns) column.builder.setExpanded(this.#expanded);
+		}
+		this.deps.requestRender();
+	}
+
+	// ========================================================================
+	// Filter
+	// ========================================================================
+
+	#handleFilterInput(data: string): void {
+		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
+			this.#closeFilter();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			const target = this.#filterMatches().includes(this.#selected) ? this.#targets[this.#selected] : undefined;
+			if (target) this.deps.onSelect(target.entryId);
+			return;
+		}
+		if (matchesAppToolsExpand(data)) {
+			this.#toggleExpanded();
+			return;
+		}
+		if (matchesSelectUp(data) || matchesKey(data, "left")) {
+			const userTurnsOnly = !matchesSelectUp(data);
+			this.#stepFiltered(-1, userTurnsOnly);
+			return;
+		}
+		if (matchesSelectDown(data) || matchesKey(data, "right")) {
+			const userTurnsOnly = !matchesSelectDown(data);
+			this.#stepFiltered(1, userTurnsOnly);
+			return;
+		}
+		if (matchesKey(data, "backspace")) {
+			if (this.#filter!.length === 0) {
+				this.#closeFilter();
+				return;
+			}
+			this.#setFilter(this.#filter!.slice(0, -1));
+			return;
+		}
+		const printable = extractPrintableText(data);
+		if (printable) {
+			this.#setFilter(this.#filter! + printable);
+			return;
+		}
+		if (this.#browser.handleScrollKey(data)) {
+			this.deps.requestRender();
+		}
+	}
+
+	/** Leave the filter, keeping the selected item outlined in the full transcript. */
+	#closeFilter(): void {
+		this.#filter = undefined;
+		this.deps.requestRender();
+	}
+
+	/** Update the query; keep the selection when it still matches, else rest on the newest match above it. */
+	#setFilter(query: string): void {
+		this.#filter = query;
+		const matches = this.#filterMatches();
+		if (!matches.includes(this.#selected)) {
+			this.#selected = matches.findLast(index => index < this.#selected) ?? matches.at(-1) ?? this.#selected;
+		}
+		this.deps.requestRender();
+	}
+
+	#stepFiltered(delta: -1 | 1, userTurnsOnly: boolean): void {
+		const matches = this.#filterMatches().filter(index => !userTurnsOnly || this.#targets[index]!.isUserTurn);
+		const next =
+			delta < 0 ? matches.findLast(index => index < this.#selected) : matches.find(index => index > this.#selected);
+		if (next === undefined) return;
+		this.#selected = next;
+		this.deps.requestRender();
+	}
+
+	/**
+	 * Visible main-path target indices whose rendered text contains every
+	 * whitespace-separated query word as a whole word (case-insensitive: `ls`
+	 * matches `ls -la` but not `tools`); all visible targets for an empty query.
+	 * Matching the rendered rows keeps results honest: collapsed tool output
+	 * only matches once Ctrl+O expands it.
+	 */
+	#filterMatches(): number[] {
+		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+		const patterns = words.map(
+			word => new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u"),
+		);
+		const matches: number[] = [];
+		for (let index = 0; index < this.#targets.length; index++) {
+			if (!this.#isMainSelectable(index)) continue;
+			const target = this.#targets[index]!;
+			const texts = this.#mainRows.slice(target.start, target.end).map(rows => {
+				let text = this.#rowText.get(rows);
+				if (text === undefined) {
+					text = Bun.stripANSI(rows.join("\n")).toLowerCase();
+					this.#rowText.set(rows, text);
+				}
+				return text;
+			});
+			if (patterns.every(pattern => texts.some(text => pattern.test(text)))) matches.push(index);
+		}
+		return matches;
 	}
 
 	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */
@@ -337,6 +466,7 @@ export class RewindSelectorComponent implements Component {
 		const children = this.#builder.container.children;
 		const prepared = this.#browser.prepareOutline(children, this.#targets, this.#selected, contentWidth);
 		this.#mainVisible = prepared.visible;
+		this.#mainRows = prepared.childRows;
 		if (prepared.selected !== this.#selected) {
 			// The current target collapsed (e.g. expansion toggle): rest on the
 			// nearest visible one and leave the strip.
@@ -344,6 +474,8 @@ export class RewindSelectorComponent implements Component {
 			this.#activeVariant = 0;
 			this.#siblingSelected = 0;
 		}
+
+		if (this.#filter !== undefined) return this.#filterFrame(this.#filter, prepared.childRows, contentWidth);
 
 		const columns = this.#stripColumns();
 		const composed =
@@ -357,16 +489,64 @@ export class RewindSelectorComponent implements Component {
 						prepared,
 					}).column;
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
-			header: [
-				`${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
-			],
+			header: [this.#header()],
 			body: {
 				lines: composed.lines,
 				anchor: this.#outlineAnchor(composed),
 			},
-			footer: [theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)],
+			footer: [theme.fg("dim", `${position}${keys}`)],
+		};
+	}
+
+	#header(): string {
+		return `${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`;
+	}
+
+	/** Only the matching items of the current path, concatenated; no branch strip. */
+	#filterFrame(
+		query: string,
+		childRows: readonly (readonly string[])[],
+		contentWidth: number,
+	): TranscriptBrowserFrame {
+		const matches = this.#filterMatches();
+		const rows: (readonly string[])[] = [];
+		const targets: OutlineTarget[] = [];
+		for (const index of matches) {
+			const target = this.#targets[index]!;
+			const start = rows.length;
+			rows.push(...childRows.slice(target.start, target.end));
+			targets.push({ ...target, start, end: rows.length });
+		}
+		const selected = matches.indexOf(this.#selected);
+		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, contentWidth, undefined);
+		const lines = matches.length > 0 ? composed.lines : [theme.fg("muted", `  No items match "${query}"`)];
+		const count =
+			matches.length === 0
+				? theme.fg("error", "no matches")
+				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const keys = `${upDown} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${editorKey("tui.select.cancel")} show all`;
+		return {
+			header: [this.#header()],
+			body: {
+				lines,
+				anchor:
+					composed.selStart >= 0
+						? {
+								id: `rewind:filter:${query}:${this.#targets[this.#selected]?.turnId ?? this.#selected}`,
+								start: composed.selStart,
+								end: composed.selEnd,
+							}
+						: undefined,
+			},
+			footer: [
+				`${theme.fg("accent", "filter:")} ${query}${theme.fg("accent", "▏")}  ${count}  ${theme.fg("dim", keys)}`,
+			],
 		};
 	}
 

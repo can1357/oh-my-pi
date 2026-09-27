@@ -392,6 +392,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
+	cacheVersion: 2,
 	fetchUsage: fetchZaiUsage,
 	supports: params =>
 		params.provider === "zai" &&

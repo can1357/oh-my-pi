@@ -703,6 +703,31 @@ describe("StdinBuffer", () => {
 			expect(emittedPaste).toEqual([]);
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
+
+		describe("classification disabled (issue #12540)", () => {
+			it("emits stall-batched Enter keystrokes as submits instead of one paste", () => {
+				// A UI event-loop stall drains the pty backlog in one read, byte-
+				// identical to an unbracketed multiline paste. When the terminal
+				// confirms bracketed-paste support the heuristic is off, so every
+				// batched Enter stays a submit rather than a coalesced newline.
+				buffer.setRawPasteClassification(false);
+				processInput("aaa\rbbb\rccc");
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+			});
+
+			it("flushes a candidate already held by the classification window as keys", async () => {
+				// The first break-bearing read arms the fixed window; disabling the
+				// heuristic mid-window must replay the held bytes as keystrokes, not
+				// drop them or later emit them as a paste.
+				processInput("hello\r");
+				expect(emittedSequences).toEqual([]);
+				expect(emittedPaste).toEqual([]);
+				buffer.setRawPasteClassification(false);
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
+			});
+		});
 	});
 
 	describe("Paste Recovery", () => {

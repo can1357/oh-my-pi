@@ -93,7 +93,7 @@ describe("SDK systemPrompt replacements", () => {
 		await withSession(
 			"{{#if eagerTasks}}",
 			defaultPrompt => {
-				expect(defaultPrompt.join("\n\n")).toContain("Helpful, trusted assistant");
+				expect(defaultPrompt.join("\n\n")).toContain("§ Tool Policy");
 				return "callback replacement";
 			},
 			async session => {

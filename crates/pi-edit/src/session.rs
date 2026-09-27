@@ -10,12 +10,12 @@ use async_trait::async_trait;
 
 use crate::{
 	diff_string::{CompactDiffOptions, build_compact_diff_preview},
-	engine::{EditMode, FileOp, HeaderKind, ModeEngine, PreviewFile, StagedFile},
+	engine::{EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, StagedFile},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	notebook,
-	path_policy::{PathPolicy, canonical_key},
-	store::{EditStore, file_hash},
+	path_policy::{PathPolicy, UrlResolution, canonical_key},
+	store::{EditStore, Snapshot, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
@@ -130,6 +130,8 @@ pub struct Session {
 	/// Generation the last preview was computed for.
 	previewed:       u32,
 	final_pass_done: bool,
+	/// Apply began: URL answers provided from here on belong to apply.
+	applying:        bool,
 }
 
 impl Session {
@@ -150,6 +152,7 @@ impl Session {
 			generation: 0,
 			previewed: 0,
 			final_pass_done: false,
+			applying: false,
 		}
 	}
 
@@ -192,6 +195,60 @@ impl Session {
 		self.generation != self.previewed || (self.args.is_finished() && !self.final_pass_done)
 	}
 
+	/// Drain internal URLs that missed the resolution table since the last
+	/// call (deduped, first-seen order). Streaming passes record misses too:
+	/// the host answers half-streamed URLs like any other (locating has no
+	/// side effects), so previews never wait for the arguments to finish.
+	pub fn take_unresolved(&mut self) -> Vec<String> {
+		self.files.take_unresolved()
+	}
+
+	/// Record the host answer for `url`; clears cached reads/resolutions for
+	/// it and makes [`Self::preview_pending`] true. Answers provided before
+	/// the apply phase serve previews only.
+	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+		self.files.provide(url, resolution);
+		self.generation += 1;
+	}
+
+	/// Enter the apply phase (idempotent) and list the internal URL targets
+	/// the finished arguments name — section paths and move destinations,
+	/// deduped in payload order — so the host can answer them all in one
+	/// pass before [`Self::apply`] instead of one staging retry per URL.
+	/// Entering the phase drops every preview-time answer: those were
+	/// resolved before approval and without the call's abort signal. Empty
+	/// while the arguments are incomplete.
+	pub fn begin_apply_url_targets(&mut self) -> Vec<String> {
+		self.begin_apply();
+		let snapshot = self.args.snapshot();
+		if !snapshot.complete {
+			return Vec::new();
+		}
+		let inspection = self.engine.inspect(&snapshot);
+		let moves = inspection.file_ops.iter().filter_map(|op| match op {
+			FileOpIntent::Move { to, .. } => Some(to),
+			FileOpIntent::Delete { .. } => None,
+		});
+		let policy = &self.config.policy;
+		let mut targets: Vec<String> = Vec::new();
+		for authored in inspection.paths.iter().chain(moves) {
+			if let Some(url) = policy.url_target(authored)
+				&& !targets.iter().any(|known| *known == url)
+			{
+				targets.push(url.into_owned());
+			}
+		}
+		targets
+	}
+
+	/// Switch to the apply phase once, forgetting preview-time URL answers.
+	fn begin_apply(&mut self) {
+		if !self.applying {
+			self.applying = true;
+			self.files.forget_urls();
+		}
+	}
+
 	/// Compute the preview for the current buffer. While streaming, trailing
 	/// removal-only tails are trimmed so additions never visibly "catch up".
 	pub fn preview(&mut self) -> PreviewBatch {
@@ -220,12 +277,19 @@ impl Session {
 	/// failure aborts before the first write), enforce the plan-mode guard
 	/// for every file, then write in payload order. A writer failure aborts
 	/// the loop; files already written stay written and the error is
-	/// returned verbatim.
+	/// returned verbatim. URL targets never reuse preview-time answers (see
+	/// [`Self::begin_apply_url_targets`]).
+	///
+	/// # Errors
+	/// Staging and plan-mode failures, all raised before the first write —
+	/// including [`EditError::UnresolvedUrl`], after which the host may
+	/// [`Self::provide`] the URL and retry — or the writer's error.
 	pub async fn apply(
 		&mut self,
 		request: ApplyRequest,
 		writer: &dyn EditWriter,
 	) -> EditResult<ApplyOutcome> {
+		self.begin_apply();
 		self.files.clear();
 		let snapshot = self.args.snapshot();
 		if !snapshot.complete {
@@ -233,7 +297,7 @@ impl Session {
 		}
 		let staged = self.engine.stage(&snapshot, &mut self.files, &self.store)?;
 		for file in &staged {
-			self.config.policy.enforce_write(
+			self.files.enforce_write(
 				&file.display,
 				file.op,
 				file.move_to.as_ref().map(|m| m.display.as_str()),
@@ -261,6 +325,9 @@ impl Session {
 			};
 
 			let mut tag: Option<String> = None;
+			// Updated files register their response rows (plus still-valid prior
+			// provenance) against the minted tag: (store key, carried lines, drifted).
+			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
@@ -270,16 +337,27 @@ impl Session {
 				},
 				FileOp::Create | FileOp::Update => {
 					let dest_canonical = file.move_to.as_ref().map(|m| canonical_key(&m.absolute));
+					let track_provenance = file.record_snapshot && file.op == FileOp::Update;
+					let prior = if track_provenance {
+						self.store.by_content(&canonical, &file.before)
+					} else {
+						None
+					};
 					if let Some(dest) = &dest_canonical {
 						self.store.relocate(&canonical, dest);
 					}
 					if file.record_snapshot {
 						let recorded = recorded_view(&file, &response.written);
-						if dest_canonical.is_none() && recorded != file.after {
+						let drifted = recorded != file.after;
+						if dest_canonical.is_none() && drifted {
 							file.warnings.push(write_drift_warning(&file.display));
 						}
-						let key = dest_canonical.as_deref().unwrap_or(&canonical);
-						tag = Some(self.store.record(key, &recorded, None));
+						let key = dest_canonical.unwrap_or_else(|| canonical.clone());
+						tag = Some(self.store.record(&key, &recorded, None));
+						if track_provenance {
+							let carried = carried_seen_lines(&file.before, &recorded, prior.as_ref());
+							provenance = Some((key, carried, drifted));
+						}
 					}
 					self.store.reset_noop(&canonical);
 				},
@@ -292,14 +370,24 @@ impl Session {
 				.move_to
 				.as_ref()
 				.map_or(file.display.as_str(), |m| m.display.as_str());
-			let header = match file.header {
-				HeaderKind::HashlineTag => {
-					let tag = tag.unwrap_or_else(|| file_hash(&file.after));
-					format!("[{header_path}#{tag}]")
-				},
-				HeaderKind::Path => format!("[{header_path}]"),
+			let response_tag = match file.header {
+				HeaderKind::HashlineTag => Some(tag.unwrap_or_else(|| file_hash(&file.after))),
+				HeaderKind::Path => None,
 			};
+			let header = response_tag
+				.as_ref()
+				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
+			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
+				// A drifted write shows rows of the previewed text, not of the recorded
+				// version the tag names, so only carried lines stay anchorable.
+				if !drifted {
+					seen_lines.extend(seen_lines_from_body(&text));
+				}
+				if !seen_lines.is_empty() {
+					self.store.record_seen_lines(&key, tag, &seen_lines);
+				}
+			}
 			let parse_regressed = file.op != FileOp::Delete
 				&& file.op != FileOp::Noop
 				&& file.existed
@@ -358,6 +446,26 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
 	normalize_to_lf(strip_bom(written).1).into_owned()
+}
+
+/// Prior-snapshot lines that keep both their number and content in `after`:
+/// the unchanged leading run, filtered by what `prior` displayed. A missing or
+/// unrestricted prior snapshot let the edit anchor anywhere, so the whole run
+/// carries over. Lines after the first change shifted, so their old numbers
+/// never carry.
+fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Vec<u32> {
+	let unchanged = before
+		.split('\n')
+		.zip(after.split('\n'))
+		.take_while(|(old, new)| old == new)
+		.count();
+	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
+	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
+		// `range(1..=0)` panics; a first-line change carries nothing.
+		_ if unchanged == 0 => Vec::new(),
+		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
+		_ => (1..=unchanged).collect(),
+	}
 }
 
 /// Model-facing text for one file (`formatEditResultText`).

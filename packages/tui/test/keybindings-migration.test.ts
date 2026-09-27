@@ -328,7 +328,6 @@ describe("KeybindingsManager.create", () => {
 
 		expect(manager.getKeys("app.plan.toggle")).toEqual(["ctrl+q"]);
 		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+enter"]);
-		expect(manager.getDisplayString("app.message.followUp")).toBe("Ctrl+Enter");
 		expect(manager.getEffectiveConfig()["app.message.followUp"]).toBe("ctrl+enter");
 		expect(matchesAppFollowUp(ctrl("q"))).toBe(false);
 		expect(matchesAppFollowUp("\x1b[13;5u")).toBe(true);

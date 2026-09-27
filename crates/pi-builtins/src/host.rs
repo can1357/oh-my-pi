@@ -12,15 +12,18 @@
 //! A utility implements [`Utility`]: a `clap` argument model plus a synchronous
 //! [`Utility::run`] body. [`util`] wraps that into a [`Registration`] which
 //!
-//! 1. materializes process-substitution arguments (`diff <(a) <(b)`) into real
-//!    file descriptors,
-//! 2. parses `argv`, rendering `--help`/`--version` on stdout and usage errors
+//! 1. parses `argv`, rendering `--help`/`--version` on stdout and usage errors
 //!    on stderr with the utility's own exit status,
-//! 3. runs the body on a blocking thread, so a slow utility never stalls the
+//! 2. runs the body on a blocking thread, so a slow utility never stalls the
 //!    async runtime and concurrent pipeline stages stay isolated,
-//! 4. observes the shell's cancellation token (abort/`timeout`), and
-//! 5. contains panics at the builtin boundary instead of taking down the
+//! 3. observes the shell's cancellation token (abort/`timeout`), and
+//! 4. contains panics at the builtin boundary instead of taking down the
 //!    long-lived host process.
+//!
+//! Paths go through [`ShellPaths`], which also maps descriptor paths
+//! (`/dev/stdin`, `/dev/fd/63` from `diff <(a) <(b)`, `/dev/tty`) onto the
+//! *shell's* descriptors: the builtin shares the host process, whose own fd 0
+//! is the host's terminal.
 
 // The whole module is API consumed by the feature-gated utility modules; a build
 // with no utility features enabled legitimately uses none of it.
@@ -36,18 +39,23 @@ use std::{
 	path::{Path, PathBuf},
 	time::Duration,
 	sync::{
-		Arc,
+		Arc, OnceLock,
 		atomic::{AtomicBool, Ordering},
 	},
 };
 
 use parking_lot::Mutex;
+use pi_vfs::{BlockingFs, Metadata, absolute_path};
 
 use brush_core::{
-	Error, ExecutionContext, ExecutionResult, ShellExtensions,
+	CommandArg, Error, ExecutionContext, ExecutionExitCode, ExecutionParameters, ExecutionResult,
+	ExecutionSpawnResult, Shell, ShellExtensions,
 	builtins::{self, Registration},
+	commands::{ShellForCommand, SimpleCommand},
 	openfiles::{self, OpenFile, OpenFiles},
+	processes::ProcessWaitResult,
 };
+use tokio_util::sync::CancellationToken;
 
 /// A command-line utility implemented as a shell builtin.
 ///
@@ -61,6 +69,11 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// Exit status for a usage error. Most GNU utilities use 1; the
 	/// `ls`/`grep`/`cmp` families reserve 1 for "differences found" and use 2.
 	const USAGE_ERROR: u8 = 1;
+
+	/// Whether the utility runs command lines through [`Host::run_command`]
+	/// (`xargs`, `find -exec`, `ifne`). The adapter then forks a subshell of
+	/// the invoking shell to serve them; every other utility skips that cost.
+	const RUNS_COMMANDS: bool = false;
 
 	/// Rewrites raw `argv` before clap parses it.
 	///
@@ -99,9 +112,13 @@ pub(crate) struct Host {
 	/// same serialized writer [`Host::stdout_writer`] returns, so interleaving
 	/// follows write order exactly.
 	pub stderr: StreamWriter,
+	/// Unwrapped stdout retained for provider-aware self-read detection.
+	stdout_handle:         Option<OpenFile>,
+	/// Populated on the utility worker, where virtual handle queries may block.
+	stdout_metadata:       OnceLock<Option<Metadata>>,
 
 	name:                  String,
-	cwd:                   PathBuf,
+	paths:                 ShellPaths,
 	env:                   HashMap<String, String>,
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
@@ -112,6 +129,43 @@ pub(crate) struct Host {
 	/// Emulated SIGPIPE state shared with every guarded stream handed out by
 	/// this host; see [`Sigpipe`].
 	sigpipe:               Arc<Sigpipe>,
+	/// Requests to the adapter's [`CommandRunner`]; `None` unless the utility
+	/// set [`Utility::RUNS_COMMANDS`].
+	commands:              Option<flume::Sender<CommandRequest>>,
+}
+
+fn output_handle(file: &OpenFile) -> Option<OpenFile> {
+	match file {
+		OpenFile::File(_) | OpenFile::Vfs(_) | OpenFile::Stdout(_) => file.try_clone().ok(),
+		_ => None,
+	}
+}
+
+fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+	match file {
+		OpenFile::File(file) => file.metadata().ok().map(Metadata::from),
+		OpenFile::Vfs(file) => file.metadata().ok(),
+		OpenFile::Stdout(stdout) => {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsFd;
+				let handle = stdout.as_fd().try_clone_to_owned().ok()?;
+				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+			}
+			#[cfg(windows)]
+			{
+				use std::os::windows::io::AsHandle;
+				let handle = stdout.as_handle().try_clone_to_owned().ok()?;
+				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				let _ = stdout;
+				None
+			}
+		},
+		_ => None,
+	}
 }
 
 /// Exit status of a process killed by SIGPIPE (128 + 13).
@@ -224,6 +278,172 @@ impl Drop for CancelOnDrop {
 	}
 }
 
+/// Where [`ShellPaths::resolve`] points a descriptor path the shell cannot
+/// back: a closed descriptor, or `/dev/tty` with no terminal. No process has
+/// descriptor -1, so every filesystem call on it fails with `ENOENT`, which is
+/// what opening a closed descriptor's path reports. (A process without a
+/// terminal gets `ENXIO` for `/dev/tty`; a path cannot carry that errno.)
+#[cfg(unix)]
+const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
+
+/// How a builtin running inside the host process sees paths.
+///
+/// Relative paths resolve against the shell's working directory, not the
+/// process's. Paths naming descriptors (`/dev/stdin`, `/dev/fd/63` from
+/// `<(…)`, `/dev/tty`) resolve against the shell's descriptors: opened for
+/// real they would reach the host process's own, and its fd 0 is the host's
+/// terminal, so `cat /dev/stdin` would block on the host's keystrokes.
+///
+/// Clones share the duplicated descriptors, which stay open while any clone
+/// is alive, so a resolved `/dev/fd/N` path never outlives its descriptor.
+/// The default resolves against the process working directory with no
+/// descriptors, for tests that build utility state without a shell.
+#[derive(Clone, Default)]
+pub(crate) struct ShellPaths {
+	cwd:         PathBuf,
+	filesystem:  BlockingFs,
+	#[cfg(unix)]
+	descriptors: Arc<[(brush_core::ShellFd, OpenFile)]>,
+}
+
+impl std::fmt::Debug for ShellPaths {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let mut debug = f.debug_struct("ShellPaths");
+		debug.field("cwd", &self.cwd);
+		#[cfg(unix)]
+		debug.field("fds", &self.descriptors.iter().map(|(fd, _)| *fd).collect::<Vec<_>>());
+		debug.finish()
+	}
+}
+
+impl ShellPaths {
+	/// Captures the working directory and the descriptors visible to the
+	/// command in `context`: usually just 0/1/2, plus any from `exec N>` or
+	/// process substitution.
+	pub fn new<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+		let filesystem = context.shell.filesystem().blocking();
+		#[cfg(unix)]
+		let descriptors: Arc<[(brush_core::ShellFd, OpenFile)]> = context
+			.open_fds()
+			.map(|(fd, file)| (fd, file.clone()))
+			.collect();
+		#[cfg(unix)]
+		let filesystem = descriptors.iter().fold(filesystem, |filesystem, (fd, file)| {
+			match file.as_vfs().and_then(|file| file.try_clone().ok()) {
+				Some(file) => filesystem.mount_file(virtual_descriptor_path(*fd), file),
+				None => filesystem,
+			}
+		});
+		Self {
+			cwd: context.shell.working_dir().to_path_buf(),
+			filesystem,
+			#[cfg(unix)]
+			descriptors,
+		}
+	}
+
+	/// A resolver with no descriptors, for tests that exercise path handling
+	/// without a shell.
+	#[cfg(test)]
+	pub fn with_cwd(cwd: impl Into<PathBuf>) -> Self {
+		Self { cwd: cwd.into(), ..Self::default() }
+	}
+
+	/// The shell working directory that relative paths resolve against.
+	pub fn cwd(&self) -> &Path {
+		&self.cwd
+	}
+
+	/// Filesystem captured from the shell, shared by utility worker threads.
+	pub fn fs(&self) -> &BlockingFs {
+		&self.filesystem
+	}
+
+	/// Resolves `path` to what the shell would open.
+	///
+	/// Relative paths join [`ShellPaths::cwd`]. Windows aliases (`/c/...`,
+	/// `/tmp`) become native paths via `brush_core::sys::fs::normalize_shell_path`.
+	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
+	/// descriptor, or a path that cannot be opened when the shell has none.
+	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+		let resolved = self.absolute(path.as_ref());
+		#[cfg(unix)]
+		if let Some(descriptor) = openfiles::DescriptorPath::parse(&resolved) {
+			return self.descriptor_target(descriptor);
+		}
+		resolved
+	}
+
+	/// Like [`ShellPaths::resolve`], for calls that inspect `path` itself
+	/// without following it (`lstat`, `readlink`).
+	///
+	/// `/dev/stdin`, `/dev/stdout`, and `/dev/stderr` are symlinks, and
+	/// `/dev/tty` a device node, that read the same in every process; only
+	/// following them reaches a process's own descriptors, so they stay as
+	/// spelled. `/dev/fd/N` names the descriptor itself and still resolves.
+	pub fn resolve_link(&self, path: impl AsRef<Path>) -> PathBuf {
+		let resolved = self.absolute(path.as_ref());
+		#[cfg(unix)]
+		if let Some(descriptor) = openfiles::DescriptorPath::parse(&resolved)
+			&& descriptor != openfiles::DescriptorPath::Terminal
+			// `/dev/stdin` and friends sit directly under `/dev`.
+			&& resolved.components().count() != 3
+		{
+			return self.descriptor_target(descriptor);
+		}
+		resolved
+	}
+
+	fn absolute(&self, path: &Path) -> PathBuf {
+		if pi_vfs::is_virtual_path(path) {
+			return path.to_path_buf();
+		}
+		let normalized_path = brush_core::sys::fs::normalize_shell_path(path);
+		absolute_path(&self.cwd, normalized_path.as_ref())
+	}
+
+	#[cfg(unix)]
+	fn descriptor_target(&self, descriptor: openfiles::DescriptorPath) -> PathBuf {
+		use std::os::fd::AsRawFd as _;
+
+		let fd = match descriptor {
+			openfiles::DescriptorPath::Fd(fd) => fd,
+			// Mirrors `brush_core::commands::child_session_action`: a command
+			// whose stdin is not a terminal runs with no controlling terminal,
+			// like the external commands the shell detaches into their own
+			// session.
+			openfiles::DescriptorPath::Terminal => {
+				return if self.file(OpenFiles::STDIN_FD).is_some_and(OpenFile::is_terminal) {
+					PathBuf::from("/dev/tty")
+				} else {
+					PathBuf::from(UNAVAILABLE_DESCRIPTOR)
+				};
+			},
+		};
+		if self.file(fd).and_then(OpenFile::as_vfs).is_some() {
+			return virtual_descriptor_path(fd);
+		}
+		match self.file(fd).and_then(|file| file.try_borrow_as_fd().ok()) {
+			Some(host_fd) => PathBuf::from(format!("/dev/fd/{}", host_fd.as_raw_fd())),
+			None => PathBuf::from(UNAVAILABLE_DESCRIPTOR),
+		}
+	}
+
+	#[cfg(unix)]
+	fn file(&self, fd: brush_core::ShellFd) -> Option<&OpenFile> {
+		self.descriptors
+			.iter()
+			.find(|(shell_fd, _)| *shell_fd == fd)
+			.map(|(_, file)| file)
+	}
+}
+
+/// Virtual descriptors cannot share native `/dev/fd` numbers in the overlay.
+#[cfg(unix)]
+fn virtual_descriptor_path(fd: brush_core::ShellFd) -> PathBuf {
+	PathBuf::from(format!("omp-descriptor://{fd}"))
+}
+
 impl Host {
 	/// The name the utility was invoked as. Differs from [`Utility::NAME`] when
 	/// one implementation backs several builtins (`grep` and `rg`).
@@ -233,23 +453,42 @@ impl Host {
 
 	/// The shell working directory that relative paths resolve against.
 	pub fn cwd(&self) -> &Path {
-		&self.cwd
+		self.paths.cwd()
 	}
 
-	/// Resolves `path` against [`Host::cwd`]; absolute paths pass through.
+	/// Native working directory for utility subprocesses; rejects virtual filesystem views.
+	pub fn native_cwd(&self) -> io::Result<&Path> {
+		native_working_dir(self.fs(), self.cwd())
+	}
+
+	/// Resolves `path` to what the shell would open; see [`ShellPaths::resolve`].
 	///
-	/// Every path argument must go through this before touching the
-	/// filesystem: the host process's current directory is unrelated to the
-	/// shell's. Windows aliases (`/c/...`, `/tmp`) are rewritten to native
-	/// paths by `brush_core::sys::fs::normalize_shell_path`.
+	/// Every path argument must go through this (or [`Host::paths`]) before
+	/// touching the filesystem: the host process's working directory and
+	/// descriptors are unrelated to the shell's.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
-		let path = normalized_path.as_ref();
-		if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			self.cwd.join(path)
-		}
+		self.paths.resolve(path)
+	}
+
+	/// The resolver behind [`Host::resolve`], for utility state that outlives
+	/// a `&Host` borrow.
+	pub fn paths(&self) -> &ShellPaths {
+		&self.paths
+	}
+
+	/// Filesystem for every utility path access, usable on its blocking worker.
+	pub fn fs(&self) -> &BlockingFs {
+		self.paths.fs()
+	}
+
+	/// Whether `path` identifies the regular file currently backing stdout.
+	pub fn path_is_stdout(&self, path: &Path) -> bool {
+		self.stdout_metadata
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.as_ref()
+			.is_some_and(|stdout| {
+				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
+			})
 	}
 
 	/// Looks up an exported shell variable.
@@ -280,7 +519,7 @@ impl Host {
 		Arc::clone(&self.cancel)
 	}
 
-	/// Whether stdin is a shell pipe or custom stream, and so should be treated
+	/// Whether stdin is a shell pipe, virtual file, or custom stream, and so should be treated
 	/// as implicit input rather than a terminal. `rg PATTERN` uses this to
 	/// decide between searching stdin and searching `.`.
 	pub const fn stdin_is_search_input(&self) -> bool {
@@ -354,7 +593,8 @@ impl Host {
 	/// its compressor from inside the temp-file abstraction, for instance.
 	pub fn child_env(&self) -> ChildEnv {
 		ChildEnv {
-			cwd:    self.cwd.clone(),
+			cwd:    self.paths.cwd().to_path_buf(),
+			filesystem: self.fs().clone(),
 			env:    Arc::new(
 				self
 					.env
@@ -366,45 +606,211 @@ impl Host {
 		}
 	}
 
-	/// Runs `command` with stdin from the null device and stdout/stderr piped
-	/// back into this host's streams, returning the child's exit status.
+	/// Runs `command` in a subshell of the invoking shell and waits for it.
 	///
-	/// The host's streams are in-process `Write` handles (pipes or in-memory
-	/// buffers), not inheritable descriptors, and the process's own fd 0/1/2
-	/// belong to the TUI — a child must never inherit stdio. Child stdout
-	/// streams through on the calling thread while a helper thread drains
-	/// stderr into a buffer, which is forwarded once the child exits.
+	/// Dispatch is the shell's own (builtins before `PATH`, shell functions
+	/// skipped, as for `command`), so an in-process utility sees the virtual
+	/// `scheme://` paths no external program can open. The command writes
+	/// straight to this utility's stdout and stderr descriptors; pending
+	/// diagnostics are flushed first so output stays in order. Every command
+	/// shares one subshell, so a `cd` inside it cannot leak into the caller;
+	/// its working directory is reset before each run.
 	///
-	/// Callers remain responsible for `current_dir` and the child environment
-	/// (`env_clear().envs(host.env())`).
-	pub fn run_captured(
-		&mut self,
-		command: &mut std::process::Command,
-	) -> io::Result<std::process::ExitStatus> {
-		command
-			.stdin(std::process::Stdio::null())
-			.stdout(std::process::Stdio::piped())
-			.stderr(std::process::Stdio::piped());
-		let mut child = command.spawn()?;
-
-		let mut child_err = child.stderr.take();
-		let stderr_thread = std::thread::spawn(move || {
-			let mut buf = Vec::new();
-			if let Some(err) = child_err.as_mut() {
-				let _ = err.read_to_end(&mut buf);
-			}
-			buf
-		});
-
-		if let Some(mut out) = child.stdout.take() {
-			let _ = io::copy(&mut out, &mut self.stdout);
-		}
-		let status = child.wait();
-		if let Ok(buf) = stderr_thread.join() {
-			let _ = self.stderr.write_all(&buf);
-		}
-		status
+	/// # Errors
+	///
+	/// - [`io::ErrorKind::NotFound`]: no builtin or program is named `argv[0]`.
+	/// - [`io::ErrorKind::PermissionDenied`]: the command cannot be executed
+	///   (not executable, or an external program in a virtual directory).
+	/// - [`io::ErrorKind::Interrupted`]: the shell cancelled this utility.
+	/// - [`io::ErrorKind::Unsupported`]: the utility did not set
+	///   [`Utility::RUNS_COMMANDS`].
+	/// - Any other shell failure (bad working directory, redirection error).
+	pub fn run_command(&mut self, mut command: ShellCommand) -> io::Result<CommandStatus> {
+		let Some(commands) = &self.commands else {
+			return Err(io::Error::new(
+				io::ErrorKind::Unsupported,
+				format!("{} cannot run commands", self.name),
+			));
+		};
+		command.cwd = command.cwd.map(|dir| self.paths.resolve(dir));
+		let (reply, response) = flume::bounded(1);
+		let request = CommandRequest { command, reply };
+		let _ = self.stderr.flush();
+		commands.send(request).map_err(|_| cancelled_command())?;
+		response.recv().map_err(|_| cancelled_command())?
 	}
+}
+
+/// A command line for [`Host::run_command`]: `argv[0]` names the builtin or
+/// program. Stdin defaults to the null device, as GNU `xargs` and `find
+/// -exec` give their children.
+pub(crate) struct ShellCommand {
+	argv:  Vec<OsString>,
+	cwd:   Option<PathBuf>,
+	stdin: Option<OpenFile>,
+}
+
+impl ShellCommand {
+	pub fn new(argv: Vec<OsString>) -> Self {
+		Self { argv, cwd: None, stdin: None }
+	}
+
+	/// Runs in `dir` (relative to the shell's working directory) instead of
+	/// the shell's working directory; `find -execdir` uses this.
+	pub fn current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+		self.cwd = Some(dir.into());
+		self
+	}
+
+	/// Feeds `stdin` to the command as fd 0.
+	pub fn stdin(mut self, stdin: OpenFile) -> Self {
+		self.stdin = Some(stdin);
+		self
+	}
+}
+
+/// How a command run through [`Host::run_command`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandStatus {
+	/// A builtin returned, or a process exited, with this status.
+	Exited(u8),
+	/// A process was killed by this signal.
+	Signaled(i32),
+}
+
+impl CommandStatus {
+	pub const fn success(self) -> bool {
+		matches!(self, Self::Exited(0))
+	}
+
+	/// The status a shell reports in `$?`: the exit status, or `128 + signal`.
+	pub const fn code(self) -> i32 {
+		match self {
+			Self::Exited(code) => code as i32,
+			Self::Signaled(signal) => 128 + signal,
+		}
+	}
+}
+
+impl From<std::process::ExitStatus> for CommandStatus {
+	fn from(status: std::process::ExitStatus) -> Self {
+		#[cfg(unix)]
+		{
+			use std::os::unix::process::ExitStatusExt;
+			if let Some(signal) = status.signal() {
+				return Self::Signaled(signal);
+			}
+		}
+		Self::Exited(status.code().map_or(1, |code| (code & 0xff) as u8))
+	}
+}
+
+/// A [`Host::run_command`] call in flight from the utility's blocking worker
+/// to the adapter's [`CommandRunner`].
+struct CommandRequest {
+	command: ShellCommand,
+	reply:   flume::Sender<io::Result<CommandStatus>>,
+}
+
+/// The error a utility sees once the adapter stops serving commands: the
+/// shell cancelled it, so its request was dropped unanswered.
+fn cancelled_command() -> io::Error {
+	io::Error::new(io::ErrorKind::Interrupted, "command cancelled")
+}
+
+/// Serves [`Host::run_command`] on the async side, where a shell can run.
+///
+/// Holds a subshell forked from the invoking shell when the utility started,
+/// so commands see its builtins, exported variables, and filesystem, while
+/// side effects on shell state (`cd`, assignments) stay inside the subshell
+/// the way they would inside a child process.
+struct CommandRunner<SE: ShellExtensions> {
+	shell:    Shell<SE>,
+	params:   ExecutionParameters,
+	cwd:      PathBuf,
+	requests: flume::Receiver<CommandRequest>,
+}
+
+impl<SE: ShellExtensions> CommandRunner<SE> {
+	fn new(context: &ExecutionContext<'_, SE>, requests: flume::Receiver<CommandRequest>) -> Self {
+		let mut shell = context.shell.clone();
+		shell.options_mut().interactive = false;
+		let cwd = shell.working_dir().to_path_buf();
+		Self { shell, params: context.params.clone(), cwd, requests }
+	}
+
+	/// Runs one request and answers it; a utility that stopped waiting (it
+	/// was cancelled) simply never reads the answer.
+	async fn serve(&mut self, request: CommandRequest) {
+		let status = self.run(request.command).await.map_err(|error| {
+			let kind = match ExecutionExitCode::from(&error) {
+				ExecutionExitCode::NotFound => io::ErrorKind::NotFound,
+				ExecutionExitCode::CannotExecute => io::ErrorKind::PermissionDenied,
+				_ => io::ErrorKind::Other,
+			};
+			io::Error::new(kind, error.to_string())
+		});
+		let _ = request.reply.send(status);
+	}
+
+	async fn run(&mut self, command: ShellCommand) -> Result<CommandStatus, Error> {
+		let dir = command.cwd.as_deref().unwrap_or(&self.cwd);
+		if self.shell.working_dir() != dir {
+			self.shell.set_working_dir(dir).await?;
+		}
+		let mut params = self.params.clone();
+		params.set_fd(OpenFiles::STDIN_FD, or_null(command.stdin)?);
+		let cancel = params.cancel_token();
+		let args: Vec<CommandArg> = command
+			.argv
+			.into_iter()
+			.map(|arg| CommandArg::from(arg.to_string_lossy().into_owned()))
+			.collect();
+		let name = args.first().map(ToString::to_string).unwrap_or_default();
+		let mut simple =
+			SimpleCommand::new(ShellForCommand::ParentShell(&mut self.shell), params, name, args);
+		simple.use_functions = false;
+		let spawned = match simple.execute().await {
+			Ok(spawned) => spawned,
+			// Nothing ran; the utility reports that in its own words.
+			Err(error)
+				if matches!(
+					ExecutionExitCode::from(&error),
+					ExecutionExitCode::NotFound | ExecutionExitCode::CannotExecute
+				) =>
+			{
+				return Err(error);
+			},
+			// A builtin ran and failed: report it as the shell does after any
+			// command, and hand back the status it would put in `$?`.
+			Err(error) => {
+				let mut stderr = self.params.stderr(&self.shell);
+				let _ = self.shell.display_error(&mut stderr, &error).await;
+				return Ok(CommandStatus::Exited(ExecutionExitCode::from(&error).into()));
+			},
+		};
+		wait_status(spawned, cancel).await
+	}
+}
+
+/// Waits for a spawned command, keeping the signal that killed a process
+/// (the shell's own result folds it into `128 + signal`).
+async fn wait_status(
+	spawned: ExecutionSpawnResult,
+	cancel: Option<CancellationToken>,
+) -> Result<CommandStatus, Error> {
+	let mut child = match spawned {
+		ExecutionSpawnResult::StartedProcess(child) => child,
+		spawned => {
+			let result = ExecutionResult::from(spawned.wait_with_cancel(cancel).await?);
+			return Ok(CommandStatus::Exited(result.exit_code.into()));
+		},
+	};
+	Ok(match child.wait(cancel).await? {
+		ProcessWaitResult::Completed(output) => output.status.into(),
+		ProcessWaitResult::Stopped => CommandStatus::Exited(ExecutionResult::stopped().exit_code.into()),
+		ProcessWaitResult::Cancelled => CommandStatus::Exited(ExecutionExitCode::Interrupted.into()),
+	})
 }
 
 /// Buffered writer for a utility's output streams, with a flush policy
@@ -579,8 +985,17 @@ fn same_destination(_a: &OpenFile, _b: &OpenFile) -> bool {
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
+	filesystem: BlockingFs,
 	env:    Arc<Vec<(String, String)>>,
 	stderr: OpenFile,
+}
+
+fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<&'a Path> {
+	if filesystem.is_native_local(cwd) {
+		Ok(cwd)
+	} else {
+		Err(pi_vfs::unsupported("external process in a virtual working directory"))
+	}
 }
 
 impl ChildEnv {
@@ -589,14 +1004,15 @@ impl ChildEnv {
 	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
-	pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+	pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> io::Result<std::process::Command> {
+		let cwd = native_working_dir(&self.filesystem, &self.cwd)?;
 		let mut command = std::process::Command::new(program);
 		command
-			.current_dir(&self.cwd)
+			.current_dir(cwd)
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(std::process::Stdio::piped());
-		command
+		Ok(command)
 	}
 
 	/// Drains a child's piped stderr into the command's standard error on a
@@ -642,6 +1058,29 @@ impl Stdin {
 	/// (`is_terminal`) or hand it to a child process.
 	pub const fn file(&self) -> &OpenFile {
 		&self.file
+	}
+
+	/// Duplicates fd 0 for a helper thread (`ifne` pumping its input into the
+	/// command); the duplicate observes the same cancellation.
+	pub fn try_clone(&self) -> io::Result<Self> {
+		let file = self.file.try_clone()?;
+		let fd = pollable_fd(&file);
+		Ok(Self { file, fd, cancel: Arc::clone(&self.cancel) })
+	}
+}
+
+/// The raw descriptor [`Stdin`] polls for readiness, so a blocked read
+/// observes cancellation; `None` off unix or for in-process streams.
+fn pollable_fd(file: &OpenFile) -> Option<i32> {
+	#[cfg(unix)]
+	{
+		use std::os::fd::AsRawFd;
+		file.try_borrow_as_fd().ok().map(|fd| fd.as_raw_fd())
+	}
+	#[cfg(not(unix))]
+	{
+		let _ = file;
+		None
 	}
 }
 
@@ -811,11 +1250,10 @@ pub(crate) fn util<U: Utility, SE: ShellExtensions>() -> Registration<SE> {
 
 /// Adapter turning a [`Utility`] into a brush builtin.
 ///
-/// Holds the raw argument vector rather than a parsed `U`: process-substitution
-/// arguments can only be materialized once the shell is in hand, which happens
-/// in [`builtins::Command::execute`], and parse failures must be reported on the
-/// utility's own terms (help on stdout, usage errors with the utility's exit
-/// status) rather than through brush's generic usage-error path.
+/// Holds the raw argument vector rather than a parsed `U`: parse failures must
+/// be reported on the utility's own terms (help on stdout, usage errors with
+/// the utility's exit status) rather than through brush's generic usage-error
+/// path.
 pub(crate) struct Util<U: Utility> {
 	argv:    Vec<String>,
 	_marker: PhantomData<fn() -> U>,
@@ -869,10 +1307,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	// Capture everything owned *before* the first await so the returned future
 	// stays `Send`: the borrowed `ExecutionContext` (and its `&mut Shell`) is
 	// dropped before we await the blocking task.
-	#[cfg_attr(not(unix), expect(unused_mut, reason = "rewritten only on unix"))]
-	let mut argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
-	#[cfg(unix)]
-	let process_substitution_fds = materialize_process_substitution_fds(&context, &mut argv)?;
+	let argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
 
 	let argv = match U::rewrite_argv(argv) {
 		Ok(argv) => argv,
@@ -901,40 +1336,72 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	let cancel = context.cancel_token();
 	let cancel_flag = host.cancel_flag();
 	let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel_flag));
+	let mut runner = U::RUNS_COMMANDS.then(|| {
+		let (sender, requests) = flume::unbounded();
+		host.commands = Some(sender);
+		CommandRunner::new(&context, requests)
+	});
 	drop(context);
 
 	let mut handle = tokio::task::spawn_blocking(move || {
-		#[cfg(unix)]
-		let _process_substitution_fds = process_substitution_fds;
-		run_caught::<U>(parsed, &mut host)
+		let code = run_caught::<U>(parsed, &mut host);
+		if let Err(error) = host.fs().drain_closes() {
+			host.error(error, 1);
+			if code == 0 { 1 } else { code }
+		} else {
+			code
+		}
 	});
 
 	// Respect shell abort/`timeout`. On cancel we set the host's cancel flag,
-	// which makes a blocked stdin read return EOF; the utility unwinds cleanly
+	// which makes a blocked stdin read return EOF, and drop the runner, which
+	// fails any pending or later `run_command`; the utility unwinds cleanly
 	// (flushing what it already produced) and the blocking task completes. We
 	// await that completion before returning so no detached thread keeps
-	// writing to the command's (possibly redirected) descriptors.
-	let code = match cancel {
-		Some(token) => {
-			let token_check = token.clone();
-			tokio::select! {
-				biased;
-				() = token.cancelled() => {
-					cancel_flag.store(true, Ordering::Relaxed);
-					let _ = (&mut handle).await;
-					130
-				},
-				result = &mut handle => {
-					// If the token already fired, the task only finished because
-					// our cancel flag unblocked it — report interrupted.
-					if token_check.is_cancelled() { 130 } else { result.unwrap_or(1) }
-				},
-			}
-		},
-		None => handle.await.unwrap_or(1),
+	// writing to the command's (possibly redirected) descriptors. A command
+	// being served when the token fires is cancelled through its own params.
+	let cancelled = async {
+		match &cancel {
+			Some(token) => token.cancelled().await,
+			None => std::future::pending().await,
+		}
+	};
+	tokio::pin!(cancelled);
+	let code = loop {
+		tokio::select! {
+			biased;
+			() = &mut cancelled => {
+				cancel_flag.store(true, Ordering::Relaxed);
+				drop(runner.take());
+				let _ = (&mut handle).await;
+				break 130;
+			},
+			result = &mut handle => {
+				// If the token already fired, the task only finished because
+				// our cancel flag unblocked it — report interrupted.
+				let interrupted = cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
+				break if interrupted { 130 } else { result.unwrap_or(1) };
+			},
+			Some(request) = next_request(runner.as_ref()) => {
+				if let Some(runner) = runner.as_mut() {
+					runner.serve(request).await;
+				}
+			},
+		}
 	};
 
 	Ok(ExecutionResult::new((code & 0xff) as u8))
+}
+
+/// The next [`Host::run_command`] request, or `None` once the utility has
+/// dropped its host (or never had a runner).
+async fn next_request<SE: ShellExtensions>(
+	runner: Option<&CommandRunner<SE>>,
+) -> Option<CommandRequest> {
+	match runner {
+		Some(runner) => runner.requests.recv_async().await.ok(),
+		None => None,
+	}
 }
 
 /// Runs a utility body, containing any panic at the builtin boundary and
@@ -979,21 +1446,11 @@ fn build_host<SE: ShellExtensions>(
 	name: &str,
 ) -> Result<Host, Error> {
 	let stdin = context.try_fd(OpenFiles::STDIN_FD);
-	// On unix, capture the raw stdin fd so reads can poll it for cancellation;
-	// the `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
-	#[cfg(unix)]
-	let stdin_fd: Option<i32> = {
-		use std::os::fd::AsRawFd;
-		stdin
-			.as_ref()
-			.and_then(|file| file.try_borrow_as_fd().ok())
-			.map(|fd| fd.as_raw_fd())
-	};
-	#[cfg(not(unix))]
-	let stdin_fd: Option<i32> = None;
+	// The `OpenFile` is kept alive by the `Stdin` below, so the fd stays valid.
+	let stdin_fd = stdin.as_ref().and_then(pollable_fd);
 	let stdin_is_search_input = stdin
 		.as_ref()
-		.is_some_and(|file| matches!(file, OpenFile::PipeReader(_) | OpenFile::Stream(_)));
+		.is_some_and(|file| matches!(file, OpenFile::PipeReader(_) | OpenFile::Stream(_) | OpenFile::Vfs(_)));
 
 	let mut env = HashMap::new();
 	for (key, var) in context.shell.env().iter_exported() {
@@ -1013,6 +1470,7 @@ fn build_host<SE: ShellExtensions>(
 	let cancel = Arc::new(AtomicBool::new(false));
 
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
+	let stdout_handle = output_handle(&stdout);
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
 	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
@@ -1037,14 +1495,17 @@ fn build_host<SE: ShellExtensions>(
 		},
 		stdout,
 		stderr,
+		stdout_handle,
+		stdout_metadata: OnceLock::new(),
 		name: invoked,
-		cwd: context.shell.working_dir().to_path_buf(),
+		paths: ShellPaths::new(context),
 		env,
 		cancel,
 		exit_code: 0,
 		stdin_is_search_input,
 		merged_out,
 		sigpipe,
+		commands: None,
 	})
 }
 
@@ -1055,43 +1516,6 @@ fn or_null(file: Option<OpenFile>) -> Result<OpenFile, Error> {
 		Some(file) => Ok(file),
 		None => openfiles::null(),
 	}
-}
-
-/// Recognizes brush's process-substitution arguments (`/dev/fd/<shell fd>`).
-#[cfg(unix)]
-fn process_substitution_fd(arg: &std::ffi::OsStr) -> Option<brush_core::ShellFd> {
-	arg.to_str()?
-		.strip_prefix("/dev/fd/")?
-		.parse::<brush_core::ShellFd>()
-		.ok()
-}
-
-/// Rewrites `/dev/fd/<shell fd>` arguments to real descriptors of the host
-/// process, returning the owned descriptors that must stay alive for the
-/// duration of the utility.
-///
-/// Brush allocates process-substitution pipes in its own descriptor table, so
-/// the shell fd number in the argument is meaningless to `open`.
-#[cfg(unix)]
-fn materialize_process_substitution_fds<SE: ShellExtensions>(
-	context: &ExecutionContext<'_, SE>,
-	argv: &mut [OsString],
-) -> Result<Vec<std::os::fd::OwnedFd>, Error> {
-	use std::os::fd::AsRawFd;
-
-	let mut fds = Vec::new();
-	for arg in argv {
-		let Some(shell_fd) = process_substitution_fd(arg) else {
-			continue;
-		};
-		let Some(file) = context.try_fd(shell_fd) else {
-			continue;
-		};
-		let fd = file.try_borrow_as_fd()?.try_clone_to_owned()?;
-		*arg = OsString::from(format!("/dev/fd/{}", fd.as_raw_fd()));
-		fds.push(fd);
-	}
-	Ok(fds)
 }
 
 /// Implements `clap::Parser` for a builder-style utility: `$ty` stores the
@@ -1141,8 +1565,9 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OsString, PathBuf, Read, Sigpipe,
-		SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles, run_caught,
+		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString, PathBuf, Read,
+		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
+		output_handle, run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -1221,14 +1646,17 @@ mod testing {
 					GuardedStream::Stderr,
 					&sigpipe,
 				)),
+				stdout_handle:         None,
+				stdout_metadata:       Default::default(),
 				name:                  name.to_string(),
-				cwd:                   cwd.into(),
+				paths:                 ShellPaths::with_cwd(cwd),
 				env:                   HashMap::new(),
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,
 				merged_out:            None,
 				sigpipe,
+				commands:              None,
 			};
 			(host, capture)
 		}
@@ -1238,6 +1666,8 @@ mod testing {
 		/// that model a departed reader (`… | head`) hand in the write end of a
 		/// pipe whose read end is already dropped.
 		pub(crate) fn set_test_stdout(&mut self, file: OpenFile) {
+			self.stdout_handle = output_handle(&file);
+			self.stdout_metadata.take();
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
 		}
 
@@ -1294,6 +1724,57 @@ mod testing {
 			},
 		};
 		(code, capture)
+	}
+
+	/// Runs `script` in a real shell with every builtin registered, from `cwd`
+	/// with `stdin` on fd 0, returning its status, stdout, and stderr.
+	///
+	/// Utilities that set [`Utility::RUNS_COMMANDS`] need this: an in-memory
+	/// [`Host::for_test`] has no shell to run their commands in.
+	pub(crate) async fn run_script(
+		script: &str,
+		stdin: &str,
+		cwd: &std::path::Path,
+	) -> (i32, String, String) {
+		use std::io::Seek;
+
+		use brush_core::{ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo};
+
+		use crate::factory::{BuiltinSet, default_builtins, utility_builtins};
+
+		let mut shell = Shell::builder()
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("test shell");
+		for (name, builtin) in utility_builtins() {
+			shell.register_builtin(name, builtin);
+		}
+		shell.set_working_dir(cwd).await.expect("test working directory");
+
+		let mut input = tempfile::tempfile().expect("stdin file");
+		input.write_all(stdin.as_bytes()).expect("write stdin");
+		input.rewind().expect("rewind stdin");
+		let output = tempfile::tempfile().expect("stdout file");
+		let error = tempfile::tempfile().expect("stderr file");
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, OpenFile::from(input));
+		params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(output.try_clone().expect("stdout")));
+		params.set_fd(OpenFiles::STDERR_FD, OpenFile::from(error.try_clone().expect("stderr")));
+		let result = shell
+			.run_string(script, &SourceInfo::from("run-script"), &params)
+			.await
+			.expect("run test script");
+
+		let read = |mut file: std::fs::File| {
+			let mut text = String::new();
+			file.rewind().expect("rewind capture");
+			file.read_to_string(&mut text).expect("read capture");
+			text
+		};
+		(i32::from(u8::from(result.exit_code)), read(output), read(error))
 	}
 
 	/// An in-memory [`openfiles::Stream`]: a cursor over fixed input, or an
@@ -1516,4 +1997,4 @@ mod testing {
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, run_util};
+pub(crate) use testing::{Capture, run_script, run_util};

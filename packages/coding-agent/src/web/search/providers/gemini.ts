@@ -2,7 +2,7 @@
  * Google Gemini Web Search Provider
  *
  * Uses Gemini's Google Search grounding via Cloud Code Assist API.
- * Cloud Code Assist auth is resolved through `AuthStorage.getOAuthAccess(...)`
+ * Cloud Code Assist auth is resolved through `AuthStorage.oauth.access(...)`
  * for the selected catalog provider; developer API auth uses the selected
  * model's registry resolver. The broker is the sole refresh authority, so this module never opens a
  * sibling SQLite store and never POSTs the broker sentinel to a Google token
@@ -17,8 +17,10 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
@@ -75,6 +77,7 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	timeoutMs?: number;
 	authStorage: AuthStorage;
 	model: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
 	modelRegistry: ModelRegistry;
 	sessionId?: string;
 	fetch?: FetchImpl;
@@ -121,7 +124,7 @@ export async function findGeminiAuth(
 	sessionId: string | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<GeminiAuthSeed | null> {
-	const access = await authStorage.getOAuthAccess(provider, sessionId, { signal });
+	const access = await authStorage.oauth.access(provider, sessionId, { signal });
 	if (!access?.accessToken || !access.projectId) return null;
 	return { provider, access, projectId: access.projectId };
 }
@@ -551,7 +554,12 @@ async function callGeminiDeveloperSearch(
  * Executes a web search using Google Gemini with Google Search grounding.
  */
 export async function searchGemini(params: GeminiSearchParams): Promise<SearchResponse> {
-	const selectedModel = params.model.id;
+	// Clamp like chat does so an unsupported level (`:xhigh` on a high-capped
+	// family) lands on the nearest routed tier instead of the default wire id.
+	const selectedModel = resolveWireModelId(
+		params.model,
+		clampThinkingLevelForModel(params.model, toReasoningEffort(concreteThinkingLevel(params.thinkingLevel))),
+	);
 	// Gemini's googleSearch grounding forwards the query to Google Search, which
 	// understands the classic operator set natively. Normalize directive aliases
 	// (domain: → site:, since: → after:, …) to canonical Google forms; leave
@@ -668,14 +676,14 @@ export class GeminiProvider extends SearchProvider {
 
 	isAvailable(authStorage: AuthStorage, model?: Model<Api>): boolean {
 		if (model) {
-			if (model.api === "google-gemini-cli") return authStorage.hasOAuth(model.provider);
-			if (model.api === "google-generative-ai") return authStorage.hasAuth(model.provider);
+			if (model.api === "google-gemini-cli") return authStorage.credentials.hasOAuth(model.provider);
+			if (model.api === "google-generative-ai") return authStorage.keys.source(model.provider) !== undefined;
 			return false;
 		}
 		return (
-			authStorage.hasOAuth("google-antigravity") ||
-			authStorage.hasOAuth("google-gemini-cli") ||
-			authStorage.hasAuth("google")
+			authStorage.credentials.hasOAuth("google-antigravity") ||
+			authStorage.credentials.hasOAuth("google-gemini-cli") ||
+			authStorage.keys.source("google") !== undefined
 		);
 	}
 
@@ -694,6 +702,7 @@ export class GeminiProvider extends SearchProvider {
 			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			model: params.model,
+			thinkingLevel: params.thinkingLevel,
 			modelRegistry: params.modelRegistry,
 			sessionId: params.sessionId,
 			fetch: params.fetch,

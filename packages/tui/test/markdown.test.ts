@@ -1316,6 +1316,31 @@ bar`,
 			// Should have italic from quote styling (\x1b[3m)
 			expect(allOutput.includes("\x1b[3m")).toBeTruthy();
 		});
+
+		it("preserves quote foreground color after inline code spans in blockquotes", () => {
+			const quoteFg = "\x1b[38;2;119;125;136m";
+			const codeFg = "\x1b[38;2;229;193;255m";
+			const testTheme = {
+				...defaultMarkdownTheme,
+				quote: (text: string) => `${quoteFg}${text}\x1b[39m`,
+				code: (text: string) => `${codeFg}${text}\x1b[39m`,
+			};
+
+			const markdown = new Markdown("> before `code` after", 0, 0, testTheme);
+			const [line] = markdown.render(80);
+
+			expect(line).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+
+			const multiMarkdown = new Markdown("> start `first` middle `second` end", 0, 0, testTheme);
+			const [multiLine] = multiMarkdown.render(80);
+			expect(multiLine).toContain(`${codeFg}first\x1b[39m${quoteFg}`);
+			expect(multiLine).toContain(`${codeFg}second\x1b[39m${quoteFg}`);
+
+			const htmlMarkdown = new Markdown("<blockquote>before <code>code</code> after</blockquote>", 0, 0, testTheme);
+			const [htmlLine] = htmlMarkdown.render(80);
+			expect(htmlLine).toContain(`${codeFg}code\x1b[39m${quoteFg}`);
+		});
+
 		it("should render list content inside blockquotes", () => {
 			const markdown = new Markdown("> 1. bla bla\n>    - nested bullet", 0, 0, defaultMarkdownTheme);
 

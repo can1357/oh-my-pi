@@ -16,24 +16,24 @@ function createFirecrawlFixture(authStorage: AuthStorage) {
 }
 
 const providerAuthStorage = createInMemoryAuthStorage();
-providerAuthStorage.setRuntimeApiKey("firecrawl", TEST_KEY);
+providerAuthStorage.keys.setRuntime("firecrawl", TEST_KEY);
 const providerFixture = createFirecrawlFixture(providerAuthStorage);
 
 const keylessAuthStorage = createInMemoryAuthStorage();
 const keylessFixture = createFirecrawlFixture(keylessAuthStorage);
-const keylessResolverSpy = vi.spyOn(keylessAuthStorage, "resolver").mockImplementation((provider, options) => {
+const keylessResolverSpy = vi.spyOn(keylessAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
 	expect(provider).toBe("firecrawl");
 	expect(options?.sessionId).toBe("session-firecrawl-test");
 	return async () => undefined;
 });
-const keylessHasAuthSpy = vi.spyOn(keylessAuthStorage, "hasAuth").mockImplementation(provider => {
+const keylessSourceSpy = vi.spyOn(keylessAuthStorage.keys, "source").mockImplementation(provider => {
 	expect(provider).toBe("firecrawl");
-	return false;
+	return undefined;
 });
 
 afterAll(() => {
 	keylessResolverSpy.mockRestore();
-	keylessHasAuthSpy.mockRestore();
+	keylessSourceSpy.mockRestore();
 	providerAuthStorage.close();
 	keylessAuthStorage.close();
 });
@@ -183,7 +183,7 @@ describe("Firecrawl web search provider", () => {
 	it("uses the initially resolved credential for the first authenticated request", async () => {
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage, "resolver").mockImplementation((provider, options) => {
+		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => {
@@ -217,7 +217,7 @@ describe("Firecrawl web search provider", () => {
 		const resolvedKeys = ["initial-firecrawl-key", "rotated-firecrawl-key"] as const;
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage, "resolver").mockImplementation((provider, options) => {
+		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => resolvedKeys[resolutionCount++];

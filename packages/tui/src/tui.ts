@@ -137,9 +137,12 @@ export interface TuiPaint {
 	readonly rows: number;
 }
 
+/** Observer of completed terminal paints; see {@link TUI.addPaintListener}. */
+export type PaintListener = (paint: TuiPaint) => void;
+
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
-	onPaint?: (paint: TuiPaint) => void;
+	onPaint?: PaintListener;
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -789,7 +792,7 @@ export class TUI extends Container {
 	#debugNextWindowTop = 0;
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
-	#paintListener: ((paint: TuiPaint) => void) | null;
+	#paintListeners = new Set<PaintListener>();
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
@@ -922,7 +925,7 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
-		this.#paintListener = options?.onPaint ?? null;
+		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
 	}
@@ -931,9 +934,15 @@ export class TUI extends Container {
 		return mode === "append" || mode === "rebuild" || mode === "preserve" ? mode : "preserve";
 	}
 
-	/** Install a listener for completed terminal paints. */
-	setPaintListener(listener: ((paint: TuiPaint) => void) | null): void {
-		this.#paintListener = listener;
+	/**
+	 * Observe completed terminal paints; returns the unsubscribe. Independent
+	 * observers (live stream publisher, session recorder) coexist.
+	 */
+	addPaintListener(listener: PaintListener): () => void {
+		this.#paintListeners.add(listener);
+		return () => {
+			this.#paintListeners.delete(listener);
+		};
 	}
 
 	/** Install the product-owned bounded frame provider. */
@@ -1256,6 +1265,13 @@ export class TUI extends Container {
 			// custom Terminal that does not distinguish DECRPM codes.
 			if (!supported && isInsideHerdr() && status === 0) return;
 			this.#setSynchronizedOutput(supported);
+		});
+		// Icons painted before the Glyph Protocol registration landed may sit in
+		// the terminal as tofu; a full repaint re-emits them against the glossary.
+		this.terminal.onGlyphProtocolReport?.(supported => {
+			if (!supported || this.#stopped) return;
+			this.invalidate();
+			this.requestRender(true);
 		});
 		this.terminal.start(
 			data => this.#handleInput(data),
@@ -2629,10 +2645,12 @@ export class TUI extends Container {
 	}
 
 	#notifyPaint(paint: TuiPaint): void {
-		try {
-			this.#paintListener?.(paint);
-		} catch (err) {
-			logger.error("TUI paint listener failed", { err });
+		for (const listener of this.#paintListeners) {
+			try {
+				listener(paint);
+			} catch (err) {
+				logger.error("TUI paint listener failed", { err });
+			}
 		}
 	}
 
