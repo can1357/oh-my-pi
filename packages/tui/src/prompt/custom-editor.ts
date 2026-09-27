@@ -4,6 +4,7 @@ import { BracketedPasteHandler } from "../bracketed-paste";
 import { BRACKETED_PASTE_END, BRACKETED_PASTE_START } from "../stdin-buffer";
 import {
 	Editor,
+	type EditorDraftSnapshot,
 	type EditorTextDecorationContext,
 	type EditorTheme,
 	type NativeEditorLayout,
@@ -447,6 +448,14 @@ export interface TextAttachment {
 export type ComposerChipDescriptor =
 	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
 	| { kind: "paste"; n: number; text: TextAttachment };
+/** Composer state outside the base editor buffer (including links and deleted-chip counters). */
+export interface ComposerDraftSnapshot {
+	editor: EditorDraftSnapshot;
+	images: ImageContent[];
+	links: (string | undefined)[];
+	texts: TextAttachment[];
+	textAttachmentCounter: number;
+}
 
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
@@ -530,6 +539,29 @@ export class CustomEditor extends Editor {
 	setSpellingFeatures(features: SpellingFeatures): void {
 		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
 		this.#wordCompletion.setMethod(features.autocomplete);
+	}
+
+	/** Snapshot all rich-draft state before clearing the composer for a separate prompt. */
+	captureComposerDraft(): ComposerDraftSnapshot {
+		return {
+			editor: this.captureDraft(),
+			images: [...this.pendingImages],
+			links: [...this.pendingImageLinks],
+			texts: [...this.pendingTexts],
+			textAttachmentCounter: this.#textAttachmentCounter,
+		};
+	}
+
+	restoreComposerDraft(snapshot: ComposerDraftSnapshot): void {
+		this.pendingImages = [...snapshot.images];
+		this.pendingImageLinks = [...snapshot.links];
+		this.imageLinks = this.pendingImageLinks.length > 0 ? this.pendingImageLinks : undefined;
+		this.pendingTexts = [...snapshot.texts];
+		this.#textAttachmentCounter = snapshot.textAttachmentCounter;
+		this.restoreDraft(snapshot.editor);
+		if (this.pendingImages.length > 0 && this.pendingImageLinks.some(link => link === undefined)) {
+			void this.#materializeDraftLinks();
+		}
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then

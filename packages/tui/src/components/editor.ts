@@ -61,6 +61,16 @@ import {
 } from "./composer";
 
 export type { EditorBorderStyle, EditorTopBorder };
+/** A local composer draft, including expansions that must not enter submitted-message history. */
+export interface EditorDraftSnapshot {
+	text: string;
+	cursor: { line: number; col: number };
+	pastes: Map<number, string>;
+	atoms: Map<string, string>;
+	pasteCounter: number;
+	vimMode: VimMode;
+	vimAnchor: VimPosition | null;
+}
 
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
 
@@ -1034,6 +1044,35 @@ export class Editor implements Component, Focusable {
 				restore,
 			},
 		});
+	}
+	/** Capture the exact editable buffer, not its expanded wire text. */
+	captureDraft(): EditorDraftSnapshot {
+		return {
+			text: this.getText(),
+			cursor: this.getCursor(),
+			pastes: new Map(this.#pastes),
+			atoms: new Map(this.#atoms),
+			pasteCounter: this.#pasteCounter,
+			vimMode: this.vimMode,
+			vimAnchor: this.#vim?.anchor ? { ...this.#vim.anchor } : null,
+		};
+	}
+
+	/** Restore an isolated draft after another message was submitted. */
+	restoreDraft(snapshot: EditorDraftSnapshot): void {
+		this.#pastes = new Map(snapshot.pastes);
+		this.#atoms = new Map(snapshot.atoms);
+		this.#pasteCounter = snapshot.pasteCounter;
+		this.setText(snapshot.text);
+		const line = Math.max(0, Math.min(snapshot.cursor.line, this.#state.lines.length - 1));
+		this.#state.cursorLine = line;
+		this.#setCursorCol(Math.max(0, Math.min(snapshot.cursor.col, this.#state.lines[line]?.length ?? 0)));
+		if (this.#vim) {
+			this.#vim.reset();
+			this.#vim.mode = snapshot.vimMode;
+			this.#vim.anchor = snapshot.vimAnchor ? { ...snapshot.vimAnchor } : null;
+		}
+		this.invalidate();
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */

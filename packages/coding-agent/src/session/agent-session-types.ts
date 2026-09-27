@@ -408,6 +408,8 @@ export interface PromptOptions {
 	 *  an in-flight tool batch, injecting at the next step boundary instead (see
 	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
 	streamingBehavior?: "steer" | "followUp" | "aside";
+	/** Called when this submission is queued or handed to the agent, after preflight succeeds. */
+	onAccepted?: () => void;
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */
@@ -449,6 +451,8 @@ export interface FollowUpOptions {
 	synthetic?: boolean;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
+	/** Called after this follow-up is enqueued, not before image preprocessing succeeds. */
+	onAccepted?: () => void;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
 }

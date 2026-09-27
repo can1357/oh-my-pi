@@ -38,6 +38,7 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.editor.external": true;
+	"app.editor.stash": true;
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
@@ -50,7 +51,6 @@ interface AppKeybindings {
 	"app.session.tree": true;
 	"app.session.fork": true;
 	"app.session.resume": true;
-	"app.session.observe": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
@@ -142,6 +142,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+g",
 		description: "Open external editor",
 	},
+	"app.editor.stash": {
+		defaultKeys: "ctrl+s",
+		description: "Stash or restore the prompt draft",
+	},
 	"app.message.followUp": {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
 		// but Windows Terminal does not emit a distinct event for Ctrl+Enter — Ctrl+Q is listed
@@ -196,10 +200,6 @@ export const KEYBINDINGS = {
 	},
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
-		description: "Open the agent hub",
-	},
-	"app.session.observe": {
-		defaultKeys: "ctrl+s",
 		description: "Open the agent hub",
 	},
 	"app.session.togglePath": {
@@ -283,7 +283,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	tree: "app.session.tree",
 	fork: "app.session.fork",
 	resume: "app.session.resume",
-	observeSessions: "app.session.observe",
 	toggleSTT: "app.stt.toggle",
 	// TUI editor (old names for backward compatibility)
 	cursorUp: "tui.editor.cursorUp",
@@ -361,7 +360,9 @@ function migrateKeybindingNames(rawConfig: unknown): {
 	let didMigrate = false;
 
 	for (const [key, value] of Object.entries(config)) {
-		if (isLegacyKeybindingName(key)) {
+		if (key === "observeSessions" || key === "app.session.observe") {
+			didMigrate = true;
+		} else if (isLegacyKeybindingName(key)) {
 			const newKey = KEYBINDING_NAME_MIGRATIONS[key];
 			migrated[newKey] = value;
 			didMigrate = true;
@@ -369,6 +370,18 @@ function migrateKeybindingNames(rawConfig: unknown): {
 			// Already a new-style key
 			migrated[key] = value;
 		}
+	}
+
+	// Retire both persisted observe names without keeping a runtime action.
+	// Explicit Hub chords come first; old remaps are appended once per chord.
+	if (config.observeSessions !== undefined || config["app.session.observe"] !== undefined) {
+		const keys = new Set<KeyId>();
+		for (const name of ["app.agents.hub", "app.session.observe", "observeSessions"] as const) {
+			const binding = config[name];
+			if (typeof binding === "string") keys.add(binding);
+			else if (binding) for (const key of binding) keys.add(key);
+		}
+		migrated["app.agents.hub"] = [...keys];
 	}
 
 	return { config: migrated, migrated: didMigrate };
@@ -542,9 +555,12 @@ const FOLLOW_UP_KEYBINDING: AppKeybinding = "app.message.followUp";
 const WINDOWS_FOLLOW_UP_FALLBACK_KEY: KeyId = "ctrl+q";
 const DEQUEUE_KEYBINDING: AppKeybinding = "app.message.dequeue";
 const MACOS_DEQUEUE_FALLBACK_KEY: KeyId = "shift+up";
+const STASH_KEYBINDING: AppKeybinding = "app.editor.stash";
+const STASH_DEFAULT_KEY: KeyId = "ctrl+s";
 function getFallbackKey(keybinding: Keybinding): KeyId | undefined {
 	if (keybinding === FOLLOW_UP_KEYBINDING) return WINDOWS_FOLLOW_UP_FALLBACK_KEY;
 	if (keybinding === DEQUEUE_KEYBINDING) return MACOS_DEQUEUE_FALLBACK_KEY;
+	if (keybinding === STASH_KEYBINDING) return STASH_DEFAULT_KEY;
 	return undefined;
 }
 function keyListIncludes(keys: KeyId | KeyId[] | undefined, target: KeyId): boolean {
@@ -559,6 +575,9 @@ function keyListIncludes(keys: KeyId | KeyId[] | undefined, target: KeyId): bool
 function userBindingClaimsKey(config: KeybindingsConfig, target: KeyId, except: Keybinding): boolean {
 	for (const [keybinding, keys] of Object.entries(config)) {
 		if (!(keybinding in KEYBINDINGS)) continue;
+		// The session selector owns its own key scope: an explicit sort binding
+		// does not claim that chord in the prompt editor. A Hub remap still does.
+		if (except === STASH_KEYBINDING && keybinding === "app.session.toggleSort") continue;
 		if (keybinding === except) continue;
 		if (keyListIncludes(keys, target)) return true;
 	}
@@ -640,6 +659,7 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	override getResolvedBindings(): KeybindingsConfig {
 		const resolved = super.getResolvedBindings();
 		resolved[FOLLOW_UP_KEYBINDING] = keyConfigValue(this.getKeys(FOLLOW_UP_KEYBINDING));
+		resolved[STASH_KEYBINDING] = keyConfigValue(this.getKeys(STASH_KEYBINDING));
 		return resolved;
 	}
 
