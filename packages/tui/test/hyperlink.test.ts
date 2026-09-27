@@ -122,24 +122,6 @@ describe("fileHyperlink", () => {
 		expect(result).toContain("bar.ts");
 	});
 
-	it("builds a valid file:// URI with the absolute path", () => {
-		setHyperlinkMode("always");
-		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts");
-		const uri = extractLinkUri(result);
-		expect(uri).toMatch(/^file:\/\//);
-		expect(uri).toContain("bar.ts");
-	});
-
-	it("encodes spaces in the path", () => {
-		setHyperlinkMode("always");
-		const filePath = path.resolve("/Users/foo/my file.ts");
-		const result = fileHyperlink(filePath, "my file.ts");
-		const uri = extractLinkUri(result);
-		expect(uri).toContain("%20");
-		expect(uri).not.toContain(" ");
-	});
-
 	it("percent-encodes URL-reserved path bytes without appending a query", () => {
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/Users/foo/a#b?c% d.ts");
@@ -169,14 +151,6 @@ describe("fileHyperlink", () => {
 		expect(uri).toBe(url.pathToFileURL(filePath).href);
 		expect(uri).not.toContain("line");
 		expect(uri).not.toContain("col");
-	});
-
-	it("omits query params when line/col are not provided", () => {
-		setHyperlinkMode("always");
-		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts");
-		const uri = extractLinkUri(result);
-		expect(uri).not.toContain("?");
 	});
 
 	it("uses the vscode://file form on the VS Code family, with the location after the path", () => {

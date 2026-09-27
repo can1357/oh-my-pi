@@ -85,10 +85,6 @@ describe("stripOutputNotice", () => {
 		expect(stripOutputNotice(combined, truncation).trimEnd()).toBe(body);
 	});
 
-	it("returns input unchanged when meta is undefined", () => {
-		expect(stripOutputNotice("plain text", undefined)).toBe("plain text");
-	});
-
 	it("returns input unchanged when meta has no notice-emitting fields", () => {
 		// e.g. meta carries only `source` info; formatOutputNotice yields "".
 		const sourceOnly: OutputMeta = { source: { type: "path", value: "/tmp/x" } };

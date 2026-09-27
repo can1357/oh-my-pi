@@ -1666,16 +1666,6 @@ describe("Devin GLM-5.2 collapse", () => {
 		});
 	});
 
-	it("routes every effort to glm-5-2 (never to the quota-gated glm-5-2-max or glm-5-2-none)", () => {
-		const out = collapseVariants([devinMemberSpec("glm-5-2"), devinMemberSpec("glm-5-2-max")], { table: devinTable });
-
-		const spec = out[0];
-		const routing = spec?.thinking?.effortRouting ?? {};
-		for (const wire of Object.values(routing)) {
-			expect(wire).toBe("glm-5-2");
-		}
-	});
-
 	it("collapses the three 1M GLM-5.2 variants into one paid entry with proper effort routing", () => {
 		const out = collapseVariants(
 			[

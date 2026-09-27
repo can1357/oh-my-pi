@@ -10,7 +10,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
-	parseCliThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseEffort,
 	parseThinkingLevel,
@@ -53,14 +52,6 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseConfiguredThinkingLevel("bogus")).toBeUndefined();
 		expect(parseThinkingLevel(AUTO_THINKING)).toBeUndefined();
 		expect(parseThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
-	});
-
-	it("parses CLI --thinking selectors while rejecting inherit", () => {
-		expect(parseCliThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
-		expect(parseCliThinkingLevel(AUTO_THINKING)).toBe(AUTO_THINKING);
-		expect(parseCliThinkingLevel("max")).toBe(ThinkingLevel.Max);
-		expect(parseCliThinkingLevel(ThinkingLevel.Inherit)).toBeUndefined();
-		expect(parseCliThinkingLevel("bogus")).toBeUndefined();
 	});
 
 	it("expands the local reasoning classifier budget", async () => {

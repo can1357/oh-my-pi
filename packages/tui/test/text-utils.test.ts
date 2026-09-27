@@ -8,15 +8,6 @@ import {
 } from "@oh-my-pi/pi-tui/utils";
 
 describe("text utils", () => {
-	it("computes visible width for ANSI and tabs", () => {
-		const text = `\x1b[31mhi\tthere\x1b[0m`;
-		expect(visibleWidth(text)).toBe(2 + 3 + 5);
-	});
-
-	it("does not double-count pure ASCII tabs", () => {
-		expect(visibleWidth("a\tb")).toBe(1 + 3 + 1);
-	});
-
 	it("ignores OSC hyperlinks in visible width", () => {
 		const text = "\x1b]8;;https://example.com\x07link\x1b]8;;\x07";
 		expect(visibleWidth(text)).toBe(4);

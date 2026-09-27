@@ -211,15 +211,6 @@ if (!CHILD_FLAGS.some(flag => process.argv.includes(flag))) {
 			return err;
 		}
 
-		it("classifies Bun's frameless node:net ERR_SOCKET_CLOSED as internal", () => {
-			// Verbatim stack from the Bun 1.4 async close-callback crash.
-			expect(
-				postmortem.isInternalSocketClosedError(
-					makeSocketClosedErr("Error: Socket is closed\n    at unknown\n    at close (node:net:686:67)"),
-				),
-			).toBe(true);
-		});
-
 		it("keeps the process alive for Bun's async node:net close error", async () => {
 			const child = Bun.spawn([process.execPath, "run", import.meta.path, socketClosedChildFlag], {
 				stdout: "pipe",

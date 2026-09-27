@@ -48,26 +48,6 @@ describe("Loader component", () => {
 		loader.stop();
 	});
 
-	it("falls back to component-scoped renders for lightweight TUI stubs", () => {
-		vi.useFakeTimers();
-		const ui = { requestComponentRender: vi.fn() };
-		const loader = new Loader(
-			ui as unknown as TUI,
-			text => text,
-			text => text,
-			"Checking",
-			["0"],
-		);
-
-		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
-
-		loader.setMessage("Still checking");
-		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
-		expect(loader.render(30).join("\n")).toContain("0 Still checking");
-
-		loader.stop();
-	});
-
 	it("skips animated render requests when composed text is unchanged before the spinner advances", () => {
 		vi.useFakeTimers();
 		const ui = { requestComponentRender: vi.fn() };

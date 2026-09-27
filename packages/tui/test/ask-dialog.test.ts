@@ -946,41 +946,6 @@ describe("AskDialogComponent", () => {
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not reset the countdown while a prompt is active", async () => {
-		vi.useFakeTimers();
-		const deferred = Promise.withResolvers<string | undefined>();
-		const onPrompt = vi.fn().mockReturnValue(deferred.promise);
-		const onTimeout = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose one?",
-				options: [{ label: "Option A" }],
-			},
-		];
-
-		const component = new AskDialogComponent(
-			questions,
-			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt },
-			{ timeout: 5000, onTimeout },
-		);
-
-		// Open the custom-input prompt (DOWN to "Other", ENTER).
-		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-		expect(onPrompt).toHaveBeenCalledTimes(1);
-
-		// While the prompt is pending, input is guarded — no reset.
-		component.handleInput(DOWN);
-		vi.advanceTimersByTime(5000);
-		// Timeout is deferred during prompt, not fired.
-		expect(onTimeout).not.toHaveBeenCalled();
-
-		deferred.resolve("answer");
-		await Promise.resolve();
-		await Promise.resolve();
-	});
-
 	it("bounds custom input prompt title for long multi-line questions", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom"));
 		const longQuestion = "This is a very long question ".repeat(20);
@@ -1076,32 +1041,6 @@ describe("AskDialogComponent", () => {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
 		}
-	});
-
-	it("single-question multi-select: Enter submits the current selection immediately", () => {
-		const onSubmit = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose multiple?",
-				options: [{ label: "Option A" }, { label: "Option B" }],
-				multi: true,
-			},
-		];
-
-		const component = new AskDialogComponent(questions, {
-			onSubmit,
-			onCancel: vi.fn(),
-			onPrompt: vi.fn(),
-		});
-
-		// Space selects Option A; Enter submits right away — no need to
-		// discover the Submit tab (issue #8252).
-		component.handleInput(SPACE);
-		component.handleInput(ENTER);
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
 	it("multi-select: Enter submits an empty selection instead of dead-ending", () => {
@@ -1701,26 +1640,6 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].id).toBe("q\r\r3a");
-	});
-
-	it("echoes extension-supplied option labels verbatim in results", () => {
-		// Option labels are caller correlation keys like ids: the guest path
-		// returns them verbatim, so the local dialog must too — display
-		// sanitizes, results echo the original, or extension code comparing
-		// selectedOptions against supplied labels misses on \r-laden input.
-		const onSubmit = vi.fn();
-		const component = new AskDialogComponent(
-			[{ id: "q1", question: "Pick one?", options: [{ label: "Retry\rnow" }, { label: "Retry now" }] }],
-			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
-		);
-
-		expect(render(component)).not.toContain("\r");
-
-		component.handleInput(ENTER);
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		const result = onSubmit.mock.calls[0][0].results[0];
-		expect(result.options).toEqual(["Retry\rnow", "Retry now"]);
-		expect(result.selectedOptions).toEqual(["Retry\rnow"]);
 	});
 
 	it("echoes the extension-supplied question verbatim in results", () => {

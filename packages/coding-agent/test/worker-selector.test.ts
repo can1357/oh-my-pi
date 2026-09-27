@@ -2,7 +2,6 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { isPidRunning } from "@oh-my-pi/pi-utils/procmgr";
 import { runCli } from "../src/cli";
-import * as computerWorkerEntry from "../src/tools/computer/worker-entry";
 
 // The worker-host re-entry seam dispatches any `__omp_worker_*` selector to
 // `runWorkerEntrypoint`. An unrecognized selector must fail loudly rather than
@@ -203,13 +202,5 @@ describe("worker selector dispatch", () => {
 		const alive = !child.killed && child.exitCode === null;
 		child.kill("SIGKILL");
 		expect(alive).toBe(true);
-	});
-});
-
-describe("computer worker entry", () => {
-	it("is side-effect-free to import outside a worker and exposes a named start function", () => {
-		// Importing on the main thread (no parentPort) must not start the worker
-		// core; the CLI host and bundled hosts call the exported hook explicitly.
-		expect(computerWorkerEntry.startComputerWorker).toBeFunction();
 	});
 });

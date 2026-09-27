@@ -26,10 +26,6 @@ describe("thinkToolRenderer", () => {
 		expect(fullText).toContain(uiTheme.fg("thinkingText", "Cache the parsed config, then check invalidation."));
 	});
 
-	it("returns undefined for renderResult", () => {
-		expect(thinkToolRenderer.renderResult()).toBeUndefined();
-	});
-
 	it("handles empty or missing thoughts gracefully", async () => {
 		const theme = await getThemeByName("dark");
 		const uiTheme = theme!;

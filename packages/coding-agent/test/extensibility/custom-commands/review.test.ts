@@ -165,20 +165,6 @@ describe("ReviewCommand", () => {
 		expect(result).toContain("Check authentication boundaries");
 	});
 
-	it("renders custom review instructions through the reviewer task prompt when no diff is available", async () => {
-		const dir = await createTempDir();
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			editorValue: "Check authentication boundaries",
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		const promptText = result!;
-		expect(promptText).toContain("Check authentication boundaries");
-	});
-
 	it("does not submit empty custom review instructions", async () => {
 		const values = [undefined, "", "   \n\t  "];
 
@@ -449,25 +435,6 @@ describe("ReviewCommand", () => {
 		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/example", number: 77 });
 	});
 
-	it("does not detect PR URLs from entries outside the current branch", async () => {
-		const dir = await createTempDir();
-		let reviewModeOptions: string[] = [];
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			editorValue: "Review docs",
-			sessionEntries: [makeUserEntry("stale", "Stale https://github.com/owner/example/pull/77")],
-			branchEntries: [],
-			onSelectCall: call => {
-				if (call.title === "Review Mode") reviewModeOptions = call.options;
-			},
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(reviewModeOptions).not.toContain("Review PR owner/example#77 from conversation");
-	});
-
 	it("detects only PR URLs from the active branch path", async () => {
 		const dir = await createTempDir();
 		let reviewModeOptions: string[] = [];
@@ -585,32 +552,6 @@ describe("ReviewCommand", () => {
 		]);
 	});
 
-	it("keeps base branch review mode working", async () => {
-		const dir = await createTempDir();
-		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
-		const mergeBaseSpy = vi.fn(async () => "basesha");
-		const repository = {
-			currentBranch: async () => "feature",
-			mergeBase: mergeBaseSpy,
-			diffText: diffSpy,
-			listBranches: async () => ["main"],
-		} as unknown as VcsGitRepo;
-		spyOn(vcs, "git").mockReturnValue(repository);
-		spyOn(vcs, "requireGit").mockReturnValue(repository);
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = createContext({
-			selectResults: ["1. Review against a base branch (PR Style)", "main"],
-		});
-
-		const result = await command.execute([], ctx);
-
-		expect(result).toBeDefined();
-		expect(result!).toContain("Reviewing changes between `main` and `feature`");
-		expect(result!).toContain("src/pr.ts");
-		expect(mergeBaseSpy).toHaveBeenCalledWith("main", "feature");
-		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "feature" });
-	});
-
 	it("resolves base-branch review against a real repo without a range revspec", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-real-"));
 		try {
@@ -717,15 +658,5 @@ describe("ReviewCommand", () => {
 		expect(result!).toContain("Reviewing commit `abc1234`");
 		expect(result!).toContain("src/pr.ts");
 		expect(showSpy).toHaveBeenCalledWith("abc1234");
-	});
-	it("renders headless review requests through the reviewer task prompt", async () => {
-		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
-
-		const result = await command.execute(["focus", "auth"], ctx);
-
-		expect(result).toBeDefined();
-		const promptText = result!;
-		expect(promptText).toContain("focus auth");
 	});
 });

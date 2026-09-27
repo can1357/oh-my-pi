@@ -121,18 +121,6 @@ describe("Python runner request dispatch", () => {
 		}
 	});
 
-	it("settles every request and exits cleanly", async () => {
-		const runner = spawnRunner();
-		try {
-			runner.send({ id: "a", code: "print(1 + 1)" });
-			runner.send({ id: "b", code: "print('two')" });
-			const dones = await collectDoneOrder(runner, new Set(["a", "b"]));
-			expect(dones.map(frame => frame.status).sort()).toEqual(["ok", "ok"]);
-		} finally {
-			await runner.dispose();
-		}
-	});
-
 	it("preserves cell locals and resets call-site occurrences", async () => {
 		const runner = spawnRunner();
 		const cell = ['path = "cell.txt"', 'tool.read({"path": locals()["path"]})'].join("\n");

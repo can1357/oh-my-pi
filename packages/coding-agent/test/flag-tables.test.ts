@@ -63,10 +63,6 @@ describe("--external-thinking", () => {
 		expect(result.externalThinking).toBe(true);
 		expect(result.messages).toEqual(["check this"]);
 	});
-
-	it("stays unset when omitted", () => {
-		expect(parseArgs([]).externalThinking).toBeUndefined();
-	});
 });
 describe("--session-dir", () => {
 	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {

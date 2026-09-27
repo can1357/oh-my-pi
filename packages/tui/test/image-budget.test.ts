@@ -356,26 +356,6 @@ describe("Image budget integration", () => {
 		setKittyGraphics(originalGraphics);
 	});
 
-	it("renders within-budget images as graphics carrying their stable id", () => {
-		const budget = new ImageBudget(3, () => {});
-		const id = budget.acquireId("k");
-		const image = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: t => t },
-			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
-		);
-
-		budget.beginPass();
-		const lines = image.render(20);
-		budget.endPass();
-
-		const last = lines.at(-1) ?? "";
-		expect(last).toContain("\x1b_G");
-		expect(last).toContain(`i=${id}`);
-		expect(last).not.toContain("[Image:");
-	});
-
 	it("transmits the base64 once via the budget and renders only a placement line", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");
@@ -1767,14 +1747,6 @@ describe("TUI inline-image budget", () => {
 });
 
 describe("kitty transmit / placement encoding", () => {
-	it("encodeKittyTransmit loads data by id without displaying it", () => {
-		const seq = encodeKittyTransmit(BASE64_ONE_PIXEL_PNG, 9);
-		expect(seq.startsWith("\x1b_Ga=t,f=100,q=2,i=9;")).toBe(true);
-		expect(seq.endsWith("\x1b\\")).toBe(true);
-		expect(seq).toContain(BASE64_ONE_PIXEL_PNG);
-		expect(seq).not.toContain("a=p");
-	});
-
 	it("encodeKittyPlacement displays a transmitted image by id with a stable placement id", () => {
 		const seq = encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 });
 		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\");

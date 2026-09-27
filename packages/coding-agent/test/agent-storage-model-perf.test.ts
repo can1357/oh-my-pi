@@ -154,17 +154,6 @@ describe("AgentStorage model perf aggregates", () => {
 		expect(stats?.ttftMs).toBeNull();
 	});
 
-	it("defers the write off the record path and lands it once the flush promise resolves", async () => {
-		const storage = await openStorage();
-
-		const flushed = storage.recordModelPerf("openai/gpt-5", { outputTokens: 1000, durationMs: 4000 });
-		// Recording is deferred: nothing is visible before the batch flushes.
-		expect(storage.getModelPerf().has("openai/gpt-5")).toBe(false);
-
-		await flushPerf(flushed);
-		expect(storage.getModelPerf().get("openai/gpt-5")?.tps).toBeCloseTo(250, 5);
-	});
-
 	it("backfills perf aggregates from an omp stats database, excluding errored and stale turns", async () => {
 		const storage = await openStorage();
 

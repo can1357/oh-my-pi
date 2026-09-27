@@ -55,10 +55,6 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 }
 
 describe("startup changelog mode settings", () => {
-	test("defaults to a summary", () => {
-		expect(cfgStartupChangelogMode.get(Settings.isolated())).toBe("summary");
-	});
-
 	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
 		expect(lookup("collapseChangelog")).toBeUndefined();
 

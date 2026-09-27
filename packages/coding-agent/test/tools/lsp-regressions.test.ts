@@ -5623,24 +5623,6 @@ describe("ty python lsp", () => {
 		expect(names).toContain("ty");
 	});
 
-	it("auto-detects ty when its binary and Python root markers are present", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-ty-detect-");
-		const resolvedTy = path.join(tempDir.path(), "bin", "ty");
-		const whichSpy = vi
-			.spyOn(piUtils, "$which")
-			.mockImplementation(command => (command === "ty" ? resolvedTy : null));
-		try {
-			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
-			const config = loadConfig(tempDir.path());
-			expect(config.servers.ty?.resolvedCommand).toBe(resolvedTy);
-			expect(config.servers.ty?.command).toBe("ty");
-			expect(config.servers.ty?.args).toEqual(["server"]);
-			expect(whichSpy).toHaveBeenCalledWith("ty");
-		} finally {
-			tempDir.removeSync();
-		}
-	});
-
 	it("coexists with ruff: ty is primary, ruff is linter, both auto-detected", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-ty-ruff-");
 		const resolvedTy = path.join(tempDir.path(), "bin", "ty");

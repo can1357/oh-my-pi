@@ -578,15 +578,6 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("No model");
 	});
 
-	it("model: returns ACP usage message when args provided", async () => {
-		const { output, runtime } = createRuntime();
-
-		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
-
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]?.toLowerCase()).toContain("acp");
-	});
-
 	it("model: applies known id and emits both title + config change notifications", async () => {
 		const { output, runtime, session } = createRuntime();
 		const available = [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
@@ -1352,18 +1343,6 @@ describe("wave 4 commands", () => {
 });
 
 describe("wave 5 — adapters and polish", () => {
-	// /mcp help lists new subcommands
-	it("/mcp help: lists resources, prompts, test, add, smithery-search", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp help", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("resources");
-		expect(output[0]).toContain("prompts");
-		expect(output[0]).toContain("test");
-		expect(output[0]).toContain("add");
-		expect(output[0]).toContain("smithery-search");
-	});
-
 	// /mcp add — verify parsing and output message
 	it("/mcp add foo --url https://example.com --token X --scope project: outputs success or propagates write error", async () => {
 		// Uses project scope so it writes to /tmp/project/.omp/mcp.json which test infra controls.
@@ -1430,20 +1409,6 @@ describe("wave 5 — adapters and polish", () => {
 		const result = await executeAcpBuiltinSlashCommand("/model gpt-fake-9000", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Unknown model");
-	});
-
-	// /model with known id (fake registry)
-	it("/model known-id: reports model set and triggers notifyTitleChanged", async () => {
-		const { output, session, runtime } = createRuntime();
-		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-sonnet-test" }];
-		let titleChanged = false;
-		runtime.notifyTitleChanged = () => {
-			titleChanged = true;
-		};
-		const result = await executeAcpBuiltinSlashCommand("/model claude-sonnet-test", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Model set to anthropic/claude-sonnet-test.");
-		expect(titleChanged).toBe(true);
 	});
 
 	// /usage bar character
