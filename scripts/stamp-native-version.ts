@@ -8,8 +8,9 @@
  * `package.json#version` into that slot after the build, so a version bump
  * never edits a Rust input and never forces the addon crate to recompile.
  *
- * Usage: bun scripts/stamp-native-version.ts <addon.node>... [--version <v>]
- * (default version: packages/natives/package.json#version).
+ * Usage: bun scripts/stamp-native-version.ts <addon.node>... [--version <v>] [--no-sign]
+ * (default version: packages/natives/package.json#version; `--no-sign` leaves
+ * Mach-O re-signing to the caller, e.g. Nix's `signIfRequired`).
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -91,13 +92,19 @@ export function stampNativeBytes(bytes: Buffer, version: string): boolean {
  * Patching a Mach-O invalidates the linker's ad-hoc code signature, which
  * arm64 macOS refuses to dlopen, so darwin hosts re-sign ad hoc. A non-darwin
  * host cannot re-sign, so it refuses to change a Mach-O (an already-matching
- * stamp is a no-op and passes).
+ * stamp is a no-op and passes). `sign: false` skips re-signing on every host
+ * for callers that sign the result themselves (the Nix build has no system
+ * `codesign` and signs through its own hook).
  */
-export async function stampNativeVersion(filePath: string, version: string): Promise<void> {
+export async function stampNativeVersion(
+	filePath: string,
+	version: string,
+	{ sign = true }: { sign?: boolean } = {},
+): Promise<void> {
 	const bytes = await fs.readFile(filePath);
-	const machO = isMachO(bytes);
+	const resign = sign && isMachO(bytes);
 	if (!stampNativeBytes(bytes, version)) return;
-	if (machO && process.platform !== "darwin") {
+	if (resign && process.platform !== "darwin") {
 		throw new Error(
 			`native version stamp: ${filePath} is a Mach-O image; stamping it requires re-signing, which only a darwin host can do. ` +
 				"Stamp darwin addons on a macOS runner.",
@@ -107,11 +114,11 @@ export async function stampNativeVersion(filePath: string, version: string): Pro
 	const tempPath = `${filePath}.stamp.${process.pid}`;
 	try {
 		await fs.writeFile(tempPath, bytes, { mode: stat.mode & 0o777 });
-		if (machO) {
-			const sign = Bun.spawnSync(["codesign", "-s", "-", "-f", tempPath], { stdout: "pipe", stderr: "pipe" });
-			if (sign.exitCode !== 0) {
+		if (resign) {
+			const codesign = Bun.spawnSync(["codesign", "-s", "-", "-f", tempPath], { stdout: "pipe", stderr: "pipe" });
+			if (codesign.exitCode !== 0) {
 				throw new Error(
-					`codesign -s - -f ${tempPath} failed (exit ${sign.exitCode}): ${sign.stderr.toString().trim()}`,
+					`codesign -s - -f ${tempPath} failed (exit ${codesign.exitCode}): ${codesign.stderr.toString().trim()}`,
 				);
 			}
 		}
@@ -125,17 +132,19 @@ export async function stampNativeVersion(filePath: string, version: string): Pro
 if (import.meta.main) {
 	const argv = process.argv.slice(2);
 	let version: string | undefined;
+	let sign = true;
 	const files: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--version") version = argv[++i];
+		else if (argv[i] === "--no-sign") sign = false;
 		else files.push(argv[i]);
 	}
 	try {
 		if (files.length === 0)
-			throw new Error("Usage: bun scripts/stamp-native-version.ts <addon.node>... [--version <v>]");
+			throw new Error("Usage: bun scripts/stamp-native-version.ts <addon.node>... [--version <v>] [--no-sign]");
 		const resolved = version ?? (await nativesPackageVersion());
 		for (const file of files) {
-			await stampNativeVersion(file, resolved);
+			await stampNativeVersion(file, resolved, { sign });
 			console.log(`stamped ${file} with ${resolved}`);
 		}
 	} catch (err) {

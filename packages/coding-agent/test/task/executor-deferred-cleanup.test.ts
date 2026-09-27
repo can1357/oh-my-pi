@@ -82,6 +82,7 @@ function mockSession(opts: {
 			state.messages.push(msg);
 			emit({ type: "message_end", message: msg } as AgentSessionEvent);
 			opts.onPrompt(emit);
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => false,

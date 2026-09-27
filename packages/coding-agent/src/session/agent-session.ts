@@ -507,6 +507,19 @@ class AgentStartPolicyChangedError extends Error {
 	}
 }
 
+/**
+ * Rejection from {@link AgentSession.prompt} with `throwOnDrop: true` when the
+ * prompt was dropped before reaching the agent (an abort, session transition,
+ * or usage preflight denial won the race with turn setup). The prompt was not
+ * persisted, so resubmitting it is safe. Headless drivers use this to retry.
+ */
+export class PromptDroppedError extends Error {
+	constructor() {
+		super("Prompt dropped before provider dispatch.");
+		this.name = "PromptDroppedError";
+	}
+}
+
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -6758,6 +6771,10 @@ export class AgentSession implements SettingsScope {
 	 * the prompt was forwarded to the agent — either directly or queued as a
 	 * steer/follow-up. Callers that render a UI or manage turn lifecycle (e.g.
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
+	 *
+	 * A prompt dropped before dispatch also resolves `true` (RPC reports it as
+	 * aborted once no run started); pass `throwOnDrop: true` to reject with
+	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		return this.#admitSubmission(() => this.#prompt(text, options));
@@ -6801,18 +6818,20 @@ export class AgentSession implements SettingsScope {
 		const typedText = text;
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
-			const handled = await this.#tryExecuteExtensionCommand(text);
-			if (handled) {
-				return false;
-			}
-
-			// Try custom commands (TypeScript slash commands)
-			const customResult = await this.#tryExecuteCustomCommand(text);
-			if (customResult !== null) {
-				if (customResult === "") {
+			if (options?.runCommands !== false) {
+				const handled = await this.#tryExecuteExtensionCommand(text);
+				if (handled) {
 					return false;
 				}
-				text = customResult;
+
+				// Try custom commands (TypeScript slash commands)
+				const customResult = await this.#tryExecuteCustomCommand(text);
+				if (customResult !== null) {
+					if (customResult === "") {
+						return false;
+					}
+					text = customResult;
+				}
 			}
 
 			// Try file-based slash commands (markdown files from commands/ directories)
@@ -6993,6 +7012,7 @@ export class AgentSession implements SettingsScope {
 			// a message that was never persisted).
 			this.#promptDropped?.({ text: typedText, images: options?.images });
 		}
+		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
 		return true;
 	}
 

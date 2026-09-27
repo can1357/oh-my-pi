@@ -148,6 +148,7 @@ function createAsyncSession(
 		prompt: async (text: string) => {
 			prompts.push(text);
 			onPrompt({ text, promptIndex: prompts.length, harness });
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => pendingAsync,

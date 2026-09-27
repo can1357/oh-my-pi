@@ -12,12 +12,24 @@
 - The `eval` tool description now notes that the kernel may be shared with the parent session and concurrent `task` subagents ([#13521](https://github.com/can1357/oh-my-pi/pull/13521) by [@radkawar](https://github.com/radkawar))
 
 ### Fixed
+- Fixed SDK requests using an `ApiKeyResolver` from `createApiKeyResolver` failing with a drained account's multi-hour quota error instead of briefly waiting for a healthy sibling credential whose block expires within seconds ([#13270](https://github.com/can1357/oh-my-pi/issues/13270))
+- Fixed headless subagents losing an assignment during a session transition and then entering yield reminders without ever receiving it ([#13538](https://github.com/can1357/oh-my-pi/issues/13538)).
 
 - Fixed Windows sessions started from an 8.3 short path (such as `C:\Users\ADMINI~1\project`) using the short spelling as the project directory, and home-directory paths written with 8.3 aliases not being shortened to `~` in the status line, tool labels, and errors ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
 - Fixed `edit` `PUT >N` moving a shallower insert (Go `case`, `} else {`) past a closing brace when that breaks the file's syntax ([#13520](https://github.com/can1357/oh-my-pi/pull/13520) by [@radkawar](https://github.com/radkawar))
 - Fixed `omp update` and other one-shot commands on Windows printing "ended before completing" and exiting 1 after they had actually completed ([#13470](https://github.com/can1357/oh-my-pi/issues/13470))
 - Fixed `omp update` on Windows printing "ended before completing: the event loop drained" and exiting 1 when no `~/.npmrc` or `~/.bunfig.toml` exists ([#13470](https://github.com/can1357/oh-my-pi/issues/13470))
 - Fixed `wait` with no owned background jobs blocking silently for up to 30 minutes while its parent or a peer kept running; it now returns after a 5-second window that grows to 5 minutes on repeated waits and names who is still running ([#13513](https://github.com/can1357/oh-my-pi/issues/13513), [#13516](https://github.com/can1357/oh-my-pi/pull/13516) by [@H4vC](https://github.com/H4vC))
+- Fixed missing judge token counts corrupting session usage totals and showing `$NaN` in the status line ([#13490](https://github.com/can1357/oh-my-pi/issues/13490)).
+- Fixed Cursor sessions under-reporting token usage and cost, and compacting from output tokens instead of real context occupancy ([#13082](https://github.com/can1357/oh-my-pi/issues/13082))
+- Fixed Cursor shell commands running with their millisecond timeout read as seconds (a 15 s budget became `requested 15000s`) ([#13082](https://github.com/can1357/oh-my-pi/issues/13082))
+- Goal mode now waits for input instead of repeatedly asking for approval when all remaining todos are blocked ([#13494](https://github.com/can1357/oh-my-pi/issues/13494)).
+- Fixed installing `pi-background-tasks` 2.6.0 or newer failing to load because the legacy `pi-ai` compatibility shim did not export `anthropicMessagesApi` ([#13250](https://github.com/can1357/oh-my-pi/issues/13250))
+- Fixed blob broker requests failing when `PI_PROXY` is set ([#13505](https://github.com/can1357/oh-my-pi/issues/13505)).
+- Fixed `generate_image` reporting the selected catalog model instead of the image model the ChatGPT/Codex backend actually ran, and saved image paths now list the size and quality the provider returned ([#13403](https://github.com/can1357/oh-my-pi/issues/13403))
+- Fixed the fast-model fallback picking Gemini and MiniMax models when no `smol` role is configured; the built-in `mini` pattern now matches only `-mini` model ids ([#13292](https://github.com/can1357/oh-my-pi/issues/13292))
+- Fixed extension tool renderers written in upstream pi's `renderCall(args, theme, context)` order failing to render and logging `Tool renderer failed` on every call ([#13081](https://github.com/can1357/oh-my-pi/issues/13081))
+- Fixed the Nix flake / NixOS module build failing with "does not carry the @oh-my-pi/pi-natives version stamp" ([#13493](https://github.com/can1357/oh-my-pi/issues/13493)).
 
 ## [18.3.5] - 2026-09-27
 

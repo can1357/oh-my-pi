@@ -54,7 +54,13 @@ import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-life
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
+import {
+	type AgentSession,
+	type AgentSessionEvent,
+	type Prewalk,
+	PromptDroppedError,
+	type PromptOptions,
+} from "../session/agent-session";
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
@@ -2151,6 +2157,10 @@ interface DriveOutcome {
 }
 
 const MAX_YIELD_RETRIES = 3;
+const MAX_PROMPT_DISPATCH_ATTEMPTS = 4;
+const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
+
+class PromptDispatchError extends Error {}
 
 /**
  * Drive one assignment through a live session: send the prompt, wait for idle,
@@ -2208,6 +2218,44 @@ async function driveSessionToYield(
 			abortSignal.removeEventListener("abort", onAbort);
 		}
 	};
+	/**
+	 * Send a headless prompt, retrying pre-provider drops (`PromptDroppedError`).
+	 * Local slash commands are disabled so an assignment always reaches the
+	 * model. `forceFinalYield` arms the monitor's forced-final latch only while
+	 * an attempt dispatches, so another turn's incremental `yield` during drop
+	 * recovery stays incremental.
+	 */
+	const dispatchPrompt = async (
+		text: string,
+		promptOptions: PromptOptions,
+		label: string,
+		{ forceFinalYield = false }: { forceFinalYield?: boolean } = {},
+	): Promise<void> => {
+		for (let attempt = 1; attempt <= MAX_PROMPT_DISPATCH_ATTEMPTS; attempt++) {
+			if (forceFinalYield) monitor.markFinalYieldForced(true);
+			try {
+				await awaitAbortable(session.prompt(text, { ...promptOptions, runCommands: false, throwOnDrop: true }));
+				return;
+			} catch (err) {
+				if (!(err instanceof PromptDroppedError)) throw err;
+			}
+			if (forceFinalYield) monitor.markFinalYieldForced(false);
+			if (attempt === MAX_PROMPT_DISPATCH_ATTEMPTS) {
+				throw new PromptDispatchError(`${label} dropped before provider dispatch after ${attempt} attempts`);
+			}
+			const deadline = AbortSignal.timeout(PROMPT_DISPATCH_IDLE_TIMEOUT_MS);
+			try {
+				await untilAborted(AbortSignal.any([abortSignal, deadline]), () => session.waitForIdle());
+			} catch (err) {
+				checkAbort();
+				if (deadline.aborted) {
+					throw new PromptDispatchError(`${label} dropped before provider dispatch; session did not become idle`);
+				}
+				throw err;
+			}
+			await untilAborted(abortSignal, () => Bun.sleep(250 * 2 ** (attempt - 1)));
+		}
+	};
 
 	try {
 		try {
@@ -2218,7 +2266,7 @@ async function driveSessionToYield(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					await awaitAbortable(session.prompt(task, { attribution: "agent", solutionSpace }));
+					await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -2235,7 +2283,7 @@ async function driveSessionToYield(
 			// below; real caller/timeout aborts (monitor signal) and genuine
 			// failures keep the old path.
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
-			if (!recoverableStop || abortSignal.aborted) throw err;
+			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
@@ -2273,16 +2321,19 @@ async function driveSessionToYield(
 					// Armed for this prompt's turn only — the quiescence barrier's
 					// later notice turn may legitimately submit more sections.
 					retriesForced = isFinalRetry;
-					if (retriesForced) monitor.markFinalYieldForced(true);
-					await awaitAbortable(
-						session.prompt(reminder, {
+					await dispatchPrompt(
+						reminder,
+						{
 							attribution: "agent",
 							synthetic: true,
 							...(isFinalRetry && reminderToolChoice ? { toolChoice: reminderToolChoice } : {}),
-						}),
+						},
+						"yield reminder",
+						{ forceFinalYield: isFinalRetry },
 					);
 					await awaitAbortable(session.waitForIdle());
 				} catch (err) {
+					if (err instanceof PromptDispatchError) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						// Benign control-flow exit — user cancel (^C) or compaction aborting
 						// pending operations both surface here as ToolAbortError. The outer
@@ -2351,12 +2402,12 @@ async function driveSessionToYield(
 						jobs,
 					});
 					try {
-						await awaitAbortable(session.prompt(notice, { attribution: "agent", synthetic: true }));
+						await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
 						await awaitAbortable(session.waitForIdle());
 					} catch (err) {
-						if (abortSignal.aborted || err instanceof ToolAbortError) throw err;
-						// A failed notice turn must not kill the run — fall through
-						// to the passive settle below.
+						if (abortSignal.aborted || err instanceof ToolAbortError || err instanceof PromptDispatchError)
+							throw err;
+						// Other notice-turn failures leave the pending jobs to settle passively.
 						logger.warn("Subagent async-pending notice failed", {
 							error: err instanceof Error ? err.message : String(err),
 						});
