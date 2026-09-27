@@ -449,11 +449,24 @@ export async function pickElectronTarget(
 	browser: Browser,
 	options: { matcher?: string; preferVisible?: boolean } = {},
 ): Promise<Page> {
+	// Prefer discovering page targets without materializing them: each
+	// `target.page()` boots a FrameManager that issues several CDP commands, and
+	// on the relay backend every driven tab costs a chrome.debugger attach.
+	// Materializing every tab of a busy browser floods the debugger API (some
+	// commands then hang until the 20s RPC timeout), so narrow by URL first and
+	// only fall back to full materialization when that finds nothing.
+	const pageTargets = browser.targets().filter(target => String(target.type()) === "page");
+	if (options.matcher) {
+		const needle = options.matcher.toLowerCase();
+		const candidates = pageTargets.filter(target => target.url().toLowerCase().includes(needle));
+		const narrowed = await Promise.all(
+			candidates.map(async target => await target.page().catch(() => null)),
+		);
+		const usable = narrowed.filter((page): page is Page => page !== null);
+		if (usable.length > 0) return pickPageFromList(usable, options);
+	}
 	const discoveredPages = await Promise.all(
-		browser.targets().map(async target => {
-			if (String(target.type()) !== "page") return null;
-			return await target.page().catch(() => null);
-		}),
+		pageTargets.map(async target => await target.page().catch(() => null)),
 	);
 	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
 	if (usablePages.length > 0) {

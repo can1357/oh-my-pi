@@ -59,6 +59,7 @@ function fakePage(options: FakePageOptions): Page {
 function fakeTarget(type: string, page: Page | null): Target {
 	return {
 		type: () => type,
+		url: () => page?.url() ?? "",
 		page: async () => page,
 	} as unknown as Target;
 }
