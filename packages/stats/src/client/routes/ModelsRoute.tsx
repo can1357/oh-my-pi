@@ -78,7 +78,7 @@ function ModelShareChart({
 	const chartTheme = CHART_THEMES[theme];
 	const meta = rangeMeta(timeRange);
 
-	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
+	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries, timeRange), [modelSeries, timeRange]);
 
 	const data = useMemo(() => {
 		return {
@@ -181,8 +181,9 @@ function ModelShareChart({
 	);
 }
 
-function buildModelPreferenceSeries(
+export function buildModelPreferenceSeries(
 	points: ModelTimeSeriesPoint[],
+	range: TimeRange,
 	topN = 5,
 ): {
 	data: Array<Record<string, number>>;
@@ -221,6 +222,21 @@ function buildModelPreferenceSeries(
 	}
 
 	const dataMap = new Map<number, Record<string, number>>();
+
+	// #6335: pre-fill one row per range bucket so the x-axis stays uniform
+	// even when some buckets saw no requests. Mirrors the gap-fill grid in
+	// buildModelPerformanceLookup (../data/view-models). The "all" range has
+	// no fixed grid (bucketCount 0) and keeps the sparse observed timestamps.
+	const { bucketMs, bucketCount } = rangeMeta(range);
+	if (bucketCount > 0) {
+		const maxTimestamp = points.reduce((max, point) => Math.max(max, point.timestamp), 0);
+		const anchor = maxTimestamp > 0 ? maxTimestamp : Math.floor(Date.now() / bucketMs) * bucketMs;
+		const start = anchor - (bucketCount - 1) * bucketMs;
+		for (let i = 0; i < bucketCount; i++) {
+			const timestamp = start + i * bucketMs;
+			dataMap.set(timestamp, { timestamp, total: 0 });
+		}
+	}
 
 	for (const point of points) {
 		const key = `${point.model}::${point.provider}`;
