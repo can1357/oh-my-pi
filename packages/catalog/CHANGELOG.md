@@ -8,6 +8,10 @@
 - Fixed Antigravity models such as Claude Opus 5.5 and Sonnet 5.5 disappearing after `omp models refresh`. When the update check failed, omp reported an outdated Antigravity client version (2.8.0), so the server left the newer models out of the list. The fallback version is now 2.19.1.
 - DSML tool calls from DeepSeek models are now parsed on every host. This includes local servers (llama.cpp, LM Studio, vLLM), custom providers from `models.yml`, and gateways that weren't on the old list of supported hosts. Before, a complete `<｜DSML｜tool_calls>` envelope from these hosts showed up as plain text and the tool never ran ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
 
+### Changed
+
+- Changed the Devin default model from SWE-1.6 to SWE-2 (default effort High), matching Devin's own account default, and the `devin/swe` shorthand now selects SWE-2 ([#13656](https://github.com/can1357/oh-my-pi/pull/13656) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

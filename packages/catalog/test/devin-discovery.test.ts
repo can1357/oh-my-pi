@@ -3,6 +3,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { buildModel } from "../src/build";
+import { collapseVariants } from "../src/compat/collapse";
 import { seedModels } from "../src/compat/providers";
 import { fetchDevinModels } from "../src/discovery/devin";
 import {
@@ -740,29 +741,34 @@ describe("devin server-declared family collapsing", () => {
 });
 
 describe("devin catalog seed", () => {
-	it("seeds both live SWE-1.6 lanes so the descriptor default resolves offline", () => {
+	it("seeds SWE-2's effort lanes so the descriptor default resolves offline to a servable wire uid", () => {
 		const descriptor = providerEntry("devin");
-		expect(descriptor?.defaultModel).toBe("swe-1-6");
-		expect(seedModels("devin").map(model => model.id)).toEqual(["swe-1-6-fast", "swe-1-6"]);
-		expect(seedModels("devin").some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		expect(descriptor?.defaultModel).toBe("swe-2");
+		// Cascade rejects the bare `swe-2` slug as a chat uid, so the seed ships the
+		// live effort lanes and the reviewed family collapses them onto the default.
+		const [swe2, ...rest] = collapseVariants(seedModels("devin"));
+		expect(rest).toEqual([]);
+		expect(swe2?.id).toBe("swe-2");
+		expect(swe2?.requestModelId).toBe("swe-2-high");
+		expect(swe2?.thinking?.effortRouting).toEqual({
+			medium: "swe-2-medium",
+			high: "swe-2-high",
+			max: "swe-2-max",
+		});
 
-		const fast = buildModel(seedModels("devin")[0] as ModelSpec<"devin-agent">);
-		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
-		expect(fast.contextWindow).toBe(200_000);
-		expect(fast.maxTokens).toBe(128_000);
-		expect(fast.compat.supportsParallelToolCalls).toBe(true);
-		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
-		expect(fast.input).toEqual(["text"]);
-		// One wire uid per lane: Cascade encodes effort in the uid, so a seeded
-		// lane reasons without exposing a selectable ladder.
-		expect(fast.thinking).toBeUndefined();
-		expect(fast.reasoning).toBe(true);
+		const model = buildModel(swe2 as ModelSpec<"devin-agent">);
+		expect(model.thinking?.defaultLevel).toBe(Effort.High);
+		expect(model.contextWindow).toBe(262_000);
+		expect(model.input).toEqual(["text", "image"]);
+		// Plan-included lanes report no cost dimensions; the KDL fallback prices them.
+		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075 });
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
 		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
+			"https://cascade.internal",
 			"https://cascade.internal",
 			"https://cascade.internal",
 		]);
