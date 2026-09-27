@@ -436,7 +436,9 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 ### `resources_discover`
 
-Fired once per session, after `session_start`, and again every time `/reload-plugins` runs. Payload: `{ cwd: string; reason: "startup" | "reload" }`. A handler may return `{ skillPaths?: string[]; promptPaths?: string[]; themePaths?: string[] }`; only `skillPaths` currently has a consumer (`promptPaths`/`themePaths` are collected but not yet acted on).
+Fired once per session, after `session_start`, and again every time `/reload-plugins` runs. Payload: `{ cwd: string; reason: "startup" | "reload" }`. A handler may return `{ skillPaths?: string[]; promptPaths?: string[]; themePaths?: string[] }`; only `skillPaths` currently has a consumer (`promptPaths`/`themePaths` are collected but not yet acted on). Other skill rescans (`manage_skill`, `skills.*` settings edits) reuse the directories the last round returned without firing the event.
+
+A turn that a `session_start` or `resources_discover` handler starts with `sendMessage`/`sendUserMessage` waits until the returned skill directories are in the system prompt, so it sees the same skills as a prompt issued after startup or after the reload.
 
 Returned `skillPaths` join skill discovery as an explicitly configured source, scanned the same way as `skills.customDirectories`: `ignoredSkills`/`includeSkills` are honored, entries are deduplicated by real path, and a name collision with a `skills.customDirectories` entry loses to the user's custom directory (extension-contributed directories are the lower-priority configured source).
 
