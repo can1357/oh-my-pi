@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `expandWindowsLongPath` and `getWindowsShortPath`, which convert Windows paths between long and 8.3 spellings without resolving symlinks or junctions; import them from `@oh-my-pi/pi-natives/path` to load the addon only on first use on Windows ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
+
 ## [18.3.5] - 2026-09-27
 
 ### Changed

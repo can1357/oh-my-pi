@@ -20,6 +20,38 @@ use pi_shell::{
 use self::vfs::ShellFilesystem;
 use crate::task;
 
+/// Expand Windows 8.3 components without resolving symlinks or junctions.
+#[napi]
+pub fn expand_windows_long_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::expand_to_long_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
+
+/// Get the existing Windows 8.3 spelling; preserve the input when unavailable.
+#[napi]
+pub fn get_windows_short_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::get_short_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
+
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
