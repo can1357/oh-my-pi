@@ -1801,14 +1801,17 @@ export class SessionTools {
 		// Two discovered directories that are symlinks to the same underlying
 		// `SKILL.md`, lacking `name` frontmatter, derive different names from
 		// their own directory basenames — `claimed` (by name) would not catch
-		// that. Dedup by the resolved real file path too, seeded from the
-		// inherited base so a discovered symlink can't re-enter a skill the
-		// snapshot already carries under a different name either.
-		const claimedRealPaths = new Set<string>();
+		// that. Dedup by the resolved real file path too. An inherited entry's
+		// real path only blocks a discovered alias under a DIFFERENT name; the
+		// same name at the same path is that skill's fresh parse and replaces the
+		// inherited copy below, so reloaded metadata is not left stale
+		// (PR #9379 review).
+		const inheritedNameByRealPath = new Map<string, string>();
 		for (const skill of base) {
 			const real = await realpathIfExists(skill.filePath);
-			if (real !== null) claimedRealPaths.add(real);
+			if (real !== null) inheritedNameByRealPath.set(real, skill.name);
 		}
+		const claimedRealPaths = new Set<string>();
 		const added: Skill[] = [];
 		for (const dir of extensionDirectories) {
 			const { skills } = await loadSkillsFromDir({ dir: expandTilde(dir), source: "extension:user" });
@@ -1820,6 +1823,8 @@ export class SessionTools {
 				const realFilePath = await realpathIfExists(skill.filePath);
 				if (realFilePath !== null) {
 					if (claimedRealPaths.has(realFilePath)) continue;
+					const inheritedName = inheritedNameByRealPath.get(realFilePath);
+					if (inheritedName !== undefined && inheritedName !== skill.name) continue;
 					claimedRealPaths.add(realFilePath);
 				}
 				const existingIndex = indexByName.get(skill.name);

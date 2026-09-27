@@ -1469,6 +1469,87 @@ export default function (pi) {
 		}
 	});
 
+	it("refreshes an inherited skill's metadata when the child rediscovers it at the same path (regression: PR #9379 review, mergeDiscoveredSkillDirectories same-path refresh)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-merge-inherited-refresh-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			const skillDir = path.join(tempDir, "shared-extension-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			const skillPath = path.join(skillDir, "SKILL.md");
+			await fs.writeFile(
+				skillPath,
+				"---\nname: shared-extension-skill\ndescription: Contributed by the parent's and child's extension.\n---\n\nbody\n",
+			);
+			// The parent's own resources_discover pass already put this file in the
+			// snapshot the child inherits.
+			const inherited: Skill = {
+				name: "shared-extension-skill",
+				description: "Contributed by the parent's and child's extension.",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "extension:user",
+				_source: { provider: "extension", providerName: "Extension", path: skillPath, level: "user" },
+			};
+
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "shared-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(tempDir)}] }));
+}
+`,
+			);
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				skills: [inherited],
+				skillsReloadable: false,
+				mergeDiscoveredSkillPaths: true,
+			});
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+
+			await fs.writeFile(
+				skillPath,
+				"---\nname: shared-extension-skill\ndescription: Edited after the parent spawned the child.\nhide: true\n---\n\nbody\n",
+			);
+			await session.refreshSkills({ reloadPlugins: true });
+
+			const after = session.skills.find(skill => skill.name === "shared-extension-skill");
+			expect(after?.description).toBe("Edited after the parent spawned the child.");
+			expect(after?.hide).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("folds reload-time resources_discover contributions into a merge-marked subagent snapshot (regression: PR #9379 round-5 review)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-merge-skills-reload-"));
 		const authStorage = createInMemoryAuthStorage();
