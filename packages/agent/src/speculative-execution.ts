@@ -615,7 +615,13 @@ export class SpeculativeOperationCoordinator {
 				this.ineligible(toolCall, "preceding speculation barrier");
 				return;
 			}
-			const tool = context.tools?.find(value => value.name === toolCall.name);
+			// Mirror resolveToolForCall: custom-tool transports emit the wire
+			// name, which may differ from the harness-internal name.
+			const tool =
+				context.tools?.find(value => value.name === toolCall.name) ??
+				context.tools?.find(
+					value => value.customWireName !== undefined && value.customWireName === toolCall.name,
+				);
 			if (!tool) {
 				this.#directBarrier = true;
 				this.ineligible(toolCall, "tool is not speculation-safe");

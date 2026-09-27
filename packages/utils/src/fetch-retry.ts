@@ -367,7 +367,9 @@ export async function fetchWithRetry(
 		} catch (error) {
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
-			if (attempt + 1 >= maxAttempts) throw wrapped;
+			// DNS and certificate failures never heal on retry; fail fast
+			// instead of burning every attempt with backoff (issue #12546).
+			if (!isRetryableNetworkFailure(wrapped) || attempt + 1 >= maxAttempts) throw wrapped;
 			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
 			continue;
 		}
@@ -516,6 +518,20 @@ const TRANSIENT_MESSAGE_PATTERN =
 const VALIDATION_MESSAGE_PATTERN =
 	/invalid|validation|bad request|unsupported|schema|missing required|not found|unauthorized|forbidden/i;
 
+/**
+ * DNS NXDOMAIN and certificate/TLS failures never heal on retry (unlike
+ * EAI_AGAIN timeouts or refused/reset connections, which stay retryable).
+ */
+const FATAL_NETWORK_MESSAGE_PATTERN = /enotfound|certificate|self.signed|unable to verify|ssl|tls handshake|tlsv/i;
+
+/**
+ * `false` for network failures that retrying cannot heal, so callers fail
+ * fast instead of burning every attempt with backoff.
+ */
+export function isRetryableNetworkFailure(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return !FATAL_NETWORK_MESSAGE_PATTERN.test(message);
+}
 /**
  * Identify errors that should be retried: aborts/timeouts in the error name or
  * message, retryable HTTP statuses (see `isRetryableStatus`), unexpected socket

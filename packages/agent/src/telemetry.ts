@@ -1587,7 +1587,7 @@ export async function recordManualChatTelemetry(
 	if (!span) return undefined;
 	if (options.span && options.attributes) span.setAttributes(options.attributes);
 	if (options.stepNumber != null) span.setAttribute(PiGenAIAttr.AgentStepNumber, options.stepNumber);
-	span.setAttribute(GenAIAttr.ResponseModel, options.responseModel ?? options.model.name);
+	span.setAttribute(GenAIAttr.ResponseModel, options.responseModel ?? options.model.id);
 	if (options.responseId) span.setAttribute(GenAIAttr.ResponseId, options.responseId);
 	const finishReason = mapStopReason(options.finishReason);
 	if (finishReason) span.setAttribute(GenAIAttr.ResponseFinishReasons, [finishReason]);
