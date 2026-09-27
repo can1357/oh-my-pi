@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import type { ExtensionActions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -413,7 +414,7 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		settings: Settings.isolated(),
 		modelRegistry: {
 			refresh: async () => {},
-		} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry,
+		} as unknown as ModelRegistry,
 		enableLsp: false,
 	};
 
