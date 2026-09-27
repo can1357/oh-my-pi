@@ -12,6 +12,7 @@ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } fr
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
@@ -141,6 +142,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type TaskModelDivergence,
 	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
@@ -2807,6 +2809,33 @@ async function driveSessionToResult(
 	return { exitCode, error, aborted, abortReasonText };
 }
 
+/**
+ * Divergences between a spawn's model request and what resolution selected, in
+ * the order {@link TaskModelDivergence} lists them. Undefined when resolution
+ * honored the request.
+ */
+function resolveModelDivergences(
+	model: Model | undefined,
+	authFallbackUsed: boolean,
+	effort: TaskEffort | undefined,
+	effortCeiling: Effort | undefined,
+): TaskModelDivergence[] | undefined {
+	const divergences: TaskModelDivergence[] = [];
+	if (authFallbackUsed) divergences.push("model-auth-fallback");
+	if (model && effort !== undefined) {
+		const uncapped = resolveTaskEffortLevel(model, effort);
+		if (uncapped === undefined) {
+			divergences.push("effort-unsupported");
+		} else if (
+			effortCeiling !== undefined &&
+			THINKING_EFFORTS.indexOf(uncapped) > THINKING_EFFORTS.indexOf(effortCeiling)
+		) {
+			divergences.push("effort-clamped");
+		}
+	}
+	return divergences.length > 0 ? divergences : undefined;
+}
+
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
 	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
@@ -2820,6 +2849,10 @@ interface FinalizeRunArgs {
 	modelRole?: string;
 	/** `false` = no `yield` tool: the run's last report turn is the result verbatim. Default `true`. */
 	structured?: boolean;
+	/** Coarse effort the spawn requested. */
+	requestedEffort?: TaskEffort;
+	/** Divergences decided when the model resolved; see {@link resolveModelDivergences}. */
+	modelDivergences?: TaskModelDivergence[];
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3049,6 +3082,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
+		requestedEffort: args.requestedEffort,
+		modelDivergences: args.modelDivergences,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -4522,6 +4557,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
+	// Decided once the child session exists, because a deferred model pattern
+	// only resolves (or falls back for missing credentials) inside it.
+	let modelDivergences: TaskModelDivergence[] | undefined;
 
 	const completionProbe = isCompletionProbeEnabled(settings, parentDepth);
 	const monitor = createSubagentRunMonitor({
@@ -4986,6 +5024,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				: undefined;
 			let session: AgentSession;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
+			let deferredAuthFallbackUsed: boolean | undefined;
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, {
@@ -4999,7 +5038,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				({ session, modelPatternAuthFallbackUsed: deferredAuthFallbackUsed } =
+					await awaitAbortable(sessionPromise));
 				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
@@ -5042,6 +5082,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
 			}
 			sessionCreatedAt = performance.now();
+			modelDivergences = resolveModelDivergences(
+				model ?? session.model,
+				authFallbackUsed || deferredAuthFallbackUsed === true,
+				options.effort,
+				spawnEffortCeiling,
+			);
 
 			monitor.setActiveSession(session);
 			if (preparedSession) untrackedSession = undefined;
@@ -5456,6 +5502,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			modelOverride,
 			modelRole,
 			structured,
+			requestedEffort: options.effort,
+			modelDivergences,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,

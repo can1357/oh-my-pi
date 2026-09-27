@@ -11,7 +11,7 @@ import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskModelDivergence } from "@oh-my-pi/pi-tui/tools/task";
 
 /**
  * Largest output inlined whole. A cut output costs the parent a
@@ -48,6 +48,25 @@ function previewHead(output: string): string {
 	return lastNewline >= PREVIEW_CHARS / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
+/**
+ * `<model-receipt>` fields for a run whose model or effort diverged from its
+ * spawn request, built from the settled model fields. Undefined when nothing
+ * diverged, so an honored request adds nothing to the envelope.
+ */
+function modelReceipt(result: SingleResult) {
+	const reasons: TaskModelDivergence[] = [...(result.modelDivergences ?? [])];
+	if (result.resolvedModelIsFallback) reasons.push("model-retry-fallback");
+	if (reasons.length === 0) return undefined;
+	const requestedModel = result.modelOverride;
+	return {
+		requestedModel: Array.isArray(requestedModel) ? requestedModel.join(",") : requestedModel,
+		requestedEffort: result.requestedEffort,
+		model: result.resolvedModelIdentity ?? result.resolvedModel,
+		thinking: result.resolvedThinkingLevel,
+		reasons: reasons.join(","),
+	};
+}
+
 /** Render the `<task-result>` envelope for a settled run. */
 export function formatTaskResultSummary(
 	result: SingleResult,
@@ -71,6 +90,7 @@ export function formatTaskResultSummary(
 	// irc instead of redoing the work. Isolated runs are parked without a
 	// reviver (their worktree is gone), so they must not read as resumable.
 	const resumable = result.aborted && !result.isolated && isResumable(AgentRegistry.global().get(result.id));
+	const receipt = modelReceipt(result);
 	const render = (truncated: boolean): string =>
 		prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,
@@ -88,6 +108,7 @@ export function formatTaskResultSummary(
 						charSize: formatBytes(result.outputMeta.charCount),
 					}
 				: undefined,
+			modelReceipt: receipt,
 			mergeSummary: options.mergeSummary === undefined ? "" : escapeHarnessTags(options.mergeSummary),
 		});
 	if (result.outputPath === undefined) return render(false);
