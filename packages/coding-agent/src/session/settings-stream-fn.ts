@@ -59,18 +59,23 @@ const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
  * YAML can supply non-string entries, which are dropped instead of throwing.
  * The wire contract allows at most three entries
  * (MessageCreateParams.fallbacks) and an overlong chain would be rejected by
- * the API instead of falling back, so cap deliberately and loudly.
+ * the API instead of falling back, so cap deliberately and loudly — once per
+ * distinct chain, tracked in `warned`, rather than on every request.
  */
-function configuredServerSideFallbackModels(configured: readonly unknown[]): string[] {
+function configuredServerSideFallbackModels(configured: readonly unknown[], warned: { chain?: string }): string[] {
 	const models = configured
 		.filter((id): id is string => typeof id === "string")
 		.map(id => id.trim())
 		.filter(id => id.length > 0);
 	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
-		logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
-			configured: models.length,
-			limit: ANTHROPIC_MAX_FALLBACK_MODELS,
-		});
+		const chain = models.join("\n");
+		if (warned.chain !== chain) {
+			warned.chain = chain;
+			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
+				configured: models.length,
+				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
+			});
+		}
 	}
 	return models.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS);
 }
@@ -110,6 +115,8 @@ export function createSettingsAwareStreamFn(
 ): StreamFn {
 	// One tokenizer per encoding, so per-message counts are reused across requests.
 	const tokenizers = new Map<Encoding | null, Tokenizer>();
+	// Last overlong fallback chain warned about, so the cap warning fires once per chain.
+	const overlongFallbackWarning: { chain?: string } = {};
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -145,7 +152,10 @@ export function createSettingsAwareStreamFn(
 				: [];
 		const serverSideFallbackChain =
 			catalogFallbackChain.length > 0 && cfgProvidersAnthropicServerSideFallbackModels.isConfigured(settings)
-				? configuredServerSideFallbackModels(cfgProvidersAnthropicServerSideFallbackModels.get(settings))
+				? configuredServerSideFallbackModels(
+						cfgProvidersAnthropicServerSideFallbackModels.get(settings),
+						overlongFallbackWarning,
+					)
 				: catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
