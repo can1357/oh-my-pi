@@ -19,11 +19,12 @@
  * Changes to fields that actually identify the connection
  * (e.g. `command`) must still miss.
  *
- * A second contract covers the migration itself: the current hashing scheme
- * is the fifth one this cache has shipped (full config, then excluding only
- * `lazy`, then also `enabled`, then also `timeout`, then also
- * `requestIdFormat`), and `CACHE_VERSION` never changed across those. A
- * cache entry written by an older scheme must still hit under the new one —
+ * A second contract covers the migration itself: released builds hash the
+ * full config (including an explicit `instructions` value since upstream
+ * v18.3.1), and earlier revisions of this change excluded only `lazy`, then
+ * also `enabled`, then also `timeout`, then also `requestIdFormat`, all
+ * without changing `CACHE_VERSION`. A cache entry written by any of those
+ * must still hit under the current scheme —
  * a miss just costs an eager server a slower startup, but a *lazy* server
  * with no cache registers no tools at all and stays dormant until a manual
  * `/mcp reconnect`. `timeout` is numeric and `requestIdFormat` is a closed
@@ -281,5 +282,17 @@ describe("MCPToolCache", () => {
 
 		expect(await cache.get("srv", { ...lazyConfig, instructions: false })).toEqual([TOOL_DEF]);
 		expect(await cache.get("srv", { ...lazyConfig, instructions: true })).toEqual([TOOL_DEF]);
+	});
+
+	it("regression: a released-build cache for a server that sets `instructions` survives converting it to lazy", async () => {
+		// Released builds hash the full config, and since upstream v18.3.1 that
+		// includes an explicit `instructions` value.
+		const { storage, store } = fakeStorageWithStore();
+		const cache = new MCPToolCache(storage);
+		const releasedConfig = config({ instructions: false });
+		await seedLegacyCacheEntry(store, "srv", releasedConfig, [], [TOOL_DEF]);
+
+		expect(await cache.get("srv", { ...releasedConfig, lazy: true })).toEqual([TOOL_DEF]);
+		expect(await cache.get("srv", config({ lazy: true }))).toEqual([TOOL_DEF]);
 	});
 });
