@@ -148,8 +148,8 @@ impl LlamaConfig {
 		self.hidden_size / self.num_attention_heads
 	}
 
-	/// `RoPE` `(cos, sin)` tables, row-major `[max_position_embeddings, head_dim /
-	/// 2]`.
+	/// `RoPE` `(cos, sin)` tables, row-major `[max_position_embeddings, head_dim
+	/// / 2]`.
 	pub fn rope_tables(&self) -> (Vec<f32>, Vec<f32>) {
 		let half = self.head_dim() / 2;
 		let inv_freq: Vec<f64> = (0..half)
@@ -258,12 +258,16 @@ impl TensorSource for SafeTensors {
 		let values = if width == 2 {
 			// bf16 is the upper half of an f32.
 			bytes
-				.as_chunks::<2>().0.iter()
+				.as_chunks::<2>()
+				.0
+				.iter()
 				.map(|b| f32::from_bits(u32::from(u16::from_le_bytes([b[0], b[1]])) << 16))
 				.collect()
 		} else {
 			bytes
-				.as_chunks::<4>().0.iter()
+				.as_chunks::<4>()
+				.0
+				.iter()
 				.map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 				.collect()
 		};

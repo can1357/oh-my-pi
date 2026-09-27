@@ -116,9 +116,9 @@ export class WordCompletionProvider implements EditorTextAssistProvider {
 			return null;
 		}
 		if (!this.#cache.has(query.key)) this.#schedule(backend, query);
-		// Engines exclude a word the user already typed past at a shorter prefix, so
-		// typing through a shown ghost without Tab answers null; keep that ghost
-		// until the engine offers something else.
+		// Typing through a shown ghost without Tab can answer null (the word fell
+		// under the show threshold, or SmolLM excludes words typed past); keep that
+		// ghost until the engine offers something else.
 		const suffix = this.#cache.get(query.key) ?? this.#project(query);
 		this.#displayed = { key: query.key, suffix };
 		if (suffix) this.#lastShown = { before: query.before, word: query.prefix + suffix };

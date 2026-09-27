@@ -39,10 +39,10 @@
 //! # Cost (replay bench, M4 Max, test-small online)
 //! - Metal: `complete` p50 10.1 ms, p90 19.9, p99 30.0 (first query after a
 //!   submitted prompt: p50 21.5, p99 48.6); open 0.3 s, first query ~40 ms;
-//!   +250 MiB RSS. A single-token forward is ~2.3 ms at 700 cached tokens,
-//!   and a query averages ~3.9 of them (three alternatives for typed-past).
-//! - CPU (`PI_SMOLLM_DEVICE=cpu`, 8 workers): p50 16 ms, p99 80 ms, +160
-//!   MiB RSS; ~1.7 ms per forward at short context, ~3.6 ms at 700 tokens.
+//!   +250 MiB RSS. A single-token forward is ~2.3 ms at 700 cached tokens, and
+//!   a query averages ~3.9 of them (three alternatives for typed-past).
+//! - CPU (`PI_SMOLLM_DEVICE=cpu`, 8 workers): p50 16 ms, p99 80 ms, +160 MiB
+//!   RSS; ~1.7 ms per forward at short context, ~3.6 ms at 700 tokens.
 //! - Weights: 269 MB bf16 download, ~145 MB resident as 8-bit blocks.
 
 mod config;
@@ -412,13 +412,15 @@ impl SmolLm {
 
 impl Predictor for SmolLm {
 	fn complete(&mut self, query: &Query<'_>) -> Option<Suggestion> {
-		if let Ok(suggestion) = self.try_complete(query) { suggestion } else {
-  				// A failed forward leaves no usable cache; start clean next time.
-  				self.session.reset();
-  				self.memory.dirty = true;
-  				self.word = None;
-  				None
-  			}
+		if let Ok(suggestion) = self.try_complete(query) {
+			suggestion
+		} else {
+			// A failed forward leaves no usable cache; start clean next time.
+			self.session.reset();
+			self.memory.dirty = true;
+			self.word = None;
+			None
+		}
 	}
 
 	fn observe(&mut self, prompt: &str) {

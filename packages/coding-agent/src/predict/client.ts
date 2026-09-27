@@ -28,7 +28,6 @@ import {
 	type TextPredictMethod,
 	type TextPredictRequest,
 	type TextPredictResponse,
-	type TextPredictTarget,
 	textPredictDaemon,
 } from "./protocol";
 
@@ -45,12 +44,11 @@ const RETRY_AFTER_MS = 30_000;
 const ENSURE_ATTEMPTS = 3;
 
 /**
- * Daemon target for a configured method. `auto` stays `auto` (the daemon picks
- * SmolLM once loaded, ngram until then); `apple` exists only on macOS and
- * falls back to `auto` elsewhere.
+ * Engine serving a configured method. `auto` is ngram, so it never downloads
+ * SmolLM's weights; `apple` falls back to ngram off macOS.
  */
-export function resolveTextPredictTarget(method: WordCompletionEngine): TextPredictTarget {
-	if (method === "apple" && process.platform !== "darwin") return "auto";
+export function resolveTextPredictMethod(method: WordCompletionEngine): TextPredictMethod {
+	if (method === "auto" || (method === "apple" && process.platform !== "darwin")) return "ngram";
 	return method;
 }
 
@@ -191,10 +189,10 @@ class TextPredictionClient {
 	#connection: DaemonConnection | undefined;
 	#connecting: Promise<DaemonConnection> | undefined;
 	#retryAt = 0;
-	#backends = new Map<TextPredictTarget, WordPredictionBackend>();
+	#backends = new Map<TextPredictMethod, WordPredictionBackend>();
 
 	backend(method: WordCompletionEngine): WordPredictionBackend {
-		const resolved = resolveTextPredictTarget(method);
+		const resolved = resolveTextPredictMethod(method);
 		let backend = this.#backends.get(resolved);
 		if (!backend) {
 			backend = {
@@ -225,22 +223,22 @@ class TextPredictionClient {
 	}
 
 	/**
-	 * Ask `target` for the ghost text after `prefix`, with its confidence.
+	 * Ask `engine` for the ghost text after `prefix`, with its confidence.
 	 *
 	 * @throws when the daemon is unreachable or the engine reports an error
 	 * (e.g. it failed to load).
 	 */
-	async complete(target: TextPredictTarget, before: string, prefix: string): Promise<TextPrediction> {
+	async complete(engine: TextPredictMethod, before: string, prefix: string): Promise<TextPrediction> {
 		// SmolLM's weights download here, in the interactive process (shown in the
-		// download HUD); the daemon serves ngram for `auto` until they land.
-		if (target === "auto" || target === "smollm") prefetchSmolLmWeights();
+		// download HUD), only once the user has chosen SmolLM.
+		if (engine === "smollm") prefetchSmolLmWeights();
 		const response = await this.#request(
-			id => ({ id, op: "complete", method: target, before, prefix }),
+			id => ({ id, op: "complete", method: engine, before, prefix }),
 			COMPLETE_TIMEOUT_MS,
 		);
 		if (!response.ok) throw new Error(response.error);
 		if (response.op !== "complete") throw new Error(`text-predict: unexpected ${response.op} response`);
-		return { engine: response.engine, suggestion: response.suggestion };
+		return { engine, suggestion: response.suggestion };
 	}
 
 	/**
@@ -302,7 +300,7 @@ export function requestTextPrediction(
 	prefix: string,
 ): Promise<TextPrediction> {
 	sharedClient ??= new TextPredictionClient();
-	return sharedClient.complete(resolveTextPredictTarget(method), before, prefix);
+	return sharedClient.complete(resolveTextPredictMethod(method), before, prefix);
 }
 
 /**

@@ -167,7 +167,7 @@ let weightsReady = false;
 /**
  * Start fetching the weights in the background, shown in the download HUD,
  * unless they are ready, already downloading, or a failure is backing off.
- * Called by the composer's word-completion backend on each `auto`/`smollm`
+ * Called by the composer's word-completion backend on each `smollm`
  * request, so the fetch starts on first use; cheap after that.
  */
 export function prefetchSmolLmWeights(): void {

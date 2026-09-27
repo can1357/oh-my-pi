@@ -81,7 +81,13 @@ env:
    # rest. Together they must equal //:natives-linux-all (checked in the cross
    # job), so a filegroup addition cannot silently skip both.
    NATIVES_X64_TARGETS: natives-linux-x64-baseline natives-linux-x64-modern
-   NATIVES_CROSS_TARGETS: natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-x64-baseline
+   NATIVES_CROSS_TARGETS: natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline
+   # Per-test wall-clock ceiling (seconds) for scripts/ci-test-ts.ts. omp-kata
+   # runners with reclaim_guest_freed_memory (infra/tune-kata-runtime.sh) run
+   # the SQLite/subprocess-heavy coding-agent suites 1.5-2x slower, which put
+   # several cases (model-registry refresh, session fork, credential bridge)
+   # over the 30 s default; 120 s still catches a real hang.
+   OMP_TEST_TIMEOUT: "120"
 
 permissions:
    contents: read
@@ -184,6 +190,33 @@ jobs:
            run: bun run ci:check:full
          - name: Build collab web
            run: bun run collab:web:build
+
+   # MODULE.bazel.lock caches the crate_universe (@crates) extension result,
+   # keyed by Cargo.toml/Cargo.lock/member-manifest hashes. While current, a
+   # fresh bazel server skips the extension entirely; once stale, every bazel
+   # job here re-runs `cargo-bazel splice` (~240 s each, CI run 36255186857).
+   # Stale is slow, never wrong, so this job only makes drift visible — PRs
+   # that touch Cargo files get told to run `bun run gen:bazel-lock`. The
+   # check compares hashes only (no splice); on failure the job evaluates the
+   # extension once and uploads the refreshed lockfile, so a contributor
+   # without bazelisk can commit it as-is.
+   bazel_lock:
+      name: Check MODULE.bazel.lock freshness
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         - name: Check crate_universe entry
+           run: bun scripts/gen-bazel-lock.ts --check
+         - name: Refresh MODULE.bazel.lock
+           if: failure()
+           run: bun scripts/gen-bazel-lock.ts
+         - name: Upload refreshed MODULE.bazel.lock
+           if: failure()
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: MODULE.bazel.lock
+              path: MODULE.bazel.lock
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
@@ -529,6 +562,37 @@ jobs:
               if-no-files-found: error
               retention-days: 1
 
+   test_coding_agent_native:
+      name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      # The longest PR job, so it runs as three shards on hosted PR runners
+      # (two left the slower shard ~25 s behind every other job). Main keeps
+      # one: omp-kata caps at 8 runners and the fan-out already fills it.
+      # Declared first among the test jobs: when the 8-runner pool is full
+      # the longest bucket should not be the one left queued (probe run
+      # 36238796966 queued it 1.9 min behind the shorter buckets).
+      # No required check keys on this job name (branch protection and
+      # rulesets are off for main/omp2), so the per-shard names are safe.
+      strategy:
+         fail-fast: false
+         matrix:
+            shard: ${{ fromJSON(github.event_name == 'pull_request' && '["1/3","2/3","3/3"]' || '["1/1"]') }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+              stash: ${{ needs.native_addons.outputs.stash }}
+         - name: Test coding-agent native/unit bucket
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+              OMP_TEST_SHARD: ${{ matrix.shard }}
+           run: bun run ci:test:coding-agent:native
+
    test_workspace:
       name: Test TS workspace fast
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
@@ -625,34 +689,6 @@ jobs:
            env:
               OMP_TEST_CONCURRENCY: "4"
            run: bun run ci:test:coding-agent:runtime
-
-   test_coding_agent_native:
-      name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
-      needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
-      timeout-minutes: 25
-      # The longest PR job, so it runs as three shards on hosted PR runners
-      # (two left the slower shard ~25 s behind every other job). Main keeps
-      # one: omp-kata caps at 8 runners and the fan-out already fills it.
-      # No required check keys on this job name (branch protection and
-      # rulesets are off for main/omp2), so the per-shard names are safe.
-      strategy:
-         fail-fast: false
-         matrix:
-            shard: ${{ fromJSON(github.event_name == 'pull_request' && '["1/3","2/3","3/3"]' || '["1/1"]') }}
-      steps:
-         - uses: actions/checkout@v4
-         - uses: ./.github/actions/bun-install
-         - uses: ./.github/actions/native-artifacts
-           with:
-              targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
-         - name: Test coding-agent native/unit bucket
-           env:
-              OMP_TEST_CONCURRENCY: "4"
-              OMP_TEST_SHARD: ${{ matrix.shard }}
-           run: bun run ci:test:coding-agent:native
 
    test_smoke:
       name: Test CLI smoke (TS)
@@ -774,6 +810,17 @@ jobs:
                     binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
                     native_targets: win32-x64-baseline,
                  }
+               # Addon cross-built by Bazel (clang-cl + xwin arm64 splat) in
+               # native_addons_cross, binary cross-compiled by bun; the
+               # release_smoke_win32_arm64 job runs it on real hardware.
+               - {
+                    os: ubuntu-22.04,
+                    platform: win32,
+                    arch: arm64,
+                    target_id: win32-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-windows-arm64.exe,
+                    native_targets: win32-arm64,
+                 }
       runs-on: ${{ matrix.os }}
       permissions:
          contents: read
@@ -789,14 +836,6 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
-         # that ref yet count against the shared 10 GB quota (see bazel-cache).
-         - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
-           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - name: Install prebuilt native addon(s)
            uses: ./.github/actions/native-artifacts
            with:
@@ -833,9 +872,19 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # Main-only save, after the build so it is off the leg's critical
+         # path: caches saved on a tag or branch are readable only by that ref
+         # yet count against the shared 10 GB quota (see bazel-cache).
+         - name: Save bun store
+           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
 
    # Native-host builds make addons that native_addons cannot provide: Darwin
-   # uses Bazel/Xcode and Windows ARM64 uses Cargo/MSVC. They gate on
+   # uses Bazel/Xcode (win32-arm64 now cross-builds on kata). They gate on
    # release_metadata alone and start as soon as a release is detected, fully
    # overlapped with the tests.
    #
@@ -859,19 +908,21 @@ jobs:
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
                     native_targets: darwin-x64-baseline,
+                    cache_scope: release-darwin-x64,
+                    fallback_scope: release-darwin-arm64-macos15,
                  }
+               # Same image as darwin-x64 so the two scopes can seed each
+               # other's exec-config actions (proc-macros, build scripts): a
+               # macos-14 probe restoring the arm64 archive got 584 disk-cache
+               # hits for the x64 build, macos-15 got 0 across images.
                - {
-                    os: macos-14,
+                    os: macos-15,
                     platform: darwin,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
                     native_targets: darwin-arm64,
-                 }
-               - {
-                    os: windows-11-arm,
-                    platform: win32,
-                    target_id: win32-arm64,
-                    binary_path: packages/coding-agent/binaries/omp-windows-arm64.exe,
+                    cache_scope: release-darwin-arm64-macos15,
+                    fallback_scope: release-darwin-x64,
                  }
       runs-on: ${{ matrix.os }}
       permissions:
@@ -890,30 +941,20 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
-         # that ref yet count against the shared 10 GB quota (see bazel-cache).
-         - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
-           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          # Darwin addons use the host Xcode toolchain. The warm workflow keeps
          # these scopes seeded near HEAD, so this is normally the version-bump
-         # delta.
+         # delta. No save here: every release push also triggers
+         # bazel-cache-warm, which builds and saves the same key concurrently;
+         # release legs lost that race and spent 0.5-6.4 min compressing an
+         # archive before "Unable to reserve cache" (18.3.2, 18.2.x).
          - name: Build native addon (bazel)
            if: matrix.platform == 'darwin'
            uses: ./.github/actions/bazel-natives
            with:
               targets: ${{ matrix.native_targets }}
-              cache-scope: release-${{ matrix.target_id }}
-         # The Bazel MSVC toolchain is cross-host-only. Build natively on the
-         # Windows ARM64 runner with its installed Rust and Visual Studio tools.
-         - name: Build native addon (cargo)
-           if: matrix.platform == 'win32'
-           env:
-              OMP_NATIVE_CARGO_PROFILE: ci
-           run: bun scripts/bazel-natives.ts host --dest packages/natives/native
+              cache-scope: ${{ matrix.cache_scope }}
+              fallback-scope: ${{ matrix.fallback_scope }}
+              save: "false"
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}
@@ -937,20 +978,6 @@ jobs:
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
-         - name: Smoke release binary (Windows)
-           if: matrix.platform == 'win32'
-           shell: pwsh
-           run: |
-              $runtimeDir = Join-Path $env:RUNNER_TEMP "omp-smoke"
-              $env:HOME = Join-Path $runtimeDir "home"
-              $env:USERPROFILE = $env:HOME
-              $env:LOCALAPPDATA = Join-Path $runtimeDir "local"
-              $env:XDG_DATA_HOME = Join-Path $runtimeDir "xdg"
-              New-Item -ItemType Directory -Force -Path $env:HOME, $env:LOCALAPPDATA, $env:XDG_DATA_HOME | Out-Null
-              & "${{ matrix.binary_path }}" --version
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              & "${{ matrix.binary_path }}" --smoke-test
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
          # Native-host addons exist only on these runners; export them so
          # release_native_leaves can publish every leaf package after the
          # validation gate. Other leaves reuse the native_addons artifacts.
@@ -966,6 +993,44 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # Main-only save, after the build so it is off the critical path.
+         - name: Save bun store
+           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+
+   # win32-arm64 is cross-built on Linux (addon: Bazel msvc arm64 toolchain;
+   # binary: bun --compile); this runs it on real Windows ARM64 hardware
+   # before anything publishes. Replaces the ~13-20 min native cargo leg.
+   release_smoke_win32_arm64:
+      name: "Smoke release binary: win32-arm64"
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_binary.result == 'success' }}
+      needs: [release_metadata, release_binary]
+      runs-on: windows-11-arm
+      permissions:
+         contents: read
+      steps:
+         - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: omp-binary-win32-arm64
+              path: packages/coding-agent/binaries
+         - name: Smoke release binary (Windows)
+           shell: pwsh
+           run: |
+              $runtimeDir = Join-Path $env:RUNNER_TEMP "omp-smoke"
+              $env:HOME = Join-Path $runtimeDir "home"
+              $env:USERPROFILE = $env:HOME
+              $env:LOCALAPPDATA = Join-Path $runtimeDir "local"
+              $env:XDG_DATA_HOME = Join-Path $runtimeDir "xdg"
+              New-Item -ItemType Directory -Force -Path $env:HOME, $env:LOCALAPPDATA, $env:XDG_DATA_HOME | Out-Null
+              & "packages/coding-agent/binaries/omp-windows-arm64.exe" --version
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              & "packages/coding-agent/binaries/omp-windows-arm64.exe" --smoke-test
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
    # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf
@@ -977,8 +1042,9 @@ jobs:
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_binary_hosted.result == 'success' &&
+         needs.release_smoke_win32_arm64.result == 'success' &&
          !inputs.skip_npm }}
-      needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
+      needs: [release_metadata, release_gate, release_binary, release_binary_hosted, release_smoke_win32_arm64]
       runs-on: ubuntu-22.04
       # id-token lets npm mint the OIDC token for trusted publishing; the
       # NODE_AUTH_TOKEN below is the fallback for unconfigured packages.
@@ -1018,7 +1084,7 @@ jobs:
          - name: Install linux and win32-x64 native addons
            uses: ./.github/actions/native-artifacts
            with:
-              targets: linux-x64-baseline linux-x64-modern linux-arm64 win32-x64-baseline
+              targets: linux-x64-baseline linux-x64-modern linux-arm64 win32-x64-baseline win32-arm64
          # Native-host addons come flat (canonical filenames) from the
          # release_binary_hosted legs.
          - name: Install native-host addons
@@ -1072,8 +1138,9 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
-         needs.release_binary_hosted.result == 'success' }}
-      needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
+         needs.release_binary_hosted.result == 'success' &&
+         needs.release_smoke_win32_arm64.result == 'success' }}
+      needs: [release_metadata, release_gate, release_binary, release_binary_hosted, release_smoke_win32_arm64]
       runs-on: ubuntu-22.04
       permissions:
          contents: write
@@ -1162,13 +1229,14 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_binary.result == 'success' &&
          needs.release_binary_hosted.result == 'success' &&
+         needs.release_smoke_win32_arm64.result == 'success' &&
          needs.release_github_verify.result == 'success' &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
       # release_native_leaves must finish first: the core package lists the
       # leaf packages as lockstep-versioned optionalDependencies, so installs
       # resolve them the moment the core version is live.
-      needs: [release_metadata, release_binary, release_binary_hosted, release_github_verify, release_native_leaves]
+      needs: [release_metadata, release_binary, release_binary_hosted, release_smoke_win32_arm64, release_github_verify, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
       # short-lived publish token (trusted publishing + provenance). When a
