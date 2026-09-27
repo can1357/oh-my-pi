@@ -14,6 +14,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bu
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
@@ -144,6 +145,25 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fixture_tool", mcpServerName: "lazysrv" }]);
 	});
 
+	// The seed writes the tool cache under the identity of the config the
+	// manager holds; the next startup looks the cache up with the config
+	// discovery produces (e.g. `type: "stdio"` filled in). Seeding with the
+	// raw file entry wrote a cache no later session could read, so the server
+	// started tool-less again.
+	test("seeds a lazy server with the config startup discovery produces", async () => {
+		await writeProjectConfig(projectDir, {
+			lazysrv: { command: "lazy-cmd", lazy: true } as MCPServerConfig,
+		});
+		const { controller, mcpManager } = createController();
+
+		await controller.handle("/mcp test lazysrv");
+
+		const discovered = (await loadAllMCPConfigs(projectDir)).configs.lazysrv;
+		expect(discovered?.type).toBe("stdio");
+		expect(mcpManager.connectServers).toHaveBeenCalledWith({ lazysrv: discovered }, expect.anything());
+		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
+	});
+
 	test("a successful test on an eager server does not force a reconnect", async () => {
 		await writeProjectConfig(projectDir, {
 			eagersrv: { type: "stdio", command: "eager-cmd" },
@@ -226,15 +246,15 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
 		});
 		const { controller, mcpManager } = createController();
-		const order: string[] = [];
 		const closeCalled = Promise.withResolvers<void>();
 		const closeGate = Promise.withResolvers<void>();
+		const seeded = Promise.withResolvers<void>();
 		vi.spyOn(mcpClient, "disconnectServer").mockImplementation(() => {
 			closeCalled.resolve();
 			return closeGate.promise;
 		});
 		mcpManager.reconnectServer.mockImplementation(async () => {
-			order.push("seed");
+			seeded.resolve();
 			return {};
 		});
 
@@ -243,22 +263,20 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		try {
 			handled = controller.handle("/mcp test lazysrv");
 			await closeCalled.promise;
-			expect(order).toEqual([]);
+			expect(mcpManager.reconnectServer).not.toHaveBeenCalled();
 			// Well past any close bound.
 			vi.advanceTimersByTime(60_000);
 		} finally {
 			vi.useRealTimers();
 		}
-		// Past the bound the seed proceeds on microtasks alone, ahead of this
-		// next event-loop turn. A regression that still awaits the close only
-		// seeds once this settles it, instead of hanging the test.
-		setImmediate(() => {
-			order.push("close settled");
-			closeGate.resolve();
-		});
+		// The seed must start while the close is still pending. A regression that
+		// awaits the close without a bound never reaches it and fails on the test
+		// timeout (real timers are back, so the timeout fires).
+		await seeded.promise;
+		closeGate.resolve();
 		await handled;
 
-		expect(order).toEqual(["seed"]);
+		expect(mcpManager.reconnectServer).toHaveBeenCalledTimes(1);
 		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
 	});
 

@@ -1329,7 +1329,25 @@ export class MCPCommandController {
 	async #syncManagerConnection(name: string, config: MCPServerConfig): Promise<void> {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
-		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
+		let managerConfig = config;
+		let managerSources: Record<string, SourceMeta> = {};
+		if (config.lazy) {
+			// The seed below writes the tool cache under the identity of the config
+			// the manager holds, and the next startup looks it up with the config
+			// discovery produces (defaults such as `type` filled in, env
+			// placeholders expanded). Hand the manager that same shape, or the seed
+			// is unreadable next session and the server starts tool-less again.
+			const discovered = await loadAllMCPConfigs(getProjectDir(), {
+				extensionRoots: this.ctx.session.effectiveExtensionRoots,
+			});
+			const discoveredConfig = discovered.configs[name];
+			if (discoveredConfig) {
+				managerConfig = discoveredConfig;
+				const source = discovered.sources[name];
+				if (source) managerSources = { [name]: source };
+			}
+		}
+		await this.ctx.mcpManager.connectServers({ [name]: managerConfig }, managerSources);
 		// A *lazy* server never connects through `connectServers`: with no
 		// cache it stays tool-less (dormant until `/mcp reconnect`), and with a
 		// cache it serves the LAST connect's catalog — which the test just
@@ -1337,7 +1355,7 @@ export class MCPCommandController {
 		// explicitly exercised this server, so spend one forced connect through
 		// the documented seeding path: it registers the live catalog and
 		// rewrites the cache for future startups.
-		if (config.lazy) {
+		if (managerConfig.lazy) {
 			try {
 				// `/mcp test` is an explicit user-driven retry, exactly like
 				// `/mcp reconnect` — it must reset the crash-burst window too, or
