@@ -147,6 +147,8 @@ function createStubInputControllerContext(opts: {
 			return (this as typeof ctx).session;
 		},
 		showError,
+		notifyComposerStash: vi.fn(),
+		cancelComposerStashNotice: vi.fn(),
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
