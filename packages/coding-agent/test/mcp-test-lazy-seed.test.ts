@@ -17,6 +17,7 @@ import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	getConfigRootDir,
@@ -77,6 +78,7 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		editor: {},
 		showError: vi.fn(),
 		showStatus: vi.fn(),
+		keybindings: KeybindingsManager.inMemory(),
 		mcpTestEscapeHandlers: new Set(),
 		oauthManualInput: {
 			hasPending: vi.fn(() => false),
