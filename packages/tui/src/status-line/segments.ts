@@ -75,8 +75,9 @@ function leadingGlyph(display: string): string {
 	return space === -1 ? display : display.slice(0, space);
 }
 
-function stripDisplayRoot(pwd: string): string {
-	for (const root of [path.join(os.homedir(), "Projects"), "/work"]) {
+function stripDisplayRoot(pwd: string, extraRoots?: readonly string[]): string {
+	for (const root of [...(extraRoots ?? []), path.join(os.homedir(), "Projects"), "/work"]) {
+		if (!root) continue;
 		const relative = relativePathWithinRoot(root, pwd);
 		if (relative) return relative;
 	}
@@ -438,7 +439,7 @@ const pathSegment: StatusLineSegment = {
 			if (scratch) {
 				if (relative) pwd = relative;
 			} else {
-				pwd = stripDisplayRoot(pwd);
+				pwd = stripDisplayRoot(pwd, opts.projectRoots);
 			}
 		}
 		const repoSuffix = ctx.activeRepo ? ` ↳ ${ctx.activeRepo.relativeRepoRoot}` : "";
