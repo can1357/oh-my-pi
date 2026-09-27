@@ -4306,7 +4306,7 @@ export function processInteractionUpdate(
 			if (mcpCall) {
 				const args = mcpCall.args || {};
 				const id = args.toolCallId || crypto.randomUUID();
-				const resolvedByExec = state.resolvedMcpToolCallIds.delete(id);
+				state.resolvedMcpToolCallIds.delete(id);
 				// The exec channel may have emitted this block first — executed
 				// (marked resolved) or handed to an external executor (deliberately
 				// unmarked). Either way the call is already in the transcript, so a
@@ -4326,9 +4326,6 @@ export function processInteractionUpdate(
 					[kStreamingBlockKind]: "mcp",
 					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 				};
-				if (resolvedByExec) {
-					markCursorExecResolved(block);
-				}
 				output.content.push(block);
 				retainStreamedCall(state, block, update.message.value.callId);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });

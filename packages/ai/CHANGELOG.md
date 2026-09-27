@@ -9,8 +9,13 @@
 
 - Added `ImageGenerationResult.model` and `GeneratedImage.size`/`quality`, populated from the image model, dimensions, and quality the hosted OpenAI backends report ([#13403](https://github.com/can1357/oh-my-pi/issues/13403))
 
+### Changed
+
+- Removed an unreachable Cursor MCP exec-resolution branch and the test that pinned it; exec-bridged MCP tool calls behave as before ([#13563](https://github.com/can1357/oh-my-pi/pull/13563))
+
 ### Fixed
 
+- Fixed Gemini and Antigravity responses reporting negative input tokens and negative cost when upstream omitted `promptTokenCount` or reported more cached tokens than the prompt
 - Fixed native judge responses without token counts producing non-finite usage and cost ([#13490](https://github.com/can1357/oh-my-pi/issues/13490)).
 - Fixed credential rotation failing with a drained account's multi-hour quota error when a healthy sibling was blocked for only a few seconds (such as a Cloud Code Assist capacity 429); rotation now waits out sibling blocks of up to 5 seconds, abortable via `signal`, and retries the freed credential ([#13270](https://github.com/can1357/oh-my-pi/issues/13270))
 - Fixed Cursor turn usage and cost reporting only streamed output tokens; turns now use Cursor's final input, cache-read, cache-write, and reasoning counters ([#13082](https://github.com/can1357/oh-my-pi/issues/13082))
