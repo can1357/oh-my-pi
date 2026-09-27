@@ -1488,6 +1488,11 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		});
 		expect(qwen36.compat.qwenTemplateReasoningEffort).toBe(false);
 		expect(qwen36.thinking?.requiresEffort).toBeUndefined();
+		// Pre-3.8 templates only toggle thinking, so every selection collapses
+		// onto one on-rung instead of advertising inert low..max tiers (#13454).
+		expect(qwen36.thinking?.efforts).toEqual([Effort.High]);
+		expect(clampThinkingLevelForModel(qwen36, Effort.Low)).toBe(Effort.High);
+		expect(clampThinkingLevelForModel(qwen36, Effort.Max)).toBe(Effort.High);
 
 		// Local Ollama renders its own (Go) templates and keeps the generic local fallback ladder.
 		const ollama = createModel({

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Enabled providers to report interim autocomplete suggestions via `onPartial` callback for improved responsiveness during high-latency file discovery
 - Added `WordCompletionProvider` for ghost-text completion with pluggable backend routing
 - Added prose-gating logic to filter completion suggestions by context
 - Added `wordCompletionFeedback` provider hook for improved ghost-text tracking
@@ -11,6 +12,8 @@
 
 ### Changed
 
+- Introduced client-side filtering for `@` file completion lists, allowing the TUI to narrow stale lists in-place while awaiting asynchronous search results
+- Configured the TUI to show a 'Searching…' placeholder when `@` completions are being refreshed if no current matches exist
 - Refined word-completion persistence to maintain suggestions when users type through existing ghost text
 - Updated ps top UI to show scope kind "(target)" or "(current + global)" in scope label
 - Updated TUI task interfaces to reflect the new `complexity` field requirement
@@ -23,6 +26,7 @@
 
 ### Fixed
 
+- Fixed submission behavior to respect active autocomplete state, ensuring Enter correctly commits current input if the list is still pending
 - Fixed missing background tint on truncated skip lines
 
 ## [18.3.1] - 2026-09-25
