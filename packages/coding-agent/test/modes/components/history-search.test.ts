@@ -10,7 +10,7 @@ beforeAll(async () => {
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 
 function makeEntry(id: number, prompt: string, ageSeconds = 0): HistoryEntry {
-	return { id, prompt, created_at: NOW_SECONDS - ageSeconds };
+	return { id, prompt, created_at: NOW_SECONDS - ageSeconds, useCount: 1 };
 }
 
 /** Minimal in-memory stand-in matching the two methods the component touches. */

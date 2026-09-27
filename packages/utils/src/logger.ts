@@ -644,7 +644,9 @@ function printSpan(span: Span, depth: number, lines: string[]): void {
 	const tag = parallel ? " [parallel]" : "";
 	const self = selfTimeOf(span);
 	const selfStr = span.children.length > 0 && self > LOGGED_TIMING_THRESHOLD_MS ? ` (self ${fmtMs(self)})` : "";
-	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag}`);
+	// Start offset from process origin: gaps between consecutive siblings are
+	// the parent's own (unspanned) work, which duration alone cannot locate.
+	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag} @${span.start.toFixed(0)}ms`);
 
 	// Split children into work spans and module-load spans for summarization.
 	const work: Span[] = [];

@@ -32,11 +32,11 @@ const resolverUrl = pathToFileURL(path.join(import.meta.dir, "../src/config/reso
 
 /**
  * Budget for the descendant-escape oracles below. The command must outlive it
- * (both use `sleep 10`, and the escaped worker `sleep 30`), so the timeout
- * always fires with the descendant alive — but it must also cover starting a
- * `sh` and a worker script on a loaded CI runner, because those oracles wait
- * for the worker *inside* the timed command. 150 ms did not, and the tests
- * flaked whenever the worker lost the race (#10259).
+ * (each keeps its shell alive with `sleep 10` and its worker with `sleep 30`),
+ * so the timeout always fires with the descendant alive — but it must also
+ * cover starting a `sh` and a worker script on a loaded CI runner, because
+ * those oracles wait for the worker *inside* the timed command. 150 ms did not,
+ * and the tests flaked whenever the worker lost the race (#10259).
  */
 const ESCAPE_TIMEOUT_MS = 3000;
 
@@ -109,31 +109,32 @@ console.log(value === undefined ? "RESOLVED-UNDEFINED" : "LEAKED:" + value);
 	},
 );
 
-test.skipIf(process.platform === "win32")(
-	"a timed-out !command leaves no descendant writing after the kill",
-	async () => {
-		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-config-treekill-"));
-		roots.push(root);
-		const marker = path.join(root, "marker");
+test.skipIf(process.platform === "win32")("a timed-out !command kills the descendant it backgrounded", async () => {
+	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-config-treekill-"));
+	roots.push(root);
+	const pidFile = path.join(root, "descendant.pid");
+	const worker = path.join(root, "worker.sh");
+	await fs.promises.writeFile(worker, `#!/bin/sh\necho $$ > "${pidFile}"\nsleep 30\n`, { mode: 0o755 });
 
-		// The backgrounded sleep must never get to write: the timeout kills the
-		// whole tree, not just the shell (parity with the executeShell contract).
-		// The resolver returns only after termination completes, so the marker
-		// delay and poll window only need comfortable margins against scheduler
-		// noise — the poll keeps discriminating power if that await is ever lost
-		// (an orphan would write at the delay, inside the window).
-		const result = await runShellCommand(`{ sleep 1.5; echo done > "${marker}"; } & sleep 10`, 150);
+	let descendant: Process | null = null;
+	try {
+		// The wait for the pid file runs inside the timed command, so it needs
+		// the same budget as the other escape cases (#10259); the trailing
+		// `sleep 10` still keeps the shell alive until the timeout fires.
+		const command = `"${worker}" & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
+		const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
 		expect(result).toBeUndefined();
-		// Real subprocess timing: fake timers cannot advance a child's clock, and
-		// the oracle is "the marker never appears" — poll so a leak fails fast
-		// instead of paying the full window on green.
-		const deadline = Date.now() + 2000;
-		while (Date.now() < deadline && !(await Bun.file(marker).exists())) {
-			await Bun.sleep(50);
-		}
-		expect(await Bun.file(marker).exists(), "orphaned descendant wrote the marker after the timeout").toBe(false);
-	},
-);
+
+		// The kill is the contract. Comparing its latency against a write the
+		// descendant performs after a delay only measured how fast the runner
+		// was, and failed a working tree-kill whenever it lost that race.
+		const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
+		descendant = Process.fromPid(pid);
+		await expectDescendantDead(descendant, pid, "backgrounded");
+	} finally {
+		descendant?.killTree(9);
+	}
+});
 
 test.skipIf(process.platform === "win32")(
 	"a timed-out !command kills descendants reparented before the timeout",
@@ -198,21 +199,30 @@ test.skipIf(process.platform === "win32")(
 	async () => {
 		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-config-treekill-term-"));
 		roots.push(root);
-		const marker = path.join(root, "marker");
+		const pidFile = path.join(root, "descendant.pid");
+		const worker = path.join(root, "term-ignoring-worker.sh");
+		// The ignored TERM disposition survives `exec`, so the recorded pid is
+		// the `sleep` that must be hard-killed; it would outlive the test.
+		await fs.promises.writeFile(worker, `#!/bin/sh\ntrap '' TERM\necho $$ > "${pidFile}"\nexec sleep 30\n`, {
+			mode: 0o755,
+		});
 
-		// Parity with the executeShell contract (natives native.test.ts "should
-		// SIGKILL workloads that ignore SIGTERM on timeout"): the timeout must
-		// hard-kill the whole tree, and the resolver must not report the timeout
-		// until that kill has completed.
-		const result = await runShellCommand(`{ trap '' TERM; sleep 1.5; echo done > "${marker}"; } & sleep 10`, 150);
-		expect(result).toBeUndefined();
-		const deadline = Date.now() + 2000;
-		while (Date.now() < deadline && !(await Bun.file(marker).exists())) {
-			await Bun.sleep(50);
+		let descendant: Process | null = null;
+		try {
+			// Parity with the executeShell contract (natives native.test.ts "should
+			// SIGKILL workloads that ignore SIGTERM on timeout"): the timeout must
+			// hard-kill the whole tree. The pid-file wait runs inside the timed
+			// command, so it needs the same budget as the other escape cases (#10259).
+			const command = `"${worker}" & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
+			const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
+			expect(result).toBeUndefined();
+
+			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
+			descendant = Process.fromPid(pid);
+			await expectDescendantDead(descendant, pid, "SIGTERM-ignoring");
+		} finally {
+			descendant?.killTree(9);
 		}
-		expect(await Bun.file(marker).exists(), "SIGTERM-ignoring descendant wrote the marker after the timeout").toBe(
-			false,
-		);
 	},
 );
 

@@ -17,7 +17,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
-	Partial<Pick<Model, "cost">>;
+	Partial<Pick<Model, "cost" | "kind">>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -53,6 +53,22 @@ function makeBrowser(
 }
 
 describe("resolveRoleAssignments", () => {
+	test("rejects configured models that do not match the role's accepted kind", () => {
+		const chat = makeModel("demo", "chat");
+		const image = makeModel("demo", "image", { kind: "image" });
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/image",
+				image: "demo/image",
+			},
+		});
+
+		const roles = resolveRoleAssignments(createModelBrowserSource(settings), [chat, image], [chat, image]);
+
+		expect(roles.default).toBeUndefined();
+		expect(roles.image?.model).toBe(image);
+	});
+
 	test("shows configured smol for an unconfigured tiny role", () => {
 		const smol = makeModel("demo", "custom-smol");
 		const priorityHead = makeModel("demo", "gemini-3.8-flash");

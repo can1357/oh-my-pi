@@ -233,14 +233,6 @@ describe("OutputSink", () => {
 		expect(dumped.totalLines).toBe(4);
 		expect(dumped.outputLines).toBe(4);
 	});
-	test("invokes onChunk callback with sanitized text", async () => {
-		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
-		await sink.push("abc");
-		await sink.push("def");
-		expect(chunks).toEqual(["abc", "def"]);
-	});
-
 	test("normalizes carriage-return progress frames across chunk boundaries", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });

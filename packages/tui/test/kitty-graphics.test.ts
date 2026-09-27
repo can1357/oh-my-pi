@@ -98,6 +98,13 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env())).toBe(true);
 	});
 
+	it("enables the scroll-aware placeholder path for rio (#12205 reporter-verified U=1 rendering)", () => {
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env())).toBe(true);
+		// The opt-out and Herdr guards must still apply to rio like any other id.
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env({ PI_NO_KITTY_PLACEHOLDERS: "1" }))).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env({ HERDR_ENV: "1" }))).toBe(false);
+	});
+
 	it("disables for wezterm and other Kitty-protocol paths that treat placeholders as literal PUA glyphs (#1877)", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("wezterm", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("warp", env())).toBe(false);
@@ -106,6 +113,13 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("base", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("iterm2", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("alacritty", env())).toBe(false);
+	});
+
+	it("enables for otty, whose Kitty implementation documents U+10EEEE virtual placement support (#12660)", () => {
+		expect(detectKittyUnicodePlaceholdersSupport("otty", env())).toBe(true);
+		// Opt-outs still apply to otty.
+		expect(detectKittyUnicodePlaceholdersSupport("otty", env({ PI_NO_KITTY_PLACEHOLDERS: "1" }))).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("otty", env({ HERDR_ENV: "1" }))).toBe(false);
 	});
 
 	it("uses scroll-aware placeholders when Kitty is explicitly forced through a multiplexer", () => {

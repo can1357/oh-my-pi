@@ -330,7 +330,7 @@ describe("cloud-drive blob uploaders", () => {
 			device_iden: "device-id",
 			type: "file",
 			file_url: publicFileUrl,
-			body: "Sent via Oh My Pi",
+			body: "Sent via omp",
 			file_type: "image/png",
 		});
 		expect(publication).toEqual({

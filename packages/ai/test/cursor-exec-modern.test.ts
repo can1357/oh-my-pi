@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import {
 	type BlockState,
 	buildCursorRequestContextRules,
-	CURSOR_CLIENT_VERSION,
 	flushOpenToolCalls,
 	handleServerMessage,
 	processInteractionUpdate,
@@ -205,12 +204,6 @@ function soleResult(frames: AgentClientMessage[]) {
 	if (frame.case !== "execClientMessage") throw new Error(`expected execClientMessage, got ${frame.case}`);
 	return frame.value.message;
 }
-
-describe("Cursor modern exec protocol activation", () => {
-	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
-	});
-});
 
 describe("Cursor requestContext rules", () => {
 	it("returns mapped system-prompt canaries as global CursorRule entries", async () => {

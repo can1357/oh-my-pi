@@ -125,20 +125,20 @@ describe("Muse Code subscription usage", () => {
 			),
 		});
 		try {
-			await storage.reload();
-			await storage.set("muse-code", {
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", {
 				type: "oauth",
 				access: credential.accessToken,
 				refresh: "meta-refresh",
 				expires: startedAt + 3_600_000,
 			});
 
-			expect(await storage.fetchUsageReports()).toEqual([]);
+			expect(await storage.usage.reports()).toEqual([]);
 			now += 30_000;
-			expect(await storage.fetchUsageReports()).toEqual([]);
+			expect(await storage.usage.reports()).toEqual([]);
 			expect(requests).toBe(1);
 			now += 5 * 60_000;
-			expect(await storage.fetchUsageReports()).toHaveLength(1);
+			expect(await storage.usage.reports()).toHaveLength(1);
 			expect(requests).toBe(2);
 		} finally {
 			storage.close();
@@ -152,8 +152,8 @@ describe("Muse Code subscription usage", () => {
 			}),
 		});
 		try {
-			await storage.reload();
-			await storage.set("muse-code", [
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", [
 				{
 					type: "oauth",
 					access: credential.accessToken,
@@ -162,7 +162,7 @@ describe("Muse Code subscription usage", () => {
 				},
 			]);
 
-			const [result] = await storage.checkCredentials();
+			const [result] = await storage.health.check();
 			expect(result.ok).toBe(false);
 			expect(result.reason).toContain("inactive");
 		} finally {

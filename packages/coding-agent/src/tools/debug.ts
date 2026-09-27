@@ -47,6 +47,8 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
+import { cfgDebugEnabled, cfgToolsMaxTimeout } from "./settings";
+
 /**
  * DAP debug actions that only read program state (no mutation, no execution).
  * Execution-side actions (`launch`, `attach`, `continue`, `step_*`, `pause`,
@@ -582,7 +584,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 	}
 
 	static createIf(session: ToolSession): DebugTool | null {
-		return session.settings.get("debug.enabled") ? new DebugTool(session) : null;
+		return cfgDebugEnabled.get(session.settings) ? new DebugTool(session) : null;
 	}
 
 	async execute(
@@ -592,7 +594,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 		_onUpdate?: AgentToolUpdateCallback<DebugExecutionDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<DebugExecutionDetails>> {
-		const timeoutSec = clampTimeout("debug", params.timeout, this.session.settings.get("tools.maxTimeout"));
+		const timeoutSec = clampTimeout("debug", params.timeout, cfgToolsMaxTimeout.get(this.session.settings));
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		const details: DebugExecutionDetails = { action: params.action, success: true };

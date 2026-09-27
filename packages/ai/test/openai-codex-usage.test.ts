@@ -52,6 +52,42 @@ function fakeFetch(payload: unknown): FetchImpl {
 }
 
 describe("openai-codex usage parser", () => {
+	it("reports active cyber access without letting a failed entitlement request hide usage", async () => {
+		for (const status of [200, 500]) {
+			const requests: string[] = [];
+			const fetchImpl: FetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+				const path = typeof url === "string" ? url : url.toString();
+				requests.push(path);
+				expect(init?.headers).toMatchObject({
+					Authorization: `Bearer ${accessTokenFixture}`,
+					"ChatGPT-Account-Id": "acct-1",
+				});
+				if (path.endsWith("/accounts/verified_access")) {
+					return new Response(
+						JSON.stringify({ programs: [{ program: "cyber", state: "active", grants: [{ level: "tac1" }] }] }),
+						{ status },
+					);
+				}
+				return new Response(JSON.stringify(makePayload()));
+			}) as unknown as FetchImpl;
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+					baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+				},
+				{ fetch: fetchImpl },
+			);
+			expect(requests).toEqual([
+				"https://chatgpt.com/backend-api/accounts/verified_access",
+				"https://chatgpt.com/backend-api/wham/usage",
+			]);
+			expect(report?.limits.map(limit => limit.id)).toContain("openai-codex:primary");
+			if (status === 200) expect(report?.metadata?.daybreak).toBe(true);
+			else expect(report?.metadata).not.toHaveProperty("daybreak");
+		}
+	});
+
 	it("emits primary + secondary limits from the main rate_limit block", async () => {
 		const report = await openaiCodexUsageProvider.fetchUsage(
 			{
@@ -389,7 +425,10 @@ describe("openai-codex usage parser", () => {
 			},
 			{ fetch: fetchImpl },
 		);
-		expect(requested).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+		expect(requested).toEqual([
+			"https://chatgpt.com/backend-api/accounts/verified_access",
+			"https://chatgpt.com/backend-api/wham/usage",
+		]);
 	});
 
 	it("keeps a canonical chatgpt.com baseUrl override (and adds /backend-api when missing)", async () => {
@@ -409,7 +448,10 @@ describe("openai-codex usage parser", () => {
 			},
 			{ fetch: fetchImpl },
 		);
-		expect(requested).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+		expect(requested).toEqual([
+			"https://chatgpt.com/backend-api/accounts/verified_access",
+			"https://chatgpt.com/backend-api/wham/usage",
+		]);
 	});
 
 	it("strips a streaming path from a canonical chatgpt.com baseUrl for wham/usage", async () => {
@@ -432,7 +474,10 @@ describe("openai-codex usage parser", () => {
 			},
 			{ fetch: fetchImpl },
 		);
-		expect(requested).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+		expect(requested).toEqual([
+			"https://chatgpt.com/backend-api/accounts/verified_access",
+			"https://chatgpt.com/backend-api/wham/usage",
+		]);
 	});
 
 	it("keeps a window with headroom usable when the account flag is set", async () => {

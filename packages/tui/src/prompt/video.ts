@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { type SourceTaggedImage, imageAttachmentSource, tagImageAttachmentSource } from "./image-source";
 
 /** Container extensions treated as video. Mirrors the video subset of the local-protocol binary list. */
 const VIDEO_EXTENSION_LOOKUP: Record<string, true> = {
@@ -17,31 +18,20 @@ export function isVideoPath(filePath: string): boolean {
 	return VIDEO_EXTENSION_LOOKUP[path.extname(filePath).toLowerCase()] === true;
 }
 
-/**
- * Original local source path stored on a generated contact-sheet image. Symbol
- * metadata stays out of serialized/model-bound image data while traveling with
- * the draft object until AgentSession creates its hidden companion message.
- */
-const kVideoPreviewSource = Symbol("video.previewSource");
-
 /** A contact-sheet image tagged with the original local video path. */
-export type VideoPreviewImage = ImageContent & {
-	readonly [kVideoPreviewSource]: string;
-};
+export type VideoPreviewImage = SourceTaggedImage;
 
 /** Create a model-ready contact-sheet image tagged with its original video path. */
 export function createVideoPreviewImage(preview: ImageContent, sourcePath: string): VideoPreviewImage {
-	return {
-		type: "image",
-		data: preview.data,
-		mimeType: preview.mimeType,
-		[kVideoPreviewSource]: sourcePath,
-	};
+	return tagImageAttachmentSource(preview, sourcePath, "video");
 }
 
-/** Return the original video path associated with a generated contact-sheet image. */
+/**
+ * Return the original video path associated with a generated contact-sheet
+ * image, via the shared attachment-source tag (see {@link tagImageAttachmentSource}).
+ * Returns undefined for untagged images and for image-file (non-video) sources.
+ */
 export function videoPreviewSource(preview: ImageContent): string | undefined {
-	if (!(kVideoPreviewSource in preview)) return undefined;
-	const sourcePath = preview[kVideoPreviewSource];
-	return typeof sourcePath === "string" ? sourcePath : undefined;
+	const source = imageAttachmentSource(preview);
+	return source?.kind === "video" ? source.path : undefined;
 }

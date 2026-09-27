@@ -11,6 +11,8 @@ import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 
+import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
+
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
 	readonly captures: string[] = [];
@@ -189,7 +191,7 @@ describe("AutoLearnController", () => {
 		// Enable via the global layer (not an isolated override) so the live flag
 		// can be flipped and the controller's fire-time re-check is exercised.
 		const settings = Settings.isolated({ "autolearn.autoContinue": true });
-		settings.set("autolearn.enabled", true);
+		cfgAutolearnEnabled.set(settings, true);
 		new AutoLearnController({
 			session: session as unknown as AgentSession,
 			settings,
@@ -198,13 +200,13 @@ describe("AutoLearnController", () => {
 		session.toolCalls(5);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1); // fires while enabled
-		settings.set("autolearn.enabled", false);
+		cfgAutolearnEnabled.set(settings, false);
 		session.toolCalls(5);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1); // no new nudge after disable
 		// The disabled stop must NOT leave its tool calls queued: re-enabling and
 		// doing a sub-threshold turn must not fire from leaked counts.
-		settings.set("autolearn.enabled", true);
+		cfgAutolearnEnabled.set(settings, true);
 		session.toolCalls(1);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1);
@@ -378,7 +380,7 @@ describe("isolated auto-learn capture", () => {
 		let captureSessionId: string | undefined;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
 			createAgent: options => {
 				captureMessages = options.initialState?.messages ?? [];
@@ -434,7 +436,7 @@ describe("isolated auto-learn capture", () => {
 		let captureOnResponse: AgentOptions["onResponse"];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			onPayload,
 			onResponse,
 			createAgent: options => {
@@ -466,7 +468,7 @@ describe("isolated auto-learn capture", () => {
 		let captureToolNames: string[] = [];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool, learnTool],
+			captureTools: () => [manageSkillTool, learnTool],
 			createAgent: options => {
 				captureToolNames = options.initialState?.tools?.map(tool => tool.name) ?? [];
 				return new Agent({
@@ -513,7 +515,7 @@ describe("isolated auto-learn capture", () => {
 		});
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "capture-transport",
 			createAgent: options =>
 				new Agent({
@@ -549,7 +551,7 @@ describe("isolated auto-learn capture", () => {
 		let closeCalls = 0;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options => {
 				providerState = options.providerSessionState;
 				providerState?.set("blocked", { close: () => closeCalls++ });

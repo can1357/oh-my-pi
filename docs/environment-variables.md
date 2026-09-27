@@ -24,6 +24,8 @@ The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the d
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
+Variables declared on a setting definition (see [settings precedence](./settings.md#precedence)) are parsed by the setting's type unless noted otherwise. Boolean ones (`PI_PY`, `PI_JS`, `PI_INTENT_TRACING`, `PI_AUTO_QA`, `HINDSIGHT_AUTO_RECALL`, …) follow `parseFlag`: an empty value is ignored, so the setting applies; `1`, `y`, `true`, `yes`, and `on` (all-lowercase or all-uppercase) mean true; any other non-empty value means false.
+
 ---
 
 ## 1) Model/provider authentication
@@ -63,6 +65,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`  | Xiaomi MiMo Token Plan auth (CN)                 | Using `xiaomi-token-plan-cn` provider                          |                                                                                                     |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | Xiaomi MiMo Token Plan auth (SGP)                | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                     |
 | `MOONSHOT_API_KEY`              | Moonshot auth                                    | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                      |
+| `STEPFUN_API_KEY`               | StepFun auth                                     | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`  |
 | `XAI_API_KEY`                   | xAI auth                                         | Using xAI models or as fallback for `xai-oauth`                |                                                                                                     |
 | `XAI_OAUTH_TOKEN`               | xAI OAuth/SuperGrok auth                         | Using `xai-oauth` provider                                     | Takes precedence over `XAI_API_KEY` for `xai-oauth`                                                 |
 | `OPENROUTER_API_KEY`            | OpenRouter auth                                  | Using OpenRouter models                                        | Also used by image tool when preferred/auto provider is OpenRouter                                  |
@@ -106,6 +109,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
+| `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
 
 ### GitHub/Copilot tokens
 
@@ -356,49 +361,34 @@ therefore completes through the paste-code path.
 | `PI_PERPLEXITY_API_MODEL`                           | Perplexity direct API model override (default `sonar-pro`)                |
 | `FIRECRAWL_API_KEY`                                 | Firecrawl search provider (keyless fallback when unset) and fetch reader backend (required) |
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
-| `GOOGLE_GEMINI_BASE_URL`                            | Gemini search endpoint override; must be a valid absolute HTTP(S) URL     |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
-| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
-| `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
-| `GEMINI_SEARCH_MODEL`                               | Gemini search model override                                              |
+| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search model availability/auth                                      |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
 | `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                                    |
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
 | `JINA_API_KEY`                                      | Jina search provider                                                      |
 | `PARALLEL_API_KEY`                                  | Parallel search provider                                                  |
 | `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                |
-| `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                                |
-| `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                                       |
+| `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token; fallbacks for `searxng.endpoint` / `searxng.token`, used when the setting is unset, `null`, or blank |
+| `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials; fallbacks used only when the matching `searxng.basic*` setting is unset or `null` (an empty string is a valid credential) |
 
 DuckDuckGo search is keyless — it queries the no-JS HTML frontend (`html.duckduckgo.com`) and needs no credentials; it also feeds the credential-free `public` aggregate (alongside startpage, google, ecosia, and mojeek).
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
 
-### Anthropic web search auth chain
+### Anthropic web search authentication
 
-`searchAnthropic()` resolves credentials in this order:
+For an Anthropic catalog model, `searchAnthropic()` uses credentials in this order:
 
 1. `ANTHROPIC_SEARCH_API_KEY`
-2. `authStorage.getApiKey("anthropic")` fallback credentials (runtime and config overrides, stored OAuth, a login-sourced API key, generic Anthropic environment fallback, then other stored API keys; the environment fallback is `ANTHROPIC_FOUNDRY_API_KEY` → `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` in Foundry mode, or `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` otherwise)
+2. The model registry's credential resolver for the selected model/provider, including configured runtime credentials, stored OAuth or API-key login, and that provider's normal environment fallback
 
-For either credential path, base URL resolution is:
+`ANTHROPIC_SEARCH_API_KEY` is a search-only auth source: it does not change chat credentials. The selected catalog model supplies the model ID and endpoint, so there are no separate Anthropic search model or base-URL environment overrides.
 
-1. `ANTHROPIC_SEARCH_BASE_URL`
-2. `FOUNDRY_BASE_URL` when `CLAUDE_CODE_USE_FOUNDRY` is enabled
-3. `ANTHROPIC_BASE_URL`
-4. `https://api.anthropic.com`
-
-Related vars:
-
-| Variable                    | Default / behavior                                                                                                                                                                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ANTHROPIC_SEARCH_API_KEY`  | API key used exclusively for the Anthropic web search provider. Highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / Foundry for search calls without affecting chat completions.                                         |
-| `ANTHROPIC_SEARCH_BASE_URL` | Base URL used exclusively for the Anthropic web search provider. Applied to either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode) for search calls. |
-| `ANTHROPIC_SEARCH_MODEL`    | Search model override. Defaults to `claude-haiku-4-5`.                                                                                                                                                                                     |
-| `ANTHROPIC_BASE_URL`        | Generic fallback base URL for Anthropic requests when no search-specific base URL is set.                                                                                                                                                  |
-
-Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to keep chat routed through an enterprise gateway (`ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_FOUNDRY=true`) while pointing web search at a direct Anthropic endpoint, or vice versa.
+| Variable                   | Default / behavior                                                                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_SEARCH_API_KEY` | API key used exclusively for an Anthropic web-search request. It is tried before the selected model's normal credential resolver and does not affect chat completions.                             |
 
 ### Perplexity OAuth flow behavior flag
 
@@ -408,13 +398,13 @@ Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to 
 
 ### TypeSafe judgments
 
-Small typed decisions the agent makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging) go through one judgment interface. With a TypeSafe credential they run on TypeSafe's System One model (`POST /v1/systemone`); a failed request falls back through the `tiny`, `smol`, `default`, and active-session models. Without TypeSafe, features use that chat chain or their configured local on-device model. `providers.judgmentProvider` (`auto` / `typesafe` / `llm`) pins the preferred backend.
+Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-latest`, `openrouter/~typesafe/jev-latest`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
 
-| Variable                 | Default / behavior                                                          |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `TYPESAFE_API_KEY`       | TypeSafe API key; alternatively use `/login typesafe`                       |
-| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`); also used by `/login` validation |
-| `TYPESAFE_DEFAULT_MODEL` | System One model name (default `jev-latest`)                                |
+| Variable                 | Default / behavior                                                                                                                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TYPESAFE_API_KEY`       | TypeSafe API key for discovery and System One requests; alternatively use `/login typesafe`                                                                                                                                                             |
+| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`), used by model discovery, `/login` validation, and System One requests                                                                                                                             |
+| `TYPESAFE_DEFAULT_MODEL` | Standalone `pi-ai` TypeSafe client default when its caller does not pass a model (default `jev-latest`). The coding-agent app passes the model selected by the `judge` role, so this variable does not override app role selection or discovered model IDs. |
 
 ---
 
@@ -422,8 +412,8 @@ Small typed decisions the agent makes about its own state (the `auto` thinking-l
 
 | Variable               | Default / behavior                                                                                  |
 | ---------------------- | --------------------------------------------------------------------------------------------------- |
-| `PI_PY`                | Boolean-like override for Python; unset defers to `eval.py` (default enabled)                       |
-| `PI_JS`                | Boolean-like override for JavaScript; unset defers to `eval.js` (default enabled)                   |
+| `PI_PY`                | Boolean flag override for Python; unset or empty defers to `eval.py` (default enabled)              |
+| `PI_JS`                | Boolean flag override for JavaScript; unset or empty defers to `eval.js` (default enabled)          |
 | `PI_PYTHON_SKIP_CHECK` | Truthy flag skips Python interpreter availability checks (subprocess runner still starts on demand) |
 | `PI_PYTHON_IPC_TRACE`  | Truthy flag logs NDJSON frames exchanged with the Python runner subprocess                          |
 | `VIRTUAL_ENV`          | Highest-priority venv path for Python runtime resolution                                            |
@@ -467,29 +457,35 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `OLLAMA_HOST`                | Ollama host used for implicit Ollama discovery when `OLLAMA_BASE_URL` is unset; accepts Ollama-style values such as `127.0.0.1:11434` or `http://host:11434`                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `OLLAMA_CONTEXT_LENGTH`      | Positive integer context-window override for implicit Ollama discovery; affects OMP context budgeting only and does not change Ollama's runtime `num_ctx`                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `LLAMA_CPP_BASE_URL`         | Default implicit Llama.cpp discovery base URL override (`http://127.0.0.1:8080` if unset)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `PI_EDIT_VARIANT`            | Forces edit tool variant when valid (`patch`, `replace`, `hashline`, `apply_patch`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `PI_INTENT_TRACING`          | Boolean-like override for tool intent metadata; falls back to `tools.intentTracing`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PI_EDIT_VARIANT`            | Forces the edit tool variant when valid (`patch`, `replace`, `hashline`, `apply_patch`, `sloppy`); invalid values (including `auto`) are ignored. A matching `edit.modelVariants` entry still wins over it                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `PI_EDIT_FUZZY`              | `1`/`true` forces edit fuzzy matching on, `0`/`false` off; `auto` or any other value is ignored and `edit.fuzzyMatch` applies |
+| `PI_EDIT_FUZZY_THRESHOLD`    | Fuzzy-match similarity threshold in `[0, 1]` overriding `edit.fuzzyThreshold`; `auto`, non-numeric, or out-of-range values are ignored |
+| `PI_INTENT_TRACING`          | Boolean flag override for tool intent metadata; unset or empty falls back to `tools.intentTracing`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `PI_STRICT_EDIT_MODE`        | If `1`, disables built-in model-specific edit-mode fallbacks, so the configured/global `edit.mode` is used unless `PI_EDIT_VARIANT` or `edit.modelVariants` overrides it                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `PI_FORCE_IMAGE_PROTOCOL`    | Forces supported image protocol (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) where used. Setting `kitty` inside tmux also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_ALLOW_SIXEL_PASSTHROUGH` | Allows SIXEL passthrough when `PI_FORCE_IMAGE_PROTOCOL=sixel`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PI_NO_PTY`                  | If `1`, disables interactive PTY path for bash tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `OMP_MCP_TIMEOUT_MS`         | Overrides MCP client request timeout (ms) for every MCP server. `0` disables client-side timeouts (`AbortSignal` never fires). Invalid (negative or non-numeric) values are ignored with a warning and the per-server config or default (`30000`) is used.                                                                                                                                                                                                                                                                                                                                                 |
+| `OMP_MCP_TIMEOUT_MS`         | Overrides MCP client request timeout (ms) for every MCP server and print-mode readiness wait (default `30000`). `0` disables both deadlines; print mode may wait indefinitely for a server. Invalid (negative or non-numeric) values are ignored with a warning and the per-server config or default is used. |
+| `OMP_MCP_STARTUP_TIMEOUT_MS` | Initial MCP discovery window (ms), overriding `mcp.startupTimeoutMs` (default `250`). `0` waits for initial connections to settle; invalid values are logged and ignored. Print mode independently waits for full readiness before its first turn. |
+| `OMP_MCP_REQUIRE_READY`      | Set to `1` to make print mode exit 1 before the first turn if any configured MCP server remains pending or has failed. Without it, unavailable servers produce per-server stderr warnings and the turn proceeds.                                                                                                                                                                                                                                                                                                                                                 |
 | `PI_DISABLE_UUTILS_BUILTINS` | Non-empty except `0`/`false` disables the bash tool's uutils built-ins; `shell.env.PI_DISABLE_UUTILS_BUILTINS` wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_NO_WEBP`                | `1` or `true` (case-insensitive) disables WebP in image-resize format selection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `MNEMOPI_EMBEDDING_MODEL`    | Embedding-model override for mnemopi memory configuration when no explicit override is supplied                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `PI_AUTO_QA`                 | Boolean flag with highest precedence for the automatic tool-issue report injection/recording (`dev.autoqa` setting is consulted next); `0`/`false` disables, `1`/`true` forces on                                                                                                                                                                                                                                                                                                                                                                                          |
+| `MNEMOPI_EMBEDDING_MODEL`    | Embedding-model fallback for `mnemopi.embeddingModel`: used when that setting is unset, `null`, or blank; otherwise the setting wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `PI_AUTO_QA`                 | Boolean flag with highest precedence for the automatic tool-issue report injection/recording; any non-empty value other than `1`/`y`/`true`/`yes`/`on` disables it; unset or empty consults the `dev.autoqa` setting                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_AUTO_QA_PUSH`            | `1`/`true` bypasses the consent dialog and forces tool-issue push recording in headless/non-interactive environments                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_AUTO_QA_PUSH_URL`        | Endpoint override for auto QA grievance push; wins over the `dev.autoqaPush.endpoint` setting                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when Eval's browser API needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Hindsight memory backend
 
-`loadHindsightConfig()` resolves each supported environment override over the corresponding
-`hindsight.*` setting and then its built-in default. String values are trimmed and an empty
-string is ignored. Boolean values are case-insensitive: only `true`, `1`, and `yes` mean true;
-any other defined value means false. Integer values use base-10 `parseInt`; non-numeric values
-are ignored and the loader does not clamp the parsed integer. Enum values must exactly match
-one of the listed lowercase values; invalid values are ignored.
+Each supported environment variable overrides the corresponding `hindsight.*` setting, which in
+turn overrides its built-in default. String values are trimmed and a blank value is ignored.
+Boolean values follow the setting-backed flag rules above: an empty value is ignored; `1`, `y`,
+`true`, `yes`, and `on` (all-lowercase or all-uppercase) mean true; any other value means false.
+Integer values use the base-10 `parseInt` prefix (`5000ms` reads as `5000`, `2.5` as `2`);
+empty and non-numeric values are ignored, and the parsed integer is not clamped. Enum values
+must match one of the listed lowercase values (surrounding whitespace is ignored); invalid values
+are ignored.
 
 | Variable                           | Setting overridden              | Accepted value / built-in default                                                 |
 | ---------------------------------- | ------------------------------- | --------------------------------------------------------------------------------- |
@@ -585,6 +581,7 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_HARDWARE_CURSOR`           | If `1`, enables hardware cursor mode                                                                                                                                                                                                               |
 | `PI_NO_SYNC_OUTPUT`            | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards                                                                                                                                     |
 | `PI_NO_DECCARA`                | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering)                                                                                                                                          |
+| `PI_NO_GLYPH_PROTOCOL`         | If `1`, skips the Glyph Protocol handshake (APC `25a1`), so nerd-preset icons come only from the terminal's own fonts instead of the outlines omp registers in-band on Rio/Ghostty                                                             |
 | `PI_DEBUG_REDRAW`              | If `1`, enables redraw debug logging                                                                                                                                                                                                               |
 | `PI_FORCE_IMAGE_PROTOCOL`      | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`). Setting `kitty` inside a terminal multiplexer also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it |
 | `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under a terminal multiplexer, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes              |
@@ -622,10 +619,19 @@ OMP initializes OTLP export only when at least one signal has an endpoint. `OTEL
 | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`                                                                                   | Common endpoint fallback                                                                        |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Per-signal endpoint; wins over the common endpoint                                              |
+| `OTEL_EXPORTER_OTLP_HEADERS`                                                                                    | Common OTLP request headers, as a `key=value,key2=value2` list with percent-encoded values       |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, `OTEL_EXPORTER_OTLP_METRICS_HEADERS`    | Per-signal request headers; merged per key over the common headers, which they override          |
 | `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER`                                           | A list containing `none` disables that signal                                                   |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` and per-signal `..._PROTOCOL` variants                                            | Only `http/protobuf` is enabled by this runtime; another explicit protocol disables that signal |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`                                                                 | OpenTelemetry resource metadata                                                                 |
 | `OTEL_LOG_LEVEL`                                                                                                | Minimum exported OMP log level                                                                  |
+
+Header values are percent-decoded, so encode spaces and the `,`/`=` delimiters:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:8000/v1/traces"
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer%20$LAMINAR_PROJECT_API_KEY"
+```
 
 ---
 
@@ -637,5 +643,6 @@ Treat these as secrets; do not log or commit them:
 - Cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS` path may expose service-account material)
 - Search/provider auth vars (`EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
 - Foundry mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)
+- OTLP exporter headers (`OTEL_EXPORTER_OTLP_HEADERS` and the per-signal `..._{TRACES,LOGS,METRICS}_HEADERS` variants) — they carry ingest bearer tokens/project keys
 
 Python runtime also explicitly strips many common key vars before spawning kernel subprocesses (`packages/coding-agent/src/eval/py/runtime.ts`).

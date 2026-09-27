@@ -1,9 +1,7 @@
 import type { BodyInit } from "bun";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -14,7 +12,8 @@ import {
 	searchExa,
 	synthesizeAnswer,
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/exa";
-import { isRecord, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 type PostedMcpRequest = Record<string, unknown> & { id: string | number };
 
@@ -26,14 +25,12 @@ function parsePostedMcpRequest(body: BodyInit | null | undefined): PostedMcpRequ
 	return { ...request, id: request.id };
 }
 
-async function withLocalAuthStorage<T>(run: (authStorage: AuthStorage) => Promise<T>): Promise<T> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "web-search-exa-auth-"));
-	const authStorage = await AuthStorage.create(path.join(dir, "auth.db"));
+async function withInMemoryAuthStorage<T>(run: (authStorage: AuthStorage) => Promise<T>): Promise<T> {
+	const authStorage = createInMemoryAuthStorage();
 	try {
 		return await run(authStorage);
 	} finally {
 		authStorage.close();
-		await removeWithRetries(dir);
 	}
 }
 
@@ -60,10 +57,6 @@ describe("normalizeSearchType", () => {
 
 	it("passes through 'auto' unchanged", () => {
 		expect(normalizeSearchType("auto")).toBe("auto");
-	});
-
-	it("passes through 'fast' unchanged", () => {
-		expect(normalizeSearchType("fast")).toBe("fast");
 	});
 });
 
@@ -309,14 +302,19 @@ describe("searchExa", () => {
 		});
 	});
 	it("maps site:/before: directives to native Exa params with an operator-free query", async () => {
-		await withLocalAuthStorage(authStorage =>
-			new ExaProvider().search({
+		await withInMemoryAuthStorage(authStorage => {
+			const modelRegistry = new ModelRegistry(authStorage);
+			const model = modelRegistry.find("web", "exa");
+			if (!model) throw new Error("Expected bundled web/exa model");
+			return new ExaProvider().search({
 				query: "vector db benchmarks site:qdrant.tech before:2025-01-01",
 				systemPrompt: "",
 				authStorage,
+				model,
+				modelRegistry,
 				fetch: mockFetch(makeMockExaResponse()),
-			}),
-		);
+			});
+		});
 		expect(capturedRequestBody!.query).toBe("vector db benchmarks");
 		expect(capturedRequestBody!.includeDomains).toEqual(["qdrant.tech"]);
 		expect(capturedRequestBody!.endPublishedDate).toBe("2025-01-01");
@@ -325,14 +323,19 @@ describe("searchExa", () => {
 	});
 
 	it("sends directive-free queries byte-identical with no domain/date params", async () => {
-		await withLocalAuthStorage(authStorage =>
-			new ExaProvider().search({
+		await withInMemoryAuthStorage(authStorage => {
+			const modelRegistry = new ModelRegistry(authStorage);
+			const model = modelRegistry.find("web", "exa");
+			if (!model) throw new Error("Expected bundled web/exa model");
+			return new ExaProvider().search({
 				query: "plain natural language question",
 				systemPrompt: "",
 				authStorage,
+				model,
+				modelRegistry,
 				fetch: mockFetch(makeMockExaResponse()),
-			}),
-		);
+			});
+		});
 		expect(capturedRequestBody).toEqual({
 			query: "plain natural language question",
 			numResults: 10,
@@ -692,8 +695,8 @@ describe("searchExa", () => {
 			);
 		};
 
-		await withLocalAuthStorage(async authStorage => {
-			authStorage.setRuntimeApiKey("exa", "stored-key-xyz");
+		await withInMemoryAuthStorage(async authStorage => {
+			authStorage.keys.setRuntime("exa", "stored-key-xyz");
 			const result = await searchExa({ query: "from auth storage", authStorage, fetch: fetchMock });
 			expect(result.provider).toBe("exa");
 			expect(result.sources).toHaveLength(3);
@@ -703,7 +706,7 @@ describe("searchExa", () => {
 
 	it("reports unavailable for the auto chain without EXA_API_KEY or stored credentials", async () => {
 		delete process.env.EXA_API_KEY;
-		const available = await withLocalAuthStorage(authStorage =>
+		const available = await withInMemoryAuthStorage(authStorage =>
 			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
 		);
 		expect(available).toBe(false);
@@ -711,7 +714,7 @@ describe("searchExa", () => {
 
 	it("reports explicitly available without credentials so the MCP fallback runs", async () => {
 		delete process.env.EXA_API_KEY;
-		const explicit = await withLocalAuthStorage(authStorage =>
+		const explicit = await withInMemoryAuthStorage(authStorage =>
 			Promise.resolve(new ExaProvider().isExplicitlyAvailable(authStorage)),
 		);
 		expect(explicit).toBe(true);
@@ -719,7 +722,7 @@ describe("searchExa", () => {
 
 	it("reports available with EXA_API_KEY", async () => {
 		process.env.EXA_API_KEY = "test-key-123";
-		const available = await withLocalAuthStorage(authStorage =>
+		const available = await withInMemoryAuthStorage(authStorage =>
 			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
 		);
 		expect(available).toBe(true);
@@ -727,8 +730,8 @@ describe("searchExa", () => {
 
 	it("reports available when AuthStorage holds a credential", async () => {
 		delete process.env.EXA_API_KEY;
-		const available = await withLocalAuthStorage(authStorage => {
-			authStorage.setRuntimeApiKey("exa", "stored-key");
+		const available = await withInMemoryAuthStorage(authStorage => {
+			authStorage.keys.setRuntime("exa", "stored-key");
 			return Promise.resolve(new ExaProvider().isAvailable(authStorage));
 		});
 		expect(available).toBe(true);

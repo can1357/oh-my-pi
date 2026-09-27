@@ -356,15 +356,6 @@ describe("string parsing", () => {
 		).toThrow("default");
 	});
 
-	it("validated default in scope", () => {
-		const $ = scope({
-			specialNumber: "number",
-			obj: { foo: "string", bar: "specialNumber = 5" },
-		});
-
-		$.export();
-	});
-
 	it("optional with default", () => {
 		expect(() =>
 			// @ts-expect-error

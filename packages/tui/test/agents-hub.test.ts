@@ -61,7 +61,8 @@ async function createHub(settings: TestSettings): Promise<{
 				mruOrder: [],
 				modelPerf: new Map(),
 				getModelRole: () => undefined,
-				getRoleInfo: role => ({ name: role }),
+				getRoleInfo: role => ({ name: role, section: "chat", accepts: () => true }),
+				defaultRoleChain: () => [],
 				resolveRoleValue: () => ({ model: undefined, explicitThinkingLevel: false }),
 			},
 			loadAgents: async () => {

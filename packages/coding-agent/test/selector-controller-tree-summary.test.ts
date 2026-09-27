@@ -8,6 +8,8 @@ import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import { cfgBranchSummaryEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 const SHIFT_ENTER = "\x1b[13;2u";
 
 let settingsState: SettingsTestState | undefined;
@@ -89,6 +91,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showHookSelector,
+		keybindings: { getKeys: () => ["escape"] },
 		showHookEditor: vi.fn(),
 		chatContainer: { addChild: vi.fn() },
 		statusContainer: {
@@ -151,7 +154,7 @@ describe("SelectorController tree branch summaries", () => {
 	});
 
 	it("skips the summary prompt on shift+enter even when branchSummary.enabled is on", async () => {
-		Settings.instance.set("branchSummary.enabled", true);
+		cfgBranchSummaryEnabled.set(Settings.instance, true);
 		const harness = createHarness();
 
 		harness.controller.showTreeSelector();
@@ -167,7 +170,7 @@ describe("SelectorController tree branch summaries", () => {
 	});
 
 	it("still offers the summary prompt on plain enter when branchSummary.enabled is on", async () => {
-		Settings.instance.set("branchSummary.enabled", true);
+		cfgBranchSummaryEnabled.set(Settings.instance, true);
 		const harness = createHarness("Summarize");
 
 		harness.controller.showTreeSelector();

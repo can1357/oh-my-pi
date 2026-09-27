@@ -1,27 +1,10 @@
 /**
- * Lazy provider module loading.
- *
- * Each provider module is loaded only when its stream function is first called.
- * This avoids eagerly importing heavy SDK dependencies (e.g., openai) at
- * startup. The loaded module promise is cached so subsequent calls
- * reuse the same import.
- *
- * NOTE: stream.ts currently imports providers directly, so this file is not yet
- * wired into the main streaming path. It provides the infrastructure for lazy
- * loading that can be integrated when stream.ts is refactored.
+ * Built-in provider stream dispatch with shared error, cancellation, and timeout handling.
  */
 
 import type { CompatOf } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
-import type {
-	Api,
-	AssistantMessage,
-	AssistantMessageEvent,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	OptionsForApi,
-} from "../types";
+import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, OptionsForApi } from "../types";
 import { type AbortSourceTracker, createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream as EventStreamImpl } from "../utils/event-stream";
 import {
@@ -31,156 +14,45 @@ import {
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import type { BedrockOptions } from "./amazon-bedrock";
-import type { AnthropicOptions } from "./anthropic";
-import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses";
-import type { CursorOptions } from "./cursor";
-import type { DevinOptions } from "./devin";
-import type { GoogleOptions } from "./google";
-import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
-import type { GoogleVertexOptions } from "./google-vertex";
-import type { OllamaChatOptions } from "./ollama";
-import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
-import type { OpenAICompletionsOptions } from "./openai-completions";
-import type { OpenAIResponsesOptions } from "./openai-responses";
+import * as AnthropicProvider from "./anthropic";
+import * as AzureOpenAIResponsesProvider from "./azure-openai-responses";
+import * as BedrockProvider from "./amazon-bedrock";
+import * as CursorProvider from "./cursor";
+import * as AppleFoundationModelsProvider from "./apple-foundation-models";
+import * as DevinProvider from "./devin";
+import * as GoogleProvider from "./google";
+import * as GoogleGeminiCliProvider from "./google-gemini-cli";
+import * as GoogleVertexProvider from "./google-vertex";
+import * as OllamaProvider from "./ollama";
+import * as OpenAICodexResponsesProvider from "./openai-codex-responses";
+import * as OpenAICompletionsProvider from "./openai-completions";
+import * as OpenAIResponsesProvider from "./openai-responses";
 
-// ---------------------------------------------------------------------------
-// Lazy provider module shape
-// ---------------------------------------------------------------------------
+type ProviderStream<TApi extends Api> = (
+	model: Model<TApi>,
+	context: Context,
+	options: OptionsForApi<TApi>,
+) => AsyncIterable<AssistantMessageEvent>;
 
-interface LazyProviderModule<TApi extends Api> {
-	stream: (model: Model<TApi>, context: Context, options: OptionsForApi<TApi>) => AsyncIterable<AssistantMessageEvent>;
+let cursorStreamOverride: typeof CursorProvider.streamCursor | undefined;
+let bedrockStreamOverride: typeof BedrockProvider.streamBedrock | undefined;
+
+/** Install a host-supplied Bedrock transport in place of the built-in provider. */
+export function setBedrockProviderModule(module: Pick<typeof BedrockProvider, "streamBedrock">): void {
+	bedrockStreamOverride = module.streamBedrock;
 }
 
-interface AnthropicProviderModule {
-	streamAnthropic: (
-		model: Model<"anthropic-messages">,
-		context: Context,
-		options: AnthropicOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface AzureOpenAIResponsesProviderModule {
-	streamAzureOpenAIResponses: (
-		model: Model<"azure-openai-responses">,
-		context: Context,
-		options: AzureOpenAIResponsesOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface GoogleProviderModule {
-	streamGoogle: (
-		model: Model<"google-generative-ai">,
-		context: Context,
-		options: GoogleOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface GoogleGeminiCliProviderModule {
-	streamGoogleGeminiCli: (
-		model: Model<"google-gemini-cli">,
-		context: Context,
-		options: GoogleGeminiCliOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface GoogleVertexProviderModule {
-	streamGoogleVertex: (
-		model: Model<"google-vertex">,
-		context: Context,
-		options: GoogleVertexOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface OpenAICodexResponsesProviderModule {
-	streamOpenAICodexResponses: (
-		model: Model<"openai-codex-responses">,
-		context: Context,
-		options: OpenAICodexResponsesOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface OpenAICompletionsProviderModule {
-	streamOpenAICompletions: (
-		model: Model<"openai-completions">,
-		context: Context,
-		options: OpenAICompletionsOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface OpenAIResponsesProviderModule {
-	streamOpenAIResponses: (
-		model: Model<"openai-responses">,
-		context: Context,
-		options: OpenAIResponsesOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface OllamaProviderModule {
-	streamOllama: (
-		model: Model<"ollama-chat">,
-		context: Context,
-		options: OllamaChatOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface CursorProviderModule {
-	streamCursor: (
-		model: Model<"cursor-agent">,
-		context: Context,
-		options: CursorOptions,
-	) => AssistantMessageEventStream;
-}
-
-interface DevinProviderModule {
-	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
-}
-
-interface BedrockProviderModule {
-	streamBedrock: (
-		model: Model<"bedrock-converse-stream">,
-		context: Context,
-		options: BedrockOptions,
-	) => AssistantMessageEventStream;
-}
-
-// ---------------------------------------------------------------------------
-// Module-level lazy promise caches
-// ---------------------------------------------------------------------------
-
-let anthropicProviderModulePromise: Promise<LazyProviderModule<"anthropic-messages">> | undefined;
-let azureOpenAIResponsesProviderModulePromise: Promise<LazyProviderModule<"azure-openai-responses">> | undefined;
-let googleProviderModulePromise: Promise<LazyProviderModule<"google-generative-ai">> | undefined;
-let googleGeminiCliProviderModulePromise: Promise<LazyProviderModule<"google-gemini-cli">> | undefined;
-let googleVertexProviderModulePromise: Promise<LazyProviderModule<"google-vertex">> | undefined;
-let openAICodexResponsesProviderModulePromise: Promise<LazyProviderModule<"openai-codex-responses">> | undefined;
-let openAICompletionsProviderModulePromise: Promise<LazyProviderModule<"openai-completions">> | undefined;
-let openAIResponsesProviderModulePromise: Promise<LazyProviderModule<"openai-responses">> | undefined;
-let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | undefined;
-let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
-let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
-let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
-let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
-let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
-
-export function setBedrockProviderModule(module: BedrockProviderModule): void {
-	bedrockProviderModuleOverride = {
-		stream: module.streamBedrock,
-	};
-}
-
-export function setCursorProviderModule(module: CursorProviderModule): void {
-	cursorProviderModuleOverride = {
-		stream: module.streamCursor,
-	};
+/** Install a host-supplied Cursor transport in place of the built-in provider. */
+export function setCursorProviderModule(module: Pick<typeof CursorProvider, "streamCursor">): void {
+	cursorStreamOverride = module.streamCursor;
 }
 
 // ---------------------------------------------------------------------------
 // Stream forwarding / error helpers
 // ---------------------------------------------------------------------------
 
-const LAZY_STREAM_IDLE_TIMEOUT_ERROR = "Provider stream stalled while waiting for the next event";
-const LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "Provider stream timed out while waiting for the first event";
+const STREAM_IDLE_TIMEOUT_ERROR = "Provider stream stalled while waiting for the next event";
+const STREAM_FIRST_EVENT_TIMEOUT_ERROR = "Provider stream timed out while waiting for the first event";
 
 function hasFinalResult(
 	source: AsyncIterable<AssistantMessageEvent>,
@@ -194,21 +66,21 @@ function hasFinalResult(
  * take precedence unless a provider opts into OpenAI-family idle flooring for
  * local backends that users historically tuned with `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`.
  */
-interface LazyStreamLimits {
+interface StreamLimits {
 	defaultFirstEventTimeoutMs?: number;
 	defaultIdleTimeoutMs?: number;
 	/**
 	 * The provider implementation already wraps its upstream transport with
-	 * stream timeouts. Keep the lazy loader from racing it with generic errors.
+	 * stream timeouts. Keep the shared watchdog from racing it with generic errors.
 	 */
 	providerHandlesStreamTimeouts?: boolean;
 	/**
 	 * The provider retries or fails over when no first event arrives, while the
-	 * lazy wrapper continues to own steady-state idle detection.
+	 * shared wrapper continues to own steady-state idle detection.
 	 */
 	providerHandlesFirstEventTimeouts?: boolean;
 	/**
-	 * Apply OpenAI-family idle timeout precedence in the lazy wrapper. Used by
+	 * Apply OpenAI-family idle timeout precedence in the shared wrapper. Used by
 	 * local backends whose users historically tune slow prompt-processing gaps
 	 * with `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`.
 	 */
@@ -217,18 +89,18 @@ interface LazyStreamLimits {
 /**
  * Cloud Code Assist owns first-event detection because Antigravity can return
  * successful headers and then never emit an SSE event. Keeping the watchdog in
- * the provider lets it fail over before surfacing an error; the lazy wrapper
+ * the provider lets it fail over before surfacing an error; the shared wrapper
  * still catches post-first-event stalls.
  */
-const GOOGLE_GEMINI_CLI_LAZY_STREAM_LIMITS: LazyStreamLimits = {
+const GOOGLE_GEMINI_CLI_STREAM_LIMITS: StreamLimits = {
 	providerHandlesFirstEventTimeouts: true,
 };
 
-const PROVIDER_HANDLED_STREAM_TIMEOUTS: LazyStreamLimits = {
+const PROVIDER_HANDLED_STREAM_TIMEOUTS: StreamLimits = {
 	providerHandlesStreamTimeouts: true,
 };
 
-const OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS: LazyStreamLimits = {
+const OPENAI_IDLE_FLOORED_STREAM_LIMITS: StreamLimits = {
 	openAIIdleEnvFloorsFirstEvent: true,
 };
 
@@ -238,7 +110,7 @@ function forwardStream<TApi extends Api>(
 	model: Model<TApi>,
 	options: OptionsForApi<TApi>,
 	abortTracker: AbortSourceTracker,
-	limits?: LazyStreamLimits,
+	limits?: StreamLimits,
 ): void {
 	(async () => {
 		try {
@@ -275,11 +147,11 @@ function forwardStream<TApi extends Api>(
 			const watchedSource = iterateWithIdleTimeout(source, {
 				idleTimeoutMs,
 				firstItemTimeoutMs,
-				errorMessage: LAZY_STREAM_IDLE_TIMEOUT_ERROR,
-				firstItemErrorMessage: LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR,
-				onIdle: () => abortTracker.abortLocally(new AIError.StreamTimeoutError(LAZY_STREAM_IDLE_TIMEOUT_ERROR)),
+				errorMessage: STREAM_IDLE_TIMEOUT_ERROR,
+				firstItemErrorMessage: STREAM_FIRST_EVENT_TIMEOUT_ERROR,
+				onIdle: () => abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
 				onFirstItemTimeout: () =>
-					abortTracker.abortLocally(new AIError.StreamTimeoutError(LAZY_STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
+					abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
 				abortSignal: options.signal,
 				// The synthetic `start` event is yielded immediately by every provider before
 				// the upstream model has emitted any tokens. Treating it as the first "real"
@@ -300,14 +172,14 @@ function forwardStream<TApi extends Api>(
 			}
 		} catch (error) {
 			const stopReason = abortTracker.wasCallerAbort() ? "aborted" : "error";
-			const message = createLazyLoadErrorMessage(model, error, stopReason);
+			const message = createProviderStreamError(model, error, stopReason);
 			target.push({ type: "error", reason: stopReason, error: message });
 			target.end(message);
 		}
 	})();
 }
 
-function createLazyLoadErrorMessage<TApi extends Api>(
+function createProviderStreamError<TApi extends Api>(
 	model: Model<TApi>,
 	error: unknown,
 	stopReason: Extract<AssistantMessage["stopReason"], "aborted" | "error"> = "error",
@@ -335,173 +207,100 @@ function createLazyLoadErrorMessage<TApi extends Api>(
 }
 
 // ---------------------------------------------------------------------------
-// Generic lazy stream factory
+// Provider stream wrapper
 // ---------------------------------------------------------------------------
 
-function createLazyStream<TApi extends Api>(
-	loadModule: () => Promise<LazyProviderModule<TApi>>,
-	limits?: LazyStreamLimits,
+function createProviderStream<TApi extends Api>(
+	stream: ProviderStream<TApi>,
+	limits?: StreamLimits,
 ): (model: Model<TApi>, context: Context, options: OptionsForApi<TApi>) => EventStreamImpl {
 	return (model, context, options) => {
 		const outer = new EventStreamImpl();
-		const streamOptions = (options ?? {}) as OptionsForApi<TApi>;
+		const streamOptions: OptionsForApi<TApi> = options ?? {};
 
-		loadModule()
-			.then(module => {
-				const abortTracker = createAbortSourceTracker(streamOptions.signal);
-				const providerOptions = { ...streamOptions, signal: abortTracker.requestSignal } as OptionsForApi<TApi>;
-				const inner = module.stream(model, context, providerOptions);
-				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
-			})
-			.catch(error => {
-				const message = createLazyLoadErrorMessage(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
-				outer.end(message);
-			});
+		try {
+			const abortTracker = createAbortSourceTracker(streamOptions.signal);
+			const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
+			const inner = stream(model, context, providerOptions);
+			forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
+		} catch (error) {
+			const message = createProviderStreamError(model, error);
+			outer.push({ type: "error", reason: "error", error: message });
+			outer.end(message);
+		}
 
 		return outer;
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Module loaders (one per provider, cached via ||=)
-// ---------------------------------------------------------------------------
-
-function loadAnthropicProviderModule(): Promise<LazyProviderModule<"anthropic-messages">> {
-	anthropicProviderModulePromise ||= import("./anthropic").then(module => {
-		const provider = module as AnthropicProviderModule;
-		return { stream: provider.streamAnthropic };
-	});
-	return anthropicProviderModulePromise;
-}
-
-function loadAzureOpenAIResponsesProviderModule(): Promise<LazyProviderModule<"azure-openai-responses">> {
-	azureOpenAIResponsesProviderModulePromise ||= import("./azure-openai-responses").then(module => {
-		const provider = module as AzureOpenAIResponsesProviderModule;
-		return { stream: provider.streamAzureOpenAIResponses };
-	});
-	return azureOpenAIResponsesProviderModulePromise;
-}
-
-function loadGoogleProviderModule(): Promise<LazyProviderModule<"google-generative-ai">> {
-	googleProviderModulePromise ||= import("./google").then(module => {
-		const provider = module as GoogleProviderModule;
-		return { stream: provider.streamGoogle };
-	});
-	return googleProviderModulePromise;
-}
-
-function loadGoogleGeminiCliProviderModule(): Promise<LazyProviderModule<"google-gemini-cli">> {
-	googleGeminiCliProviderModulePromise ||= import("./google-gemini-cli").then(module => {
-		const provider = module as GoogleGeminiCliProviderModule;
-		return { stream: provider.streamGoogleGeminiCli };
-	});
-	return googleGeminiCliProviderModulePromise;
-}
-
-function loadGoogleVertexProviderModule(): Promise<LazyProviderModule<"google-vertex">> {
-	googleVertexProviderModulePromise ||= import("./google-vertex").then(module => {
-		const provider = module as GoogleVertexProviderModule;
-		return { stream: provider.streamGoogleVertex };
-	});
-	return googleVertexProviderModulePromise;
-}
-
-function loadOpenAICodexResponsesProviderModule(): Promise<LazyProviderModule<"openai-codex-responses">> {
-	openAICodexResponsesProviderModulePromise ||= import("./openai-codex-responses").then(module => {
-		const provider = module as OpenAICodexResponsesProviderModule;
-		return { stream: provider.streamOpenAICodexResponses };
-	});
-	return openAICodexResponsesProviderModulePromise;
-}
-
-function loadOpenAICompletionsProviderModule(): Promise<LazyProviderModule<"openai-completions">> {
-	openAICompletionsProviderModulePromise ||= import("./openai-completions").then(module => {
-		const provider = module as OpenAICompletionsProviderModule;
-		return { stream: provider.streamOpenAICompletions };
-	});
-	return openAICompletionsProviderModulePromise;
-}
-
-function loadOpenAIResponsesProviderModule(): Promise<LazyProviderModule<"openai-responses">> {
-	openAIResponsesProviderModulePromise ||= import("./openai-responses").then(module => {
-		const provider = module as OpenAIResponsesProviderModule;
-		return { stream: provider.streamOpenAIResponses };
-	});
-	return openAIResponsesProviderModulePromise;
-}
-
-function loadOllamaProviderModule(): Promise<LazyProviderModule<"ollama-chat">> {
-	ollamaProviderModulePromise ||= import("./ollama").then(module => {
-		const provider = module as OllamaProviderModule;
-		return { stream: provider.streamOllama };
-	});
-	return ollamaProviderModulePromise;
-}
-
-function loadCursorProviderModule(): Promise<LazyProviderModule<"cursor-agent">> {
-	if (cursorProviderModuleOverride) {
-		return Promise.resolve(cursorProviderModuleOverride);
-	}
-	cursorProviderModulePromise ||= import("./cursor").then(module => {
-		const provider = module as CursorProviderModule;
-		return { stream: provider.streamCursor };
-	});
-	return cursorProviderModulePromise;
-}
-
-function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
-	devinProviderModulePromise ||= import("./devin").then(module => {
-		const provider = module as DevinProviderModule;
-		return { stream: provider.streamDevin };
-	});
-	return devinProviderModulePromise;
-}
-
-function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
-	if (bedrockProviderModuleOverride) {
-		return Promise.resolve(bedrockProviderModuleOverride);
-	}
-	bedrockProviderModulePromise ||= import("./amazon-bedrock").then(module => {
-		const provider = module as BedrockProviderModule;
-		return { stream: provider.streamBedrock };
-	});
-	return bedrockProviderModulePromise;
-}
-
-// ---------------------------------------------------------------------------
-// Lazy stream function exports
-//
-// These use the same names as the direct provider stream functions. When
-// stream.ts is updated to import from this module instead of individual
-// providers, the lazy loading will take effect on the main code path.
-// ---------------------------------------------------------------------------
-
-export const streamAnthropic = createLazyStream(loadAnthropicProviderModule, PROVIDER_HANDLED_STREAM_TIMEOUTS);
-export const streamAzureOpenAIResponses = createLazyStream(
-	loadAzureOpenAIResponsesProviderModule,
+/** Stream Anthropic responses with provider-owned timeout handling. */
+export const streamAnthropic = createProviderStream<"anthropic-messages">(
+	(model, context, options) => AnthropicProvider.streamAnthropic(model, context, options),
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
-export const streamGoogle = createLazyStream(loadGoogleProviderModule);
-export const streamGoogleGeminiCli = createLazyStream(
-	loadGoogleGeminiCliProviderModule,
-	GOOGLE_GEMINI_CLI_LAZY_STREAM_LIMITS,
-);
-export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
-export const streamOpenAICodexResponses = createLazyStream(
-	loadOpenAICodexResponsesProviderModule,
-	PROVIDER_HANDLED_STREAM_TIMEOUTS,
-);
-export const streamOpenAICompletions = createLazyStream(
-	loadOpenAICompletionsProviderModule,
-	PROVIDER_HANDLED_STREAM_TIMEOUTS,
-);
-export const streamOpenAIResponses = createLazyStream(
-	loadOpenAIResponsesProviderModule,
-	PROVIDER_HANDLED_STREAM_TIMEOUTS,
-);
-export const streamCursor = createLazyStream(loadCursorProviderModule);
-export const streamDevin = createLazyStream(loadDevinProviderModule);
-export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 
-export const streamBedrock = createLazyStream(loadBedrockProviderModule);
+/** Stream Azure Responses with provider-owned timeout handling. */
+export const streamAzureOpenAIResponses = createProviderStream<"azure-openai-responses">(
+	(model, context, options) => AzureOpenAIResponsesProvider.streamAzureOpenAIResponses(model, context, options),
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
+/** Stream Google's direct API through the shared watchdog. */
+export const streamGoogle = createProviderStream<"google-generative-ai">((model, context, options) =>
+	GoogleProvider.streamGoogle(model, context, options),
+);
+
+/** Stream Cloud Code Assist while retaining its first-event watchdog. */
+export const streamGoogleGeminiCli = createProviderStream<"google-gemini-cli">(
+	(model, context, options) => GoogleGeminiCliProvider.streamGoogleGeminiCli(model, context, options),
+	GOOGLE_GEMINI_CLI_STREAM_LIMITS,
+);
+
+/** Stream the Vertex API through the shared watchdog. */
+export const streamGoogleVertex = createProviderStream<"google-vertex">((model, context, options) =>
+	GoogleVertexProvider.streamGoogleVertex(model, context, options),
+);
+
+/** Stream Codex with provider-owned timeout handling. */
+export const streamOpenAICodexResponses = createProviderStream<"openai-codex-responses">(
+	(model, context, options) => OpenAICodexResponsesProvider.streamOpenAICodexResponses(model, context, options),
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
+/** Stream Chat Completions with provider-owned timeout handling. */
+export const streamOpenAICompletions = createProviderStream<"openai-completions">(
+	(model, context, options) => OpenAICompletionsProvider.streamOpenAICompletions(model, context, options),
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
+/** Stream Responses with provider-owned timeout handling. */
+export const streamOpenAIResponses = createProviderStream<"openai-responses">(
+	(model, context, options) => OpenAIResponsesProvider.streamOpenAIResponses(model, context, options),
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
+/** Stream through the host Cursor transport when installed, otherwise the built-in transport. */
+export const streamCursor = createProviderStream<"cursor-agent">((model, context, options) =>
+	(cursorStreamOverride ?? CursorProvider.streamCursor)(model, context, options),
+);
+
+/** Stream Devin through the shared watchdog. */
+export const streamDevin = createProviderStream<"devin-agent">((model, context, options) =>
+	DevinProvider.streamDevin(model, context, options),
+);
+
+/** Stream Apple's on-device Foundation Model through the shared watchdog. */
+export const streamAppleFoundationModels = createProviderStream<"apple-foundation-models">((model, context, options) =>
+	AppleFoundationModelsProvider.streamAppleFoundationModels(model, context, options),
+);
+
+/** Stream Ollama with OpenAI-compatible idle timeout precedence. */
+export const streamOllama = createProviderStream<"ollama-chat">(
+	(model, context, options) => OllamaProvider.streamOllama(model, context, options),
+	OPENAI_IDLE_FLOORED_STREAM_LIMITS,
+);
+
+/** Stream through the host Bedrock transport when installed, otherwise the built-in transport. */
+export const streamBedrock = createProviderStream<"bedrock-converse-stream">((model, context, options) =>
+	(bedrockStreamOverride ?? BedrockProvider.streamBedrock)(model, context, options),
+);

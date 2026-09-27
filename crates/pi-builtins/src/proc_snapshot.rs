@@ -24,6 +24,27 @@ pub enum ProcessStatus {
 	Exited,
 }
 
+/// One thread of a process, as `ps -M` lists it.
+///
+/// Fields the platform cannot report stay `None`. Produced in bulk by
+/// [`threads_by_pid`], because Windows can only enumerate threads system-wide.
+#[derive(Clone, Debug)]
+pub struct ThreadInfo {
+	/// Scheduler state letter: the kernel's own on Linux (`R`, `S`, `D`, …),
+	/// Apple `ps` letters on macOS (`R`, `U`, `S`, `I`, `T`, `H`), `?` when
+	/// unknown.
+	pub state:       char,
+	/// Scheduling priority on the platform's native scale.
+	pub priority:    Option<i32>,
+	/// Policy letter Apple `ps -M` appends to the priority: `T` timesharing,
+	/// `R` round-robin, `F` FIFO.
+	pub policy:      Option<char>,
+	pub user_time:   Option<std::time::Duration>,
+	pub system_time: Option<std::time::Duration>,
+	/// Kernel-decayed recent CPU share on macOS; lifetime average elsewhere.
+	pub cpu_percent: Option<f64>,
+}
+
 /// Collapses a process command line into a single display line.
 ///
 /// Command lines reach the terminal verbatim from `ps` and `top`, so control
@@ -44,12 +65,13 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
 #[cfg(target_os = "linux")]
 mod proc_snapshot {
 	use std::{
+		collections::HashMap,
 		fs,
 		os::fd::{AsRawFd, FromRawFd, OwnedFd},
 		time::Duration,
 	};
 
-	use super::ProcessStatus;
+	use super::{ProcessStatus, ThreadInfo};
 
 	#[derive(Clone)]
 	pub struct ProcInfo {
@@ -64,6 +86,7 @@ mod proc_snapshot {
 	struct Stat {
 		comm:       String,
 		state:      char,
+		policy:     Option<u32>,
 		ppid:       i32,
 		pgrp:       i32,
 		session:    i32,
@@ -208,12 +231,7 @@ mod proc_snapshot {
 		}
 
 		pub fn age(&self) -> Option<Duration> {
-			let uptime = fs::read_to_string("/proc/uptime")
-				.ok()?
-				.split_whitespace()
-				.next()?
-				.parse::<f64>()
-				.ok()?;
+			let uptime = uptime_seconds()?;
 			let ticks = clock_ticks()? as f64;
 			Some(Duration::from_secs_f64((uptime - self.stat.start_time as f64 / ticks).max(0.0)))
 		}
@@ -298,8 +316,55 @@ mod proc_snapshot {
 		})
 	}
 
+	/// Lists every thread of each process, main thread first.
+	pub fn threads_by_pid(processes: &[ProcInfo]) -> HashMap<i32, Vec<ThreadInfo>> {
+		let uptime = uptime_seconds();
+		let ticks = clock_ticks().map(|ticks| ticks as f64);
+		processes
+			.iter()
+			.map(|process| (process.pid, process_threads(process.pid, uptime, ticks)))
+			.collect()
+	}
+
+	/// Reads `/proc/<pid>/task`, which the kernel lists in thread-id order.
+	fn process_threads(pid: i32, uptime: Option<f64>, ticks: Option<f64>) -> Vec<ThreadInfo> {
+		let Ok(entries) = fs::read_dir(format!("/proc/{pid}/task")) else {
+			return Vec::new();
+		};
+		entries
+			.flatten()
+			.filter_map(|entry| parse_stat(&fs::read_to_string(entry.path().join("stat")).ok()?))
+			.map(|stat| {
+				let seconds = |value: u64| ticks.map(|ticks| Duration::from_secs_f64(value as f64 / ticks));
+				// A thread started within the current clock tick has no elapsed time
+				// yet; procps reports 0% rather than an unknown share.
+				let cpu_percent = uptime.zip(ticks).map(|(uptime, ticks)| {
+					let age = uptime - stat.start_time as f64 / ticks;
+					if age > 0.0 { 100.0 * (stat.utime + stat.stime) as f64 / ticks / age } else { 0.0 }
+				});
+				ThreadInfo {
+					state: stat.state,
+					priority: Some(stat.priority),
+					// SCHED_OTHER, SCHED_BATCH and SCHED_IDLE are all timesharing.
+					policy: match stat.policy {
+						Some(0 | 3 | 5) => Some('T'),
+						Some(1) => Some('F'),
+						Some(2) => Some('R'),
+						_ => None,
+					},
+					user_time: seconds(stat.utime),
+					system_time: seconds(stat.stime),
+					cpu_percent,
+				}
+			})
+			.collect()
+	}
+
 	fn read_stat(pid: i32) -> Option<Stat> {
-		let content = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+		parse_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+	}
+
+	fn parse_stat(content: &str) -> Option<Stat> {
 		let open = content.find('(')?;
 		let close = content.rfind(')')?;
 		let comm = content[open + 1..close].to_string();
@@ -307,6 +372,7 @@ mod proc_snapshot {
 		Some(Stat {
 			comm,
 			state: fields.first()?.chars().next()?,
+			policy: fields.get(38).and_then(|value| value.parse().ok()),
 			ppid: fields.get(1)?.parse().ok()?,
 			pgrp: fields.get(2)?.parse().ok()?,
 			session: fields.get(3)?.parse().ok()?,
@@ -337,6 +403,15 @@ mod proc_snapshot {
 		Some((ids.next()?, ids.next()?))
 	}
 
+	fn uptime_seconds() -> Option<f64> {
+		fs::read_to_string("/proc/uptime")
+			.ok()?
+			.split_whitespace()
+			.next()?
+			.parse()
+			.ok()
+	}
+
 	fn clock_ticks() -> Option<u64> {
 		// SAFETY: sysconf reads a process-global constant.
 		u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
@@ -353,6 +428,7 @@ mod proc_snapshot {
 #[cfg(target_os = "macos")]
 mod proc_snapshot {
 	use std::{
+		collections::HashMap,
 		ffi::CStr,
 		mem::size_of,
 		path::Path,
@@ -360,9 +436,11 @@ mod proc_snapshot {
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
-	use super::ProcessStatus;
+	use super::{ProcessStatus, ThreadInfo};
 
 	const KERN_PROCARGS2: libc::c_int = 49;
+	/// `proc_pidinfo` flavor listing a task's thread handles; absent from `libc`.
+	const PROC_PIDLISTTHREADS: libc::c_int = 6;
 
 	#[link(name = "proc", kind = "dylib")]
 	unsafe extern "C" {
@@ -580,6 +658,103 @@ mod proc_snapshot {
 		(actual >= size_of::<libc::proc_bsdinfo>() as i32).then_some(info)
 	}
 
+	/// Lists every thread of each process in the kernel's creation order.
+	///
+	/// Processes whose threads are unreadable (another user's, without root)
+	/// map to an empty list.
+	pub fn threads_by_pid(processes: &[ProcInfo]) -> HashMap<i32, Vec<ThreadInfo>> {
+		processes
+			.iter()
+			.map(|process| (process.pid, process_threads(process)))
+			.collect()
+	}
+
+	fn process_threads(process: &ProcInfo) -> Vec<ThreadInfo> {
+		let mut capacity = process
+			.thread_count()
+			.map_or(64, |count| count as usize + 8);
+		loop {
+			let mut handles = vec![0u64; capacity];
+			// SAFETY: handles is writable for the supplied byte size.
+			let bytes = unsafe {
+				libc::proc_pidinfo(
+					process.pid,
+					PROC_PIDLISTTHREADS,
+					0,
+					handles.as_mut_ptr().cast(),
+					(capacity * size_of::<u64>()) as i32,
+				)
+			};
+			if bytes <= 0 {
+				return Vec::new();
+			}
+			let listed = bytes as usize / size_of::<u64>();
+			// A full buffer may have cut the list short; threads were spawned since
+			// the task snapshot.
+			if listed == capacity {
+				capacity *= 2;
+				continue;
+			}
+			handles.truncate(listed);
+			return handles
+				.into_iter()
+				.filter_map(|handle| read_threadinfo(process.pid, handle))
+				.map(|info| thread_info(&info))
+				.collect();
+		}
+	}
+
+	fn read_threadinfo(pid: i32, handle: u64) -> Option<libc::proc_threadinfo> {
+		// SAFETY: proc_threadinfo is a C record of integers and a char array,
+		// valid when zeroed.
+		let mut info = unsafe { std::mem::zeroed::<libc::proc_threadinfo>() };
+		// SAFETY: info is writable for the exact supplied size.
+		let actual = unsafe {
+			libc::proc_pidinfo(
+				pid,
+				libc::PROC_PIDTHREADINFO,
+				handle,
+				(&raw mut info).cast(),
+				size_of::<libc::proc_threadinfo>() as i32,
+			)
+		};
+		(actual >= size_of::<libc::proc_threadinfo>() as i32).then_some(info)
+	}
+
+	/// Mirrors Apple `ps`: `mach_state_order` for the state letter, and the
+	/// current priority for timesharing threads but the base priority for
+	/// fixed-priority ones.
+	fn thread_info(info: &libc::proc_threadinfo) -> ThreadInfo {
+		const TH_USAGE_SCALE: f64 = 1000.0;
+		// <mach/policy.h>; absent from `libc`.
+		const POLICY_TIMESHARE: i32 = 1;
+		const POLICY_RR: i32 = 2;
+		const POLICY_FIFO: i32 = 4;
+		let state = match info.pth_run_state {
+			1 => 'R',
+			2 => 'T',
+			3 if info.pth_sleep_time > 20 => 'I',
+			3 => 'S',
+			4 => 'U',
+			5 => 'H',
+			_ => '?',
+		};
+		let (priority, policy) = match info.pth_policy {
+			POLICY_TIMESHARE => (info.pth_curpri, Some('T')),
+			POLICY_RR => (info.pth_priority, Some('R')),
+			POLICY_FIFO => (info.pth_priority, Some('F')),
+			_ => (info.pth_curpri, None),
+		};
+		ThreadInfo {
+			state,
+			priority: Some(priority),
+			policy,
+			user_time: Some(Duration::from_nanos(info.pth_user_time)),
+			system_time: Some(Duration::from_nanos(info.pth_system_time)),
+			cpu_percent: Some(f64::from(info.pth_cpu_usage) * 100.0 / TH_USAGE_SCALE),
+		}
+	}
+
 	fn read_taskinfo(pid: i32) -> Option<libc::proc_taskinfo> {
 		// SAFETY: proc_taskinfo is a C integer record valid when zeroed.
 		let mut info = unsafe { std::mem::zeroed::<libc::proc_taskinfo>() };
@@ -656,11 +831,13 @@ mod proc_snapshot {
 mod proc_snapshot {
 	use std::{collections::HashMap, ffi::c_void, mem::size_of, sync::Arc, time::Duration};
 
-	use super::ProcessStatus;
+	use super::{ProcessStatus, ThreadInfo};
 
 	type Handle = *mut c_void;
 	const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 	const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+	const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+	const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
 	const PROCESS_TERMINATE: u32 = 0x0001;
 	const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 	const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -679,6 +856,17 @@ mod proc_snapshot {
 		base_priority: i32,
 		flags:         u32,
 		exe:           [u16; 260],
+	}
+
+	#[repr(C)]
+	struct ThreadEntry32 {
+		size:           u32,
+		usage:          u32,
+		tid:            u32,
+		owner_pid:      u32,
+		base_priority:  i32,
+		delta_priority: i32,
+		flags:          u32,
 	}
 
 	#[repr(C)]
@@ -714,6 +902,16 @@ mod proc_snapshot {
 		fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
 		fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
 		fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+		fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+		fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+		fn OpenThread(access: u32, inherit: i32, tid: u32) -> Handle;
+		fn GetThreadTimes(
+			handle: Handle,
+			creation: *mut FileTime,
+			exit: *mut FileTime,
+			kernel: *mut FileTime,
+			user: *mut FileTime,
+		) -> i32;
 		fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
 		fn CloseHandle(handle: Handle) -> i32;
 		fn TerminateProcess(handle: Handle, exit_code: u32) -> i32;
@@ -898,14 +1096,7 @@ mod proc_snapshot {
 		}
 
 		pub fn age(&self) -> Option<Duration> {
-			let mut now = FileTime::default();
-			// SAFETY: now is writable for one FILETIME.
-			unsafe { GetSystemTimeAsFileTime(&raw mut now) };
-			Some(Duration::from_nanos(
-				filetime_ticks(now)
-					.saturating_sub(self.creation)
-					.saturating_mul(100),
-			))
+			Some(ticks_duration(now_ticks().saturating_sub(self.creation)))
 		}
 
 		pub fn match_name(&self) -> String {
@@ -946,7 +1137,7 @@ mod proc_snapshot {
 
 		pub fn cpu_time(&self) -> Option<Duration> {
 			let (_, kernel, user) = process_times(self.handle.0)?;
-			Some(Duration::from_nanos(kernel.saturating_add(user).saturating_mul(100)))
+			Some(ticks_duration(kernel.saturating_add(user)))
 		}
 
 		pub fn resident_bytes(&self) -> Option<u64> {
@@ -985,6 +1176,68 @@ mod proc_snapshot {
 			ok = unsafe { Process32NextW(snapshot.0, &raw mut entry) };
 		}
 		result
+	}
+
+	/// Lists every thread of each process from one system-wide Toolhelp
+	/// snapshot. Windows exposes no run state or scheduling policy here, and
+	/// times stay `None` for threads of protected processes.
+	pub fn threads_by_pid(processes: &[ProcInfo]) -> HashMap<i32, Vec<ThreadInfo>> {
+		let mut threads: HashMap<i32, Vec<ThreadInfo>> = processes
+			.iter()
+			.map(|process| (process.pid, Vec::new()))
+			.collect();
+		// SAFETY: documented scalar Toolhelp snapshot call.
+		let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+		if snapshot == INVALID_HANDLE_VALUE {
+			return threads;
+		}
+		let snapshot = OwnedHandle(snapshot);
+		let now = now_ticks();
+		// SAFETY: the all-zero entry is initialized with its ABI size below.
+		let mut entry = unsafe { std::mem::zeroed::<ThreadEntry32>() };
+		entry.size = size_of::<ThreadEntry32>() as u32;
+		// SAFETY: snapshot and entry are valid.
+		let mut ok = unsafe { Thread32First(snapshot.0, &raw mut entry) };
+		while ok != 0 {
+			if let Ok(pid) = i32::try_from(entry.owner_pid)
+				&& let Some(list) = threads.get_mut(&pid)
+			{
+				let times = thread_times(entry.tid);
+				list.push(ThreadInfo {
+					state:       '?',
+					priority:    Some(entry.base_priority),
+					policy:      None,
+					user_time:   times.map(|(_, _, user)| ticks_duration(user)),
+					system_time: times.map(|(_, kernel, _)| ticks_duration(kernel)),
+					cpu_percent: times.map(|(creation, kernel, user)| {
+						let age = now.saturating_sub(creation);
+						if age > 0 { 100.0 * kernel.saturating_add(user) as f64 / age as f64 } else { 0.0 }
+					}),
+				});
+			}
+			// SAFETY: snapshot and entry remain valid.
+			ok = unsafe { Thread32Next(snapshot.0, &raw mut entry) };
+		}
+		threads
+	}
+
+	/// `(creation, kernel, user)` FILETIME ticks of one thread.
+	fn thread_times(tid: u32) -> Option<(u64, u64, u64)> {
+		// SAFETY: OpenThread returns a new owned query handle or null.
+		let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, tid) };
+		if handle.is_null() {
+			return None;
+		}
+		let handle = OwnedHandle(handle);
+		let mut creation = FileTime::default();
+		let mut exit = FileTime::default();
+		let mut kernel = FileTime::default();
+		let mut user = FileTime::default();
+		// SAFETY: all FILETIME output pointers are valid and writable.
+		let ok = unsafe {
+			GetThreadTimes(handle.0, &raw mut creation, &raw mut exit, &raw mut kernel, &raw mut user)
+		};
+		(ok != 0).then(|| (filetime_ticks(creation), filetime_ticks(kernel), filetime_ticks(user)))
 	}
 
 	fn open_process_identity(pid: u32) -> Option<(Arc<OwnedHandle>, u64)> {
@@ -1052,6 +1305,18 @@ mod proc_snapshot {
 		(u64::from(time.high) << 32) | u64::from(time.low)
 	}
 
+	/// Converts 100 ns FILETIME ticks.
+	fn ticks_duration(ticks: u64) -> Duration {
+		Duration::from_nanos(ticks.saturating_mul(100))
+	}
+
+	fn now_ticks() -> u64 {
+		let mut now = FileTime::default();
+		// SAFETY: now is writable for one FILETIME.
+		unsafe { GetSystemTimeAsFileTime(&raw mut now) };
+		filetime_ticks(now)
+	}
+
 	fn process_times(handle: Handle) -> Option<(u64, u64, u64)> {
 		let mut creation = FileTime::default();
 		let mut exit = FileTime::default();
@@ -1081,7 +1346,7 @@ mod proc_snapshot {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub use proc_snapshot::ProcInfo;
+pub use proc_snapshot::{ProcInfo, threads_by_pid};
 
 /// The processes a signal must never reach: this one and its ancestors.
 ///

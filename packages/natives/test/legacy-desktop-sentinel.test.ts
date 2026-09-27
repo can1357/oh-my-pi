@@ -16,11 +16,12 @@ async function withCandidate(contents: string, test: (candidate: string) => void
 }
 
 function ctxFor(version: string) {
-	return {
-		isWorkspaceLoad: false,
-		packageVersion: version,
-		versionSentinelExport: `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`,
-	};
+	return { isWorkspaceLoad: false, packageVersion: version };
+}
+
+function stamped(version: string): string {
+	const slot = `PI_NATIVES_VERSION_STAMP:${version}`;
+	return `${slot}${"\0".repeat(64 - slot.length)}`;
 }
 
 class LegacyDesktopSession {
@@ -62,8 +63,20 @@ describe("legacy native addon loading", () => {
 	it("keeps resident old addons restart-only", async () => {
 		const ctx = ctxFor("17.2.8");
 		const bindings = { __piNativesV17_2_7: () => {}, ...legacyCoreBindings, DesktopSession: LegacyDesktopSession };
-		await withCandidate("__piNativesV17_2_8", candidate => {
+		await withCandidate(stamped("17.2.8"), candidate => {
 			expect(() => validateLoadedBindings(ctx, bindings, candidate)).toThrow("restart omp");
+		});
+	});
+
+	it("does not treat a stamped addon with the core ABI as pre-sentinel", async () => {
+		const ctx = ctxFor("17.2.8");
+		const bindings = {
+			__piNativesBuildVersion: () => null,
+			...legacyCoreBindings,
+			DesktopSession: LegacyDesktopSession,
+		};
+		await withCandidate("unstamped", candidate => {
+			expect(() => validateLoadedBindings(ctx, bindings, candidate)).toThrow("reinstall to re-sync");
 		});
 	});
 });

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -4587,7 +4586,9 @@ function handleConversationCheckpointUpdate(
 }
 
 function createBlobId(data: Uint8Array): Uint8Array {
-	return new Uint8Array(createHash("sha256").update(data).digest());
+	const id = new Uint8Array(32);
+	Bun.SHA256.hash(data, id);
+	return id;
 }
 
 function storeCursorBlob(blobStore: Map<string, Uint8Array>, data: Uint8Array): Uint8Array {
@@ -4737,7 +4738,7 @@ function cursorUserContentKey(content: string | (TextContent | ImageContent)[]):
 	if (typeof content === "string") {
 		return content.trim();
 	}
-	const hash = createHash("sha256");
+	const hash = new Bun.SHA256();
 	for (const item of content) {
 		hash.update(item.type);
 		if (item.type === "text") {

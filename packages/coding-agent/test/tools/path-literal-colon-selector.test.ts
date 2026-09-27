@@ -120,6 +120,49 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			}
 		});
 
+		it("keeps the selector when Windows lstat falsely reports a missing stream as present", async () => {
+			// Windows can intermittently answer `lstat("file.md:1-40")` with the base
+			// file's metadata although that NTFS stream does not exist and `open`
+			// fails with ENOENT. The splitters dropped the selector and `read` opened
+			// the unsplit path, surfacing a raw ENOENT for an existing file.
+			const base = path.join(tmpDir, "notes.md");
+			await Bun.write(base, "line one\nline two\nline three\nline four\n");
+			const stream = `${base}:1-2`;
+			const baseStat = await fs.promises.lstat(base);
+			const realLstat = fs.promises.lstat;
+			const realLstatSync = fs.lstatSync;
+			const realBunFile = Bun.file.bind(Bun);
+			const platform = Object.getOwnPropertyDescriptor(process, "platform");
+			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			const lstat = spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
+				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);
+			const lstatSync = spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) =>
+				String(target) === stream ? baseStat : realLstatSync(target)) as typeof fs.lstatSync);
+			const bunFile = spyOn(Bun, "file").mockImplementation((source, options) => {
+				const file = realBunFile(source as string, options);
+				if (source === stream) file.stat = async () => baseStat;
+				return file;
+			});
+
+			try {
+				const expectedSelector = { path: base, sel: "1-2" };
+				expect(await splitPathAndSelPreferringLiteral(stream, tmpDir)).toEqual(expectedSelector);
+				expect(splitPathAndSelPreferringLiteralSync(stream, tmpDir)).toEqual(expectedSelector);
+
+				const result = await new ReadTool(createSession()).execute("read-false-positive-stream", { path: stream });
+				const output = getText(result);
+				expect(output).toContain("line one");
+				expect(output).toContain("line two");
+				expect(output).not.toContain("ENOENT");
+			} finally {
+				bunFile.mockRestore();
+				lstatSync.mockRestore();
+				lstat.mockRestore();
+				Object.defineProperty(process, "platform", platform);
+			}
+		});
+
 		it("also protects `:raw`-shaped literal filenames", async () => {
 			const literal = "log:raw";
 			await Bun.write(path.join(tmpDir, literal), "line one\nline two\n");

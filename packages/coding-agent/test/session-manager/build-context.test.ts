@@ -312,14 +312,14 @@ describe("buildSessionContext", () => {
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
 		});
 
-		it("attaches the Anthropic native replay payload and still emits the kept raw messages", () => {
+		it("attaches the signed Anthropic replay payload before the kept raw messages", () => {
 			const nativeCompaction: CompactionEntry = {
 				...compaction("3", "2", "Native summary", "2"),
 				preserveData: {
 					anthropicCompaction: {
 						provider: "anthropic",
 						content: "Native summary",
-						encryptedContent: "enc_state",
+						signature: "sig_state",
 						model: "claude-fable-5",
 					},
 				},
@@ -340,13 +340,31 @@ describe("buildSessionContext", () => {
 				type: "anthropicCompaction",
 				provider: "anthropic",
 				content: "Native summary",
-				encryptedContent: "enc_state",
+				signature: "sig_state",
 			});
 		});
 
-		it("predates native summaries before the retained tail but keeps local commit timestamps", () => {
+		it("replays new turns after an empty-tail snapshot with an earlier rewrite marker", () => {
+			const snapshot = msg("1", null, "user", "summarized snapshot");
+			const newTurn = msg("2", "1", "assistant", "new assistant");
+			const compactionEntry: CompactionEntry = {
+				...compaction("3", "2", "Snapshot summary", ""),
+				providerReplayThroughEntryId: "1",
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Snapshot summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([snapshot, newTurn, compactionEntry]);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant"]);
+			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary");
+			expect(ctx.messages[0].providerPayload).toMatchObject({ signature: "sig" });
+			expect(ctx.messages[0].historyRewriteAt).toBeLessThan(new Date(newTurn.timestamp).getTime());
+		});
+
+		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
-			// thinking on the next request; native replay must not do that.
+			// thinking on the next request; native replay must not do that. The
+			// commit timestamp still retires the tail's pre-compaction usage.
 			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
 			const retainedAssistant: SessionMessageEntry = {
 				type: "message",
@@ -382,7 +400,7 @@ describe("buildSessionContext", () => {
 					anthropicCompaction: {
 						provider: "anthropic",
 						content: "Native summary",
-						encryptedContent: "enc_state",
+						signature: "sig_state",
 						model: "claude-fable-5",
 					},
 				},
@@ -397,10 +415,11 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
 			const summary = ctx.messages[0];
 			if (summary?.role !== "compactionSummary") throw new Error("Expected compaction summary message");
-			expect(new Date(summary.timestamp).getTime()).toBe(mayDay - 1);
+			expect(summary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 			const [llmSummary] = defaultConvertToLlm([summary]);
 			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
 			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+			expect(llmSummary.timestamp).toBe(summary.timestamp);
 
 			// A local compaction keeps the entry commit timestamp.
 			const localCtx = buildSessionContext(

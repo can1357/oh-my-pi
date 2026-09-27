@@ -11,7 +11,7 @@ import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
@@ -84,7 +84,7 @@ function makeBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
 async function createSession(
 	tools: AgentTool[],
 	bridge?: ClientBridge,
-	settingsOverrides: Partial<Record<SettingPath, unknown>> = {},
+	settingsOverrides: Record<string, unknown> = {},
 	options?: {
 		xdev?: XdevState;
 		builtInToolNames?: string[];
@@ -262,7 +262,7 @@ it("always-ask: an ACP grant satisfies the inner wrapper's explicit prompt polic
 	const wrapped = new ExtensionToolWrapper(bashTool, noUiRunner()) as unknown as AgentTool;
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
-	const approvalSettings: Partial<Record<SettingPath, unknown>> = {
+	const approvalSettings: Record<string, unknown> = {
 		"tools.approvalMode": "always-ask",
 		"tools.approval": { bash: "prompt" },
 	};
@@ -969,7 +969,7 @@ it("setActiveToolsByName normalizes legacy tool names", async () => {
 	const globTool = makeFakeTool("glob");
 	session = await createSession([grepTool, globTool]);
 
-	await session.setActiveToolsByName(["Search", "find", "grep"]);
+	await session.setActiveToolsByName(["Search", "glob", "grep"]);
 
 	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
 });

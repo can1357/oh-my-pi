@@ -13,6 +13,6 @@ describe("powerAssertionOptions", () => {
 	});
 
 	it("names the session so platform power diagnostics can attribute the assertion", () => {
-		expect(powerAssertionOptions("idle")?.reason).toBe("Oh My Pi agent session");
+		expect(powerAssertionOptions("idle")?.reason).toBe("omp agent session");
 	});
 });

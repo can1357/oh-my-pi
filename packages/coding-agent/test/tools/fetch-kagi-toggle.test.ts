@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
@@ -35,7 +35,7 @@ describe("read tool URL selector shorthands", () => {
 		removeSyncWithRetries(testDir);
 	});
 
-	const createSession = (settingsOverrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
+	const createSession = (settingsOverrides: Record<string, unknown> = {}): ToolSession => {
 		const sessionFile = path.join(testDir, "session.jsonl");
 		const artifactsDir = sessionFile.slice(0, -6);
 		let nextArtifactId = 0;
@@ -128,7 +128,7 @@ describe("read tool URL handling", () => {
 		removeSyncWithRetries(testDir);
 	});
 
-	const createSession = (overrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
+	const createSession = (overrides: Record<string, unknown> = {}): ToolSession => {
 		const sessionFile = path.join(testDir, "session.jsonl");
 		const artifactsDir = sessionFile.slice(0, -6);
 		let nextArtifactId = 0;

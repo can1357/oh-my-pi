@@ -173,13 +173,11 @@ function makeRenderCtx(
 		},
 		// Rebuild paths honor terminal.showImages since the native-image work;
 		// keep it on so the image-replay contracts below stay meaningful.
-		settings: {
-			get: (key: string) => {
-				if (key === "terminal.showImages") return showImages;
-				if (key === "display.hideToolActivity") return hideToolActivity;
-				return false;
-			},
-		},
+		settings: Settings.isolated({
+			"terminal.showImages": showImages,
+			"display.hideToolActivity": hideToolActivity,
+			"composer.recallClearedDrafts": false,
+		}),
 		toolOutputExpanded: false,
 		hideToolActivity,
 		hideThinkingBlock: false,

@@ -34,6 +34,7 @@ const ALPHA: HostFixture = {
 		participants: 3,
 		relayConnected: true,
 		inputRequired: true,
+		busy: true,
 		access: "control",
 	},
 	controlUrl: "https://collab.test/#alpha-CONTROL-url",
@@ -53,6 +54,7 @@ const BRAVO: HostFixture = {
 		participants: 1,
 		relayConnected: false,
 		inputRequired: false,
+		busy: false,
 		access: "view",
 	},
 	controlUrl: "https://collab.test/#bravo-CONTROL-url",
@@ -145,13 +147,30 @@ describe("Collab CLI", () => {
 		expect(text).toContain(`pid ${process.pid}`);
 		expect(text).toContain("gen 2 · test/alpha-model");
 		expect(text).toContain("gen 7 · no model");
-		expect(text).toContain("2 guests · control · relay connected · input required");
-		expect(text).toContain("0 guests · view · relay reconnecting");
+		expect(text).toContain("2 guests · control · relay connected · input required · working");
+		expect(text).toContain("0 guests · view · relay reconnecting · idle");
 		expect(text.indexOf(ALPHA.snapshot.instanceId)).toBeLessThan(text.indexOf(BRAVO.snapshot.instanceId));
 		for (const fixture of [ALPHA, BRAVO]) {
 			expect(text).not.toContain(fixture.controlUrl);
 			expect(text).not.toContain(fixture.viewUrl);
 		}
+	});
+
+	it("renders no activity token for a host that does not report busy", async () => {
+		const dir = await makeTmpDir();
+		const legacy: HostFixture = {
+			snapshot: { ...BRAVO.snapshot, instanceId: "host-charlie", sessionId: "sess-charlie", busy: null },
+			controlUrl: "https://collab.test/#charlie-CONTROL-url",
+			viewUrl: "https://collab.test/#charlie-VIEW-url",
+		};
+		await publish(dir, legacy);
+		const out = collector();
+		await runCommand(["list"], dir, out);
+
+		const text = out.plain();
+		expect(text).toContain("host-charlie");
+		// An older host reports nothing, and the row guesses nothing.
+		expect(text).not.toMatch(/working|idle/);
 	});
 
 	it("emits repeatable, two-space metadata-only JSON for list and the default action with -j", async () => {

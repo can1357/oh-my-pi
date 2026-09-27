@@ -140,7 +140,7 @@ The repository's `hermes` dialect is an **owned in-band converter**, registered 
 
 ### Selection
 
-Force the dialect with `tools.format: hermes` or `PI_DIALECT=hermes` (`resolveOwnedDialectFromEnv`, `packages/agent/src/agent-loop.ts:171-191`, consumed at `agent-loop.ts:1527`). The `tools.format` enum (`packages/coding-agent/src/config/settings-schema.ts:2655-2671`; UI labels at `2679-2697`) offers:
+Force the dialect with `tools.format: hermes` or `PI_DIALECT=hermes` (`resolveOwnedDialectFromEnv`, `packages/agent/src/agent-loop.ts:188-208`, consumed at `agent-loop.ts:1774`). The `tools.format` enum (`cfgToolsFormat`, `packages/coding-agent/src/session/context-settings.ts:344-358`; UI labels at `366-384`) offers:
 
 | `tools.format` value | UI label | Meaning |
 |---|---|---|

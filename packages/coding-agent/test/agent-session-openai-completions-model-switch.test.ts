@@ -55,7 +55,7 @@ describe("AgentSession openai-completions provider session eviction", () => {
 	}
 
 	function buildSession(model: Model): AgentSession {
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -75,7 +75,7 @@ describe("AgentSession openai-completions provider session eviction", () => {
 	it("evicts stale openai-completions state on provider/baseUrl switch", async () => {
 		const deepseek = completionsModel("deepseek", "deepseek-v4-pro");
 		const cerebras = completionsModel("cerebras", "llama3.1-8b");
-		authStorage.setRuntimeApiKey(cerebras.provider, "cerebras-test-key");
+		authStorage.keys.setRuntime(cerebras.provider, "cerebras-test-key");
 
 		session = buildSession(deepseek);
 
@@ -96,7 +96,7 @@ describe("AgentSession openai-completions provider session eviction", () => {
 		const deepseekPro = completionsModel("deepseek", "deepseek-v4-pro");
 		const deepseekFlash = completionsModel("deepseek", "deepseek-v4-flash");
 		const cerebras = completionsModel("cerebras", "llama3.1-8b");
-		authStorage.setRuntimeApiKey(cerebras.provider, "cerebras-test-key");
+		authStorage.keys.setRuntime(cerebras.provider, "cerebras-test-key");
 
 		session = buildSession(deepseekPro);
 
@@ -122,7 +122,7 @@ describe("AgentSession openai-completions provider session eviction", () => {
 	it("evicts entries whose base URL was resolved at request time", async () => {
 		const moonshot = completionsModel("moonshot", "kimi-k2-thinking");
 		const cerebras = completionsModel("cerebras", "llama3.1-8b");
-		authStorage.setRuntimeApiKey(cerebras.provider, "cerebras-test-key");
+		authStorage.keys.setRuntime(cerebras.provider, "cerebras-test-key");
 
 		session = buildSession(moonshot);
 
@@ -141,7 +141,7 @@ describe("AgentSession openai-completions provider session eviction", () => {
 	it("leaves unrelated provider session state untouched", async () => {
 		const deepseek = completionsModel("deepseek", "deepseek-v4-pro");
 		const cerebras = completionsModel("cerebras", "llama3.1-8b");
-		authStorage.setRuntimeApiKey(cerebras.provider, "cerebras-test-key");
+		authStorage.keys.setRuntime(cerebras.provider, "cerebras-test-key");
 
 		session = buildSession(deepseek);
 

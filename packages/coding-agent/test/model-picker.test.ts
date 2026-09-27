@@ -15,11 +15,12 @@ function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
+function makeModel(provider: string, id: string, contextWindow = 128_000, kind?: Model["kind"]): Model {
 	return buildModel({
 		id,
 		name: id,
-		api: "ollama-chat",
+		api: kind === "image" ? "openai-images" : "ollama-chat",
+		...(kind ? { kind } : {}),
 		provider,
 		baseUrl: "https://example.com",
 		reasoning: false,
@@ -90,6 +91,17 @@ describe("ModelPicker", () => {
 		if (!testTheme) {
 			throw new Error("Failed to load dark theme for ModelPicker tests");
 		}
+	});
+
+	test("shows kind-role metadata only on accepted model kinds", () => {
+		const chat = makeModel("test", "chat-model");
+		const image = makeModel("test", "image-model", 128_000, "image");
+		const settings = Settings.isolated({ modelRoles: { image: "test/image-model" } });
+		const { picker } = createPicker({ models: [chat, image], scoped: true, settings });
+
+		picker.handleInput("image");
+
+		expect(normalize(picker.render(220))).toContain("● image");
 	});
 
 	test("flags over-context models but keeps them selectable, reporting overContext on pick", () => {

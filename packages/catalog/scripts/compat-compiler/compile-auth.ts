@@ -703,6 +703,16 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "allows-missing-api-key":
 				result.allowsMissingApiKey = singleBool(child);
 				break;
+			case "org-scoped-identity":
+				result.orgScopedIdentity = singleBool(child);
+				break;
+			case "oauth-token-env": {
+				leaf(child, []);
+				const vars = positionalStrings(child);
+				if (vars.length === 0 || vars.some(v => !v)) malformed(child);
+				result.oauthTokenEnv = vars;
+				break;
+			}
 			case "native-auth-api": {
 				leaf(child, []);
 				const apis = positionalStrings(child);

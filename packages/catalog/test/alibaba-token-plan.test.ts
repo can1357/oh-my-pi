@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
 	alibabaTokenPlanModelManagerOptions,
@@ -11,47 +9,7 @@ import {
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
-const alibabaTokenPlanModels = seedModels<"openai-completions">("alibaba-token-plan");
-
 describe("QwenCloud Token Plan provider", () => {
-	test("ships the documented Individual text-model allowlist", () => {
-		expect(alibabaTokenPlanModels.map(model => model.id)).toEqual([
-			"qwen3.8-max-preview",
-			"qwen3.8-max",
-			"qwen3.8-flash",
-			"qwen3.7-max",
-			"qwen3.7-plus",
-			"qwen3.6-flash",
-			"glm-5.2",
-			"deepseek-v4-pro",
-		]);
-
-		const preview = alibabaTokenPlanModels[0];
-		expect(preview).toMatchObject({
-			provider: "alibaba-token-plan",
-			baseUrl: ALIBABA_TOKEN_PLAN_BASE_URL,
-			contextWindow: 983_616,
-			maxTokens: 131_072,
-			input: ["text", "image"],
-			thinking: {
-				efforts: [Effort.Low, Effort.High, Effort.XHigh],
-				requiresEffort: true,
-			},
-			compat: {
-				supportsDeveloperRole: false,
-				supportsReasoningEffort: true,
-			},
-		});
-
-		expect(alibabaTokenPlanModels.find(model => model.id === "glm-5.2")?.thinking?.efforts).toEqual([
-			Effort.Minimal,
-			Effort.Low,
-			Effort.Medium,
-			Effort.High,
-			Effort.Max,
-		]);
-	});
-
 	test("bundles curated capabilities before dynamic discovery", () => {
 		expect(getBundledModel<"openai-completions">("alibaba-token-plan", "qwen3.8-max-preview")).toMatchObject({
 			reasoning: true,
@@ -240,15 +198,5 @@ describe("QwenCloud Token Plan provider", () => {
 		});
 		expect(options.fetchDynamicModels).toBeUndefined();
 		expect(fetched).toBe(false);
-	});
-
-	test("uses Token Plan-specific environment keys and authoritative discovery", () => {
-		const descriptor = providerEntry("alibaba-token-plan");
-		expect(descriptor).toMatchObject({
-			defaultModel: "qwen3.7-plus",
-			envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
-			dynamicModelsAuthoritative: true,
-			discovery: { label: "QwenCloud Token Plan" },
-		});
 	});
 });

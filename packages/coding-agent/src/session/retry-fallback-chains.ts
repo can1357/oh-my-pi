@@ -9,6 +9,10 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
+import { getRoleInfo, isKindRole } from "../config/model-roles";
+
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -132,7 +136,10 @@ function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): strin
 }
 
 /** Whether a provider is registered or configured for discovery. */
-export function isKnownProvider(modelRegistry: ModelRegistry, provider: string): boolean {
+export function isKnownProvider(
+	modelRegistry: Pick<RetryFallbackModelLookup, "hasProvider">,
+	provider: string,
+): boolean {
 	return modelRegistry.hasProvider(provider);
 }
 
@@ -145,16 +152,35 @@ export function expandDefaultRetryFallbackChains(
 	const defaultChain = chains.default;
 	if (!Array.isArray(defaultChain)) return chains;
 	for (const role of roleNames) {
-		if (role !== "default" && chains[role] === undefined) chains[role] = defaultChain;
+		if (role !== "default" && !isKindRole(role) && chains[role] === undefined) chains[role] = defaultChain;
 	}
 	return chains;
 }
 
 /** Resolves configured fallback chains, applying the default chain to named roles. */
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
-	const configuredChains = settings.get("retry.fallbackChains");
+	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (!configuredChains || typeof configuredChains !== "object") return {};
 	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
+}
+
+/**
+ * Catalog slice covering every provider a selector's patterns name, or
+ * `undefined` when a pattern is provider-less and needs the whole catalog.
+ */
+function providerScopedPool(
+	modelRegistry: Pick<ModelRegistry, "find" | "getProviderModels">,
+	patterns: readonly string[],
+): Model[] | undefined {
+	const providers = new Set<string>();
+	for (const pattern of patterns) {
+		const parsed = parseRetryFallbackSelector(pattern, modelRegistry);
+		if (!parsed) return undefined;
+		providers.add(parsed.provider);
+	}
+	const pool: Model[] = [];
+	for (const provider of providers) pool.push(...modelRegistry.getProviderModels(provider));
+	return pool;
 }
 
 /**
@@ -169,11 +195,11 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
  */
 export function validateRetryFallbackChains(
 	settings: Settings,
-	modelRegistry: ModelRegistry,
+	modelRegistry: Pick<ModelRegistry, "getAll" | "find" | "hasProvider" | "getProviderModels">,
 	warn: (message: string) => void,
 	options: { isDiscoveryPending?: (provider: string) => boolean } = {},
 ): void {
-	const configuredChains = settings.get("retry.fallbackChains");
+	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (configuredChains === undefined) return;
 	const report = warn;
 	const isDiscoveryPending = options.isDiscoveryPending ?? (() => false);
@@ -209,9 +235,36 @@ export function validateRetryFallbackChains(
 			report(`Fallback chain for ${keyKind} '${key}' must be an array of selector strings.`);
 			continue;
 		}
+		// Compatibility is a catalog property, independent of credentials and enabled providers.
+		const kindRole = keyKind === "role" && isKindRole(key) ? getRoleInfo(key, settings) : undefined;
+		// Provider-qualified selectors are checked against their providers' slices
+		// first; the full catalog (expensive to compose) only backs a failed check,
+		// so warnings are unchanged while the happy path stays cheap.
+		let kindRoleCatalog: Model[] | undefined;
+		const resolvesForKindRole = (selectorStr: string, pool: Model[] | undefined): boolean =>
+			pool !== undefined &&
+			kindRole !== undefined &&
+			resolveModelRoleValue(selectorStr, pool.filter(kindRole.accepts), { settings }).model !== undefined;
 		for (const selectorStr of chain) {
 			if (typeof selectorStr !== "string") {
 				report(`Fallback chain for ${keyKind} '${key}' contains a non-string selector.`);
+				continue;
+			}
+			if (kindRole) {
+				const patterns = resolveConfiguredModelPatterns(selectorStr, settings);
+				if (resolvesForKindRole(selectorStr, providerScopedPool(modelRegistry, patterns))) continue;
+				kindRoleCatalog ??= modelRegistry.getAll("all");
+				if (resolvesForKindRole(selectorStr, kindRoleCatalog)) continue;
+
+				const pending =
+					patterns.length > 0 &&
+					patterns.every(pattern => {
+						const parsed = parseRetryFallbackSelector(pattern, modelRegistry);
+						return parsed ? isDiscoveryPending(parsed.provider) : false;
+					});
+				if (!pending) {
+					report(`Fallback chain for role '${key}' does not resolve to a compatible model: ${selectorStr}`);
+				}
 				continue;
 			}
 			if (isRetryFallbackWildcardKey(selectorStr)) {
@@ -237,7 +290,7 @@ export function validateRetryFallbackChains(
 
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
-	return settings.get("retry.fallbackRevertPolicy") === "never" ? "never" : "cooldown-expiry";
+	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */
@@ -386,13 +439,12 @@ export function resolveRetryFallbackChainKey(
 	}
 	if (matchedRole) return matchedRole;
 
-	// 4. The default chain, when default has no explicit role primary.
+	// 4. The default chain. Use it even when `default` has an explicit role
+	//    primary that is a *different* model than the live one (#12421): a
+	//    /model switch or a mid-chain hop onto Fable/Astra must still reach
+	//    glm/grok/… instead of resolving no key and aborting on wait > maxDelayMs.
 	const defaultChain = context.chains.default;
-	if (
-		Array.isArray(defaultChain) &&
-		defaultChain.length > 0 &&
-		getRetryFallbackPrimarySelector(context, "default") === undefined
-	) {
+	if (Array.isArray(defaultChain) && defaultChain.length > 0) {
 		return "default";
 	}
 	return undefined;
@@ -531,5 +583,5 @@ export function findRetryFallbackCandidates(
 		const candidatesAfter = chain.slice(baseIndex + 1);
 		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, baseIndex)] : candidatesAfter;
 	}
-	return chain.slice(1);
+	return chain;
 }

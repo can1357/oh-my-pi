@@ -2,16 +2,11 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::{
-	ffi::OsString,
-	fs::{Metadata, OpenOptions, metadata},
-	io::ErrorKind,
-};
+use std::{ffi::OsString, io::ErrorKind};
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use pi_vfs::{Metadata, OpenOptions};
 use uucore::{
 	display::Quotable,
 	parser::parse_size::{ParseSizeError, Parser, allow_list_with_all_suffixes},
@@ -194,18 +189,12 @@ fn app() -> Command {
 }
 
 /// The I/O block size of a file, falling back to 512 when the filesystem
-/// reports 0 (mirrors GNU's `ST_BLKSIZE`).
-#[cfg(unix)]
+/// reports 0 or has no block size (mirrors GNU's `ST_BLKSIZE`).
 fn io_blocksize(file_metadata: &Metadata) -> u64 {
 	match file_metadata.blksize() {
-		0 => 512,
-		blksize => blksize,
+		None | Some(0) => 512,
+		Some(blksize) => blksize,
 	}
-}
-
-#[cfg(not(unix))]
-fn io_blocksize(_file_metadata: &Metadata) -> u64 {
-	512
 }
 
 /// Truncate one file according to `mode`.
@@ -224,11 +213,11 @@ fn file_truncate(
 	filename: &OsString,
 ) -> Result<(), String> {
 	let resolved = host.resolve(filename);
+	let fs = host.fs();
 
 	// A pipe has no length, and opening it for writing would block waiting
 	// for a reader; refuse it before the open.
-	#[cfg(unix)]
-	if let Ok(pre_metadata) = metadata(&resolved) {
+	if let Ok(pre_metadata) = fs.metadata(&resolved) {
 		if pre_metadata.file_type().is_fifo() {
 			return Err(format!(
 				"cannot open {} for writing: No such device or address",
@@ -238,7 +227,7 @@ fn file_truncate(
 	}
 
 	let create = !no_create;
-	let file = match OpenOptions::new().write(true).create(create).open(&resolved) {
+	let file = match fs.open_with(&resolved, OpenOptions::new().write(true).create(create)) {
 		Ok(file) => file,
 		Err(error) if error.kind() == ErrorKind::NotFound && !create => return Ok(()),
 		Err(error) => {
@@ -270,12 +259,14 @@ fn file_truncate(
 		return Err("division by zero".to_string());
 	};
 
-	file.set_len(truncate_size).map_err(|error| {
-		format!(
-			"failed to truncate {} at {truncate_size} bytes: {error}",
-			filename.quote()
-		)
-	})
+	file.set_len(truncate_size)
+		.and_then(|()| file.close())
+		.map_err(|error| {
+			format!(
+				"failed to truncate {} at {truncate_size} bytes: {error}",
+				filename.quote()
+			)
+		})
 }
 
 fn truncate(
@@ -292,7 +283,8 @@ fn truncate(
 
 	let reference_size = match reference {
 		Some(reference_path) => {
-			let reference_metadata = metadata(host.resolve(&reference_path)).map_err(|error| {
+			let resolved = host.resolve(&reference_path);
+			let reference_metadata = host.fs().metadata(&resolved).map_err(|error| {
 				match error.kind() {
 					ErrorKind::NotFound => format!(
 						"cannot stat {}: No such file or directory",

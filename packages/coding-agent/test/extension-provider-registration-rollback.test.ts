@@ -225,7 +225,7 @@ describe("extension provider registration rollback", () => {
 			if (!replaceProvider) throw new Error("Extension did not expose its provider replacement action");
 			replaceProvider();
 
-			expect(modelRegistry.authStorage.hasAuth("cliproxyapi")).toBe(false);
+			expect(modelRegistry.authStorage.keys.source("cliproxyapi") !== undefined).toBe(false);
 			expect(modelRegistry.find("cliproxyapi", "test-model")?.baseUrl).toBe(
 				"https://replacement.example.invalid/v1",
 			);
@@ -284,19 +284,19 @@ describe("extension provider registration rollback", () => {
 				modelRegistry.registerProvider("synthetic", { apiKey: "must-not-be-probed" });
 			}
 
-			await expect(authStorage.fetchUsageReports()).resolves.toEqual([report]);
-			expect(authStorage.usageProviderFor(provider)).toBe(extensionUsage);
+			await expect(authStorage.usage.reports()).resolves.toEqual([report]);
+			expect(authStorage.usage.providerFor(provider)).toBe(extensionUsage);
 
 			modelRegistry.unregisterProvider(provider);
-			expect(authStorage.usageProviderFor(provider)).toBeUndefined();
+			expect(authStorage.usage.providerFor(provider)).toBeUndefined();
 
-			const builtinUsage = authStorage.usageProviderFor("synthetic");
+			const builtinUsage = authStorage.usage.providerFor("synthetic");
 			if (!builtinUsage) throw new Error("Expected the synthetic built-in usage provider");
 			const syntheticOverride: UsageProvider = { ...extensionUsage, id: "synthetic" };
 			modelRegistry.registerProvider("synthetic", { usage: syntheticOverride }, "extension-usage-provider");
-			expect(authStorage.usageProviderFor("synthetic")).toBe(syntheticOverride);
+			expect(authStorage.usage.providerFor("synthetic")).toBe(syntheticOverride);
 			modelRegistry.unregisterProvider("synthetic");
-			expect(authStorage.usageProviderFor("synthetic")).toBe(builtinUsage);
+			expect(authStorage.usage.providerFor("synthetic")).toBe(builtinUsage);
 		} finally {
 			authStorage.close();
 			tempDir.removeSync();

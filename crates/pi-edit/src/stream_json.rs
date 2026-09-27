@@ -672,8 +672,8 @@ mod tests {
 
 	#[test]
 	fn raw_input_is_verbatim() {
-		let snapshot = snapshot_from_text("  *** SM:EDIT\n", true, false);
-		assert_eq!(snapshot.input.as_deref(), Some("  *** SM:EDIT\n"));
+		let snapshot = snapshot_from_text("  *** Edit File:\n", true, false);
+		assert_eq!(snapshot.input.as_deref(), Some("  *** Edit File:\n"));
 		assert!(!snapshot.complete);
 		assert!(snapshot_from_text("", true, true).complete);
 	}

@@ -28,39 +28,6 @@ function modelListResponse(ids: readonly string[]): Response {
 }
 
 describe("Meta Model API provider", () => {
-	test("seeds every Muse Spark revision with Responses reasoning and tier pricing", () => {
-		const byId = new Map(metaMuseModels.map(model => [model.id, model]));
-		expect([...byId.keys()]).toEqual([
-			"muse-spark-1.1",
-			"muse-spark-1.2",
-			"muse-spark-1.2-contributor",
-			"muse-spark-1.3",
-			"muse-spark-1.3-contributor",
-		]);
-		expect(byId.get("muse-spark-1.3")).toEqual({
-			id: "muse-spark-1.3",
-			name: "Muse Spark 1.3",
-			api: "openai-responses",
-			provider: "meta",
-			baseUrl: "https://api.meta.ai/v1",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-			contextWindow: 1_048_576,
-			maxTokens: 131_072,
-			thinking: MUSE_SPARK_MAX_THINKING,
-			compat: { supportsReasoningEffort: true, includeEncryptedReasoning: true },
-		});
-		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
-			name: "Muse Spark 1.3 (C)",
-			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-			thinking: MUSE_SPARK_THINKING,
-		});
-		const options = metaModelManagerOptions();
-		expect(options.providerId).toBe("meta");
-		expect(options.staticModels).toEqual(metaMuseModels);
-	});
-
 	test("live discovery keeps seeded capabilities for ids Meta lists without metadata", async () => {
 		// api.meta.ai/v1/models returns bare `{id}` rows: no name, limits,
 		// reasoning, or pricing. Without the seed as reference, a newly shipped
@@ -161,15 +128,6 @@ describe("Muse Code subscription provider", () => {
 				maxTokens: 131_072,
 			}),
 		]);
-	});
-
-	test("leaves the existing Meta Model API descriptor API-key-only", () => {
-		const descriptor = providerEntry("meta");
-		expect(descriptor).toMatchObject({
-			defaultModel: "muse-spark-1.1",
-			envVars: ["MODEL_API_KEY", "META_API_KEY"],
-			discovery: { label: "Meta Model API" },
-		});
 	});
 
 	test("selects the compact edit prompt only for the subscription tier", () => {

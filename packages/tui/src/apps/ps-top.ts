@@ -6,6 +6,7 @@
  * `x` kill, `r` restart, `a` toggle all scopes, `q`/`esc`/`ctrl+c` quit.
  * Sub-views (info, logs): `esc`/`q` back.
  */
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { KeyValueList, type KeyValueRow } from "../components/key-value-list";
 import { ScrollView } from "../components/scroll-view";
 import { renderTableRow, type TableColumn } from "../components/table";
@@ -15,7 +16,7 @@ import { type Component, TUI } from "../tui";
 import { truncateToWidth } from "../utils";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { DaemonSnapshot, DaemonSpec } from "../tools/hub";
+import type { DaemonSnapshot, DaemonSpec } from "../tools/daemon";
 import {
 	collapseCommand,
 	daemonLabel,
@@ -281,11 +282,16 @@ export class PsTopComponent implements Component {
 	}
 
 	#renderTable(width: number, height: number): string[] {
-		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(this.#all ? "(all)" : "(current)")}`;
+		const scopeKind = this.#all
+			? "(all)"
+			: this.#target.dir !== undefined || this.#target.global !== undefined
+				? "(target)"
+				: "(current + global)";
+		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(scopeKind)}`;
 		const header = this.#header(width, scopesLabel);
 		const footer = this.#footer(
 			width,
-			"↑/↓ select · enter info · l logs · s stop · x kill · r restart · a all scopes · q quit",
+			`${formatKeyHints(["up", "down"])} select · ${formatKeyHint("enter")} info · ${formatKeyHint("l")} logs · ${formatKeyHint("s")} stop · ${formatKeyHint("x")} kill · ${formatKeyHint("r")} restart · ${formatKeyHint("a")} all scopes · ${formatKeyHint("q")} quit`,
 		);
 		const bodyHeight = height - 1 - footer.length;
 
@@ -350,7 +356,7 @@ export class PsTopComponent implements Component {
 	#renderInfo(width: number, height: number): string[] {
 		const info = this.#info;
 		const header = this.#header(width, "process info");
-		const footer = this.#footer(width, "esc back · q back");
+		const footer = this.#footer(width, `${formatKeyHint("escape")} back · ${formatKeyHint("q")} back`);
 		const body = [""];
 		if (info) {
 			const daemon = info.daemon;
@@ -383,7 +389,10 @@ export class PsTopComponent implements Component {
 			width,
 			`logs ${chalk.bold(name)}${this.#logsState ? chalk.dim(` · ${this.#logsState}`) : ""}`,
 		);
-		const footer = this.#footer(width, "esc back · q back · view refreshes live");
+		const footer = this.#footer(
+			width,
+			`${formatKeyHint("escape")} back · ${formatKeyHint("q")} back · view refreshes live`,
+		);
 		const bodyHeight = height - 1 - footer.length;
 		this.#logsView.setLines(this.#logsLines.map(line => ` ${line}`));
 		this.#logsView.setHeight(bodyHeight);

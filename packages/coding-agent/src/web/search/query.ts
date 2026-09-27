@@ -16,7 +16,7 @@
  *    reported rather than returning nothing.
  */
 
-import type { SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchSource } from "./types";
 
 /** One free-text token of the query (everything that is not a recognized directive). */
 export interface QueryTerm {

@@ -64,6 +64,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Power",
 		"Agent",
 		"Git",
+		"Skills",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
@@ -74,6 +75,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Todos",
 		"Grep & Browser",
 		"Computer",
+		"IDA Pro",
 		"GitHub",
 		"Output Limits",
 		"Execution",
@@ -130,6 +132,11 @@ export interface SettingsHost {
 	entries: readonly SettingsDisplayEntry[];
 	get(path: string): unknown;
 	set(path: string, value: unknown): void;
+	/**
+	 * Removes the value from the global config: a project or other layer, or an environment
+	 * variable, that configures the setting still applies; otherwise the default does.
+	 */
+	unset(path: string): void;
 	normalizeProviderLimits(value: unknown): Record<string, number>;
 	validateProviderLimits(value: unknown): Record<string, number>;
 }

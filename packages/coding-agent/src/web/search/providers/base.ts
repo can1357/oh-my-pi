@@ -1,7 +1,8 @@
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import type { Api, AuthStorage, FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
-import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchProviderId, SearchResponse } from "../types";
 
 /**
  * Shared web search parameters passed to providers.
@@ -64,10 +65,14 @@ export interface SearchParams {
 	 * the per-credential single-flight refresh.
 	 */
 	authStorage: AuthStorage;
+	/** Selected catalog model that chose this engine or grounding backend. */
+	model: Model<Api>;
+	/** Thinking selector resolved from the model-role candidate. */
+	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Provider/model transport settings used by native search endpoints. */
-	modelRegistry?: ModelRegistry;
-	/** Exact active model identifier, when the caller has trusted session metadata. */
-	modelName?: string;
+	modelRegistry: ModelRegistry;
+	/** Whether the selected model came from an explicit role-chain entry. */
+	explicit?: boolean;
 	/**
 	 * Optional session id used as the round-robin / sticky key when selecting
 	 * among multiple credentials for the same provider. Pass through from the
@@ -75,7 +80,6 @@ export interface SearchParams {
 	 */
 	sessionId?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
-	geminiModel?: string;
 }
 
 /** Base class for web search providers. */
@@ -88,11 +92,11 @@ export abstract class SearchProvider {
 	 * service a request right now. Implementations consult the passed
 	 * {@link AuthStorage} — never a sibling store.
 	 *
-	 * Drives auto-chain admission: providers that return `false` are skipped
-	 * when {@link resolveProviderChain} walks the order. Explicit selection
-	 * uses {@link isExplicitlyAvailable} instead.
+	 * Drives role-chain admission: providers that return `false` are skipped.
+	 * Explicit selection uses {@link isExplicitlyAvailable} instead. The model
+	 * is supplied for providers whose authentication depends on its transport.
 	 */
-	abstract isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean;
+	abstract isAvailable(authStorage: AuthStorage, model?: Model<Api>): Promise<boolean> | boolean;
 
 	/**
 	 * Returns `true` when this provider should run when the user explicitly
@@ -103,8 +107,8 @@ export abstract class SearchProvider {
 	 *
 	 * Defaults to mirroring {@link isAvailable}.
 	 */
-	isExplicitlyAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return this.isAvailable(authStorage);
+	isExplicitlyAvailable(authStorage: AuthStorage, model?: Model<Api>): Promise<boolean> | boolean {
+		return this.isAvailable(authStorage, model);
 	}
 
 	/**

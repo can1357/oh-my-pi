@@ -3,6 +3,28 @@
 provider "xai" {
 	default-model "grok-4.6"
 	env "XAI_API_KEY"
+	kind-apis {
+		image "openai-images"
+		tts "xai-tts"
+	}
+	web-search "xai"
+
+	seed api="xai-tts" base-url="https://api.x.ai/v1" bundle="always" {
+		model "grok-tts" name="Grok TTS" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "grok-imagine-image" {
+		kind "image"
+	}
+	models "grok-tts" {
+		kind "tts"
+	}
 
 	// Replaces the provider-keyed prompt-cache session-header baseline.
 	prompt-cache-session-header "x-grok-conv-id"
@@ -27,14 +49,14 @@ provider "xai" {
 			thinking-mode "effort"
 		}
 	}
-	// Dormant until a catalog snapshot ships grok-4.6; xhigh is native there.
+	// Dormant until a catalog snapshot ships grok-4.7; xhigh is native there.
 	// The effort-capable allowlist accepts the wire reasoning.effort dial;
-	// xhigh-capable SKUs (4.6, multi-agent) keep xhigh unmapped.
-	models "grok-3-mini*" "grok-4.20-multi-agent*" "grok-4.3*" "grok-4.5*" "grok-4.6*" {
+	// xhigh-capable SKUs (4.6, 4.7, multi-agent) keep xhigh unmapped.
+	models "grok-3-mini*" "grok-4.20-multi-agent*" "grok-4.3*" "grok-4.5*" "grok-4.6*" "grok-4.7*" {
 		supports-reasoning-effort #true
 		omit-reasoning-effort #false
 	}
-	models "grok-4.20-multi-agent*" "grok-4.6*" priority=1 {
+	models "grok-4.20-multi-agent*" "grok-4.6*" "grok-4.7*" priority=1 {
 		reasoning-effort-map {
 			minimal "low"
 		}

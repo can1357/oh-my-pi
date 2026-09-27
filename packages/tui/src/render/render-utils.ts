@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
-import { formatKeyHints, type KeyId } from "../app-keybindings";
+import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
@@ -201,17 +201,17 @@ const EXPAND_ACTION = "app.tools.expand";
 /** Fallback key when no binding is resolvable (e.g. outside an interactive session). */
 const DEFAULT_EXPAND_KEY: KeyId = "ctrl+o";
 
-/** Human-readable key currently bound to tool-output expansion, e.g. `Ctrl+O`. */
+/** Human-readable primary key bound to tool-output expansion, e.g. `Ctrl+O`. */
 export function expandKeyHint(): string {
-	const keys = getKeybindings().getKeys(EXPAND_ACTION);
-	return formatKeyHints(keys.length > 0 ? keys : [DEFAULT_EXPAND_KEY]);
+	const [key = DEFAULT_EXPAND_KEY] = getKeybindings().getKeys(EXPAND_ACTION);
+	return formatKeyHint(key);
 }
 
 // =============================================================================
 // Text Truncation Utilities
 // =============================================================================
 /** Keep both ends of a single-line label without splitting wide characters. */
-function truncateMiddleToWidth(text: string, maxWidth: number): string {
+export function truncateMiddleToWidth(text: string, maxWidth: number): string {
 	const width = visibleWidth(text);
 	if (width <= maxWidth) return text;
 	if (maxWidth <= 1) return maxWidth === 1 ? "…" : "";

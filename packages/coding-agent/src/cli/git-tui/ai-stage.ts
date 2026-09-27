@@ -1,40 +1,78 @@
 /**
  * AI-assisted selective staging for the git TUI ("what should we stage?").
  *
- * Runs two judgment passes over the unstaged tree. The file pass asks one
- * yes/no question per changed file over the whole (batched) file list, so
- * files are picked as a coherent set; the hunk pass then judges every hunk of
- * the picked files with independent parallel yes/no questions. Matching hunks
- * are staged via `git apply --cached`; picked untracked and binary files are
- * staged whole.
+ * Every unit of unstaged change — each hunk of a tracked text file, each
+ * untracked file, each binary file — is one independent judgment for the
+ * `judge` role (TypeSafe jev when credentialed), scored against the full list
+ * of changed paths for contrast and fanned out as a single concurrency-capped
+ * wave. Accepted hunks are staged via `git apply --cached`; accepted untracked
+ * and binary files are staged whole.
  */
-import type { NoulQuestion } from "@oh-my-pi/pi-ai";
+import * as path from "node:path";
+import type { ChoiceQuestion, ScoreQuestion } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { VcsHunkSelection } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { parseFileDiffs, parseFileHunks } from "../../commit/git/diff";
-import type { FileDiff } from "../../commit/types";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { resolveJudge } from "../../judgment";
-import fileQuestionTemplate from "../../prompts/system/git-ai-stage-file.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
-import { ONLINE_MEMORY_MODEL_KEY } from "../../tiny/models";
+import { mapWithConcurrencyLimitAllSettled } from "../../task/parallel";
 import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import type { AiStageOutcome } from "@oh-my-pi/pi-tui/apps/git/git-tui";
 
-/** Files per file-pass judgment; larger trees fan out one call per batch. */
-const FILE_BATCH = 80;
-/** Head-truncation bound for hunk text in the hunk pass. */
-const HUNK_CHARS = 2400;
-/** Yes-probability at or above which a file or hunk is staged. */
-const STAGE_THRESHOLD = 0.5;
+/** Judgments in flight at once; System One requests are stateless, so the tree is classified as one wave. */
+const CONCURRENCY = 64;
+/** Head-truncation bound for a unit's change text. */
+const UNIT_CHARS = 2400;
+/**
+ * Probability of the top level ("part of it") at or above which a unit is
+ * staged. Genuine matches score ≥ 0.7 (measured on a mixed tree and small
+ * fixtures); same-area noise settles around 0.5–0.65 when the instruction
+ * names nothing in the tree, so 0.6 trims it without costing recall.
+ */
+const STAGE_THRESHOLD = 0.6;
 
-const HUNK_QUESTION: NoulQuestion = {
-	type: "noul",
+/**
+ * Each unit is judged with the whole changed-path list as contrast. Without
+ * it, an isolated yes/no lets anything sharing vocabulary with the instruction
+ * drift to 0.55–0.8 (measured on a 278-hunk tree: 105 accepted for a
+ * 23-hunk feature); with the tree and an explicit "tangential" level, the same
+ * tree yields zero false positives and 16 of the feature's hunks.
+ */
+const UNIT_QUESTION: ScoreQuestion = {
+	type: "score",
 	instructions:
-		"The state holds the user's staging instruction and the added (+) and removed (−) lines of one git hunk in `path`. Is this change what the user asked to stage?",
+		"The user is staging a git commit out of a working tree with many unrelated changes and described which changes they want. `all_changed_files` lists every changed path for contrast; the state then shows one unit of change: its `path`, its `kind` (`hunk`: the added + and removed − lines of one hunk of a modified file; `deleted file`: the head of the removed − lines of a file being deleted; `new file`: the head of an untracked file; `binary`: path only), and `change`. How much does this unit belong to what the user described?",
+	criteria: [
+		"Unrelated: different work that happens to be in the same tree.",
+		"Tangential: same file, area, or vocabulary, but the user's words do not actually describe this particular change.",
+		"Part of it: the user's words describe this particular change (its content, its kind of edit, or this file by name).",
+	],
 };
+/** Index of the "part of it" level in {@link UNIT_QUESTION}. */
+const PART_OF_IT = "2";
+
+/** Highest-scoring accepted units shown together in the verification pick. */
+const VERIFY_CANDIDATES = 8;
+/** Per-candidate change text bound in the verification pick. */
+const VERIFY_CHARS = 600;
+/**
+ * Probability of `none` at or above which the run stages nothing. When the
+ * instruction names work that is not in the tree, per-unit scores of the
+ * nearest same-area changes still drift to 0.6–0.85; only a question with an
+ * explicit "none of these" alternative separates that (0.55–0.7) from a real
+ * match (0.03–0.37, measured across feature, kind-of-edit, and by-name asks).
+ */
+const NONE_THRESHOLD = 0.5;
+/** Choice key for "the instruction describes none of the candidates". */
+const NONE = "none";
+const VERIFY_INSTRUCTIONS =
+	"The user is staging a git commit and described which changes they want. `candidates` are the changed units in the tree that scored highest for that description, each with its path, kind, and changed lines. Which candidate is most clearly the change the user described — or is none of them actually it?";
+const VERIFY_NONE_CRITERION =
+	"None of the candidates is the change the user described; they only share an area or vocabulary with it.";
 
 /** Options for {@link aiStage}. */
 export interface AiStageOptions {
@@ -47,10 +85,22 @@ export interface AiStageOptions {
 	onProgress?: (message: string) => void;
 }
 
+/** One independently judged piece of the working tree. */
+interface Unit {
+	path: string;
+	/** 1-based hunk index for `stageHunks`; absent for units staged whole. */
+	hunk?: number;
+	/** Whole-file units: `git add` for untracked paths, `apply --cached` for tracked binaries. */
+	untracked: boolean;
+	kind: "hunk" | "deleted file" | "new file" | "binary";
+	/** Head-bounded +/− lines or untracked-file head; absent for binaries. */
+	change?: string;
+}
+
 /**
  * Filter the unstaged tree against `instruction` with the resolved judge and
- * stage the matching hunks. Called by the git TUI's unstaged-header wand pill.
- * @throws when no judge resolves, git fails, or every judgement in a pass errors.
+ * stage the matching units. Called by the git TUI's unstaged-header wand pill.
+ * @throws when no judge resolves, git fails, the run is aborted, or every judgment errors.
  */
 export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> {
 	const { cwd, instruction, signal, onProgress } = options;
@@ -61,7 +111,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 
 	onProgress?.("Resolving model…");
 	const settings = await Settings.init({ cwd });
-	const authStorage = await discoverAuthStorage();
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		const registry = new ModelRegistry(authStorage);
 		await registry.refresh();
@@ -69,132 +119,153 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 		const judge = resolveJudge({
 			settings,
 			registry,
-			backend: ONLINE_MEMORY_MODEL_KEY,
 			sessionId: Bun.randomUUIDv7(),
 		});
 
+		onProgress?.("Reading changes…");
 		const rawDiff = tracked.length > 0 ? await repo.diffText({ files: tracked.map(file => file.path) }, signal) : "";
-		const fileDiffs = new Map(parseFileDiffs(rawDiff).map(entry => [entry.filename, entry]));
-
-		interface Candidate {
-			file: Pick<ChangedFile, "path" | "kind">;
-			/** Parsed worktree diff; absent for untracked files. */
-			diff?: FileDiff;
-		}
-		const candidates: Candidate[] = tracked.flatMap(file => {
-			const diff = fileDiffs.get(file.path);
-			return diff ? [{ file, diff }] : [];
-		});
-		candidates.push(...untracked.map(file => ({ file })));
-
-		// File pass: one judgment sees the whole (batched) list with a question
-		// per file, so files are picked as a coherent set instead of N
-		// independent coin flips.
-		onProgress?.(`Choosing files… (${candidates.length} changed)`);
-		const batches: Candidate[][] = [];
-		for (let start = 0; start < candidates.length; start += FILE_BATCH) {
-			batches.push(candidates.slice(start, start + FILE_BATCH));
-		}
-		const picked = (
-			await Promise.all(
-				batches.map(async batch => {
-					const questions: Record<string, NoulQuestion> = {};
-					const files = batch.map((candidate, index) => {
-						questions[`file${index}`] = {
-							type: "noul",
-							instructions: prompt.render(fileQuestionTemplate, { index, path: candidate.file.path }),
-						};
-						return { path: candidate.file.path, change: describeCandidate(candidate) };
-					});
-					const { answers } = await judge.judge({ state: { instruction, files }, questions }, { signal });
-					return batch.filter((_, index) => answers[`file${index}`].noul >= STAGE_THRESHOLD);
-				}),
-			)
-		).flat();
-		onProgress?.(`Picked ${picked.length}/${candidates.length} files`);
-		// Zero picks usually means the request is about change content ("comment
-		// edits"), which paths alone cannot answer — advance everything and let
-		// the hunk pass decide. A non-authoritative file scope must never stage
-		// whole files: no untracked/binary whole-stages, no whole-file fallback.
-		const fileScopeAuthoritative = picked.length > 0;
-		const matched = fileScopeAuthoritative ? picked : candidates;
-
-		// Hunk pass: every hunk of every matched text file is judged independently.
-		const binaryWhole: string[] = [];
-		const jobs: { path: string; index: number; changed: string }[] = [];
-		for (const candidate of matched) {
-			if (!candidate.diff) continue;
-			if (candidate.diff.isBinary) {
-				if (fileScopeAuthoritative) binaryWhole.push(candidate.file.path);
+		const deleted = new Set(tracked.flatMap(file => (file.kind === "deleted" ? [file.path] : [])));
+		const units: Unit[] = [];
+		const filePaths = new Set<string>();
+		for (const diff of parseFileDiffs(rawDiff)) {
+			filePaths.add(diff.filename);
+			if (diff.isBinary) {
+				units.push({ path: diff.filename, untracked: false, kind: "binary" });
 				continue;
 			}
-			for (const hunk of parseFileHunks(candidate.diff).hunks) {
-				// Small judges misread unchanged context as part of the change, so
-				// only the +/− lines go to the model.
+			for (const hunk of parseFileHunks(diff).hunks) {
+				// Prompted fallbacks misread unchanged context as part of the
+				// change, so only the +/− lines go to the model.
 				const changed = hunk.content
 					.split("\n")
 					.filter(line => line.startsWith("+") || line.startsWith("-"))
 					.join("\n");
 				if (changed.length === 0) continue;
 				// HunkSelection indices are 1-based; parsed hunk.index is 0-based.
-				jobs.push({ path: candidate.file.path, index: hunk.index + 1, changed });
+				units.push({
+					path: diff.filename,
+					hunk: hunk.index + 1,
+					untracked: false,
+					kind: deleted.has(diff.filename) ? "deleted file" : "hunk",
+					change: bound(changed, UNIT_CHARS),
+				});
 			}
 		}
-		let hunksJudged = 0;
-		const hunkVerdicts = await judgeAll(jobs, async job => {
+		for (const file of untracked) {
+			filePaths.add(file.path);
+			const head = await readHead(path.join(cwd, file.path), signal);
+			units.push(
+				head === null
+					? { path: file.path, untracked: true, kind: "binary" }
+					: { path: file.path, untracked: true, kind: "new file", change: head },
+			);
+		}
+		const totalHunks = units.reduce((count, unit) => count + (unit.hunk === undefined ? 0 : 1), 0);
+		const allChangedFiles = [...filePaths];
+
+		let settled = 0;
+		onProgress?.(`Judging 0/${units.length} changes…`);
+		const { results, aborted } = await mapWithConcurrencyLimitAllSettled(
+			units,
+			CONCURRENCY,
+			async (unit, _index, workerSignal) => {
+				const { answers } = await judge.judge(
+					{
+						state: {
+							instruction,
+							all_changed_files: allChangedFiles,
+							path: unit.path,
+							kind: unit.kind,
+							...(unit.change === undefined ? {} : { change: unit.change }),
+						},
+						questions: { belongs: UNIT_QUESTION },
+					},
+					{ signal: workerSignal },
+				);
+				onProgress?.(`Judging ${++settled}/${units.length} changes…`);
+				return answers.belongs.probabilities[PART_OF_IT];
+			},
+			signal,
+		);
+		if (aborted) throw signal?.reason instanceof Error ? signal.reason : new AIError.AbortError("staging aborted");
+		const scores = verdicts(results);
+		const accepted = scores.map(score => score >= STAGE_THRESHOLD);
+
+		// Per-unit scores rank well but have no null hypothesis: when the
+		// instruction describes nothing in the tree, the nearest same-area
+		// changes still clear the threshold. One pick over the strongest
+		// candidates with an explicit `none` option supplies it.
+		const ranked = units
+			.map((unit, index) => ({ unit, score: scores[index] }))
+			.filter(entry => entry.score >= STAGE_THRESHOLD)
+			.sort((a, b) => b.score - a.score)
+			.slice(0, VERIFY_CANDIDATES);
+		if (ranked.length > 0) {
+			onProgress?.("Verifying…");
+			const criteria: Record<string, string | null> = { [NONE]: VERIFY_NONE_CRITERION };
+			const candidates = ranked.map(({ unit }, index) => {
+				criteria[`c${index}`] = null;
+				return {
+					key: `c${index}`,
+					path: unit.path,
+					kind: unit.kind,
+					...(unit.change === undefined ? {} : { change: bound(unit.change, VERIFY_CHARS) }),
+				};
+			});
+			const question: ChoiceQuestion = { type: "choice", instructions: VERIFY_INSTRUCTIONS, criteria };
 			const { answers } = await judge.judge(
-				{
-					state: { instruction, path: job.path, changed_lines: bound(job.changed, HUNK_CHARS) },
-					questions: { matches: HUNK_QUESTION },
-				},
+				{ state: { instruction, candidates }, questions: { pick: question } },
 				{ signal },
 			);
-			onProgress?.(`Choosing hunks… ${++hunksJudged}/${jobs.length}`);
-			return answers.matches.noul >= STAGE_THRESHOLD;
-		});
+			if (answers.pick.probabilities[NONE] >= NONE_THRESHOLD) {
+				logger.debug("git ai-stage: verification rejected every candidate", {
+					instruction,
+					none: answers.pick.probabilities[NONE],
+					candidates: candidates.map(candidate => candidate.path),
+				});
+				accepted.fill(false);
+			}
+		}
 
-		const stagedHunks = hunkVerdicts.filter(Boolean).length;
-		// The hunk judge asks whether the changed lines themselves are what the
-		// user described. Topical instructions ("git stuff", "the login feature")
-		// are answered by the file pick, not by line content, so the judge
-		// rejects every hunk unanimously — take that as "the instruction does not
-		// discriminate within files" and stage the picked files whole. Kind
-		// instructions ("comment changes") accept at least one hunk somewhere,
-		// which keeps the per-hunk selection authoritative.
-		const wholeFileScope = fileScopeAuthoritative && jobs.length > 0 && stagedHunks === 0;
 		const indicesByPath = new Map<string, number[]>();
-		jobs.forEach((job, index) => {
-			if (!hunkVerdicts[index]) return;
-			const indices = indicesByPath.get(job.path);
-			if (indices) indices.push(job.index);
-			else indicesByPath.set(job.path, [job.index]);
+		const binaryAccepted: string[] = [];
+		const untrackedAccepted: string[] = [];
+		const matchedPaths = new Set<string>();
+		let stagedHunks = 0;
+		units.forEach((unit, index) => {
+			if (!accepted[index]) return;
+			matchedPaths.add(unit.path);
+			if (unit.hunk === undefined) {
+				(unit.untracked ? untrackedAccepted : binaryAccepted).push(unit.path);
+				return;
+			}
+			stagedHunks++;
+			const indices = indicesByPath.get(unit.path);
+			if (indices) indices.push(unit.hunk);
+			else indicesByPath.set(unit.path, [unit.hunk]);
 		});
-		const trackedWhole = wholeFileScope
-			? matched.filter(candidate => candidate.diff && !candidate.diff.isBinary).map(candidate => candidate.file.path)
-			: [];
 
 		const selections: VcsHunkSelection[] = [
-			...binaryWhole.map(filePath => ({ path: filePath, kind: "all" as const })),
-			...trackedWhole.map(filePath => ({ path: filePath, kind: "all" as const })),
+			...binaryAccepted.map(filePath => ({
+				path: filePath,
+				kind: "all" as const,
+			})),
 			...[...indicesByPath].map(([filePath, indices]) => ({
 				path: filePath,
 				kind: "indices" as const,
 				indices,
 			})),
 		];
-		const untrackedAccepted = fileScopeAuthoritative
-			? matched.filter(candidate => !candidate.diff).map(candidate => candidate.file.path)
-			: [];
 		if (selections.length > 0 || untrackedAccepted.length > 0) onProgress?.("Staging…");
 		if (selections.length > 0) await repo.stageHunks(selections, rawDiff || null, signal);
 		if (untrackedAccepted.length > 0) await repo.stageFiles(untrackedAccepted, signal);
 
 		return {
-			matchedFiles: matched.length,
-			totalFiles: candidates.length,
+			matchedFiles: matchedPaths.size,
+			totalFiles: filePaths.size,
 			stagedHunks,
-			totalHunks: jobs.length,
-			wholeFiles: untrackedAccepted.length + binaryWhole.length + trackedWhole.length,
+			totalHunks,
+			wholeFiles: binaryAccepted.length + untrackedAccepted.length,
 		};
 	} finally {
 		authStorage.close();
@@ -202,39 +273,45 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 }
 
 /**
- * Fan out one judgement per item. A failed judgement rejects just its item so
- * one flaky request cannot sink the run — unless every item failed, which
- * means the backend is broken and the first error surfaces.
+ * Collapse settled judgments to per-unit scores. A failed judgment scores its
+ * unit 0 so one flaky request cannot sink the run — unless every unit failed,
+ * which means the backend is broken and the first error surfaces.
  */
-async function judgeAll<T>(items: readonly T[], run: (item: T) => Promise<boolean>): Promise<boolean[]> {
+function verdicts(results: readonly (PromiseSettledResult<number> | undefined)[]): number[] {
 	let failures = 0;
 	let firstError: unknown;
-	const verdicts = await Promise.all(
-		items.map(async item => {
-			try {
-				return await run(item);
-			} catch (error) {
-				failures++;
-				firstError ??= error;
-				logger.debug("git ai-stage: judgement failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return false;
-			}
-		}),
-	);
-	if (items.length > 0 && failures === items.length) {
+	const out = results.map(result => {
+		if (result?.status === "fulfilled") return result.value;
+		failures++;
+		firstError ??= result?.reason;
+		if (result) {
+			logger.debug("git ai-stage: judgment failed", {
+				error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+			});
+		}
+		return 0;
+	});
+	if (results.length > 0 && failures === results.length) {
 		throw firstError instanceof Error ? firstError : new Error(String(firstError));
 	}
-	return verdicts;
+	return out;
 }
 
-/** File-list detail: change kind plus +/− counts when the diff is parsed. */
-function describeCandidate(candidate: { file: Pick<ChangedFile, "kind">; diff?: FileDiff }): string {
-	if (!candidate.diff) return candidate.file.kind;
-	return `${candidate.file.kind}, +${candidate.diff.additions} −${candidate.diff.deletions}`;
+/** Head of an untracked file as text; `null` when the file is binary or unreadable. */
+async function readHead(filePath: string, signal: AbortSignal | undefined): Promise<string | null> {
+	signal?.throwIfAborted();
+	try {
+		const file = Bun.file(filePath);
+		const text = await file.slice(0, UNIT_CHARS).text();
+		if (text.includes("\0")) return null;
+		return file.size > UNIT_CHARS ? `${text}\n…` : text;
+	} catch (error) {
+		if (isEnoent(error)) return null;
+		throw error;
+	}
 }
 
+/** Head-truncate `text` to `limit` characters with an ellipsis marker. */
 function bound(text: string, limit: number): string {
 	return text.length <= limit ? text : `${text.slice(0, limit)}\n…`;
 }

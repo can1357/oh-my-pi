@@ -1,11 +1,28 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	buildRequestBody,
 	searchTavily,
 	type TavilySearchParams,
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/tavily";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+const catalogAuthStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(catalogAuthStorage);
+
+function requireTavilyModel() {
+	const model = modelRegistry.find("web", "tavily");
+	if (!model) throw new Error("Expected bundled web/tavily model");
+	return model;
+}
+
+const tavilyModel = requireTavilyModel();
+
+afterAll(() => {
+	catalogAuthStorage.close();
+});
 
 describe("Tavily buildRequestBody", () => {
 	afterEach(() => {
@@ -61,12 +78,10 @@ describe("Tavily searchTavily request shape (integration)", () => {
 	});
 
 	const fakeAuthStorage = {
-		async getApiKey() {
-			return process.env.TAVILY_API_KEY ?? undefined;
-		},
-		resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
-		hasAuth() {
-			return Boolean(process.env.TAVILY_API_KEY);
+		keys: {
+			get: async () => process.env.TAVILY_API_KEY ?? undefined,
+			resolver: vi.fn(() => async () => process.env.TAVILY_API_KEY ?? undefined),
+			source: () => (process.env.TAVILY_API_KEY ? { kind: "env", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 
@@ -76,6 +91,8 @@ describe("Tavily searchTavily request shape (integration)", () => {
 			authStorage: fakeAuthStorage,
 			systemPrompt: "Tavily integration test prompt",
 			...extras,
+			model: tavilyModel,
+			modelRegistry,
 		};
 	}
 

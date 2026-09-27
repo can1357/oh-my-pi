@@ -1443,7 +1443,7 @@ export function generateProtoTs(
 		lines.push(options.headerComment);
 	} else {
 		lines.push("/**");
-		lines.push(` * ${pkgPrefix} protocol declarations used by Oh My Pi.`);
+		lines.push(` * ${pkgPrefix} protocol declarations used by omp.`);
 		lines.push(" *");
 		lines.push(" * Each declaration retains only fields consumed by the client or its protocol tests.");
 		lines.push(" */");

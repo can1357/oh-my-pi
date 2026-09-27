@@ -1,18 +1,15 @@
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
+import { Effort, realizesPriorityServiceTier, resolveModelServiceTier, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import {
 	clearAnthropicFastModeFallback,
-	Effort,
 	isAnthropicFastModeFallbackDisabled,
-	realizesPriorityServiceTier,
-	resolveModelServiceTier,
-	serviceTierFamily,
-} from "@oh-my-pi/pi-ai";
+} from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
-import { autoThinkingEffortCeiling, classifyDifficulty } from "../auto-thinking/classifier";
+import { classifyDifficulty } from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -23,7 +20,8 @@ import {
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
+import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -41,6 +39,9 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier } from "./settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -56,7 +57,7 @@ export interface ModelControlsHost {
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
-	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
+	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -133,9 +134,11 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command. */
+	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-		return this.#scopedModels;
+		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
+		if (disabledProviders.length === 0) return this.#scopedModels;
+		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
 	}
 
 	/**
@@ -299,7 +302,7 @@ export class ModelControls {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.#scopedModels.length > 0) {
+		if (this.scopedModels.length > 0) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -401,7 +404,7 @@ export class ModelControls {
 		const apiKeysByProvider = new Map<string, string | undefined>();
 		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> = [];
 
-		for (const scoped of this.#scopedModels) {
+		for (const scoped of this.scopedModels) {
 			const provider = scoped.model.provider;
 			let apiKey: string | undefined;
 			if (apiKeysByProvider.has(provider)) {
@@ -482,7 +485,7 @@ export class ModelControls {
 	 */
 	getAvailableModels(): Model[] {
 		const all = this.#host.modelRegistry.getAvailable();
-		const patterns = this.#host.settings.get("enabledModels");
+		const patterns = cfgEnabledModels.get(this.#host.settings);
 		if (!patterns || patterns.length === 0) return all;
 		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings);
 	}
@@ -519,7 +522,7 @@ export class ModelControls {
 			}
 			this.#applyThinkingLevelToAgent(provisional);
 			if (persist) {
-				this.#host.settings.set("defaultThinkingLevel", AUTO_THINKING);
+				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
@@ -548,7 +551,7 @@ export class ModelControls {
 			this.#host.clearInheritedProviderPromptCacheKey();
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
+				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
@@ -591,11 +594,13 @@ export class ModelControls {
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
+	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
+	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -603,9 +608,8 @@ export class ModelControls {
 		// nothing to pick — skip classification rather than discard its result.
 		if (getSupportedEfforts(model).length === 0) return;
 
-		const isUltrathink = this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText);
 		let resolved: Effort | undefined;
-		if (isUltrathink) {
+		if (this.#host.magicKeywordEnabled("ultrathink") && containsMagicKeyword(promptText, "ultrathink")) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
@@ -618,21 +622,24 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
-				resolved = await classifyDifficulty(promptText, {
-					settings: this.#host.settings,
-					registry: this.#host.modelRegistry,
-					model,
-					sessionId: this.#host.sessionId(),
-					signal: controller.signal,
-					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
-					onUsage: usage => {
-						const entryId = this.#host.sessionManager.appendModelUsage(
-							{ purpose: "auto-thinking", ...usage },
-							usageOwner,
-						);
-						if (entryId) usageOwner.parentId = entryId;
+				resolved = await classifyDifficulty(
+					{ request: promptText, solutionSpace },
+					{
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						model,
+						sessionId: this.#host.sessionId(),
+						signal: controller.signal,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: usage => {
+							const entryId = this.#host.sessionManager.appendModelUsage(
+								{ purpose: "auto-thinking", ...usage },
+								usageOwner,
+							);
+							if (entryId) usageOwner.parentId = entryId;
+						},
 					},
-				});
+				);
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
 					error: error instanceof Error ? error.message : String(error),
@@ -645,16 +652,11 @@ export class ModelControls {
 		// Drop the result if the turn was aborted/superseded while classifying.
 		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
 
-		const candidate = resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model);
-		const autoLimited =
-			candidate === undefined || isUltrathink
-				? candidate
-				: clampAutoThinkingEffort(
-						model,
-						candidate,
-						autoThinkingEffortCeiling(model, this.#host.settings.get("providers.autoThinkingMaxEffort")),
-					);
-		const effort = clampThinkingLevelToCeiling(model, autoLimited, this.#thinkingLevelCeiling);
+		const effort = clampThinkingLevelToCeiling(
+			model,
+			resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model),
+			this.#thinkingLevelCeiling,
+		);
 		if (effort === undefined) return;
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;
@@ -709,7 +711,7 @@ export class ModelControls {
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
 		if (model?.provider === "fireworks") {
-			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
+			return cfgProvidersFireworksTier.get(this.#host.settings) === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
 				: undefined;
 		}

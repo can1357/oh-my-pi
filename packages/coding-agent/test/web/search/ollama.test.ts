@@ -1,31 +1,48 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchOllama } from "@oh-my-pi/pi-coding-agent/web/search/providers/ollama";
 import { parseSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search/query";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 const OLLAMA_SEARCH_URL = "https://ollama.com/api/web_search";
+const catalogAuthStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(catalogAuthStorage);
+
+function requireOllamaModel() {
+	const model = modelRegistry.find("web", "ollama");
+	if (!model) throw new Error("Expected bundled web/ollama model");
+	return model;
+}
+
+const ollamaModel = requireOllamaModel();
+
+afterAll(() => {
+	catalogAuthStorage.close();
+});
 
 /** Build a fake AuthStorage that resolves an API key (or undefined). */
 function makeAuthStorage(apiKey: string | undefined): AuthStorage {
 	return {
-		async getApiKey() {
-			return apiKey;
-		},
-		resolver: vi.fn(() => async () => apiKey),
-		hasAuth() {
-			return Boolean(apiKey);
+		keys: {
+			get: async () => apiKey,
+			resolver: vi.fn(() => async () => apiKey),
+			source: () => (apiKey ? { kind: "runtime", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 }
 
 /** Build standard search params with sensible defaults. */
-function makeParams(query: string, extras: Record<string, unknown> = {}) {
+function makeParams(query: string, extras: Partial<SearchParams> = {}): SearchParams {
 	return {
+		...extras,
 		query,
 		authStorage: makeAuthStorage("test-key"),
 		systemPrompt: "Ollama test prompt",
-		...extras,
+		model: ollamaModel,
+		modelRegistry,
 	};
 }
 
@@ -510,6 +527,8 @@ describe("Ollama searchOllama auth resolution", () => {
 			query: "test",
 			authStorage: noKeyStorage,
 			systemPrompt: "",
+			model: ollamaModel,
+			modelRegistry,
 			fetch: fetchMock,
 		});
 
@@ -521,8 +540,10 @@ describe("Ollama searchOllama auth resolution", () => {
 	it("resolves credentials for ollama-cloud provider", async () => {
 		const resolverMock = vi.fn(() => async () => "test-key");
 		const authStorage = {
-			resolver: resolverMock,
-			hasAuth: vi.fn(() => true),
+			keys: {
+				resolver: resolverMock,
+				source: vi.fn(() => ({ kind: "runtime", concrete: true })),
+			},
 		} as unknown as AuthStorage;
 		const fetchMock: FetchImpl = async () =>
 			new Response(JSON.stringify({ results: [] }), {

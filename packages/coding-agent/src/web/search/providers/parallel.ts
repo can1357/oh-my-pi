@@ -1,7 +1,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { callMCP } from "../../../mcp/json-rpc";
-import type { SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
 	PARALLEL_BETA_HEADER,
@@ -178,8 +178,8 @@ async function searchWithAuthStorage(
 	sessionId?: string,
 	sourcePolicy?: ParallelSourcePolicy,
 ): Promise<ParallelSearchResult> {
-	const hasConfiguredAuth = authStorage.hasAuth("parallel");
-	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
+	const hasConfiguredAuth = authStorage.keys.source("parallel") !== undefined;
+	const apiKey = await authStorage.keys.get("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
 		// A failed credential lookup must not admit anonymous search to the automatic chain.
 		if (hasConfiguredAuth) {
@@ -194,7 +194,7 @@ async function searchWithAuthStorage(
 	// sibling-rotate retry policy. The `ParallelApiError` thrown below carries a
 	// `statusCode`, which `withAuth`'s default classifier reads to detect a
 	// retryable 401 / usage-limit.
-	const keyOrResolver: ApiKey = authStorage.resolver("parallel", { sessionId });
+	const keyOrResolver: ApiKey = authStorage.keys.resolver("parallel", { sessionId });
 	return withAuth(
 		keyOrResolver,
 		async key => {
@@ -289,7 +289,11 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
-	isAvailable(_authStorage: AuthStorage): boolean {
+	isAvailable(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("parallel") !== undefined;
+	}
+
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 
@@ -303,7 +307,7 @@ export class ParallelProvider extends SearchProvider {
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 				parsedQuery: params.parsedQuery,
-				modelName: params.modelName,
+				modelName: params.model.id,
 			},
 			params.authStorage,
 			params.sessionId,

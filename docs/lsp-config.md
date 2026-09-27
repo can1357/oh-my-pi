@@ -84,7 +84,7 @@ Do not mix wrapped and flat server entries: when `servers` is present, sibling k
 | `settings`              | `object`   |                        no | Pushed via `workspace/didChangeConfiguration`                                                            |
 | `disabled`              | `boolean`  |                        no | Set `true` to disable this server                                                                        |
 | `warmupTimeoutMs`       | `number`   |                        no | Startup timeout for this server in milliseconds                                                          |
-| `isLinter`              | `boolean`  |                        no | Marks a linter/formatter-only server; excludes it from type-intelligence operations                      |
+| `isLinter`              | `boolean`  |                        no | Marks a dedicated linter/formatter server: excluded from type-intelligence, but preferred over type-checkers when choosing the `formatOnWrite` formatter |
 | `capabilities`          | `object`   |                        no | Opt-in server-specific features; see [Capabilities](#capabilities)                                       |
 | `workspaceReadyTimings` | `object`   |                        no | Advanced rust-analyzer workspace-readiness timing overrides; see below                                   |
 

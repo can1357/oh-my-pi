@@ -7,7 +7,6 @@ use std::{
 	borrow::Borrow,
 	ffi::{OsStr, OsString},
 	fmt::{Display, Formatter},
-	fs::File,
 	io::{self, BufReader, Read, Write},
 };
 
@@ -793,6 +792,9 @@ where
 	let mut files = files.peekable();
 
 	while let Some(filename) = files.next() {
+		if host.is_cancelled() {
+			break;
+		}
 		// Check that in raw mode, we are not provided with several files.
 		if options.output_format.is_raw() && files.peek().is_some() {
 			return Err(failure(ChecksumError::RawMultipleFiles));
@@ -802,7 +804,7 @@ where
 		let resolved_filepath = host.resolve(filepath);
 		let stdin_buf;
 		let file_buf;
-		if resolved_filepath.is_dir() {
+		if host.fs().is_dir(&resolved_filepath) {
 			host.error(format!("{}: Is a directory", filepath.display()), 1);
 			continue;
 		}
@@ -814,7 +816,7 @@ where
 				stdin_buf = &mut host.stdin;
 				Box::new(stdin_buf) as Box<dyn Read>
 			} else {
-				file_buf = match File::open(&resolved_filepath) {
+				file_buf = match host.fs().open(&resolved_filepath) {
 					Ok(file) => file,
 					Err(err) => {
 						host.error(format!("{}: {err}", filepath.to_string_lossy()), 1);
@@ -1415,7 +1417,7 @@ fn get_file_to_check<'a>(
 		return Ok(Box::new(&mut host.stdin));
 	}
 
-	match File::open(host.resolve(filename)) {
+	match host.fs().open(host.resolve(filename)) {
 		Ok(file) => {
 			if file.metadata().map_err(|_| LineCheckError::CantOpenFile)?.is_dir() {
 				let escaped = locale_aware_escape_name(filename, QuotingStyle::SHELL_ESCAPE);
@@ -1451,7 +1453,7 @@ fn get_file_to_check<'a>(
 
 /// Returns a reader to the list of checksums.
 fn get_input_file(host: &Host, filename: &OsStr) -> ExecResult<Box<dyn Read>> {
-	match File::open(host.resolve(filename)) {
+	match host.fs().open(host.resolve(filename)) {
 		Ok(file) => {
 			if file.metadata()?.is_dir() {
 				Err(failure(format!("{}: Is a directory", filename.maybe_quote())))
@@ -1722,6 +1724,10 @@ fn process_checksum_file(
 	let mut cached_line_format = None;
 	let mut last_algo = None;
 	for (i, line) in lines.into_iter().enumerate() {
+		// An aborted check reports no summary for the lines it skipped.
+		if host.is_cancelled() {
+			return Err(FileCheckError::Failed);
+		}
 		let line_result = process_checksum_line(
 			host,
 			&line,
@@ -1811,6 +1817,10 @@ where
 {
 	let mut failed = false;
 	for filename_input in files {
+		if host.is_cancelled() {
+			failed = true;
+			break;
+		}
 		use FileCheckError::*;
 		match process_checksum_file(host, filename_input, algo_kind, length_input, opts) {
 			Err(Critical(error)) => return Err(error),

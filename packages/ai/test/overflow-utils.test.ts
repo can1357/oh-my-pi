@@ -24,6 +24,28 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 	};
 }
 
+describe("context overflow evidence", () => {
+	it("distinguishes transient errors from text-backed overflow when usage is missing", () => {
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "error",
+			errorMessage: "503 service unavailable",
+		};
+		expect(isContextOverflow(message, 128000)).toBe(false);
+
+		message.errorMessage = "maximum context length is 128000 tokens";
+		expect(isContextOverflow(message, 128000)).toBe(true);
+	});
+
+	it("counts cached input and requires usage to exceed the context window", () => {
+		const message: AIError.ContextOverflowMessage = {
+			stopReason: "stop",
+			usage: { input: 10, cacheRead: 50, cacheWrite: 40 },
+		};
+		expect(isContextOverflow(message, 100)).toBe(false);
+		expect(isContextOverflow(message, 99)).toBe(true);
+	});
+});
+
 describe("isContextOverflow - model_context_window_exceeded", () => {
 	it("detects model_context_window_exceeded in finish_reason error message", () => {
 		const message = createErrorMessage("Provider finish_reason: model_context_window_exceeded");

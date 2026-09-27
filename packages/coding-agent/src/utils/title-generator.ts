@@ -18,15 +18,17 @@ import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
+import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
+
+import { cfgRetryModelFallback } from "../session/settings";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -120,7 +122,7 @@ const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
 function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
-	const availableModels = registry.getAvailable();
+	const availableModels = roleCandidatePool("tiny", settings, registry);
 	if (availableModels.length === 0) return [];
 
 	const models = collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, availableModels).map(
@@ -128,7 +130,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 	);
 	if (
 		currentModel &&
-		(models.length === 0 || settings.get("retry.modelFallback") !== false) &&
+		(models.length === 0 || cfgRetryModelFallback.get(settings) !== false) &&
 		!models.some(model => formatModelStringWithRouting(model) === formatModelStringWithRouting(currentModel))
 	) {
 		// Append currentModel and expand its own chain separately — never merge it
@@ -181,15 +183,20 @@ export async function generateSessionTitle(
 		return null;
 	}
 
+	const models = getTitleModels(registry, settings, currentModel);
+	const firstModel = models[0];
+	if (!firstModel) {
+		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
+		return null;
+	}
+
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
-	const tinyModel = settings.get("providers.tinyModel");
-	if (tinyModel === ONLINE_TINY_TITLE_MODEL_KEY) {
-		return generateTitleOnline(
+	if (firstModel.api !== "local-inference") {
+		return generateTitleOnlineWithModels(
 			firstMessage,
+			models,
 			registry,
-			settings,
 			sessionId,
-			currentModel,
 			metadataResolver,
 			signal,
 			titleSystemPrompt,
@@ -197,37 +204,28 @@ export async function generateSessionTitle(
 		);
 	}
 
-	// User explicitly picked a local tiny model. NEVER fall back to the online
-	// smol path (issue #3187): the smol role resolves through priority.json and
-	// silently bills whatever provider holds the resolved API key — OpenRouter
-	// in the reporter's case, leaking real credits without consent. If the
-	// local worker fails (unknown key, download missing, transformers.js
-	// crash, abort), leave the session untitled; the next user turn retries.
-	if (!isTinyTitleLocalModelKey(tinyModel)) {
-		logger.warn("title-generator: unknown local tiny model; skipping title (will not fall back to online)", {
-			sessionId,
-			model: tinyModel,
-			reason: "unknown-local-model",
-		});
-		return null;
-	}
+	// A local role selection is an explicit no-billing boundary. If the worker
+	// fails (download missing, runtime crash, abort, or no output), leave the
+	// session untitled rather than advancing into a paid fallback candidate.
 	try {
 		let localTitle: string | null;
 		if (signal) {
 			localTitle = await tinyTitleClient.generate(
-				tinyModel,
+				firstModel.id,
 				firstMessage,
 				titleSystemPrompt ? { signal, systemPrompt: titleSystemPrompt } : { signal },
 			);
 		} else if (titleSystemPrompt) {
-			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt });
+			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage, {
+				systemPrompt: titleSystemPrompt,
+			});
 		} else {
-			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage);
+			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage);
 		}
 		if (!localTitle) {
 			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
 				sessionId,
-				model: tinyModel,
+				model: firstModel.id,
 				reason: "local-no-output",
 			});
 			return null;
@@ -236,7 +234,7 @@ export async function generateSessionTitle(
 	} catch (err) {
 		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
 			sessionId,
-			model: tinyModel,
+			model: firstModel.id,
 			error: err instanceof Error ? err.message : String(err),
 		});
 		return null;
@@ -259,7 +257,28 @@ export async function generateTitleOnline(
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
 		return null;
 	}
+	return generateTitleOnlineWithModels(
+		firstMessage,
+		models,
+		registry,
+		sessionId,
+		metadataResolver,
+		signal,
+		customSystemPrompt,
+		credentialSourceSessionId,
+	);
+}
 
+async function generateTitleOnlineWithModels(
+	firstMessage: string,
+	models: Model<Api>[],
+	registry: ModelRegistry,
+	sessionId?: string,
+	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+	signal?: AbortSignal,
+	customSystemPrompt?: string,
+	credentialSourceSessionId?: string,
+): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
 	// the title is parsed from text. A forced `set_title` tool call was the old
@@ -289,15 +308,11 @@ export async function generateTitleOnline(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage
-					.listOAuthAccounts(model.provider, credentialSourceSessionId)
+				const foregroundCredential = registry.authStorage.oauth
+					.accounts(model.provider, credentialSourceSessionId)
 					.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.pinSessionOAuthAccount(
-						model.provider,
-						sessionId,
-						foregroundCredential.credentialId,
-					);
+					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);
