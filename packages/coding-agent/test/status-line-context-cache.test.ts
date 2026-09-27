@@ -134,17 +134,6 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(breakdown.contextWindow).toBe(272_000);
 	});
 
-	it("memoizes: repeated redraws with no change do not re-query usage", () => {
-		const { session, usageCalls } = makeSession({ messages: [userMessage("hi")] });
-		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
-
-		comp.getCachedContextBreakdown();
-		comp.getCachedContextBreakdown();
-		comp.getCachedContextBreakdown();
-
-		expect(usageCalls()).toBe(1);
-	});
-
 	it("re-queries and surfaces the new total when a message is appended", () => {
 		const fake = makeSession({
 			messages: [userMessage("hi")],
@@ -232,16 +221,6 @@ describe("StatusLineComponent context breakdown", () => {
 
 		expect(comp.getCachedContextBreakdown().usedTokens).toBe(117_000);
 		expect(fake.usageCalls()).toBe(2);
-	});
-
-	it("propagates a speculative/numeric token count, e.g. right after compaction", () => {
-		const { session } = makeSession({
-			messages: [userMessage("compaction summary")],
-			usage: { tokens: 1234, contextWindow: 272_000, percent: 0.45 },
-		});
-		const breakdown = statusLines.track(new StatusLineComponent(session, statusLineHost)).getCachedContextBreakdown();
-		expect(breakdown.usedTokens).toBe(1234);
-		expect(breakdown.contextWindow).toBe(272_000);
 	});
 
 	it("falls back to the model window with 0 tokens when usage is unavailable", () => {

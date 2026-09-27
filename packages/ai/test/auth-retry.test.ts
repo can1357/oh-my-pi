@@ -513,7 +513,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					storage.calls.push("rotate");
-					return tokens.rotated !== undefined;
+					return { switched: tokens.rotated !== undefined };
 				},
 			},
 		};
@@ -598,7 +598,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					calls.push("rotate");
-					return true;
+					return { switched: true };
 				},
 			},
 		};
@@ -656,7 +656,7 @@ describe("withOAuthAccess", () => {
 				async rotate() {
 					calls.push("rotate");
 					rotateIndex += 1;
-					return true;
+					return { switched: true };
 				},
 			},
 		};
@@ -731,7 +731,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate(_provider, _sessionId, options) {
 					rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
-					return true;
+					return { switched: true };
 				},
 			},
 		};
@@ -763,7 +763,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					rotateCalls += 1;
-					return true;
+					return { switched: true };
 				},
 			},
 		};

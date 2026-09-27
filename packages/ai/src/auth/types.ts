@@ -701,6 +701,21 @@ export type RotateCredentialOptions = {
 	signal?: AbortSignal;
 };
 
+/**
+ * Outcome of {@link LimitsApi.rotate}.
+ *
+ * `switched` is `true` when a usable same-type sibling credential is available,
+ * so the caller's next resolve hands it out. `afterSiblingWait` is `true` when
+ * no sibling was free at the failure but rotation slept out a sibling's short
+ * block (e.g. a Cloud Code Assist capacity 429 that resets in under a second);
+ * the freed credential may be one the caller already sent in this request, so
+ * attempted-bearer dedupe must let it through once.
+ */
+export interface CredentialRotation {
+	switched: boolean;
+	afterSiblingWait?: boolean;
+}
+
 /** Filter saved reset credits by provider and session. */
 export type ListResetCreditsOptions = {
 	provider?: string;
@@ -1199,9 +1214,15 @@ export interface LimitsApi {
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
 	 *
-	 * Returns whether another usable credential of the same type remains.
+	 * For usage-limit and account-policy failures with no free sibling, waits
+	 * (abortable via `options.signal`) when a sibling's block expires within a
+	 * few seconds, then reports `afterSiblingWait`.
 	 */
-	rotate(provider: string, sessionId: string | undefined, options?: RotateCredentialOptions): Promise<boolean>;
+	rotate(
+		provider: string,
+		sessionId: string | undefined,
+		options?: RotateCredentialOptions,
+	): Promise<CredentialRotation>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,

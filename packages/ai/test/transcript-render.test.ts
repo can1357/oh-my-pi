@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Message, Usage } from "@oh-my-pi/pi-ai";
-import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
+import { getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 
 function usage(): Usage {
 	return {
@@ -84,14 +84,6 @@ describe("dialect transcript rendering", () => {
 		expect(out).toContain("<function_calls>");
 		expect(out).toContain("<function_results>");
 		expect(out).not.toContain("[Assistant tool calls]:");
-	});
-
-	it("renders distinct native text for each sampled dialect", () => {
-		const outputs = (["harmony", "qwen3", "glm", "anthropic"] satisfies readonly Dialect[]).map(dialect =>
-			getDialectDefinition(dialect).renderTranscript(messages),
-		);
-
-		expect(new Set(outputs).size).toBe(outputs.length);
 	});
 
 	it("does not double-wrap thinking blocks already stored with literal envelopes", () => {

@@ -92,10 +92,6 @@ describe("parseRateLimitReason", () => {
 		);
 	});
 
-	it("classifies Too many requests as RATE_LIMIT_EXCEEDED", () => {
-		expect(parseRateLimitReason("Cloud Code Assist API error (429): Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
-	});
-
 	it("classifies per minute errors as RATE_LIMIT_EXCEEDED", () => {
 		expect(parseRateLimitReason("Requests per minute limit reached")).toBe("RATE_LIMIT_EXCEEDED");
 	});

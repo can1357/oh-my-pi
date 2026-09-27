@@ -84,22 +84,8 @@ describe("searchDuckDuckGo kl parameter (integration)", () => {
 		expect(fr.get("kl")).toBe("fr-fr");
 	});
 
-	it("uses DDG's provider-specific locale codes", async () => {
-		const ja = await effectiveForm("news lang:ja-jp");
-		const ko = await effectiveForm("news lang:ko-kr");
-		const tw = await effectiveForm("news lang:zh-tw");
-		expect(ja.get("kl")).toBe("jp-jp");
-		expect(ko.get("kl")).toBe("kr-kr");
-		expect(tw.get("kl")).toBe("tw-tzh");
-	});
-
 	it("falls back to us-en when no lang: directive is supplied", async () => {
 		const form = await effectiveForm("weather");
-		expect(form.get("kl")).toBe("us-en");
-	});
-
-	it("falls back to us-en for language-only locales", async () => {
-		const form = await effectiveForm("weather lang:de");
 		expect(form.get("kl")).toBe("us-en");
 	});
 

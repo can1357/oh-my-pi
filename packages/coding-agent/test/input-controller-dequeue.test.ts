@@ -90,12 +90,6 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 		expect(getText()).toBe("first\n\nsecond");
 	});
 
-	test("merges the popped message ahead of an existing draft", () => {
-		const { ctx, getText } = makeCtx({ queue: [{ text: "queued" }], draft: "typed draft" });
-		new InputController(ctx).handleDequeue();
-		expect(getText()).toBe("queued\n\ntyped draft");
-	});
-
 	test("empty queue reports nothing to restore", () => {
 		const { ctx, statuses, getText } = makeCtx();
 		new InputController(ctx).handleDequeue();

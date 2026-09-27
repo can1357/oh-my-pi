@@ -173,6 +173,12 @@ stdenv.mkDerivation {
     cargo build --release -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}
     install -Dm755 "target/release/${platform.nativeLibrary}" \
       "packages/natives/native/${platform.addon}"
+    # The loader and embed-native.ts require the release version, which is
+    # written into the addon after linking (build-bindings.ts does this for
+    # local builds; this raw cargo build must do it itself). Darwin re-signs
+    # through signIfRequired below; the sandbox has no system codesign.
+    bun scripts/stamp-native-version.ts --no-sign \
+      "packages/natives/native/${platform.addon}"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.

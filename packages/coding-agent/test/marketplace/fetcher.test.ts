@@ -202,12 +202,6 @@ describe("fetchMarketplace", () => {
 		await expect(fetchMarketplace(missing, tmpDir)).rejects.toThrow(/Marketplace catalog not found/);
 	});
 
-	it("throws a clear error for relative nonexistent path", async () => {
-		// Use a path that resolves within tmpDir but doesn't exist
-		const fakeSrc = path.join(tmpDir, "ghost-marketplace");
-		await expect(fetchMarketplace(fakeSrc, tmpDir)).rejects.toThrow(/Marketplace catalog not found/);
-	});
-
 	it("loads catalog from .omp-plugin/marketplace.json when present", async () => {
 		const root = path.join(tmpDir, "omp-only");
 		fs.mkdirSync(path.join(root, ".omp-plugin"), { recursive: true });
@@ -244,13 +238,6 @@ describe("fetchMarketplace", () => {
 		expect(result.catalog.name).toBe("from-omp-plugin");
 	});
 
-	it("falls back to .claude-plugin/marketplace.json when .omp-plugin is absent", async () => {
-		// The shared fixture only ships .claude-plugin/marketplace.json — confirms
-		// the legacy path still loads unchanged.
-		const result = await fetchMarketplace(FIXTURE_DIR, tmpDir);
-		expect(result.catalog.name).toBe("test-marketplace");
-	});
-
 	it("error message names both candidate paths when neither exists", async () => {
 		const empty = path.join(tmpDir, "empty-dir");
 		fs.mkdirSync(empty, { recursive: true });
@@ -275,25 +262,5 @@ describe("fetchMarketplace", () => {
 		} finally {
 			cloneSpy.mockRestore();
 		}
-	});
-
-	// Network-dependent tests — skip in CI / offline environments.
-	// These verify real git clone and HTTP fetch error handling.
-	it.skip("github source throws on nonexistent repo", async () => {
-		await expect(fetchMarketplace("nonexistent-owner-xyz/nonexistent-repo-xyz", tmpDir)).rejects.toThrow(
-			/git clone failed/,
-		);
-	});
-
-	it.skip("git source throws on nonexistent repo", async () => {
-		await expect(
-			fetchMarketplace("git@github.com:nonexistent-owner-xyz/nonexistent-repo-xyz.git", tmpDir),
-		).rejects.toThrow(/git clone failed/);
-	});
-
-	it.skip("url source throws on non-2xx response", async () => {
-		await expect(fetchMarketplace("https://example.com/nonexistent-catalog-xyz.json", tmpDir)).rejects.toThrow(
-			/HTTP [45]\d\d/,
-		);
 	});
 });

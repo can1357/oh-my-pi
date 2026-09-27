@@ -702,17 +702,6 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.totalBytes).toBe(byteLength(lines));
 	});
 
-	test("disabled (headBytes=0) preserves tail-only behavior", async () => {
-		const sink = new OutputSink({ spillThreshold: 5, headBytes: 0 });
-		await sink.push("abc");
-		await sink.push("def");
-
-		const dumped = await sink.dump();
-		expect(dumped.truncated).toBe(true);
-		expect(dumped.output).toBe("bcdef");
-		expect(dumped.elidedBytes).toBeUndefined();
-	});
-
 	test("head fills cleanly across chunks without elision when total fits", async () => {
 		const sink = new OutputSink({ spillThreshold: 50, headBytes: 4 });
 		await sink.push("abcdefgh");

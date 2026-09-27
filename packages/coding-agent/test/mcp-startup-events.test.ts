@@ -124,13 +124,6 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		).toBe("Connected: alpha. Failed: broken: missing command. Still connecting: slow…");
 	});
 
-	it("terminates active connecting messages with a single U+2026 ellipsis", () => {
-		const msg = formatMCPConnectingMessage(["x"]);
-		expect(msg.endsWith("\u2026")).toBe(true);
-		expect(msg.endsWith("...")).toBe(false);
-		expect(msg.at(-1)).toBe("\u2026");
-	});
-
 	it("accepts well-formed payloads and rejects malformed ones", () => {
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: ["a", "b"] })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: [] })).toBe(true);

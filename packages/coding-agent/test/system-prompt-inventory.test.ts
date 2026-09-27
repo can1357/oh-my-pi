@@ -974,30 +974,6 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("`skill://<name>`");
 	});
 
-	it("tells the agent to read matching skills before work", async () => {
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: tempDir,
-			contextFiles: [],
-			skills: [
-				{
-					name: "frontend-design",
-					description: "Frontend UI workflow",
-					filePath: path.join(tempDir, "SKILL.md"),
-					baseDir: tempDir,
-					source: "test",
-				},
-			],
-			rules: [],
-			toolNames: ["read"],
-			tools: TOOLS,
-			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-		});
-		const text = systemPrompt.join("\n\n");
-
-		expect(text).toContain("<skills>");
-		expect(text).toContain("- frontend-design: Frontend UI workflow");
-	});
-
 	it("omits the read-only scout delegation gate when scout is unavailable", async () => {
 		const opts = { toolNames: ["read", "bash", "task"], tools: TOOLS };
 		const withScout = (

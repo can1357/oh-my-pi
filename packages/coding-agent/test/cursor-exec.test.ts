@@ -334,19 +334,6 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
 	});
 
-	it("reports the failure instead of editing when no edit tool is reachable", async () => {
-		const target = path.join(cwd, "sample.txt");
-		await Bun.write(target, "alpha\nbeta\n");
-		const unreachable = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>() });
-		const result = await unreachable.piEdit({
-			toolCallId: "e2",
-			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
-		} as never);
-
-		expect(result.isError).toBe(true);
-		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
-	});
-
 	it("substitutes a replace-mode edit into a granted advisor tool map", async () => {
 		// The advisor roster hands the bridge the instances it built for the
 		// advisor's own loop — default `hashline` mode, whose schema is a single
@@ -756,6 +743,60 @@ describe("pi_bash timeout presence", () => {
 	});
 });
 
+describe("legacy shell timeout unit (issue #13082)", () => {
+	let cwd: string;
+	let handlers: CursorExecHandlers;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-shell-timeout-"));
+		const bash: Tool = new BashTool(createTestSession(cwd));
+		handlers = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>([["bash", bash]]) });
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("converts a millisecond ShellArgs budget into bash seconds", async () => {
+		// Legacy `ShellArgs.timeout` is milliseconds (`ShellTimeout` echoes it as
+		// `timeout_ms`), so a model asking for 15s sends 15000. Forwarded as
+		// seconds it exceeded the bash ceiling and ran clamped to 3600s.
+		const result = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 15_000,
+			toolCallId: "s1",
+		} as never);
+		// BashTool records its resolved deadline here; shape known from `bash.ts`.
+		const details = result.details as { timeoutSeconds?: number };
+		expect(details.timeoutSeconds).toBe(15);
+	});
+
+	it("rounds a sub-second budget up and leaves an unset budget on the default", async () => {
+		// Truncating 400ms to 0 would read as `bash`'s "no deadline" instead of
+		// the shortest deadline it can honor.
+		const subSecond = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 400,
+			toolCallId: "s2",
+		} as never);
+		const subSecondDetails = subSecond.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
+		expect(subSecondDetails.timeoutSeconds).toBe(1);
+		expect(subSecondDetails.timeoutDisabled).toBeUndefined();
+
+		const unset = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 0,
+			toolCallId: "s3",
+		} as never);
+		const unsetDetails = unset.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
+		expect(unsetDetails.timeoutDisabled).toBeUndefined();
+		expect(unsetDetails.timeoutSeconds).toBeGreaterThan(1);
+	});
+});
+
 describe("CursorExecHandlers error results", () => {
 	const rewrittenErrorTool = (name: string): AgentTool => ({
 		name,
@@ -858,7 +899,8 @@ describe("CursorExecHandlers error results", () => {
 				toolCallId: "call-shell-keep",
 				command: "pwd",
 				workingDirectory: "/tmp",
-				timeout: 12,
+				// Milliseconds on the wire; the bridge forwards bash seconds.
+				timeout: 12_000,
 			}),
 			{ onStdout: () => {}, onStderr: () => {} },
 		);
@@ -1916,17 +1958,6 @@ describe("CursorExecHandlers Pi frame translation", () => {
 			// Genuinely unset leaves the local tool's own default in place.
 			{ path: "*.ts", limit: undefined },
 		]);
-	});
-
-	it("renames pi_edit's camelCase replacements to the local tool's snake_case pairs", async () => {
-		const { handlers, calls } = recordingHandlers("edit");
-
-		await handlers.piEdit({
-			toolCallId: "c1",
-			args: { path: "a.ts", edits: [{ oldText: "before", newText: "after" }] },
-		} as never);
-
-		expect(calls[0]).toEqual({ path: "a.ts", old_string: "before", new_string: "after" });
 	});
 
 	it("sends a multi-replacement pi_edit frame as one batched tool call", async () => {

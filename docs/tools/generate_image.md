@@ -29,8 +29,9 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 ## Outputs
 - Success with image data:
   - `content[0].type = "text"`
-  - `content[0].text` summarizes provider/model and saved image paths.
+  - `content[0].text` summarizes provider/model and saved image paths, with each image's reported size/quality when the provider returns them.
   - `details = { provider, model, imageCount, imagePaths, images, responseText?, revisedPrompt?, promptFeedback?, usage? }`
+  - `model` is the image model the provider reports having run when it echoes one (hosted OpenAI transports), otherwise the selected catalog model id. When they differ, the text shows both, e.g. `Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-1)`. Each `images[]` entry may carry the provider-reported `size` and `quality`.
 - Model responses with no image data return `imageCount: 0`, empty `imagePaths` / `images`, and any provider text/feedback available.
 
 ## Flow
@@ -68,6 +69,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - OpenAI hosted output is requested as WebP. Other response files use MIME-derived extensions (`png`, `jpg`, `gif`, or `webp`; unknown MIME types fall back to `.png`).
 - The schema accepts `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `3:2`, and `2:3`; upstream support depends on the selected model transport. xAI accepts the two additional landscape/portrait ratios `3:2` and `2:3`.
 - `image_size` accepts `1024x1024`, `1536x1024`, and `1024x1536`. On xAI these map to `1k`, `2k`, and `2k`; omission defaults to `1k`.
+- The ChatGPT/Codex subscription backend (`openai-codex-responses`) chooses the image model, size, and quality itself and ignores the requested values, so `aspect_ratio` and `image_size` are not honored on that transport. The result reports the model, size, and quality the backend returned.
 - xAI edit requests accept at most 3 input images.
 
 ## Errors

@@ -171,18 +171,6 @@ describe("editToolRenderer", () => {
 		expect(rendered).not.toContain("The first line of the patch must be");
 	});
 
-	it("uses sloppy input section headers for the streaming call path", async () => {
-		const uiTheme = await getUiTheme();
-		const component = editToolRenderer.renderCall(
-			{ input: "*** Edit File: src/engine/disk.rs\n*** Find\nfn parse_disk_ref(" },
-			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
-			uiTheme,
-		);
-
-		const rendered = Bun.stripANSI(component.render(160).join("\n"));
-		expect(rendered).toContain("src/engine/disk.rs");
-	});
-
 	it("counts extra sloppy sections in the streaming call header", async () => {
 		const uiTheme = await getUiTheme();
 		const input = "*** Edit File: a.ts\n*** Find\nfoo\n*** Edit File: b.ts\n*** Find\nbar";

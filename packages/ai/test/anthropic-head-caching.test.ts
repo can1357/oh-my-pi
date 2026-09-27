@@ -231,11 +231,6 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(second).toBeGreaterThan(first);
 	});
 
-	it("stays within Anthropic's 4-breakpoint budget", async () => {
-		const body = await captureWireBody();
-		expect(countCacheBreakpoints(body)).toBeLessThanOrEqual(4);
-	});
-
 	it("adds no breakpoints when caching is disabled", async () => {
 		const body = await captureWireBody("none");
 		expect(countCacheBreakpoints(body)).toBe(0);

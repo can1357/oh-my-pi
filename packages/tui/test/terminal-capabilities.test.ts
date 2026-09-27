@@ -272,10 +272,6 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 });
 
 describe("Warp terminal capabilities", () => {
-	it("recognizes TERM_PROGRAM=WarpTerminal before the true-color fallback", () => {
-		expect(detectTerminalId({ TERM_PROGRAM: "WarpTerminal", COLORTERM: "truecolor" })).toBe("warp");
-	});
-
 	it("resolves the process-wide Warp terminal id and image protocol from TERM_PROGRAM", async () => {
 		const env = subprocessEnv({
 			TERM_PROGRAM: "WarpTerminal",

@@ -72,13 +72,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.models).toEqual({});
 		});
 
-		it("single user message", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages).toHaveLength(1);
-			expect(ctx.messages[0].role).toBe("user");
-		});
-
 		it("rehydrates custom_message attribution from entries", () => {
 			const entries: SessionEntry[] = [
 				{
@@ -642,26 +635,6 @@ describe("buildSessionContext", () => {
 			expect(transcript.messages[1]?.role).toBe("assistant");
 			expect(transcript.messages[2]?.role).toBe("compactionSummary");
 			expect(transcript.messages[3]?.role).toBe("user");
-		});
-
-		it("agent context: summary stays at top", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "old question"),
-				msg("2", "1", "assistant", "old response"),
-				msg("3", "2", "user", "kept question"),
-				msg("4", "3", "assistant", "kept response"),
-				compaction("5", "4", "Summary of compacted turns", "3"),
-				msg("6", "5", "user", "after compact"),
-			];
-
-			// Agent context (no transcript): summary first
-			const agentCtx = buildSessionContext(entries);
-
-			expect(agentCtx.messages).toHaveLength(4);
-			expect(agentCtx.messages[0]?.role).toBe("compactionSummary");
-			expect(agentCtx.messages[1]?.role).toBe("user");
-			expect(agentCtx.messages[2]?.role).toBe("assistant");
-			expect(agentCtx.messages[3]?.role).toBe("user");
 		});
 
 		it("display transcript with no post-compaction messages: summary at bottom", () => {

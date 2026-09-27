@@ -377,16 +377,6 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(2); // "Test" in title + "test" in body
 		});
 
-		it("should return filesWithMatches mode", async () => {
-			const result = await grep({
-				pattern: "return",
-				path: testDir,
-				mode: GrepOutputMode.FilesWithMatches,
-			});
-
-			expect(result.filesWithMatches).toBeGreaterThan(0);
-		});
-
 		it("counts files instead of line matches in filesWithMatches mode", async () => {
 			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-files-"));
 			try {

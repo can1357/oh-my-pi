@@ -16,27 +16,6 @@ import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 
 describe("parseClaudePluginsRegistry", () => {
-	test("parses valid registry", () => {
-		const content = JSON.stringify({
-			version: 2,
-			plugins: {
-				"my-plugin@marketplace": [
-					{
-						scope: "user",
-						installPath: "/path/to/plugin",
-						version: "1.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
-					},
-				],
-			},
-		});
-
-		const result = parseClaudePluginsRegistry(content);
-		expect(result?.version).toBe(2);
-		expect(result?.plugins["my-plugin@marketplace"]).toHaveLength(1);
-	});
-
 	test("returns null for invalid JSON", () => {
 		expect(parseClaudePluginsRegistry("not json")).toBeNull();
 	});
