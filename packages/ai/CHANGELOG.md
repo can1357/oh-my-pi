@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Shortened ZAI/Zhipu usage limit labels to window + meter (e.g. `5 Hours Tokens` instead of `ZAI 5 Hours Token Quota`); the provider section already names the plan ([#12459](https://github.com/can1357/oh-my-pi/pull/12459) by [@abcfy2](https://github.com/abcfy2)).
+
+### Fixed
+
+- Fixed Zhipu Coding Plan (`zhipu-coding-plan`) and MiniMax Token Plan China (`minimax-code-cn`) accounts reporting no quota in `omp usage`; both now poll their domestic quota endpoints ([#12448](https://github.com/can1357/oh-my-pi/issues/12448), [#12459](https://github.com/can1357/oh-my-pi/pull/12459) by [@abcfy2](https://github.com/abcfy2)).
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed
