@@ -450,7 +450,7 @@ export async function resolveEffectiveSubagentPolicy(
 			if (unmatched) {
 				throw new StructuredSubagentError(
 					"preflight",
-					`No available model matches \`model\`: ${JSON.stringify(request.model)}. Run \`omp models find <query> --json\` and use a listed \`selector\`, or omit \`model\` to use the agent's own.`,
+					`No available model matches \`model\`: ${JSON.stringify(request.model)}. \`omp models find <query> --json\` lists selectors, but only fix the spelling of the same model. Do NOT substitute a different model or drop \`model\` unless the user allowed it: stop and report that the requested model is unavailable.`,
 				);
 			}
 		}
