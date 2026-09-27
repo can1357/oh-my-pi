@@ -278,6 +278,40 @@ describe("tiny model chat client", () => {
 		}
 	});
 
+	it("returns null from generate() for judge keys without connecting a worker", async () => {
+		const connected: string[] = [];
+		const client = new TinyTitleClient(async modelKey => {
+			connected.push(modelKey);
+			return new FakeTinyWorker(() => {});
+		});
+
+		try {
+			expect(await client.generate("julia-1", "hi")).toBeNull();
+			expect(connected).not.toContain("julia-1");
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("returns null from judge() for non-judge keys without connecting a worker", async () => {
+		const connected: string[] = [];
+		const client = new TinyTitleClient(async modelKey => {
+			connected.push(modelKey);
+			return new FakeTinyWorker(() => {});
+		});
+
+		try {
+			expect(
+				await client.judge("lfm2.5-230m", "s", {
+					q: { type: "noul", instructions: "i", options: ["no", "yes"] },
+				}),
+			).toBeNull();
+			expect(connected).not.toContain("lfm2.5-230m");
+		} finally {
+			await client.terminate();
+		}
+	});
+
 	it("prewarms and generates titles with memory-group tiny models", async () => {
 		const firstRequest = Promise.withResolvers<TinyWorkerRequest>();
 		const worker = new FakeTinyWorker((request, current) => {

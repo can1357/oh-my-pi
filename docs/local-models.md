@@ -227,4 +227,4 @@ Kokoro and the transformers.js Whisper models use the same `providers.tinyModelD
 
 ## Task 3: Local judgments (`modelRoles.judge`)
 
-The default local judge is `local/julia-1` (`DEFAULT_JUDGE_LOCAL_MODEL_KEY`): a 144M decision model answering typed choice/noul/score questions with native probabilities instead of generated keywords. Weights are fp32 ONNX (~577 MB) served by the shared tiny-model worker; opt in with `modelRoles.judge: local/julia-1`. The built-in chain still prefers credentialed native judges (TypeSafe/OpenRouter) first, with `local/julia-1` as the first local entry and the remaining `@tiny`/`@smol` keyword fallbacks after it.
+`local/julia-1` is an opt-in on-device judge: a 144M decision model answering typed choice/noul/score questions with native probabilities instead of generated keywords. Enable it with `modelRoles.judge: local/julia-1` (or under `retry.fallbackChains.judge`); nothing selects it automatically. The first use downloads ~577 MB of fp32 ONNX weights (CPU-only) into the shared tiny-model worker cache.

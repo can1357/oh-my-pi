@@ -19,9 +19,10 @@ import {
 	tokenUsage,
 } from "@oh-my-pi/pi-ai";
 import type { JudgeQuestionPayload } from "../tiny/title-protocol";
+import { renderJudgeStateValue } from "../tiny/judge-serialize";
 import { tinyModelClient } from "../tiny/title-client";
 
-/** Plain softmax, no temperature (Julia-1 v1 raw softmax; Laya per-cardinality temps are future work). */
+/** Plain softmax, no temperature (Julia-1 v1 raw softmax). */
 function softmax(logits: readonly number[]): number[] {
 	const max = Math.max(...logits);
 	let sum = 0;
@@ -118,7 +119,7 @@ export class LocalJudge implements Judge {
 		if (ids.length === 0) throw new Error("judgment request has no questions");
 		const questions: Record<string, JudgeQuestionPayload> = {};
 		for (const id of ids) questions[id] = toPayload(id, request.questions[id]);
-		const state = typeof request.state === "string" ? request.state : JSON.stringify(request.state);
+		const state = renderJudgeStateValue(request.state);
 		const logits = await tinyModelClient.judge(this.#modelId, state, questions, { signal: options.signal });
 		// Aborted dispatches resolve null; rethrow the signal reason instead of masking it as no-output.
 		options.signal?.throwIfAborted();

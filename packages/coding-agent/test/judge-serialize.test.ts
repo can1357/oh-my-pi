@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { packJudgeBatch, serializeJudgeRow } from "@oh-my-pi/pi-coding-agent/tiny/judge-serialize";
+import {
+	fillJudgeBatch,
+	packJudgeBatch,
+	renderJudgeStateValue,
+	serializeJudgeRow,
+	sliceJudgeLogits,
+} from "@oh-my-pi/pi-coding-agent/tiny/judge-serialize";
 
 // Offline-safe contract tests: no ORT, no network. A char-code stand-in for the
 // tokenizer keeps every id hand-computable (ASCII < 1000, so % 1000 is identity).
@@ -71,5 +77,57 @@ describe("judge-serialize", () => {
 		expect(batch.length).toBe(Math.ceil(longest / 8) * 8);
 		expect(batch.length % 8).toBe(0);
 		expect(batch.qtypes).toEqual([two.qtype, three.qtype]);
+	});
+
+	it("renders non-string states with python separators outside strings (compact JSON shifts training token layout)", () => {
+		expect(renderJudgeStateValue("as-is string")).toBe("as-is string");
+		// Structural separators gain a space; commas/colons inside values never split.
+		expect(renderJudgeStateValue({ b: 2, a: [1, 2] })).toBe('{"b": 2, "a": [1, 2]}');
+		expect(renderJudgeStateValue({ msg: "a, b: c" })).toBe('{"msg": "a, b: c"}');
+		// Escaped quotes would flip a quote-counting regex lookahead; the scanner tracks backslashes.
+		expect(renderJudgeStateValue({ k: 'a"b, c: d', e: "plain" })).toBe('{"k": "a\\"b, c: d", "e": "plain"}');
+		expect(renderJudgeStateValue(["a,b", "c:d"])).toBe('["a,b", "c:d"]');
+	});
+
+	it("fills batch tensors with ids/attention at row offsets and markers at option offsets (pad slots stay zero)", () => {
+		const two = serializeJudgeRow(
+			{ type: "choice", question: "Q", options: ["A", "B"], state: "S" },
+			encode,
+			SPECIAL_IDS,
+		);
+		const three = serializeJudgeRow(
+			{ type: "score", question: "Q", options: ["A", "B", "C"], state: "S" },
+			encode,
+			SPECIAL_IDS,
+		);
+		// Hand-computed: two.ids is 29 long (see marker test above: "score" head
+		// is one token shorter than "choice"), three.ids is 31, so length pads
+		// to 32 and count is 3.
+		const batch = packJudgeBatch([two, three]);
+		expect(batch).toMatchObject({ length: 32, count: 3 });
+		const { ids, attention, positions, mask, qtype } = fillJudgeBatch([two, three], batch);
+		expect(ids.length).toBe(2 * 32);
+		expect(attention.length).toBe(2 * 32);
+		// Row 0 ids land at offset 0; trailing pad slots stay zero with no attention.
+		expect(Array.from(ids.slice(0, two.ids.length), Number)).toEqual(two.ids);
+		expect(Array.from(ids.slice(two.ids.length, 32), Number)).toEqual(Array(32 - two.ids.length).fill(0));
+		expect(Array.from(attention.slice(0, two.ids.length))).toEqual(Array(two.ids.length).fill(1n));
+		expect(Array.from(attention.slice(two.ids.length, 32))).toEqual(Array(32 - two.ids.length).fill(0n));
+		// Row 1 starts at offset 32; its 31 ids land followed by one zero pad.
+		expect(Array.from(ids.slice(32, 32 + three.ids.length), Number)).toEqual(three.ids);
+		expect(Number(ids[63])).toBe(0);
+		expect(Number(attention[63])).toBe(0);
+		// Marker positions land per row; the padded third option slot of row 0 stays zero.
+		expect(Array.from(positions.slice(0, 3))).toEqual([BigInt(two.markers[0]!), BigInt(two.markers[1]!), 0n]);
+		expect(Array.from(positions.slice(3, 6))).toEqual(three.markers.map(BigInt));
+		expect(Array.from(mask.slice(0, 3))).toEqual([1, 1, 0]);
+		expect(Array.from(mask.slice(3, 6))).toEqual([1, 1, 1]);
+		expect(Array.from(qtype)).toEqual([BigInt(two.qtype), BigInt(three.qtype)]);
+	});
+
+	it("slices flat logits back into per-question rows (padded option slots carry no logits)", () => {
+		const logits = sliceJudgeLogits(["a", "b"], [2, 3], [0.1, 0.2, 0, 0.3, 0.4, 0.5], 3);
+		expect(logits).toEqual({ a: [0.1, 0.2], b: [0.3, 0.4, 0.5] });
+		expect(Object.values(logits).map(row => row.length)).toEqual([2, 3]);
 	});
 });

@@ -16,13 +16,13 @@ import type {
 } from "@huggingface/transformers";
 import { getTinyModelsCacheDir, logger, setProcessName } from "@oh-my-pi/pi-utils";
 import {
-	TRANSFORMERS_PACKAGE,
 	errorMessage,
 	errorText,
 	formatOnnxRuntimeCudaDiagnostics,
 	getTransformersVersionSpec,
 	loadTransformersRuntime,
 	MemoizedRuntime,
+	resolveOnnxRuntimePackageDir,
 	sendProgress,
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
@@ -34,7 +34,7 @@ import {
 	tinyModelDeviceLoadOrder,
 } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
-import { packJudgeBatch, serializeJudgeRow, type JudgeSerializedRow } from "./judge-serialize";
+import { fillJudgeBatch, packJudgeBatch, serializeJudgeRow, sliceJudgeLogits } from "./judge-serialize";
 import { ensureJuliaJudgeFiles } from "./judge-weights";
 import {
 	getTinyLocalModelSpec,
@@ -153,6 +153,13 @@ interface OrtRuntime {
 	InferenceSession: { create(modelPath: string, options: { executionProviders: ["cpu"] }): Promise<OrtSession> };
 }
 
+/** Transformers runtime extended with the tokenizer loader the Julia-1 judge needs. */
+interface JuliaTransformersRuntime extends TransformersRuntime {
+	AutoTokenizer: {
+		from_pretrained(dir: string): Promise<JuliaJudgeTokenizer>;
+	};
+}
+
 /** Encode raw text to ids with no special tokens (matches the reference serializer's `encode`). */
 function encodeJudgeText(tokenizer: JuliaJudgeTokenizer, text: string): number[] {
 	return Array.from(tokenizer(text, { add_special_tokens: false }).input_ids.data, Number);
@@ -189,7 +196,7 @@ function toJudgeSerializeRow(
 class JuliaJudgeModel {
 	#modelKey: TinyLocalModelKey;
 	#spec: TinyTitleLocalModelSpec;
-	#runtime = new MemoizedRuntime<TransformersRuntime>();
+	#runtime = new MemoizedRuntime<JuliaTransformersRuntime>();
 	#loaded: Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime; session: OrtSession }> | null = null;
 
 	constructor(modelKey: TinyLocalModelKey, spec: TinyTitleLocalModelSpec) {
@@ -231,8 +238,8 @@ class JuliaJudgeModel {
 		requestId: string,
 	): Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime; session: OrtSession }> {
 		const dir = await ensureJuliaJudgeFiles(this.#modelKey, this.#spec.repo, reply, requestId);
-		const transformersEntry = await this.#transformersEntry(reply, requestId);
-		const { tokenizer, ort } = await this.#loadDeps(transformersEntry, dir);
+		const runtime = await this.#transformersEntry(reply, requestId);
+		const { tokenizer, ort } = await this.#loadDeps(runtime, dir);
 		const session = await ort.InferenceSession.create(path.join(dir, "model.onnx"), {
 			executionProviders: ["cpu"],
 		});
@@ -240,40 +247,36 @@ class JuliaJudgeModel {
 	}
 
 	/**
-	 * Entry point of the ambient/side transformers install (never top-level
-	 * ORT). Loads the tiny side runtime on first use (memoized) so the
-	 * compiled-binary path resolves the nested onnxruntime-node copy from
+	 * Loaded transformers runtime carrying the tokenizer loader (never
+	 * top-level ORT). Loads the tiny side runtime on first use (memoized) so
+	 * the compiled-binary path resolves the nested onnxruntime-node copy from
 	 * the version-keyed runtime dir, exactly like the chat path.
 	 */
-	async #transformersEntry(reply: ReplyTransport, requestId: string): Promise<string> {
-		const runtime = await loadTransformersRuntime(
+	async #transformersEntry(reply: ReplyTransport, requestId: string): Promise<JuliaTransformersRuntime> {
+		return loadTransformersRuntime<JuliaTransformersRuntime, TinyLocalModelKey>(
 			this.#runtime,
 			reply,
 			requestId,
 			this.#modelKey,
 			getTinyTitleRuntimeDir,
 		);
-		return runtime.__ompTransformersEntry ?? createRequire(import.meta.url).resolve(TRANSFORMERS_PACKAGE);
 	}
 
-	async #loadDeps(entry: string, dir: string): Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime }> {
-		const require = createRequire(entry);
-		const transformers = require(entry) as {
-			env: { allowLocalModels?: boolean };
-			AutoTokenizer: {
-				from_pretrained(path: string, options?: { local_files_only?: boolean }): Promise<JuliaJudgeTokenizer>;
-			};
-		};
+	async #loadDeps(
+		runtime: JuliaTransformersRuntime,
+		dir: string,
+	): Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime }> {
 		// `loadTransformersRuntime` disables local models (pipeline-only chat
 		// path resolves repos from the HF cache); the judge dir IS the local
 		// model, so re-enable it for this runtime before loading the tokenizer.
-		transformers.env.allowLocalModels = true;
-		const tokenizer = await transformers.AutoTokenizer.from_pretrained(dir);
-		// Nested copy only: resolving from the transformers entry lands in
-		// transformers' own `node_modules/onnxruntime-node` (1.30.0), never
-		// the top-level 1.26.0 (dual load segfaults/dlopen-clashes).
-		const ortEntry = require.resolve("onnxruntime-node/package.json");
-		const ort = createRequire(ortEntry)(path.dirname(ortEntry)) as OrtRuntime;
+		runtime.env.allowLocalModels = true;
+		const tokenizer = await runtime.AutoTokenizer.from_pretrained(dir);
+		// Nested copy only: resolve ORT through the transformers entry so the
+		// side-runtime's own `node_modules/onnxruntime-node` (1.30.0) is used,
+		// never the top-level 1.26.0 (dual load segfaults/dlopen-clashes).
+		const packageDir = resolveOnnxRuntimePackageDir(runtime);
+		if (!packageDir) throw new Error("Unable to resolve onnxruntime-node in the tiny-model runtime");
+		const ort: OrtRuntime = createRequire(path.join(packageDir, "package.json"))(packageDir);
 		return { tokenizer, ort };
 	}
 
@@ -298,6 +301,16 @@ class JuliaJudgeModel {
 		const marker = tokenizer.mask_token;
 		const clean = (text: string): string => (marker ? text.split(marker).join(" ") : text);
 		const state = clean(request.state);
+		// The state text is identical across rows: memoize encoding so it is
+		// tokenized once per judge() call instead of once per question.
+		const encodeCache = new Map<string, number[]>();
+		const encode = (text: string): number[] => {
+			const cached = encodeCache.get(text);
+			if (cached) return cached;
+			const ids = encodeJudgeText(tokenizer, text);
+			encodeCache.set(text, ids);
+			return ids;
+		};
 		const rows = names.map(name => {
 			const question = request.questions[name]!;
 			const instructions = clean(question.instructions);
@@ -308,7 +321,7 @@ class JuliaJudgeModel {
 					: question.type === "noul"
 						? { type: "noul", instructions, options: [clean(question.options[0]!), clean(question.options[1]!)] }
 						: { type: "score", instructions, options: question.options.map(clean) };
-			return serializeJudgeRow(toJudgeSerializeRow(cleaned, state), text => encodeJudgeText(tokenizer, text), {
+			return serializeJudgeRow(toJudgeSerializeRow(cleaned, state), encode, {
 				mask: tokenizer.mask_token_id,
 				cls: tokenizer.cls_token_id ?? tokenizer.bos_token_id ?? 2,
 				sep: tokenizer.sep_token_id,
@@ -317,22 +330,7 @@ class JuliaJudgeModel {
 		const batch = packJudgeBatch(rows);
 		const length = batch.length;
 		const count = batch.count;
-		const ids = new BigInt64Array(names.length * length);
-		const attention = new BigInt64Array(names.length * length);
-		const positions = new BigInt64Array(names.length * count);
-		const mask = new Uint8Array(names.length * count);
-		const qtype = new BigInt64Array(names.length);
-		rows.forEach((row: JudgeSerializedRow, rowIndex: number) => {
-			row.ids.forEach((id, tokenIndex) => {
-				ids[rowIndex * length + tokenIndex] = BigInt(id);
-				attention[rowIndex * length + tokenIndex] = 1n;
-			});
-			row.markers.forEach((marker, optionIndex) => {
-				positions[rowIndex * count + optionIndex] = BigInt(marker);
-				mask[rowIndex * count + optionIndex] = 1;
-			});
-			qtype[rowIndex] = BigInt(row.qtype);
-		});
+		const { ids, attention, positions, mask, qtype } = fillJudgeBatch(rows, batch);
 		const output = await session.run({
 			input_ids: new ort.Tensor("int64", ids, [names.length, length]),
 			attention_mask: new ort.Tensor("int64", attention, [names.length, length]),
@@ -341,11 +339,12 @@ class JuliaJudgeModel {
 			qtype: new ort.Tensor("int64", qtype, [names.length]),
 		});
 		const values = Array.from(await output.logits!.getData());
-		const logits: Record<string, number[]> = {};
-		names.forEach((name, rowIndex) => {
-			logits[name] = values.slice(rowIndex * count, rowIndex * count + rows[rowIndex]!.markers.length);
-		});
-		return logits;
+		return sliceJudgeLogits(
+			names,
+			rows.map(row => row.markers.length),
+			values,
+			count,
+		);
 	}
 }
 

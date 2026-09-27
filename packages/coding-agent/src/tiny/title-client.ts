@@ -399,6 +399,9 @@ export function onnxLaunch(modelKey: TinyLocalModelKey, modelEnv: Record<string,
 function mlxLaunch(modelKey: TinyLocalModelKey, emitProgress: (event: TinyTitleProgressEvent) => void): WorkerLaunch {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
+	// Judge keys never reach here (#connectDefault forces ONNX), so ONNX-only specs are unreachable.
+	const mlxRepo = spec.mlxRepo;
+	if (!mlxRepo) throw new Error(`Tiny local model has no MLX export: ${modelKey}`);
 	const tag = `mlx|${MLX_LM_VERSION}|${Bun.hash.crc32(MLX_SERVER_SCRIPT).toString(16)}`;
 	return {
 		backend: "mlx",
@@ -427,9 +430,9 @@ function mlxLaunch(modelKey: TinyLocalModelKey, emitProgress: (event: TinyTitleP
 				"--model-key",
 				modelKey,
 				"--repo",
-				spec.mlxRepo,
+				mlxRepo,
 				"--dir",
-				getTinyMlxModelDir(spec.mlxRepo),
+				getTinyMlxModelDir(mlxRepo),
 				"--idle-seconds",
 				String(idleSeconds),
 			];

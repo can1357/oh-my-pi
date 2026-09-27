@@ -1,31 +1,22 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { downloadHubFile, hubResolveUrl, remoteHubFileSize } from "../subprocess/hub-download";
 import type { TinyLocalModelKey } from "./models";
 import type { TinyWorkerResponse } from "./title-protocol";
 
 /** Julia-1 ONNX root-layout files (model + external data + tokenizer). */
 const JULIA_JUDGE_FILES = ["model.onnx", "model.onnx.data", "tokenizer.json", "tokenizer_config.json"] as const;
-const HF_RESOLVE_BASE = "https://huggingface.co";
-// Coalesce download progress so streaming model.onnx.data (~577MB) doesn't
-// flood the IPC channel with one event per chunk.
-const PROGRESS_EMIT_BYTES = 4_000_000;
+/** Pinned Julia-1-ONNX revision so judge weights are reproducible (tokenizer_config.json resolves at this sha). */
+const JULIA_JUDGE_REVISION = "82a2fadf8fccfccdc5fd4e1009ba8f1a265eb7a8";
 
 /** Minimal outbound surface for weight-download progress (matches ReplyTransport in worker.ts). */
 interface JudgeDownloadTransport {
 	send(message: TinyWorkerResponse): void;
 }
 
-/** Remote file size via HEAD; 0 when unknown so the caller downloads. */
-async function remoteJudgeFileSize(url: string): Promise<number> {
-	const response = await fetch(url, { method: "HEAD", redirect: "follow" });
-	if (!response.ok) return 0;
-	await response.body?.cancel().catch(() => {});
-	return Number(response.headers.get("content-length") ?? 0);
-}
-
-/** Stream one weight file to disk (`.part` + rename), emitting progress; never buffers. */
-async function downloadJudgeFile(
+/** Stream one weight file to disk via the shared Hub downloader (`.part` + rename, never buffers). */
+function downloadJudgeFile(
 	repo: string,
 	filename: string,
 	dest: string,
@@ -33,49 +24,15 @@ async function downloadJudgeFile(
 	reply: JudgeDownloadTransport,
 	requestId: string,
 ): Promise<void> {
-	const url = `${HF_RESOLVE_BASE}/${repo}/resolve/main/${filename}`;
-	const response = await fetch(url, { redirect: "follow" });
-	if (!response.ok || !response.body) {
-		throw new Error(`Failed to download ${filename} (${repo}): HTTP ${response.status}`);
-	}
-	const total = Number(response.headers.get("content-length") ?? 0);
-	reply.send({
-		type: "progress",
-		id: requestId,
-		event: { modelKey, status: "download", name: `${repo}/${filename}`, file: filename },
+	return downloadHubFile({
+		repo,
+		revision: JULIA_JUDGE_REVISION,
+		filename,
+		dest,
+		modelKey,
+		transport: reply,
+		requestId,
 	});
-	const part = `${dest}.part`;
-	const handle = await fs.open(part, "w");
-	let loaded = 0;
-	let lastEmitted = 0;
-	const reader = response.body.getReader();
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
-			await handle.write(value);
-			loaded += value.byteLength;
-			if (loaded - lastEmitted >= PROGRESS_EMIT_BYTES || (total > 0 && loaded >= total)) {
-				lastEmitted = loaded;
-				reply.send({
-					type: "progress",
-					id: requestId,
-					event: {
-						modelKey,
-						status: "progress",
-						name: `${repo}/${filename}`,
-						file: filename,
-						loaded,
-						total: total || loaded,
-					},
-				});
-			}
-		}
-	} finally {
-		await handle.close();
-	}
-	await fs.rename(part, dest);
 }
 
 /**
@@ -109,11 +66,10 @@ export async function ensureJuliaJudgeFiles(
 			.then(stats => stats.size)
 			.catch(() => 0);
 		if (localSize > 0) {
-			const remoteSize = await remoteJudgeFileSize(`${HF_RESOLVE_BASE}/${repo}/resolve/main/${filename}`).catch(
-				() => 0,
-			);
-			// Downloads land atomically (`.part` + rename), so a present file is
-			// complete; HEAD is best-effort validation, not a re-download trigger.
+			const remoteSize = await remoteHubFileSize(hubResolveUrl(repo, JULIA_JUDGE_REVISION, filename)).catch(() => 0);
+			// Present file with matching size is complete (downloads land atomically
+			// via `.part` + rename), so skip it; an unknown remote size keeps the
+			// local file, while a known size mismatch re-downloads below.
 			if (remoteSize === 0 || remoteSize === localSize) continue;
 		}
 		await downloadJudgeFile(repo, filename, dest, modelKey, reply, requestId);

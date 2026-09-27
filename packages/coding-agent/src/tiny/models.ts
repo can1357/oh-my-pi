@@ -8,8 +8,8 @@ export interface TinyTitleLocalModelSpec {
 	/** ONNX export loaded by transformers.js on every platform. */
 	repo: string;
 	dtype: TinyModelDtype;
-	/** Pre-quantized MLX export loaded by mlx-lm when `PI_TINY_DEVICE=mlx`. */
-	mlxRepo: string;
+	/** Pre-quantized MLX export loaded by mlx-lm when `PI_TINY_DEVICE=mlx`; absent for ONNX-only models. */
+	mlxRepo?: string;
 	label: string;
 	description: string;
 	contextNote: string;
@@ -141,9 +141,6 @@ export function isTinyMemoryReasoningModelKey(key: TinyMemoryLocalModelKey): boo
 	return "reasoning" in spec && spec.reasoning === true;
 }
 
-/** Default local judge model for on-device verdicts when none is named. */
-export const DEFAULT_JUDGE_LOCAL_MODEL_KEY = "julia-1";
-
 /**
  * Local models for decision-model judge tasks (choice/noul/score verdicts).
  * Julia-1 emits native per-option probabilities, no keyword parsing.
@@ -153,7 +150,6 @@ export const TINY_JUDGE_LOCAL_MODELS = [
 		key: "julia-1",
 		repo: "SupersonicLabs/Julia-1-ONNX",
 		dtype: "fp32",
-		mlxRepo: "zainmerchan/Julia-1-MLX",
 		label: "Julia-1 144M",
 		description:
 			"Decision-model judge (144M, fp32 ONNX); native choice/noul/score probabilities, no keyword parsing.",
@@ -165,12 +161,6 @@ export type TinyJudgeLocalModelKey = (typeof TINY_JUDGE_LOCAL_MODELS)[number]["k
 
 export function isTinyJudgeLocalModelKey(value: string): value is TinyJudgeLocalModelKey {
 	return TINY_JUDGE_LOCAL_MODELS.some(model => model.key === value);
-}
-
-export function getTinyJudgeModelSpec(key: TinyJudgeLocalModelKey): (typeof TINY_JUDGE_LOCAL_MODELS)[number] {
-	const spec = TINY_JUDGE_LOCAL_MODELS.find(model => model.key === key);
-	if (!spec) throw new Error(`Unknown tiny judge model: ${key}`);
-	return spec;
 }
 
 /** Any local model key (title, memory, or judge), used by the shared inference worker. */

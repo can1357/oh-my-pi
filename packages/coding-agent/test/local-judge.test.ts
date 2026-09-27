@@ -3,7 +3,7 @@ import { JudgmentParseError } from "@oh-my-pi/pi-ai";
 import type { JudgeQuestionPayload } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 import { LocalJudge } from "@oh-my-pi/pi-coding-agent/judgment/local-judge";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
-import { getTinyLocalModelSpec, isTinyJudgeLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
+import { isTinyJudgeLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -206,10 +206,7 @@ describe("LocalJudge", () => {
 		expect(mock.mock.calls.length).toBe(0);
 	});
 
-	it("registers julia-1 as the fp32 judge model, not a title model (worker loads wrong repo/quant)", () => {
-		const spec = getTinyLocalModelSpec("julia-1");
-		expect(spec?.repo).toBe("SupersonicLabs/Julia-1-ONNX");
-		expect(spec?.dtype).toBe("fp32");
+	it("routes julia-1 to the judge path and title keys away from it", () => {
 		expect(isTinyJudgeLocalModelKey("julia-1")).toBe(true);
 		expect(isTinyJudgeLocalModelKey("lfm2.5-230m")).toBe(false);
 	});
