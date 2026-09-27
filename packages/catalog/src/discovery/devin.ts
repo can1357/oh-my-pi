@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { isExcludedModel } from "../compat/behavior";
 import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { DevinCompat, FetchImpl, ModelCost, ModelSpec } from "../types";
@@ -77,8 +78,6 @@ function supportsDevinThinking(config: ClientModelConfig): boolean {
 const DEVIN_COST_LABEL_INPUT = "input";
 const DEVIN_COST_LABEL_CACHE_READ = "cached input";
 const DEVIN_COST_LABEL_OUTPUT = "output";
-/** Normalized label of the marker dimension separating composite rate cards. */
-const DEVIN_SIDEKICK_LABEL = "sidekick";
 
 /** Leading token count of a cost denominator ("1M tokens", "1K tokens"). */
 const DEVIN_COST_DENOMINATOR_PATTERN = /(\d+(?:\.\d+)?)\s*([kmb])?/i;
@@ -107,20 +106,11 @@ function devinCostDenominatorTokens(denominator: string): number {
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
  * has no Cascade dimension — Devin bills cache writes at the input rate — and
  * stays 0.
- *
- * Composite configs (`fusion`) flatten their own rate card plus every
- * dispatched component's card into one `modelDimensions` list. A `Sidekick`
- * marker dimension separates the composite's own card from the component
- * cards, so reading stops there: a headline card may omit dimensions a
- * component includes, which makes repeated-label detection unreliable.
  */
 function devinModelCost(config: ClientModelConfig): ModelCost {
 	const cost: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 	for (const dimension of config.modelDimensions) {
 		const label = dimension.label.trim().toLowerCase();
-		if (label === DEVIN_SIDEKICK_LABEL) {
-			break;
-		}
 		if (dimension.kind !== ModelDimensionKind.COST && dimension.kind !== ModelDimensionKind.COST_FUZZY) {
 			continue;
 		}
@@ -416,14 +406,14 @@ function devinModelSpec(
 	config: ClientModelConfig,
 	uid: string,
 	baseUrl: string,
-	isAssignModelRouter: boolean,
+	isModelRouter: boolean,
 ): ModelSpec<"devin-agent"> {
 	const features = config.modelInfo?.modelFeatures;
 	const supportsImages =
 		(features !== undefined ? features.supportsImages : config.supportsImages) && !DEVIN_IMAGE_BLIND_UIDS.has(uid);
 	const input: ("text" | "image")[] = supportsImages ? ["text", "image"] : ["text"];
 	const compat: DevinCompat = {};
-	if (isAssignModelRouter) compat.modelRouter = true;
+	if (isModelRouter) compat.modelRouter = true;
 	if (features?.supportsParallelToolCalls === true) compat.supportsParallelToolCalls = true;
 	const maxOutputTokens = config.modelInfo?.maxOutputTokens ?? 0;
 	const spec: ModelSpec<"devin-agent"> = {
@@ -453,51 +443,6 @@ function devinModelSpec(
 	return spec;
 }
 
-/**
- * Lead chat uid of a Fusion pairing `fusion-<lead>[-fast]-sidekick-<sidekick>`.
- * An exact live lead uid wins, so leads whose own uid ends in `-fast`
- * (`swe-1-6-fast`) route as written. Otherwise `-fast` selects the lead's
- * priority lane when the server lists one, then the standard lane.
- *
- * Returns `undefined` for uids that are not pairings and `null` for pairings
- * whose lead is not live: the composite uid itself is never servable.
- */
-function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>): string | null | undefined {
-	if (!uid.startsWith("fusion-")) return undefined;
-	const cut = uid.indexOf("-sidekick-");
-	if (cut <= "fusion-".length) return undefined;
-	const lead = uid.slice("fusion-".length, cut);
-	if (liveUids.has(lead)) return lead;
-	if (lead.endsWith("-fast")) {
-		const base = lead.slice(0, -"-fast".length);
-		if (liveUids.has(`${base}-priority`)) return `${base}-priority`;
-		if (liveUids.has(base)) return base;
-	}
-	return null;
-}
-
-/**
- * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
- * paired by the native client), so the limits and pricing a caller budgets
- * against are the lead's, not the composite card's.
- */
-function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
-	spec.requestModelId = lead.id;
-	spec.reasoning = lead.reasoning;
-	spec.input = lead.input;
-	spec.supportsTools = lead.supportsTools;
-	spec.cost = lead.cost;
-	spec.contextWindow = lead.contextWindow;
-	spec.maxTokens = lead.maxTokens;
-	if (lead.compat?.supportsParallelToolCalls) {
-		spec.compat = { ...spec.compat, supportsParallelToolCalls: true };
-	} else if (spec.compat?.supportsParallelToolCalls) {
-		const { supportsParallelToolCalls: _, ...rest } = spec.compat;
-		if (Object.keys(rest).length > 0) spec.compat = rest;
-		else delete spec.compat;
-	}
-}
-
 function normalizeDevinModels(
 	configs: readonly ClientModelConfig[],
 	baseUrlOverride: string | undefined,
@@ -506,12 +451,6 @@ function normalizeDevinModels(
 	const specs: ModelSpec<"devin-agent">[] = [];
 	const seen = new Set<string>();
 	const lanes = new Map<string, DevinFamilyLane>();
-	const liveConfigs = new Map<string, ClientModelConfig>();
-	for (const config of configs) {
-		const uid = config.modelUid.trim();
-		if (!config.disabled && uid && !liveConfigs.has(uid)) liveConfigs.set(uid, config);
-	}
-
 	for (const config of configs) {
 		if (config.disabled) {
 			continue;
@@ -521,26 +460,14 @@ function normalizeDevinModels(
 			continue;
 		}
 		const uid = config.modelUid.trim();
-		if (!uid || seen.has(uid)) {
+		if (!uid || seen.has(uid) || isExcludedModel("devin", uid)) {
 			continue;
 		}
 		seen.add(uid);
+		// A router (`adaptive`) is a dispatch slot, not a chat uid: `AssignModel`
+		// resolves it into a concrete model for each turn.
 		const isRouter = displayOption === DisplayOption.MODEL_ROUTER || config.modelInfo?.isModelRouter === true;
-		// `isModelRouter` marks two different things: harness-less routing slots
-		// (`adaptive`, `subagent-default`) that `AssignModel` resolves into a
-		// concrete model, and harness-backed composites (`fusion`,
-		// `fusion-sidekick-*`) that are themselves valid chat uids. Only the
-		// former take the `AssignModel` path — sending a composite uid there 404s.
-		const isAssignModelRouter = isRouter && (config.modelInfo?.harnessUids.length ?? 0) === 0;
-		// Fusion pairings are orchestrated by the native client: it runs the lead
-		// model as an ordinary chat uid and pairs a sidekick locally. The server
-		// has no provider for the composite uid itself (`permission_denied: no API
-		// providers are available`), so the chat request carries the lead uid and
-		// a pairing without a live lead is not listed.
-		const lead = devinFusionLeadUid(uid, liveConfigs);
-		if (lead === null) continue;
-		const spec = devinModelSpec(config, uid, baseUrl, isAssignModelRouter);
-		if (lead !== undefined) routeDevinFusionLead(spec, devinModelSpec(liveConfigs.get(lead)!, lead, baseUrl, false));
+		const spec = devinModelSpec(config, uid, baseUrl, isRouter);
 		specs.push(spec);
 		// A router is a server-side dispatcher, not an effort tier: it stays a
 		// standalone model even when upstream files it under a family.

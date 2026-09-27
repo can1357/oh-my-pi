@@ -170,6 +170,12 @@ behavior {
 	// cannot route.
 	exclude-models provider="alibaba-token-plan" prefix="fun-asr" prefix="happyhorse-" \
 		prefix="qwen-audio-" prefix="qwen-image-" prefix="text-embedding-" prefix="wan2.7-"
+	// Devin Fusion is a native-client harness: the CLI pairs the lead with a
+	// persistent sidekick subagent the lead drives through a local `sidekick`
+	// tool. omp runs its own subagents, so the `fusion` router, every
+	// `fusion-<lead>-sidekick-<sidekick>` pairing, and the `fusion-sidekick-*`
+	// lanes would only list aliases of models already in the roster.
+	exclude-models provider="devin" exact="fusion" prefix="fusion-"
 	// Copilot's /models listing carries no transport field; route Claude ids
 	// to Anthropic Messages, the reviewed Responses roster to Responses, and
 	// everything else to chat completions. Every Grok Copilot has served since

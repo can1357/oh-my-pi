@@ -176,10 +176,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "devin":
-			// v2: rows cached before Fusion pairings carried their lead uid as
-			// `requestModelId` send the composite uid and fail with
-			// `permission_denied: no API providers are available`.
-			return "devin:models-v2";
+			// v3: rows cached before Fusion was excluded still list the `fusion`
+			// router and every lead/sidekick pairing.
+			return "devin:models-v3";
 		default:
 			return providerId;
 	}
