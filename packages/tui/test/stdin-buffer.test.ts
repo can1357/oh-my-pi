@@ -434,6 +434,7 @@ describe("StdinBuffer", () => {
 
 	describe("Bracketed Paste", () => {
 		let emittedPaste: string[] = [];
+		let emittedPasteEnters: (string | undefined)[] = [];
 
 		beforeEach(() => {
 			buffer = new StdinBuffer({ timeout: 10 });
@@ -446,8 +447,10 @@ describe("StdinBuffer", () => {
 
 			// Collect paste events
 			emittedPaste = [];
-			buffer.on("paste", (data: string) => {
+			emittedPasteEnters = [];
+			buffer.on("paste", (data: string, enter?: string) => {
 				emittedPaste.push(data);
+				emittedPasteEnters.push(enter);
 			});
 		});
 
@@ -518,7 +521,54 @@ describe("StdinBuffer", () => {
 			processInput("\x1b[200~paste\x1b");
 			processInput("[201~x");
 			expect(emittedPaste).toEqual(["paste"]);
+			expect(emittedPasteEnters).toEqual([undefined]);
 			expect(emittedSequences).toEqual(["x"]);
+		});
+
+		// A paste-and-Enter burst arrives in one read from automation and from
+		// terminals that batch input. Splitting it lets an overlay the paste opens
+		// swallow the Enter, so the Enter stays on the paste event in both keyboard
+		// encodings; anything else after the paste keeps the normal data route.
+		for (const [label, enter] of [
+			["legacy \\r", "\r"],
+			["legacy \\n", "\n"],
+			["kitty CSI-u", "\x1b[13u"],
+			["kitty CSI-u with explicit no-modifier field", "\x1b[13;1u"],
+		] as const) {
+			it(`keeps a same-read Enter (${label}) on the paste event`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${enter}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([enter]);
+				expect(emittedSequences).toEqual([]);
+			});
+		}
+
+		it("routes bytes after the attached Enter as ordinary input", () => {
+			processInput("\x1b[200~paste\x1b[201~\rnext");
+			expect(emittedPasteEnters).toEqual(["\r"]);
+			expect(emittedSequences).toEqual(["n", "e", "x", "t"]);
+		});
+
+		for (const [label, sequence] of [
+			["a modified kitty Enter", "\x1b[13;2u"],
+			["a DA1 terminal report", "\x1b[?1;2c"],
+			["an arrow key", "\x1b[A"],
+			["printable text", "x"],
+		] as const) {
+			it(`leaves ${label} after a paste on the data route`, () => {
+				processInput(`\x1b[200~paste\x1b[201~${sequence}`);
+				expect(emittedPaste).toEqual(["paste"]);
+				expect(emittedPasteEnters).toEqual([undefined]);
+				expect(emittedSequences).toEqual([sequence]);
+			});
+		}
+
+		it("does not attach an Enter that arrives in a later read", async () => {
+			processInput("\x1b[200~paste\x1b[201~");
+			processInput("\r");
+			expect(emittedPasteEnters).toEqual([undefined]);
+			await waitUntil(() => emittedSequences.length === 1);
+			expect(emittedSequences).toEqual(["\r"]);
 		});
 
 		it("does not end the paste on a partial end-marker prefix in the body", () => {
@@ -652,6 +702,31 @@ describe("StdinBuffer", () => {
 			processInput("\x1b[A\rx");
 			expect(emittedPaste).toEqual([]);
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
+		});
+
+		describe("classification disabled (issue #12540)", () => {
+			it("emits stall-batched Enter keystrokes as submits instead of one paste", () => {
+				// A UI event-loop stall drains the pty backlog in one read, byte-
+				// identical to an unbracketed multiline paste. When the terminal
+				// confirms bracketed-paste support the heuristic is off, so every
+				// batched Enter stays a submit rather than a coalesced newline.
+				buffer.setRawPasteClassification(false);
+				processInput("aaa\rbbb\rccc");
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+			});
+
+			it("flushes a candidate already held by the classification window as keys", async () => {
+				// The first break-bearing read arms the fixed window; disabling the
+				// heuristic mid-window must replay the held bytes as keystrokes, not
+				// drop them or later emit them as a paste.
+				processInput("hello\r");
+				expect(emittedSequences).toEqual([]);
+				expect(emittedPaste).toEqual([]);
+				buffer.setRawPasteClassification(false);
+				expect(emittedPaste).toEqual([]);
+				expect(emittedSequences).toEqual(["h", "e", "l", "l", "o", "\r"]);
+			});
 		});
 	});
 

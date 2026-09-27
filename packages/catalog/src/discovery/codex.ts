@@ -61,6 +61,7 @@ const codexModelEntrySchema = type({
 	"id?": "unknown",
 	"display_name?": "unknown",
 	"context_window?": "unknown",
+	"max_context_window?": "unknown",
 	"default_reasoning_level?": "unknown",
 	"supported_reasoning_levels?": "unknown",
 	"input_modalities?": "unknown",
@@ -69,6 +70,7 @@ const codexModelEntrySchema = type({
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
 	"tool_mode?": "unknown",
+	"available_access_programs?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -110,6 +112,13 @@ export interface CodexModelDiscoveryOptions {
 export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
+	/**
+	 * Set when the backend rejected the credential itself (401/403, e.g.
+	 * `token_revoked`); `models` is empty. A definitive per-account denial,
+	 * unlike the `null` result for transport/parse failures, so multi-account
+	 * discovery can skip the account instead of aborting.
+	 */
+	rejectedStatus?: 401 | 403;
 }
 
 /**
@@ -139,6 +148,9 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
+		if (response.status === 401 || response.status === 403) {
+			return { models: [], rejectedStatus: response.status };
+		}
 		if (!response.ok) {
 			continue;
 		}
@@ -150,7 +162,7 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
-		const models = normalizeCodexModels(payload, baseUrl);
+		const models = normalizeCodexModels(payload, baseUrl, options.accountId);
 		if (models === null) {
 			continue;
 		}
@@ -212,7 +224,11 @@ function normalizeClientVersion(value: unknown): string | undefined {
 	return trimmed;
 }
 
-function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"openai-codex-responses">[] | null {
+function normalizeCodexModels(
+	payload: unknown,
+	baseUrl: string,
+	accountId: string | undefined,
+): ModelSpec<"openai-codex-responses">[] | null {
 	const parsedResponse = codexModelsResponseSchema(payload);
 	if (parsedResponse instanceof type.errors) {
 		return null;
@@ -239,10 +255,10 @@ function normalizeCodexModels(payload: unknown, baseUrl: string): ModelSpec<"ope
 	const normalized: NormalizedCodexModel[] = [];
 	for (const parsed of parsedEntries) {
 		const canonicalSlug = plainCounterpartForWorkerSlug(parsed.slug, bundledCodexModelIds) ?? parsed.slug;
-		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl));
+		normalized.push(buildNormalizedCodexModel(parsed, parsed.slug, canonicalSlug, baseUrl, accountId));
 		const plainSlug = canonicalSlug !== parsed.slug ? canonicalSlug : null;
 		if (plainSlug && !advertisedSlugs.has(plainSlug)) {
-			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl));
+			normalized.push(buildNormalizedCodexModel(parsed, plainSlug, canonicalSlug, baseUrl, accountId));
 		}
 	}
 
@@ -277,8 +293,10 @@ function plainCounterpartForWorkerSlug(slug: string, bundledCodexModelIds: Reado
 
 interface ParsedCodexModelEntry {
 	slug: string;
+	cyberPrograms: string[] | undefined;
 	name: string;
 	contextWindow: number | null;
+	maxContextWindow: number | null;
 	reasoning: boolean;
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
@@ -304,10 +322,22 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		return null;
 	}
 
+	const programs = payload.available_access_programs;
+	let cyberPrograms: string[] | undefined;
+	if (programs !== null && typeof programs === "object" && "cyber" in programs && Array.isArray(programs.cyber)) {
+		cyberPrograms = [];
+		for (const program of programs.cyber) {
+			const name = toNonEmptyString(program);
+			if (name) cyberPrograms.push(name);
+		}
+	}
+
 	return {
 		slug,
+		cyberPrograms,
 		name: toNonEmptyString(payload.display_name) ?? slug,
 		contextWindow: toPositiveInt(payload.context_window),
+		maxContextWindow: toPositiveInt(payload.max_context_window),
 		reasoning: supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels),
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
@@ -329,6 +359,7 @@ function buildNormalizedCodexModel(
 	slug: string,
 	canonicalSlug: string,
 	baseUrl: string,
+	accountId: string | undefined,
 ): NormalizedCodexModel {
 	// Codex discovery historically omitted `context_window` for GPT-5.6-family
 	// SKUs (#5705); luna/sol/terra additionally floor the reported value because
@@ -358,13 +389,21 @@ function buildNormalizedCodexModel(
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl,
+			...(accountId && accountId.trim().length > 0
+				? {
+						accountAccess: {
+							[accountId]: parsed.cyberPrograms === undefined ? {} : { cyberPrograms: parsed.cyberPrograms },
+						},
+					}
+				: {}),
 			reasoning: parsed.reasoning,
 			input: parsed.input,
-			// Daybreak standard API pricing is rule-owned (`providers/openai-codex.kdl`
-			// cost-patch) and corrected at build time.
+			// Codex discovery omits pricing; documented subscription credit-equivalent
+			// rates are rule-owned (`providers/openai-codex.kdl`) and applied at build time.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			remoteCompaction: CODEX_REMOTE_COMPACTION,
 			contextWindow,
+			...(parsed.maxContextWindow !== null ? { maxContextWindow: parsed.maxContextWindow } : {}),
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),

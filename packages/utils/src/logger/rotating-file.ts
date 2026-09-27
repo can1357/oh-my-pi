@@ -1,8 +1,9 @@
 /** Behavior-compatible reimplementation of winston-daily-rotate-file's used surface. */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { localDay } from "../dirs";
+import { openCloexecSync } from "../fs-open";
 
 interface AuditEntry {
 	readonly date: number;
@@ -47,6 +48,12 @@ export class RotatingFileSink {
 	#activePath: string | undefined;
 	#activeBytes = 0;
 	#closed = false;
+	// Held append fd: the old code did open+write+close per line
+	// (appendFileSync) plus a throwaway open in the constructor. A single fd
+	// per active file removes two syscalls per log line; it is reopened on
+	// rotation and closed on close()/rotation (required for Windows
+	// delete-on-prune semantics).
+	#fd: number | undefined;
 
 	constructor(options: RotatingFileOptions) {
 		this.#directory = options.directory;
@@ -57,34 +64,61 @@ export class RotatingFileSink {
 		this.#maxFiles = options.maxFiles;
 		this.#files = this.#readAudit();
 		const now = new Date();
-		this.#selectFile(this.#localDay(now));
+		this.#selectFile(localDay(now));
 		const activePath = this.#activePath;
 		if (activePath) {
 			this.#registerFile(activePath, now.getTime());
-			fs.closeSync(fs.openSync(activePath, "a"));
+			this.#openFd(activePath);
+		}
+	}
+
+	#openFd(filePath: string): void {
+		this.#closeFd();
+		this.#fd = openCloexecSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);
+	}
+
+	#closeFd(): void {
+		if (this.#fd !== undefined) {
+			try {
+				fs.closeSync(this.#fd);
+			} catch {
+				// Best-effort: the fd may already be invalid after rotation.
+			}
+			this.#fd = undefined;
 		}
 	}
 
 	/** Append one already-formatted log record. */
 	write(line: string): void {
 		if (this.#closed) return;
+		const prevPath = this.#activePath;
 		const now = new Date();
-		this.#selectFile(this.#localDay(now));
+		this.#selectFile(localDay(now));
 		const activePath = this.#activePath;
 		if (!activePath) return;
+		// Rotation moved the active path: close the old descriptor BEFORE
+		// registering the new path, because registration prunes beyond
+		// maxFiles — on Windows the pruned predecessor cannot be deleted
+		// while still open, which would leak it (audit entry removed, file
+		// left on disk, retention unbounded).
+		if (activePath !== prevPath) this.#closeFd();
 		this.#registerFile(activePath, now.getTime());
+		if (this.#fd === undefined) this.#openFd(activePath);
 		const record = `${line}${os.EOL}`;
-		fs.appendFileSync(activePath, record, "utf8");
-		this.#activeBytes += Buffer.byteLength(record);
+		const buf = Buffer.from(record, "utf8");
+		let off = 0;
+		while (off < buf.length) {
+			const written = fs.writeSync(this.#fd!, buf, off);
+			if (written <= 0) break;
+			off += written;
+		}
+		this.#activeBytes += buf.length;
 	}
 
 	/** Stop accepting records. Synchronous writes require no drain phase. */
 	close(): void {
 		this.#closed = true;
-	}
-
-	#localDay(date: Date): string {
-		return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+		this.#closeFd();
 	}
 
 	#selectFile(day: string): void {
@@ -114,7 +148,7 @@ export class RotatingFileSink {
 
 	#registerFile(filePath: string, date: number): void {
 		if (this.#files.some(file => file.name === filePath)) return;
-		const hash = crypto.createHash("sha256").update(`${filePath}LOG_FILE${date}`).digest("hex");
+		const hash = Bun.SHA256.hash(`${filePath}LOG_FILE${date}`, "hex");
 		this.#files.push({ date, name: filePath, hash });
 		while (this.#files.length > this.#maxFiles) {
 			const removed = this.#files.shift();

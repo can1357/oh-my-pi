@@ -1,7 +1,10 @@
-import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
+import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
+import { contextLocalProtocolOptions } from "../internal-urls/context";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalDisplayOutput } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -21,6 +24,12 @@ export interface ExecutorBackendExecOptions {
 	 */
 	idleTimeoutMs?: number;
 	reset: boolean;
+	/** Absolute filename for file-backed cells; preserves import and traceback locations. */
+	filename?: string;
+	/** Explicit distribution requirements installed before executing the cell. */
+	packages?: string[];
+	/** Managed scratch environment by default; project mutations require explicit selection. */
+	environment?: "managed" | "project";
 	onChunk: (chunk: string) => void;
 	/**
 	 * Live status events (read/write/agent/…) delivered as they are emitted,
@@ -38,6 +47,7 @@ export interface ExecutorBackendResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
@@ -59,14 +69,12 @@ export interface ExecutorBackend {
 
 /**
  * Resolve the on-disk roots that the eval helpers substitute for internal-URL
- * schemes (currently `local://`). Prefers the session's own
- * {@link LocalProtocolOptions} — the exact mapping `read local://…` uses — so an
+ * schemes (currently `local://`) from {@link contextLocalProtocolOptions} resolved
+ * like the local:// handler does — the exact mapping `read local://…` uses — so an
  * eval `write("local://x")` and a later `read local://x` agree on the location.
+ * Empty when no `local://` root resolves (read would fail the same way).
  */
 export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
-	const options: LocalProtocolOptions = session.localProtocolOptions ?? {
-		getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
-		getSessionId: () => session.getSessionId?.() ?? null,
-	};
-	return buildEvalUrlRoots(options);
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: contextLocalProtocolOptions(session) });
+	return options ? buildEvalUrlRoots(options) : {};
 }

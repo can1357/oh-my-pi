@@ -489,44 +489,39 @@ describe("llama.cpp warm-prefix preservation (#3528)", () => {
 		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
 
-	it("emits preserve_thinking for discovered local Qwen with spec.reasoning=false", () => {
+	it("repairs discovered local Qwen with spec.reasoning=false via upgrade-neutral", () => {
 		// `discoverOpenAICompatibleModels` stamps `reasoning: false` on
-		// every model from a generic `/v1/models` endpoint, but Qwen3.6+
-		// servers still emit `reasoning_content` deltas at runtime — captured
-		// by the encoder's `replayReasoningContent` branch. Without
-		// `preserve_thinking: true` on the request, the template strips
-		// `<think>...</think>` from older assistants the moment a new user
-		// message lands, and the local slot's KV cache invalidates on every
-		// turn for the discovered-model variant. The emission must NOT be
-		// gated on `reasoning.enabled` (which requires `model.reasoning`)
-		// — same gotcha that #3532 fixed for `replayReasoningContent`.
+		// every model from a generic `/v1/models` endpoint, but the reviewed
+		// `thinking-upgrade-neutral` policy repairs stale capability metadata
+		// for the llama.cpp Qwen class: the built model reports reasoning
+		// support with the reviewed effort ladder, so default requests behave
+		// exactly like explicitly-declared thinking models.
 		const compat = llamaCppQwenModel({ reasoning: false }).compat;
 		expect(compat.qwenPreserveThinking).toBe(true);
 
 		const model = llamaCppQwenModel({ reasoning: false });
+		expect(model.reasoning).toBe(true);
 		const params: OpenAICompletionsParams = { model: model.id, messages: [], stream: true };
 		// No `reasoning` option — mirrors a default request against a
 		// discovered model whose spec hardcodes `reasoning: false`.
 		applyChatCompletionsReasoningParams(params, model, model.compat, undefined);
-		// Qwen's `enable_thinking` is unset here (model.reasoning false
-		// short-circuits the reasoning encoder), so the server falls back
-		// to its template default. `preserve_thinking` still rides so
+		// No effort requested, so the thinking-off default rides; the server
+		// template default would think. `preserve_thinking` still rides so
 		// HISTORY rendering keeps the `<think>` blocks intact.
-		expect(params.enable_thinking).toBeUndefined();
+		expect(params.enable_thinking).toBe(false);
 		expect(params.preserve_thinking).toBe(true);
 		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
 
 	it("emits preserve_thinking for discovered local Qwen even when caller passes disableReasoning", () => {
-		// Same discovered-model case, but the caller also asks to disable
-		// thinking. Neither branch of `resolveOpenAICompatPolicy` would
-		// fire the reasoning encoder (model.reasoning false → both `enabled`
-		// and `disabled` resolve false), yet `preserve_thinking` must still
-		// ship so the local slot keeps reusing the prefix from prior
-		// thinking-on turns.
+		// Same repaired-model case, but the caller also asks to disable
+		// thinking. The explicit thinking-off toggle rides alongside the
+		// history knob so the local slot keeps reusing the prefix from
+		// prior thinking-on turns.
 		const model = llamaCppQwenModel({ reasoning: false });
 		const params: OpenAICompletionsParams = { model: model.id, messages: [], stream: true };
 		applyChatCompletionsReasoningParams(params, model, model.compat, { disableReasoning: true });
+		expect(params.enable_thinking).toBe(false);
 		expect(params.preserve_thinking).toBe(true);
 		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});

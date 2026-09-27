@@ -21,7 +21,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Reusable core of a POSIX/bash shell (used by brush-shell)"
-readme = "README.md"
 keywords = [
     "cli",
     "shell",
@@ -51,6 +50,9 @@ name = "brush_core"
 path = "src/lib.rs"
 bench = false
 
+
+[dependencies.pi-vfs]
+workspace = true
 
 [dependencies.async-recursion]
 version = "1.1.1"

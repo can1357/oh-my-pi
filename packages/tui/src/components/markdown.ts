@@ -988,14 +988,6 @@ const FAST_LINE_START_HAZARD_RE =
 	// chars are in ASCENDING code-point order (no reversed ranges that
 	// rely on engine leniency): * + = – — ─ ━ ═ then the literal `-`.
 	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|\d{1,9}[.)](?:[ \t]|$)|[*+=–—─━═-](?:[ \t]|$)|(?:[*+=–—─━═-][ \t]*){2,}[ \t]*$)/;
-/** @internal exported for tests — counts fast-tail splice frames. A future
- *  regression that silently disarms the fast path (e.g. an over-broad gate)
- *  leaves byte-identity intact but drops the counter to zero. */
-export let fastTailSplices = 0;
-/** @internal exported for tests — resets the splice counter. */
-export function resetFastTailSplices(): void {
-	fastTailSplices = 0;
-}
 
 /** @internal exported for tests — the grown-line-start block-kind gate. */
 export function fastLineStartHazard(grownLine: string): boolean {
@@ -1254,6 +1246,50 @@ function lexDocument(text: string): Token[] {
 	return lexWindowed(text);
 }
 
+/** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
+export interface MarkdownLink {
+	/** Flattened visible label with whitespace collapsed to one row; falls back to `href` when empty. */
+	text: string;
+	/** Destination exactly as marked resolved it (references resolved, no normalization). */
+	href: string;
+}
+
+/**
+ * Every link token in `text`, in document order, from the same configured
+ * lexer the renderer uses — so fenced code, code spans, escapes, reference
+ * definitions and the GFM autolink rules agree with what is drawn on screen.
+ * Duplicate hrefs are kept; callers decide how to fold them.
+ */
+export function extractMarkdownLinks(text: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const link = token as Tokens.Link;
+				if (typeof link.href === "string" && link.href.length > 0) {
+					const label = plainInlineTokens(link.tokens).replace(/\s+/g, " ").trim();
+					links.push({ text: label || link.href, href: link.href });
+				}
+				continue;
+			}
+			// Containers: paragraphs, emphasis, lists, blockquotes, table cells.
+			const any = token as {
+				tokens?: Token[];
+				items?: Token[];
+				header?: Array<{ tokens?: Token[] }>;
+				rows?: Array<Array<{ tokens?: Token[] }>>;
+			};
+			walk(any.tokens);
+			walk(any.items);
+			if (any.header) for (const cell of any.header) walk(cell.tokens);
+			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
+		}
+	};
+	walk(lexDocument(text));
+	return links;
+}
+
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
 export function clearRenderCache(): void {
 	renderCache.clear();
@@ -1300,6 +1336,15 @@ export interface HighlightStreamSession {
 	push(chunk: string): string;
 }
 
+/** Collect distinct hyperlink destinations using the renderer's Markdown grammar, excluding images and code. */
+export function getMarkdownLinkUrls(text: string): string[] {
+	const urls = new Set<string>();
+	markdownParser.walkTokens(markdownParser.lexer(text), token => {
+		if (token.type === "link" && typeof token.href === "string") urls.add(token.href);
+	});
+	return [...urls];
+}
+
 /**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
@@ -1308,6 +1353,8 @@ export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
+	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
+	resolveLink?: (href: string) => string | undefined;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -1439,6 +1486,9 @@ function plainInlineTokens(tokens: Token[]): string {
 				break;
 			case "codespan":
 				result += token.text;
+				break;
+			case "br":
+				result += "\n";
 				break;
 			default:
 				if ("text" in token && typeof token.text === "string") result += token.text;
@@ -2011,17 +2061,8 @@ export class Markdown implements Component {
 			return EMPTY_RENDER_LINES;
 		}
 
-		// Replace tabs with spaces, then repair orphan fences in final mode.
-		const tabbed = replaceTabs(this.#text);
-		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
-		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
-			// repairOrphanClosingFence deleted bytes this frame (orphan fence
-			// removed): the guard-scan memo's checked region is no longer
-			// byte-identical, and a cached false verdict may have been based
-			// on the very CR/ref-def line that was deleted. Invalidate so the
-			// next #lexTokens re-derives on the repaired buffer.
-			this.#lastScanValid = false;
-		}
+		// Fast-path inputs only: signature first, so the append-only branch below
+		// can return without scanning the whole document for tabs.
 		const signature = this.#renderSignature(width, paddingX);
 		// B+ fast path: an append-only, same-line delta re-renders ONLY the
 		// last content row (the paragraph's trailing wrapped row) with the
@@ -2141,14 +2182,26 @@ export class Markdown implements Component {
 						rowEnd: recipe.rowStart + wrapped.length,
 						signature: recipe.signature,
 					};
-					fastTailSplices++;
 					return fastResult;
 				}
 			}
 			// Hazard → disarm until the next real render re-captures.
 			this.#fastTail = undefined;
 		}
-		// Replace tabs with 3 spaces for consistent rendering
+		// Normalize only after the append-only branch: the fast path above
+		// returns without ever reading these, so streaming frames skip the
+		// whole-document tab scan/copy (the delta-only replaceTabs inside the
+		// branch is the only tab work a streamed frame pays).
+		const tabbed = this.#text.includes("\t") ? replaceTabs(this.#text) : this.#text;
+		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
+		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
+			// repairOrphanClosingFence deleted bytes this frame (orphan fence
+			// removed): the guard-scan memo's checked region is no longer
+			// byte-identical, and a cached false verdict may have been based
+			// on the very CR/ref-def line that was deleted. Invalidate so the
+			// next #lexTokens re-derives on the repaired buffer.
+			this.#lastScanValid = false;
+		}
 
 		// L2: module-level LRU — survives component disposal/recreation across
 		// session-tree navigations. Key encodes every dimension that affects the
@@ -2829,6 +2882,14 @@ export class Markdown implements Component {
 		};
 	}
 
+	#quoteStyle(text: string): string {
+		return this.#theme.quote(this.#theme.italic(text));
+	}
+
+	#getQuoteStylePrefix(): string {
+		return this.#getStylePrefix(text => this.#quoteStyle(text));
+	}
+
 	#renderToken(
 		token: Token,
 		width: number,
@@ -2902,7 +2963,7 @@ export class Markdown implements Component {
 				// resolver. The art is preformatted, so clip each row to the content
 				// width: the later wrap pass would otherwise fragment the box-drawing
 				// canvas. truncateToWidth is ANSI- and wide-char-aware, and the
-				// resolver already re-fits over-wide horizontal graphs top-down.
+				// resolver picks the shortest orientation that fits this width.
 				if (token.lang === "mermaid" && this.#theme.resolveMermaidAscii) {
 					const ascii = this.#theme.resolveMermaidAscii(token.text, width);
 					if (ascii) {
@@ -2951,7 +3012,7 @@ export class Markdown implements Component {
 			case "blockquote": {
 				const quoteInlineStyleContext: InlineStyleContext = {
 					applyText: (text: string) => text,
-					stylePrefix: "",
+					stylePrefix: this.#getQuoteStylePrefix(),
 				};
 				const quoteContentWidth = Math.max(1, width - 2);
 				const quoteTokens = token.tokens || [];
@@ -3021,14 +3082,13 @@ export class Markdown implements Component {
 	 * `width` is the full content width; the border reserves two cells.
 	 */
 	#applyQuoteBorder(renderedLines: RenderedLine[], width: number): RenderedLine[] {
-		const quoteStyle = (text: string) => this.#theme.quote(this.#theme.italic(text));
-		const quoteStylePrefix = this.#getStylePrefix(quoteStyle);
+		const quoteStylePrefix = this.#getQuoteStylePrefix();
 		const applyQuoteStyle = (line: string): string => {
 			if (!quoteStylePrefix) {
-				return quoteStyle(line);
+				return this.#quoteStyle(line);
 			}
 			const lineWithReappliedStyle = line.replace(/\x1b\[0m/g, `\x1b[0m${quoteStylePrefix}`);
-			return quoteStyle(lineWithReappliedStyle);
+			return this.#quoteStyle(lineWithReappliedStyle);
 		};
 		const quoteContentWidth = Math.max(1, width - 2);
 		const lines: RenderedLine[] = [];
@@ -3087,7 +3147,12 @@ export class Markdown implements Component {
 
 	/** Render the inner content of an HTML `<blockquote>` with quote styling. */
 	#renderHtmlBlockquote(inner: string, width: number): RenderedLine[] {
-		const cleaned = normalizeHtmlForTerminal(inner, createHtmlNormalizationState(), text => this.#theme.code(text));
+		const quoteStylePrefix = this.#getQuoteStylePrefix();
+		const cleaned = normalizeHtmlForTerminal(
+			inner,
+			createHtmlNormalizationState(),
+			text => this.#theme.code(text) + quoteStylePrefix,
+		);
 		const innerLines = splitTerminalLines(cleaned).map(line => renderedLine(line.trimEnd()));
 		while (innerLines.length > 0 && innerLines[innerLines.length - 1].text === "") innerLines.pop();
 		return this.#applyQuoteBorder(innerLines, width);
@@ -3162,7 +3227,8 @@ export class Markdown implements Component {
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
-					const clickableLinkText = formatHyperlink(styledLinkText, href);
+					const target = (href && this.#theme.resolveLink?.(href)) || href;
+					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
 					// href (malformed/partial link token) renders as plain link text
 					// instead of crashing the renderer or emitting an empty "()"
@@ -3175,7 +3241,7 @@ export class Markdown implements Component {
 						result += clickableLinkText + stylePrefix;
 					else {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, href)}${stylePrefix}`;
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
 					}
 					break;
 				}

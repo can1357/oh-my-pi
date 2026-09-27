@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -67,7 +68,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@pi-agent-goal-midrun-compaction-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -95,6 +96,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			onProviderCall?: (index: number) => void;
 			configureAgent?: (agent: Agent) => void;
 			toolResultDetails?: unknown;
+			tool?: AgentTool;
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -120,7 +122,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 
-		const mockBashTool: AgentTool = {
+		const mockBashTool: AgentTool = options.tool ?? {
 			name: "bash",
 			label: "Bash",
 			description: "Mock bash tool",
@@ -146,7 +148,12 @@ describe("AgentSession mid-run threshold compaction", () => {
 					? {
 							role: "assistant" as const,
 							content: [
-								{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
+								{
+									type: "toolCall" as const,
+									id: `tc-${index}`,
+									name: mockBashTool.name,
+									arguments: { cmd: "pwd" },
+								},
 							],
 							api: "anthropic-messages" as const,
 							provider: "anthropic" as const,
@@ -220,7 +227,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
 	});
 
-	it("does not wait for message persistence below the mid-run threshold", async () => {
+	it("continues below the mid-run threshold while message_end notifications remain pending", async () => {
 		const releaseMessageEnd = Promise.withResolvers<void>();
 		const messageEndEntered = Promise.withResolvers<void>();
 		const nextProviderCall = Promise.withResolvers<void>();
@@ -274,6 +281,137 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(providerOutcome).toBe("dispatched");
 		expect(promptOutcome).toBe("settled");
 		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("delivers parent steering after interrupting a tool despite a stalled result listener", async () => {
+		const toolStarted = Promise.withResolvers<void>();
+		const finishWait = Promise.withResolvers<void>();
+		const resultListenerEntered = Promise.withResolvers<void>();
+		const releaseResultListener = Promise.withResolvers<void>();
+		const nextProviderCall = Promise.withResolvers<void>();
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("message_end", async event => {
+					if (event.message.role !== "toolResult") return;
+					resultListenerEntered.resolve();
+					await releaseResultListener.promise;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			extensionRuntime,
+			"stalled-interrupted-result",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir.path(),
+			SessionManager.inMemory(),
+			sharedModelRegistry,
+		);
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait until interrupted",
+			parameters: type({}),
+			interruptible: true,
+			async execute(_id, _args, signal) {
+				if (!signal) throw new Error("Missing tool signal");
+				const onAbort = () => finishWait.resolve();
+				signal.addEventListener("abort", onAbort, { once: true });
+				toolStarted.resolve();
+				try {
+					await finishWait.promise;
+					signal.throwIfAborted();
+					return { content: [], details: undefined };
+				} finally {
+					signal.removeEventListener("abort", onAbort);
+				}
+			},
+		};
+		const { session, observedContexts } = await createHarness(
+			{ "retry.enabled": false, "retry.usageAwareFallback": false },
+			{
+				extensionRunner,
+				tool: waitTool,
+				onProviderCall: index => {
+					if (index === 1) nextProviderCall.resolve();
+				},
+			},
+		);
+		mockCompaction("INTERRUPTED-TURN-COMPACTED");
+		const finalDisplayed = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(block => block.type === "text" && block.text === "All done.")
+			) {
+				finalDisplayed.resolve();
+			}
+		});
+		const registry = AgentRegistry.global();
+		const childId = `steering-${tempDir.path()}`;
+		const ref = registry.register({ id: childId, displayName: "task", kind: "sub", parentId: "Main", session });
+		const prompt = session.prompt("Wait for instructions");
+		try {
+			expect(
+				await raceWithTimeout(
+					toolStarted.promise.then(() => true),
+					2_000,
+					false,
+				),
+			).toBe(true);
+			await session.deliverIrcMessage({
+				id: "parent-interrupt",
+				from: "Main",
+				to: childId,
+				body: "Handle the changed assignment",
+				ts: Date.now(),
+			});
+			expect(
+				await raceWithTimeout(
+					resultListenerEntered.promise.then(() => true),
+					2_000,
+					false,
+				),
+			).toBe(true);
+			expect(
+				await raceWithTimeout(
+					nextProviderCall.promise.then(() => true),
+					2_000,
+					false,
+				),
+			).toBe(true);
+
+			const context = observedContexts[1].join("\n");
+			expect(context).toContain("Handle the changed assignment");
+			expect(context).toContain("INTERRUPTED-TURN-COMPACTED");
+			expect(session.agent.peekSteeringQueue()).toEqual([]);
+			expect(
+				await raceWithTimeout(
+					finalDisplayed.promise.then(() => true),
+					2_000,
+					false,
+				),
+			).toBe(true);
+			expect(
+				await raceWithTimeout(
+					prompt.then(() => true),
+					2_000,
+					false,
+				),
+			).toBe(true);
+		} finally {
+			finishWait.resolve();
+			releaseResultListener.resolve();
+			try {
+				await prompt;
+			} finally {
+				registry.unregister(childId, ref);
+			}
+		}
 	});
 
 	it("persists a tool result when its message_end listener rejects below the mid-run threshold", async () => {
@@ -446,6 +584,90 @@ describe("AgentSession mid-run threshold compaction", () => {
 			})
 			.map(message => message.role);
 		expect(persistedToolTurnRoles).toEqual(["assistant", "toolResult"]);
+	});
+
+	it("preserves passive tool context when message_end persistence overlaps mid-run compaction", async () => {
+		const releaseContextMessageEnd = Promise.withResolvers<void>();
+		const contextMessageEndEntered = Promise.withResolvers<void>();
+		const turnEndEntered = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn(
+				(eventType: string) => eventType === "tool_call" || eventType === "message_end" || eventType === "turn_end",
+			),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			markToolCallEmitted: vi.fn(),
+			emitToolCall: vi.fn(async () => ({ additionalContext: "PASSIVE-TOOL-CONTEXT" })),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (event.type === "turn_end") {
+					turnEndEntered.resolve();
+					return;
+				}
+				if (event.type === "message_end" && event.message?.role === "developer") {
+					contextMessageEndEntered.resolve();
+					await releaseContextMessageEnd.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		// Disable background speculation: the soft method would otherwise defer
+		// this threshold crossing to a background run and the assertions below
+		// would race it. The sync mid-run path is the contract under test.
+		const { session, sessionManager, observedContexts } = await createHarness(
+			{ "compaction.asyncEnabled": false },
+			{ extensionRunner },
+		);
+		// Seed older history so the cut point lands mid-branch: the live turn's
+		// uncuttable [toolResult, developer] tail alone is smaller than the
+		// keep-recent budget, which would leave prepareCompaction with nothing
+		// to summarize on this tiny branch. Filler turns give the summary
+		// something real to cover while the live tail stays in the kept region.
+		for (let filler = 0; filler < 8; filler++) {
+			const timestamp = Date.now() + filler;
+			sessionManager.appendMessage({
+				role: "user",
+				content: `Filler history turn ${filler} padding padding padding padding padding padding`,
+				timestamp,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{
+						type: "text" as const,
+						text: `Filler reply ${filler} padding padding padding padding padding padding`,
+					},
+				],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				stopReason: "stop" as const,
+				usage: highUsage(100),
+				timestamp,
+			});
+		}
+		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+
+		const prompt = session.prompt("work on the release");
+		await contextMessageEndEntered.promise;
+		await turnEndEntered.promise;
+		expect(compactSpy).not.toHaveBeenCalled();
+		releaseContextMessageEnd.resolve();
+		await prompt;
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
+		const nextProviderContext = observedContexts[1].join("\n");
+		expect(nextProviderContext).toContain("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+		expect(nextProviderContext).toContain("PASSIVE-TOOL-CONTEXT");
+		const persistedContext = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message)
+			.find(
+				message =>
+					message.role === "developer" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "text" && block.text === "PASSIVE-TOOL-CONTEXT"),
+			);
+		expect(persistedContext).toBeDefined();
 	});
 
 	it("keeps synchronous message_end mutations notification-local during mid-run compaction", async () => {

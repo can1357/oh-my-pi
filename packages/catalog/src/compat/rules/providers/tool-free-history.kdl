@@ -1,0 +1,6 @@
+// Bedrock injects a callable sentinel when tool-free requests retain tool history, but the
+// sentinel is model-visible and calling it ends the turn: a genuine tool opt-out needs
+// history without prior tool calls or results. Applies to every routed Bedrock deployment.
+on-api "bedrock-converse-stream" {
+	requires-tool-free-history-for-tool-opt-out #true
+}

@@ -29,11 +29,25 @@ describe("runRootCommand — startup --resume picker cancellation", () => {
 	it("exits cleanly (process.exit 0) when the picker is cancelled instead of returning and hanging", async () => {
 		using tempDir = TempDir.createSync("@omp-resume-cancel-");
 		const sessionDir = tempDir.path();
-		// One valid session so folderSessions is non-empty and the picker (not the
+		// One answered session so folderSessions is non-empty and the picker (not the
 		// "No sessions found" probe) is the path under test.
 		await Bun.write(
 			path.join(sessionDir, "existing.jsonl"),
-			`${JSON.stringify({ type: "session", id: "existing-session", cwd: sessionDir, timestamp: new Date().toISOString() })}\n`,
+			[
+				JSON.stringify({
+					type: "session",
+					id: "existing-session",
+					cwd: sessionDir,
+					timestamp: new Date().toISOString(),
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "e1",
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					message: { role: "assistant", content: "prior work" },
+				}),
+			].join("\n"),
 		);
 
 		const authStorage = await AuthStorage.create(path.join(sessionDir, "auth.db"));

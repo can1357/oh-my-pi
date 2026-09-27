@@ -50,7 +50,7 @@ See [docs/custom-tools.md](../../docs/custom-tools.md) for full documentation.
 import { Text } from "@oh-my-pi/pi-tui";
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
-const factory: CustomToolFactory = (pi) => ({
+const factory: CustomToolFactory = pi => ({
 	name: "my_tool",
 	label: "My Tool",
 	description: "Tool description for LLM",
@@ -66,15 +66,14 @@ const factory: CustomToolFactory = (pi) => ({
 	async execute(toolCallId, params) {
 		return {
 			content: [{ type: "text", text: "Result" }],
-			details: {
-				/* for rendering and state reconstruction */
-			},
+			details: {/* for rendering and state reconstruction */},
 		};
 	},
 });
 
 export default factory;
 ```
+
 **Custom rendering:**
 
 ```typescript

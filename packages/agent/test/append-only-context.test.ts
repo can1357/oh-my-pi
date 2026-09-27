@@ -105,6 +105,81 @@ describe("StablePrefix", () => {
 		expect(changed).toBe(true);
 	});
 
+	it("skips normalize+stringify when live references are unchanged", () => {
+		const p = new StablePrefix();
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [makeTool("read")] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		const first = p.toContext();
+
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+		// Same cached snapshot object: no rebuild happened at all.
+		expect(p.toContext().tools).toBe(first.tools);
+		expect(p.toContext().systemPrompt).toBe(first.systemPrompt);
+	});
+
+	it("detects swapped tool objects without invalidate", () => {
+		const p = new StablePrefix();
+		const tools = [makeTool("read", "Original desc")];
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools });
+		p.build(ctx, BUILD_OPTS);
+
+		// Same array identity, different tool object: the per-tool
+		// name/description check sees it — no invalidate needed.
+		tools[0] = makeTool("read", "Mutated desc");
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().tools[0]!.description).toBe("Mutated desc");
+	});
+
+	it("detects dynamic schema swaps under stable tool references", () => {
+		// ReadTool-style getter: same tool object, different resolved schema
+		// (e.g. after a /skillful toggle). The wire-identity check catches it.
+		const p = new StablePrefix();
+		let variant = false;
+		const tool = makeTool("read");
+		Object.defineProperty(tool, "parameters", {
+			configurable: true,
+			get: () =>
+				variant
+					? { type: "object", properties: { extra: { type: "string" } } }
+					: { type: "object", properties: {} },
+		});
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [tool] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+
+		variant = true;
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+	});
+
+	it("detects wire-field swaps that keep name, description, and schema", () => {
+		// Registry replaces the tool object with same name/description and
+		// the SAME parameters object but a different strict/customWireName.
+		const p = new StablePrefix();
+		const params = { type: "object", properties: {} };
+		const first = { ...makeTool("read"), parameters: params } as never;
+		const ctx = makeContext({ systemPrompt: ["Stable"], tools: [first] });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+
+		const second = { ...makeTool("read"), parameters: params, strict: true, customWireName: "read_custom" } as never;
+		const ctx2 = makeContext({ systemPrompt: ["Stable"], tools: [second] });
+		expect(p.build(ctx2, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().tools[0]!.customWireName).toBe("read_custom");
+	});
+
+	it("detects in-place system-prompt mutation without invalidate", () => {
+		// Same array object, pushed in place (Agent.setSystemPrompt stores
+		// the caller's array). Reference equality holds; joined bytes don't.
+		const p = new StablePrefix();
+		const prompt = ["Stable"];
+		const ctx = makeContext({ systemPrompt: prompt });
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.build(ctx, BUILD_OPTS)).toBe(false);
+		prompt.push(" appended in place");
+		expect(p.build(ctx, BUILD_OPTS)).toBe(true);
+		expect(p.toContext().systemPrompt).toEqual(["Stable", " appended in place"]);
+	});
+
 	it("toContext() throws when not built", () => {
 		const p = new StablePrefix();
 		expect(() => p.toContext()).toThrow("build()");

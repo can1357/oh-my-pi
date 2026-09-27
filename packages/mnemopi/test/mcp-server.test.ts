@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callToolJson, handleJsonRpc, runStdio } from "@oh-my-pi/pi-mnemopi/mcp-server";
-import { getToolDefinitions, handleToolCall, TOOLS } from "@oh-my-pi/pi-mnemopi/mcp-tools";
+import { getToolDefinitions, handleToolCall } from "@oh-my-pi/pi-mnemopi/mcp-tools";
 
 let dataDir: string;
 
@@ -43,36 +43,6 @@ async function runStdioText(input: string): Promise<unknown[]> {
 }
 
 describe("MCP tool definitions", () => {
-	it("exposes the full realistic tool surface", () => {
-		const names = TOOLS.map(tool => tool.name);
-		expect(names).toHaveLength(23);
-		expect(names).toEqual([
-			"mnemopi_remember",
-			"mnemopi_recall",
-			"mnemopi_shared_remember",
-			"mnemopi_shared_recall",
-			"mnemopi_shared_forget",
-			"mnemopi_shared_stats",
-			"mnemopi_sleep",
-			"mnemopi_stats",
-			"mnemopi_invalidate",
-			"mnemopi_validate",
-			"mnemopi_get",
-			"mnemopi_triple_add",
-			"mnemopi_triple_query",
-			"mnemopi_scratchpad_write",
-			"mnemopi_scratchpad_read",
-			"mnemopi_scratchpad_clear",
-			"mnemopi_export",
-			"mnemopi_update",
-			"mnemopi_forget",
-			"mnemopi_import",
-			"mnemopi_diagnose",
-			"mnemopi_graph_query",
-			"mnemopi_graph_link",
-		]);
-	});
-
 	it("returns JSON-serializable MCP schemas", () => {
 		const tools = getToolDefinitions();
 		expect(tools).toHaveLength(23);

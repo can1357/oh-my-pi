@@ -7,12 +7,13 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgAskEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
@@ -231,7 +232,7 @@ describe("guided goal setup", () => {
 	it("refuses to reactivate ask after the setting is disabled", async () => {
 		const harness = await createHarness();
 		try {
-			harness.settings.override("ask.enabled", false);
+			cfgAskEnabled.override(harness.settings, false);
 			const previousTools = harness.session.getEnabledToolNames();
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
 
@@ -252,7 +253,7 @@ describe("guided goal setup", () => {
 			const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
 			vi.spyOn(harness.session, "setActiveToolsByName").mockImplementation(async names => {
 				await setActiveTools(names);
-				harness.settings.override("ask.enabled", false);
+				cfgAskEnabled.override(harness.settings, false);
 			});
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
 

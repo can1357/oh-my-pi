@@ -1285,3 +1285,33 @@ describe("mcp oauth flow", () => {
 		});
 	});
 });
+
+describe("mcp oauth google offline access (issue #12438)", () => {
+	it("requests access_type=offline from Google issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+				tokenUrl: "https://oauth2.googleapis.com/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBe("offline");
+	});
+
+	it("leaves access_type untouched for other issuers", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://auth.example.com/oauth/authorize",
+				tokenUrl: "https://auth.example.com/oauth/token",
+				clientId: "test-client-id",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+		expect(new URL(url).searchParams.get("access_type")).toBeNull();
+	});
+});

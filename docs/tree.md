@@ -17,7 +17,7 @@ Primary implementation:
 - `src/slash-commands/builtin-registry.ts` (`/tree`, `/branch` command routing)
 - `src/modes/controllers/input-controller.ts` (keybinding wiring, double-escape behavior)
 - `src/modes/controllers/selector-controller.ts` (tree UI launch + summary prompt flow)
-- `src/modes/components/tree-selector.ts` (navigation, filters, search, labels, rendering)
+- `packages/tui/src/overlays/tree-selector.ts` (navigation, filters, search, labels, rendering)
 - `src/session/agent-session.ts` (`navigateTree` leaf switching + optional summary)
 - `src/session/session-manager.ts` (`getTree`, `branch`, `branchWithSummary`, `resetLeaf`, label persistence)
 

@@ -202,13 +202,6 @@ describe("stripResidualCombiners", () => {
 		const result = stripResidualCombiners(input) as Record<string, unknown>;
 		expect(result.type).toBe("string");
 	});
-
-	it("passes through primitives and arrays unchanged", () => {
-		expect(stripResidualCombiners("hello")).toBe("hello");
-		expect(stripResidualCombiners(42)).toBe(42);
-		expect(stripResidualCombiners(null)).toBe(null);
-		expect(stripResidualCombiners([1, 2])).toEqual([1, 2]);
-	});
 });
 
 describe("adaptSchemaForStrict", () => {

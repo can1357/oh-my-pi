@@ -4,9 +4,11 @@
  * Handles `omp stats` subcommand for viewing AI usage statistics.
  */
 
+import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { openPath } from "../utils/open";
 
 /**
@@ -62,12 +64,6 @@ export interface StatsCommandArgs {
 	summary: boolean;
 }
 
-function formatCost(n: number): string {
-	if (n < 0.01) return `$${n.toFixed(4)}`;
-	if (n < 1) return `$${n.toFixed(3)}`;
-	return `$${n.toFixed(2)}`;
-}
-
 function normalizePremiumRequests(n: number): number {
 	return Math.round((n + Number.EPSILON) * 100) / 100;
 }
@@ -108,7 +104,7 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	// Open browser
 	openPath(url);
 
-	console.log("Press Ctrl+C to stop\n");
+	console.log(`Press ${formatKeyHint("ctrl+c")} to stop\n`);
 
 	// Keep process running
 	process.on("SIGINT", () => {

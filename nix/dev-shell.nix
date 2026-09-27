@@ -1,5 +1,7 @@
 {
   pkgs,
+  bun,
+  bun2nix,
   rustToolchain,
 }:
 let
@@ -16,10 +18,8 @@ pkgs.mkShell (
     name = "omp-dev";
 
     packages =
-      (with pkgs; [
-        bun
-        bun2nix
-        rustToolchain
+      [ bun bun2nix rustToolchain ]
+      ++ (with pkgs; [
         cargo-nextest
         rustPlatform.bindgenHook
         nixfmt
@@ -50,7 +50,6 @@ pkgs.mkShell (
         cairo
         giflib
         libjpeg
-        libopus
         librsvg
         openssl
         pango
@@ -59,7 +58,6 @@ pkgs.mkShell (
       ])
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxLibraries;
 
-    CMAKE_POLICY_VERSION_MINIMUM = "3.5";
     PCRE2_SYS_STATIC = "1";
     RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
   }

@@ -10,16 +10,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { hindsightBackend, reloadMentalModelsForSession } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import {
+	hindsightBackend,
+	rebindMemoryBackendForCwd,
+	reloadMentalModelsForSession,
+} from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
-import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { HindsightRetainQueue, type HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+
+import {
+	cfgHindsightBankId,
+	cfgHindsightBankIdPrefix,
+	cfgHindsightBankMission,
+	cfgHindsightRecallBudget,
+	cfgHindsightRetainMission,
+	cfgHindsightScoping,
+} from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 
 interface FakeSessionDeps {
 	sessionId: string | null;
 	cwd?: string;
 	entries?: Array<{ role: "user" | "assistant"; text: string }>;
 	settings?: Settings;
+	xdevEntries?: Array<{ name: string; summary: string }>;
 }
 
 function makeFakeSession(deps: FakeSessionDeps) {
@@ -28,6 +42,7 @@ function makeFakeSession(deps: FakeSessionDeps) {
 	let hindsightState: HindsightSessionState | undefined;
 	const session = {
 		sessionId: deps.sessionId,
+		memoryEnabled: true,
 		settings: deps.settings ?? Settings.isolated(),
 		sessionManager: {
 			getEntries: () =>
@@ -62,7 +77,9 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			return () => listeners.delete(listener);
 		},
 		refreshBaseSystemPrompt: vi.fn().mockResolvedValue(undefined),
+		settleMemoryBackend: async () => {},
 		getHindsightSessionState: () => hindsightState,
+		getXdevToolEntries: () => deps.xdevEntries ?? [],
 		setHindsightSessionState(state: HindsightSessionState | undefined) {
 			const previous = hindsightState;
 			hindsightState = state;
@@ -329,10 +346,12 @@ describe("hindsightBackend first-turn injection", () => {
 			session as never,
 			"What do I know about this user?",
 		);
-		expect(block).toContain("<memories>");
-		expect(block).toContain("Can prefers concise communication");
+		expect(block?.context).toContain("<memories>");
+		expect(block?.context).toContain("Can prefers concise communication");
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
+		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
-		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block);
+		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block?.context);
 	});
 
 	it("does not let agent_start preempt first-turn recall injection", async () => {
@@ -367,8 +386,60 @@ describe("hindsightBackend first-turn injection", () => {
 
 		// beforeAgentStartPrompt is the sole, awaited injection path.
 		const block = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What is the canary phrase?");
-		expect(block).toContain("PURPLE-OTTER-9931");
+		expect(block?.context).toContain("PURPLE-OTTER-9931");
+		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
+	});
+
+	it("forwards the turn's abort signal to recall and unwinds when aborted (#12668)", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-abort" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		// A slow recall server: the request never resolves on its own and only
+		// settles when the forwarded signal aborts, mirroring a fetch honouring
+		// AbortSignal. Pre-fix the signal was dropped, so this pended for the full
+		// recall timeout and Esc could not cancel it.
+		let received: AbortSignal | undefined;
+		vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(((
+			_bankId: string,
+			_query: string,
+			options?: { signal?: AbortSignal },
+		) => {
+			received = options?.signal;
+			const { promise, reject } = Promise.withResolvers<never>();
+			if (options?.signal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+			else {
+				options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+					once: true,
+				});
+			}
+			return promise;
+		}) as never);
+
+		const controller = new AbortController();
+		const pending = hindsightBackend.beforeAgentStartPrompt?.(
+			session as never,
+			"What do I know about this user?",
+			controller.signal,
+		);
+		await Promise.resolve();
+		expect(received).toBe(controller.signal);
+
+		controller.abort();
+		const block = await pending;
+		expect(block).toBeUndefined();
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
 	});
 
 	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
@@ -394,6 +465,28 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(prompt).toContain("remembered fact");
 	});
 
+	it("names memory tools by their xd:// URL only when they are mounted as devices", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-xd",
+			xdevEntries: [{ name: "recall", summary: "Search memory" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
+		expect(prompt).toContain("Use `xd://recall` proactively");
+		expect(prompt).toContain("Use `retain` to store");
+	});
+
 	it("places the <mental_models> block above the <memories> recall block in developer instructions", async () => {
 		// Stable, curated semantic memory must come first so the LLM's prior is
 		// anchored on it; the volatile per-turn recall block follows. Ordering
@@ -416,7 +509,7 @@ describe("hindsightBackend first-turn injection", () => {
 		state!.lastRecallSnippet = "<memories>\nrecalled fact\n</memories>";
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", settings, session as never);
-		// `<memories>` and `<mental_models>` are mentioned in STATIC_INSTRUCTIONS
+		// `<memories>` and `<mental_models>` are mentioned in the static memory instructions
 		// bullets too. Match the actual injected block opener (tag + newline)
 		// to disambiguate documentation prose from the injected payloads.
 		const mmIdx = prompt!.indexOf("<mental_models>\n");
@@ -589,7 +682,7 @@ describe("hindsightBackend live bank routing", () => {
 		// follow-up `set` writes to `#global` while `get` keeps returning the
 		// `#overrides` value — exactly the precedence the live settings UI
 		// does NOT have, since real config writes land in `#global`.
-		settings.set("hindsight.bankId", "omp");
+		cfgHindsightBankId.set(settings, "omp");
 		const session = makeFakeSession({ sessionId: "s-rebuild", settings });
 
 		await hindsightBackend.start({
@@ -603,9 +696,8 @@ describe("hindsightBackend live bank routing", () => {
 		const initial = session.getHindsightSessionState();
 		expect(initial?.bankId).toBe("omp");
 
-		settings.set("hindsight.bankId", "Minigames");
-		// Hook is sync but the rebuild is async; yield once so the handler runs.
-		await Bun.sleep(0);
+		cfgHindsightBankId.set(settings, "Minigames");
+		await hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
 
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("Minigames");
@@ -621,7 +713,7 @@ describe("hindsightBackend live bank routing", () => {
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
 		});
-		settings.set("hindsight.scoping", "global");
+		cfgHindsightScoping.set(settings, "global");
 		const session = makeFakeSession({ sessionId: "s-scoping", cwd: "/work/proj", settings });
 
 		await hindsightBackend.start({
@@ -636,8 +728,8 @@ describe("hindsightBackend live bank routing", () => {
 		expect(initial?.bankId).toBe("omp");
 		expect(initial?.retainTags).toBeUndefined();
 
-		settings.set("hindsight.scoping", "per-project");
-		await Bun.sleep(0);
+		cfgHindsightScoping.set(settings, "per-project");
+		await hindsightBackend.applySettings!(session as never, ["hindsight.scoping"]);
 
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("omp-proj");
@@ -653,7 +745,7 @@ describe("hindsightBackend live bank routing", () => {
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
 		});
-		settings.set("hindsight.bankId", "omp");
+		cfgHindsightBankId.set(settings, "omp");
 		const session = makeFakeSession({ sessionId: "s-noop", settings });
 
 		await hindsightBackend.start({
@@ -665,10 +757,35 @@ describe("hindsightBackend live bank routing", () => {
 		});
 
 		const initial = session.getHindsightSessionState();
-		settings.set("hindsight.bankId", "omp"); // unchanged
-		await Bun.sleep(0);
+		cfgHindsightBankId.set(settings, "omp"); // unchanged
+		await hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
 
 		expect(session.getHindsightSessionState()).toBe(initial);
+	});
+
+	it("applies a mid-session recall budget change to the next recall", async () => {
+		const recallSpy = vi.spyOn(HindsightApi.prototype, "recall").mockResolvedValue({ results: [] } as never);
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		cfgHindsightRecallBudget.set(settings, "low");
+		const session = makeFakeSession({ sessionId: "s-budget", settings });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		cfgHindsightRecallBudget.set(settings, "high");
+		await hindsightBackend.applySettings!(session as never, ["hindsight.recallBudget"]);
+		await session.getHindsightSessionState()!.recallForCompaction([{ role: "user", content: "deploy policy?" }]);
+
+		expect(recallSpy).toHaveBeenCalledTimes(1);
+		expect(recallSpy.mock.calls[0][2]).toMatchObject({ budget: "high" });
 	});
 
 	// Same regression flipped: resetting `hindsight.bankId` back to blank /
@@ -684,8 +801,8 @@ describe("hindsightBackend live bank routing", () => {
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
 		});
-		settings.set("hindsight.scoping", "per-project");
-		settings.set("hindsight.bankId", "Minigames");
+		cfgHindsightScoping.set(settings, "per-project");
+		cfgHindsightBankId.set(settings, "Minigames");
 		const session = makeFakeSession({ sessionId: "s-reset", cwd: "/work/_NEW_XenGameKit", settings });
 
 		await hindsightBackend.start({
@@ -700,8 +817,8 @@ describe("hindsightBackend live bank routing", () => {
 
 		// Operator clears the bankId via the TUI — `settings.set(path, "")` is
 		// the same call shape `#setSettingValue` uses for an empty text input.
-		settings.set("hindsight.bankId", "");
-		await Bun.sleep(0);
+		cfgHindsightBankId.set(settings, "");
+		await hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
 
 		const next = session.getHindsightSessionState();
 		expect(next).not.toBe(initial);
@@ -726,8 +843,8 @@ describe("hindsightBackend live bank routing", () => {
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
 		});
-		settings.set("hindsight.scoping", "global");
-		settings.set("hindsight.bankId", "Minigames-_NEW_XenGameKit");
+		cfgHindsightScoping.set(settings, "global");
+		cfgHindsightBankId.set(settings, "Minigames-_NEW_XenGameKit");
 		const session = makeFakeSession({ sessionId: "s-reset-global", settings });
 
 		await hindsightBackend.start({
@@ -739,8 +856,8 @@ describe("hindsightBackend live bank routing", () => {
 		});
 		expect(session.getHindsightSessionState()?.bankId).toBe("Minigames-_NEW_XenGameKit");
 
-		settings.set("hindsight.bankId", "");
-		await Bun.sleep(0);
+		cfgHindsightBankId.set(settings, "");
+		await hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
 
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("omp");
@@ -752,7 +869,7 @@ describe("hindsightBackend live bank routing", () => {
 		expect(retainBatchSpy.mock.calls[0][0]).toBe("omp");
 	});
 
-	it("coalesces synchronous routing hooks so rebuilt states do not leak agent listeners", async () => {
+	it("coalesces synchronous routing edits so rebuilt states do not leak agent listeners", async () => {
 		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		const settings = Settings.isolated({
@@ -760,8 +877,8 @@ describe("hindsightBackend live bank routing", () => {
 			"hindsight.apiUrl": "http://localhost:8888",
 			"hindsight.retainEveryNTurns": 1,
 		});
-		settings.set("hindsight.bankId", "omp");
-		settings.set("hindsight.scoping", "global");
+		cfgHindsightBankId.set(settings, "omp");
+		cfgHindsightScoping.set(settings, "global");
 		const entries = [
 			{ role: "user" as const, text: "remember this routing coalesce fact" },
 			{ role: "assistant" as const, text: "acknowledged routing coalesce fact" },
@@ -777,13 +894,17 @@ describe("hindsightBackend live bank routing", () => {
 		});
 		expect(session.listenerCount()).toBe(1);
 
-		// Mirrors `Settings.#fireAllHooks()` during cwd reload: all three
-		// Hindsight routing hooks can fire synchronously before the first async
-		// queue flush continuation resumes. They must collapse into one rebuild.
-		settings.set("hindsight.bankIdPrefix", "live");
-		settings.set("hindsight.bankId", "Minigames");
-		settings.set("hindsight.scoping", "per-project");
-		await Bun.sleep(0);
+		// Several rebuild requests can land before the first async queue flush
+		// continuation resumes (bulk reload plus cwd rebind). They must collapse
+		// into one rebuild.
+		const edits: Promise<void>[] = [];
+		cfgHindsightBankIdPrefix.set(settings, "live");
+		edits.push(hindsightBackend.applySettings!(session as never, ["hindsight.bankIdPrefix"]));
+		cfgHindsightBankId.set(settings, "Minigames");
+		edits.push(hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]));
+		cfgHindsightScoping.set(settings, "per-project");
+		edits.push(hindsightBackend.applySettings!(session as never, ["hindsight.scoping"]));
+		await Promise.all(edits);
 
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("live-Minigames-proj");
@@ -847,6 +968,203 @@ describe("hindsightBackend live bank routing", () => {
 			expect(bankIdx).toBeLessThan(mmIdx);
 		}
 		void listMentalSpy;
+	});
+});
+
+describe("hindsightBackend cwd rebind", () => {
+	beforeEach(() => {
+		resetSettingsForTest();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// No extra yield after rebind: the next retain must already use the destination.
+	it("routes the destination project's bank before the move completes", async () => {
+		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		cfgHindsightScoping.set(settings, "per-project");
+		const deps: FakeSessionDeps = { sessionId: "s-cwd-move", cwd: "/work/source", settings };
+		const session = makeFakeSession(deps);
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		expect(session.getHindsightSessionState()?.bankId).toBe("omp-source");
+
+		deps.cwd = "/work/destination";
+		await rebindMemoryBackendForCwd(session as never);
+
+		const next = session.getHindsightSessionState();
+		expect(next?.bankId).toBe("omp-destination");
+
+		next!.enqueueRetain("fact from the destination project");
+		await next!.flushRetainQueue();
+		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
+		expect(retainBatchSpy.mock.calls[0][0]).toBe("omp-destination");
+	});
+
+	it.each([
+		["hindsight.bankMission", cfgHindsightBankMission],
+		["hindsight.retainMission", cfgHindsightRetainMission],
+	] as const)("updates a confirmed bank when %s changes", async (_missionId, missionSetting) => {
+		const createBank = vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.scoping": "global",
+			"hindsight.bankMission": "original reflect mission",
+			"hindsight.retainMission": "original retain mission",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "mission-move", cwd: "/work/source", settings });
+		try {
+			await hindsightBackend.start({
+				session: session as never,
+				settings,
+				modelRegistry: {} as never,
+				agentDir: "/tmp",
+				taskDepth: 0,
+			});
+			const initial = session.getHindsightSessionState();
+			if (!initial) throw new Error("Hindsight fixture did not start");
+			initial.enqueueRetain("source fact");
+			await initial.flushRetainQueue();
+			expect(createBank).toHaveBeenCalledTimes(1);
+
+			missionSetting.override(settings, "destination mission");
+			await rebindMemoryBackendForCwd(session as never);
+			const rebound = session.getHindsightSessionState();
+			if (!rebound) throw new Error("Hindsight fixture lost its state");
+			rebound.enqueueRetain("destination fact");
+			await rebound.flushRetainQueue();
+
+			expect(createBank).toHaveBeenCalledTimes(2);
+			expect(createBank).toHaveBeenLastCalledWith(initial.bankId, {
+				reflectMission:
+					missionSetting === cfgHindsightBankMission ? "destination mission" : "original reflect mission",
+				retainMission:
+					missionSetting === cfgHindsightRetainMission ? "destination mission" : "original retain mission",
+			});
+		} finally {
+			session.getHindsightSessionState()?.dispose();
+		}
+	});
+
+	it("honors a rebuild requested while the previous one is still in flight", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const parked = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		let flushes = 0;
+		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+			flushes++;
+			if (flushes > 1) return;
+			parked.resolve();
+			await gate.promise;
+		});
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		cfgHindsightScoping.set(settings, "global");
+		const deps: FakeSessionDeps = { sessionId: "s-cwd-inflight", cwd: "/work/source", settings };
+		const session = makeFakeSession(deps);
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		cfgHindsightBankId.set(settings, "first");
+		const firstEdit = hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
+		// The first rebuild is now parked inside the outgoing state's flush.
+		await parked.promise;
+		cfgHindsightBankId.set(settings, "second");
+		const secondEdit = hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
+		gate.resolve();
+
+		await rebindMemoryBackendForCwd(session as never);
+
+		await Promise.all([firstEdit, secondEdit]);
+		expect(session.getHindsightSessionState()?.bankId).toBe("second");
+
+		const settledState = session.getHindsightSessionState();
+		let thirdEdit: Promise<void> | undefined;
+		vi.spyOn(session, "getHindsightSessionState").mockImplementationOnce(() => {
+			// Three microtasks land after loop retirement but before rebind resolves.
+			queueMicrotask(() =>
+				queueMicrotask(() =>
+					queueMicrotask(() => {
+						cfgHindsightBankId.set(settings, "third");
+						thirdEdit = hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
+					}),
+				),
+			);
+			return settledState;
+		});
+		await rebindMemoryBackendForCwd(session as never);
+		expect(session.getHindsightSessionState()?.bankId).toBe("third");
+		await thirdEdit;
+		session.getHindsightSessionState()?.dispose();
+	});
+
+	it("clears a failed attempt once a coalesced retry completes the transition", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const parked = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		let flushes = 0;
+		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+			flushes++;
+			if (flushes > 1) return;
+			parked.resolve();
+			await gate.promise;
+			// Fails before the outgoing state is replaced, so the destination
+			// route is still unbuilt when the next request runs.
+			throw new Error("outgoing flush failed");
+		});
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		cfgHindsightScoping.set(settings, "global");
+		const session = makeFakeSession({ sessionId: "s-cwd-retry", cwd: "/work/source", settings });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		try {
+			cfgHindsightBankId.set(settings, "destination");
+			const edit = hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
+			await parked.promise;
+			// Requested while the doomed attempt is still in flight, so it
+			// coalesces onto the same task; the retry clears the failure for both.
+			const move = rebindMemoryBackendForCwd(session as never);
+			gate.resolve();
+			await Promise.all([edit, move]);
+
+			expect(session.getHindsightSessionState()?.bankId).toBe("destination");
+		} finally {
+			session.getHindsightSessionState()?.dispose();
+		}
 	});
 });
 

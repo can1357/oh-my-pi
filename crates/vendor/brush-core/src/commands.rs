@@ -82,6 +82,11 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
 	pub fn iter_fds(&self) -> impl Iterator<Item = (ShellFd, openfiles::OpenFile)> {
 		self.params.iter_fds(self.shell)
 	}
+
+	/// Iterates over all open file descriptors without duplicating them.
+	pub fn open_fds(&self) -> impl Iterator<Item = (ShellFd, &openfiles::OpenFile)> {
+		self.params.open_fds(self.shell)
+	}
 }
 
 /// An argument to a command.
@@ -189,6 +194,24 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	args: &[S],
 	empty_env: bool,
 ) -> Result<std::process::Command, error::Error> {
+	// The operating system can only start native programs in native
+	// directories; virtual paths exist solely inside this process.
+	let filesystem = context.shell.filesystem();
+	let working_dir = context.shell.working_dir();
+	if !filesystem.is_native_local(working_dir) {
+		return Err(error::ErrorKind::ExternalCommandInVirtualWorkingDir(
+			context.command_name.clone(),
+			working_dir.to_owned(),
+		)
+		.into());
+	}
+	if sys::fs::contains_path_separator(command_name) {
+		let program = context.shell.absolute_path(Path::new(command_name));
+		if !filesystem.is_native_local(&program) {
+			return Err(error::ErrorKind::ExternalCommandIsVirtual(program).into());
+		}
+	}
+
 	let mut cmd = std::process::Command::new(command_name);
 
 	// Override argv[0].
@@ -405,11 +428,17 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			// through them for a matching executable. Otherwise, use our default search
 			// logic.
 			let path = if let Some(path_dirs) = &self.path_dirs {
-				pathsearch::search_for_executable(path_dirs.iter(), self.command_name.as_str()).next()
+				pathsearch::find_executable(
+					self.shell.filesystem(),
+					path_dirs,
+					Path::new(&self.command_name),
+				)
+				.await
 			} else {
 				self
 					.shell
 					.find_first_executable_in_path_using_cache(&self.command_name)
+					.await
 			};
 
 			if let Some(path) = path {
@@ -430,6 +459,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			let command_name = PathBuf::from(self.command_name.clone());
 			self.execute_via_external(command_name.as_path())
 		}
+	}
+
+	/// Whether any descriptor the command would see is backed by a virtual
+	/// filesystem provider.
+	fn sees_virtual_files(&self) -> bool {
+		self
+			.params
+			.open_fds(&*self.shell)
+			.any(|(_, file)| file.as_vfs().is_some())
 	}
 
 	/// Extracts the owned string representation of the last argument of a
@@ -485,16 +523,54 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		self,
 		builtin: builtins::Registration<SE>,
 	) -> Result<ExecutionSpawnResult, error::Error> {
+		let sees_virtual_files = self.sees_virtual_files();
 		let mut shell = self.shell;
 		let last_arg = Self::take_last_arg(&self.args);
 
-		let cmd_context = ExecutionContext {
-			shell:        &mut shell,
-			command_name: self.command_name,
-			params:       self.params,
-		};
+		let result = if sees_virtual_files {
+			// Builtins do synchronous I/O on their descriptors. A virtual file's
+			// synchronous I/O awaits its provider, which must not happen on an
+			// async runtime thread (a current-thread runtime would have nothing
+			// left to drive the provider). Run the builtin on a blocking worker
+			// instead, against a lease of the parent shell that is adopted only
+			// once the builtin returns: if this future is dropped mid-builtin,
+			// the parent keeps its prior state and jobs, and the worker's copy
+			// is discarded when it finishes. A filesystem built with a
+			// cancellation token interrupts the lease's virtual I/O once
+			// cancelled, so the worker returns promptly.
+			let lease = shell.lease();
+			let command_name = self.command_name;
+			let params = self.params;
+			let args = self.args;
+			let join_handle = tokio::task::spawn_blocking(move || {
+				let mut lease = lease;
+				let cmd_context = ExecutionContext { shell: &mut lease, command_name, params };
+				let result = tokio::runtime::Handle::current().block_on(execute_builtin_command(
+					&builtin,
+					cmd_context,
+					args,
+				));
+				(lease, result)
+			});
+			match join_handle.await {
+				Ok((lease, result)) => {
+					shell.settle_lease(lease);
+					result
+				},
+				Err(join_error) if join_error.is_panic() => {
+					std::panic::resume_unwind(join_error.into_panic())
+				},
+				Err(join_error) => Err(error::ErrorKind::ThreadingError(join_error).into()),
+			}
+		} else {
+			let cmd_context = ExecutionContext {
+				shell:        &mut shell,
+				command_name: self.command_name,
+				params:       self.params,
+			};
 
-		let result = execute_builtin_command(&builtin, cmd_context, self.args).await;
+			execute_builtin_command(&builtin, cmd_context, self.args).await
+		};
 
 		// Update $_ after command execution.
 		shell.update_last_arg_variable(last_arg);
@@ -860,17 +936,19 @@ pub(crate) async fn invoke_shell_function(
 	// Handle control-flow.
 	match result.next_control_flow {
 		ExecutionControlFlow::BreakLoop { .. } => {
-			writeln!(
-				context.params.stderr(context.shell),
-				"break: only meaningful in a `for', `while', or `until' loop"
-			)?;
+			context
+				.params
+				.stderr(context.shell)
+				.write_all_async(b"break: only meaningful in a `for', `while', or `until' loop\n")
+				.await?;
 			result.next_control_flow = ExecutionControlFlow::Normal;
 		},
 		ExecutionControlFlow::ContinueLoop { .. } => {
-			writeln!(
-				context.params.stderr(context.shell),
-				"continue: only meaningful in a `for', `while', or `until' loop"
-			)?;
+			context
+				.params
+				.stderr(context.shell)
+				.write_all_async(b"continue: only meaningful in a `for', `while', or `until' loop\n")
+				.await?;
 			result.next_control_flow = ExecutionControlFlow::Normal;
 		},
 		ExecutionControlFlow::ReturnFromFunctionOrScript => {
@@ -940,7 +1018,7 @@ async fn run_substitution_command(
 	if let Ok(program) = &parse_result {
 		if let Some(redir) = try_unwrap_bare_input_redir_program(program) {
 			interp::setup_redirect(&mut shell, &mut params, redir).await?;
-			std::io::copy(&mut params.stdin(&shell), &mut params.stdout(&shell))?;
+			openfiles::copy_async(&mut params.stdin(&shell), &mut params.stdout(&shell)).await?;
 			return Ok(ExecutionResult::new(0));
 		}
 	}

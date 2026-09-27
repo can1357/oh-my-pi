@@ -148,6 +148,70 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["skill:humanizer"]);
 		});
 
+		it("matches leading skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "skill:code-ponytail", description: "Ponytail coding workflow" },
+				],
+				"/tmp",
+			);
+
+			for (const [input, expected] of [
+				["/last", "skill:research-last30days"],
+				["/last30days", "skill:research-last30days"],
+				["/research-last30days", "skill:research-last30days"],
+				["/ponytail", "skill:code-ponytail"],
+			] as const) {
+				const result = await provider.getSuggestions([input], 0, input.length);
+				expect(result?.items[0]?.value).toBe(expected);
+			}
+		});
+
+		it("matches mid-prompt skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "skill:design-impeccable", description: "Improve interface design" }],
+				"/tmp",
+			);
+			const line = "polish this /impec";
+
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.prefix).toBe("/impec");
+			expect(result?.items.map(item => item.value)).toEqual(["skill:design-impeccable"]);
+		});
+
+		it("does not widen hyphen-segment matching to ordinary command names or aliases", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "docs-last30days", aliases: ["archive-last30days"], description: "Open archived docs" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			// The ordinary command remains only a fuzzy hit; it must not acquire a
+			// segment-prefix tier that ties and suppresses the skill breakout, and it
+			// still surfaces with the same ordinary fuzzy behavior as before.
+			expect(result?.items.map(item => item.value)).toEqual(["skill:research-last30days", "docs-last30days"]);
+		});
+
+		it("keeps command precedence when a leading command ties a segmented skill prefix", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "last-report", description: "Open the latest report" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["last-report"]);
+		});
+
 		it("collapses skills into a single skill: namespace row at prompt start", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[
@@ -654,6 +718,62 @@ describe("CombinedAutocompleteProvider", () => {
 
 			expect(result.lines[0]).toBe("/model claude-sonnet");
 			expect(result.cursorCol).toBe("/model claude-sonnet".length);
+		});
+
+		it("does not add a trailing space when completing a directory with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const result = provider.applyCompletion(
+				["see @pack"],
+				0,
+				9,
+				{ value: "@packages/", label: "packages/" },
+				"@pack",
+			);
+
+			expect(result.lines[0]).toBe("see @packages/");
+			expect(result.cursorCol).toBe("see @packages/".length);
+		});
+
+		it("does not add a trailing space when completing a quoted directory with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = 'see @"my fold';
+			const result = provider.applyCompletion(
+				[line],
+				0,
+				line.length,
+				{ value: '@"my folder/', label: "my folder/" },
+				'@"my fold',
+			);
+			expect(result.lines[0]).toBe('see @"my folder/');
+			expect(result.cursorCol).toBe('see @"my folder/'.length);
+		});
+
+		it("does not add a trailing space when completing a directory with a Windows backslash", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = "see @packages\\";
+			const result = provider.applyCompletion(
+				[line],
+				0,
+				line.length,
+				{ value: "@packages\\", label: "packages\\" },
+				"@packages\\",
+			);
+			expect(result.lines[0]).toBe("see @packages\\");
+			expect(result.cursorCol).toBe("see @packages\\".length);
+		});
+
+		it("adds a trailing space when completing a file with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const result = provider.applyCompletion(
+				["see @inde"],
+				0,
+				9,
+				{ value: "@index.ts", label: "index.ts" },
+				"@inde",
+			);
+
+			expect(result.lines[0]).toBe("see @index.ts ");
+			expect(result.cursorCol).toBe("see @index.ts ".length);
 		});
 	});
 

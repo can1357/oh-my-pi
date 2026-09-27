@@ -18,14 +18,8 @@ interface TemplateProbeResult {
 	assetsRemoved: number;
 }
 
-const expectedTemplate: TemplateProbeResult = {
-	chars: 376_586,
-	bytes: 376_742,
-	sha256: "d1832d9fc1e2033e4d998856bfdd7739aa3be94bff74c21154d7fa6a51788269",
-	stableCache: true,
-	assetsRemoved: 0,
-};
 const assetDir = new URL("../src/export/html/", import.meta.url);
+const bundleDistUrl = new URL("../scripts/bundle-dist.ts", import.meta.url).href;
 const templateProbePath = path.resolve(import.meta.dir, "fixtures", "html-export-template-probe.ts");
 const heapProbePath = path.resolve(import.meta.dir, "fixtures", "html-export-static-import-heap-probe.ts");
 const packageDir = path.resolve(import.meta.dir, "..");
@@ -36,7 +30,7 @@ const compiledPath = path.join(tempRoot, "compiled-template-probe");
 let bundlePath: string;
 const bundledDependencyStubs: Record<string, string> = {
 	"@oh-my-pi/pi-utils": 'export const APP_NAME = "omp"; export const isEnoent = () => false;',
-	"../../modes/theme/theme":
+	"@oh-my-pi/pi-tui/theme":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
 	"../../session/session-loader": "export const loadEntriesFromFile = async () => [];",
 	"../../session/session-manager":
@@ -74,6 +68,20 @@ function composeExpectedTemplate(): string {
 		.replace("<template-tool-views/>", () => `<script>${toolViewsJs}</script>`)
 		.replace("<template-js/>", () => `<script>${templateJs}</script>`);
 }
+
+/** Probe result every bundle shape must reproduce: the composed source template, byte for byte. */
+function expectedProbeResult(): TemplateProbeResult {
+	const template = composeExpectedTemplate();
+	return {
+		chars: template.length,
+		bytes: Buffer.byteLength(template),
+		sha256: new Bun.CryptoHasher("sha256").update(template).digest("hex"),
+		stableCache: true,
+		assetsRemoved: 0,
+	};
+}
+
+const expectedTemplate = expectedProbeResult();
 
 async function runProbe(command: string[]): Promise<TemplateProbeResult> {
 	const proc = Bun.spawn(command, {
@@ -145,10 +153,15 @@ describe("HTML export template", () => {
 	});
 
 	test("production normal bundle packs every HTML export asset", async () => {
-		const staleAssetPath = path.join(packageDir, "dist", "template-stale.css");
-		fs.mkdirSync(path.dirname(staleAssetPath), { recursive: true });
-		fs.writeFileSync(staleAssetPath, "stale");
-		const build = Bun.spawn([process.execPath, "run", "gen:bundle"], {
+		const productionBundleDir = path.join(tempRoot, "production-bundle");
+		const staleAssetPath = path.join(productionBundleDir, "template-stale.css");
+		const bundleRunnerPath = path.join(tempRoot, "bundle-dist-runner.ts");
+		await Bun.write(staleAssetPath, "stale");
+		await Bun.write(
+			bundleRunnerPath,
+			`import { bundleDist } from ${JSON.stringify(bundleDistUrl)};\nawait bundleDist(${JSON.stringify(productionBundleDir)});\n`,
+		);
+		const build = Bun.spawn([process.execPath, bundleRunnerPath], {
 			cwd: packageDir,
 			stdin: "ignore",
 			stdout: "pipe",
@@ -160,10 +173,16 @@ describe("HTML export template", () => {
 			build.exited,
 		]);
 		expect(buildExitCode, `${buildStdout}\n${buildStderr}`).toBe(0);
-		expect(fs.existsSync(staleAssetPath)).toBe(false);
+		expect(await Bun.file(staleAssetPath).exists()).toBe(false);
 
+		const packDir = path.join(tempRoot, "production-package");
+		await Bun.write(path.join(packDir, "package.json"), Bun.file(path.join(packageDir, "package.json")));
+		await Bun.write(path.join(packDir, "bun.lock"), Bun.file(path.resolve(packageDir, "../../bun.lock")));
+		for (const entry of await fs.promises.readdir(productionBundleDir)) {
+			await Bun.write(path.join(packDir, "dist", entry), Bun.file(path.join(productionBundleDir, entry)));
+		}
 		const proc = Bun.spawn([process.execPath, "pm", "pack", "--dry-run", "--ignore-scripts"], {
-			cwd: packageDir,
+			cwd: packDir,
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",

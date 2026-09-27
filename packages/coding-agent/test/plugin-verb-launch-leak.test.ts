@@ -106,3 +106,18 @@ describe("documented-but-unregistered plugin verbs do not leak to launch (#2935)
 		});
 	});
 });
+
+describe("`omp plugins` is a registered alias of `omp plugin`", () => {
+	// The TUI builtin is `/plugins` while the CLI command is `plugin`. Dispatch
+	// resolves `CommandEntry.aliases`, not the command class's `static aliases`,
+	// so dropping the registry entry would make `omp plugins list` stop reaching
+	// the plugin command again.
+	test("`omp plugins list` routes to the plugin command instead of launch", () => {
+		expect(isSubcommand("plugins")).toBe(true);
+		expect(resolveCliArgv(["plugins", "list"])).toEqual({ argv: ["plugins", "list"] });
+	});
+
+	test("bare `omp plugins` routes to the plugin command, which defaults to list", () => {
+		expect(resolveCliArgv(["plugins"])).toEqual({ argv: ["plugins"] });
+	});
+});

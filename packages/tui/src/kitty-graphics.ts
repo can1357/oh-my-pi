@@ -15,7 +15,7 @@
  * forms. Protocol gating (`imageProtocol === Kitty`) lives in the caller.
  */
 
-import { isInsideTerminalMultiplexer } from "./terminal-multiplexer";
+import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
 import { wrapTmuxPassthroughIfNeeded } from "./tmux";
 
 /** Kitty Unicode placeholder base character (U+10EEEE, Plane 16 PUA). */
@@ -63,7 +63,7 @@ export interface KittyGraphicsFeatures {
  * Whether the detected terminal renders Kitty Unicode placeholders (`U=1` +
  * U+10EEEE with row/column diacritics).
  *
- * Kitty and Ghostty advertise placeholder support directly. A multiplexer
+ * Kitty, Ghostty and Otty advertise placeholder support directly. A multiplexer
  * cannot use cursor-positioned placements because the outer terminal does not
  * know pane scroll/reflow state. An explicit `PI_FORCE_IMAGE_PROTOCOL=kitty`
  * opts into placeholders under any multiplexer — matching `timg -pk`.
@@ -81,8 +81,8 @@ export function detectKittyUnicodePlaceholdersSupport(terminalId: string, env: N
 	if (force === "0" || force === "false" || force === "off" || force === "no" || force === "n") return false;
 	const insideMultiplexer = isInsideTerminalMultiplexer(env);
 	if (insideMultiplexer && env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase() === "kitty") return true;
-	if (env.HERDR_ENV === "1") return false;
-	return terminalId === "kitty" || terminalId === "ghostty";
+	if (isInsideHerdr(env)) return false;
+	return terminalId === "kitty" || terminalId === "ghostty" || terminalId === "otty" || terminalId === "rio";
 }
 
 let features: KittyGraphicsFeatures = {

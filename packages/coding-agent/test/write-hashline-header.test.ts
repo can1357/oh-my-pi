@@ -2,14 +2,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Patch, Patcher } from "@oh-my-pi/hashline";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, getFileSnapshotStore } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
-import { HashlineFilesystem } from "@oh-my-pi/pi-coding-agent/edit/hashline/filesystem";
-import { writethroughNoop } from "@oh-my-pi/pi-coding-agent/lsp";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 
 function createSession(cwd: string): ToolSession {
 	return {
@@ -66,9 +66,8 @@ describe("write tool hashline header", () => {
 
 		// The tag must address a snapshot whose content matches what we wrote so a
 		// follow-up edit can land without an extra `read` round-trip.
-		const snapshot = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(filePath), tag!);
-		expect(snapshot).not.toBeNull();
-		expect(snapshot?.text).toBe(content);
+		const snapshot = getEditStore(session).byHashText(filePath, tag!);
+		expect(snapshot).toBe(content);
 	});
 
 	it("makes the post-write tag usable by the hashline patcher", async () => {
@@ -84,29 +83,36 @@ describe("write tool hashline header", () => {
 		// Apply a hashline patch immediately, using only the tag the write tool
 		// returned — no intervening `read`.
 		const patchInput = `${headerLine}\nPUT 1-1:\n+export const enabled = true;\n`;
-		const patch = Patch.parse(patchInput, { cwd: tmpDir });
-		expect(patch.sections).toHaveLength(1);
-
-		const filesystem = new HashlineFilesystem({
-			session,
-			writethrough: writethroughNoop,
-			beginDeferredDiagnosticsForPath: () => {
-				throw new Error("deferred diagnostics unused with writethroughNoop");
-			},
-		});
-		const patcher = new Patcher({ fs: filesystem, snapshots: getFileSnapshotStore(session) });
-		const prepared = await patcher.prepare(patch.sections[0]!);
-		const sectionResult = await patcher.commit(prepared);
-		expect(sectionResult.op).toBe("update");
+		await new EditTool(session, "hashline").execute("call-2", { input: patchInput });
 
 		const final = await fs.readFile(filePath, "utf8");
 		expect(final).toBe("export const enabled = true;\n");
 	});
 
+	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {
+		const session = createSession(tmpDir);
+		const backingPath = path.join(tmpDir, "artifacts", "local", "notes.ts");
+		const content = "export const enabled = false;\n";
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: "local://notes.ts", content });
+		const [headerLine = "", writeLine] = resultText(writeResult).split("\n");
+		expect(HASHLINE_HEADER_LINE.exec(headerLine)?.[1]).toBe("local://notes.ts");
+		expect(writeLine).toBe(`Successfully wrote ${content.length} bytes to local://notes.ts`);
+
+		await new EditTool(session, "hashline").execute("call-2", {
+			input: `${headerLine}\nPUT 1-1:\n+export const enabled = true;\n`,
+		});
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const enabled = true;\n");
+
+		// The URL-form header also addresses the same file as a `write` path.
+		await new WriteTool(session).execute("call-3", { path: headerLine, content: "export const v = 2;\n" });
+		expect(await fs.readFile(backingPath, "utf8")).toBe("export const v = 2;\n");
+	});
+
 	it("omits the hashline header when the edit mode is not hashline", async () => {
 		const filePath = path.join(tmpDir, "plain.txt");
 		const session = createSession(tmpDir);
-		session.settings.set("edit.mode", "replace");
+		cfgEditMode.set(session.settings, "replace");
 		const tool = new WriteTool(session);
 		const content = "no anchors here\n";
 
@@ -114,5 +120,16 @@ describe("write tool hashline header", () => {
 		const text = resultText(result);
 		expect(text.startsWith("[")).toBe(false);
 		expect(text).toBe(`Successfully wrote ${content.length} bytes to ${path.relative(tmpDir, filePath)}`);
+	});
+
+	it("reports UTF-8 bytes, not JavaScript string length", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		const session = createSession(tmpDir);
+		cfgEditMode.set(session.settings, "replace");
+		const tool = new WriteTool(session);
+		const content = "café\n";
+
+		const result = await tool.execute("call-1", { path: filePath, content });
+		expect(resultText(result)).toBe(`Successfully wrote 6 bytes to ${path.relative(tmpDir, filePath)}`);
 	});
 });

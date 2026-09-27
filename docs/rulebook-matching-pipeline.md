@@ -25,6 +25,7 @@ It reflects the current implementation, including partial semantics and metadata
 - [`packages/coding-agent/src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
 - [`packages/coding-agent/src/system-prompt.ts`](../packages/coding-agent/src/system-prompt.ts)
 - [`packages/coding-agent/src/internal-urls/rule-protocol.ts`](../packages/coding-agent/src/internal-urls/rule-protocol.ts)
+- [`packages/coding-agent/src/cli/ttsr-cli.ts`](../packages/coding-agent/src/cli/ttsr-cli.ts)
 - [`packages/utils/src/frontmatter.ts`](../packages/utils/src/frontmatter.ts)
 
 ## 1. Canonical rule shape
@@ -41,7 +42,9 @@ interface Rule {
   description?: string;
   condition?: string[];
   astCondition?: string[];
+  question?: string;
   scope?: string[];
+  agents?: string[];
   interruptMode?: "never" | "prose-only" | "tool-only" | "always";
   _source: SourceMeta;
 }
@@ -80,7 +83,7 @@ Normalization:
 - `name` = filename without `.md`/`.mdc`
 - frontmatter parsed via `parseFrontmatter`
 - `content` = body (frontmatter stripped)
-- `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `scope`, and `interruptMode` are parsed by `buildRuleFromMarkdown`
+- `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` are parsed by `buildRuleFromMarkdown`
 - top-level `RULES.md` is synthesized as rule name `RULES` and forced to `alwaysApply: true`
 
 Both sticky files use the fixed name `RULES`. Because native items are appended as project rules, user rules, user sticky `RULES.md`, then project sticky `RULES.md`, the first earlier item named `RULES` wins. Normally this means user sticky content shadows project sticky content; a regular `rules/RULES.md` can shadow both.
@@ -94,7 +97,7 @@ Loads from both `.agent` and `.agents` directories:
 - project: walk upward from `cwd` to repo root, loading `<ancestor>/.agent/rules/*.{md,mdc}` and `<ancestor>/.agents/rules/*.{md,mdc}`
 - user: `~/.agent/rules/*.{md,mdc}` and `~/.agents/rules/*.{md,mdc}`
 
-Normalization uses the shared `buildRuleFromMarkdown` path: filename-derived name, stripped frontmatter body, and parsed `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `scope`, and `interruptMode`.
+Normalization uses the shared `buildRuleFromMarkdown` path: filename-derived name, stripped frontmatter body, and parsed `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode`.
 
 ### Cursor provider (`cursor.ts`)
 
@@ -108,7 +111,7 @@ Normalization (`transformMDCRule`):
 - `description`: kept only if string
 - `alwaysApply`: normalized to a boolean — `true` only when frontmatter has `alwaysApply: true` (anything else becomes `false`)
 - `globs`: accepts array (string elements only) or single string
-- `condition`/legacy `ttsr_trigger`, `astCondition`, `scope`, and `interruptMode` are parsed by shared rule helpers
+- `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` are parsed by shared rule helpers
 - `name` from filename without extension
 
 ### Windsurf provider (`windsurf.ts`)
@@ -121,7 +124,7 @@ Loads from:
 Normalization:
 
 - `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `scope`, and `interruptMode` parsed by shared rule helpers
+- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` parsed by shared rule helpers
 - `name` is fixed to `global_rules` for the user global file and derived from filename for project rules
 
 ### Cline provider (`cline.ts`)
@@ -134,7 +137,7 @@ Searches upward from `cwd` for nearest `.clinerules`:
 Normalization:
 
 - `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `scope`, and `interruptMode` parsed by shared rule helpers
+- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, and `interruptMode` parsed by shared rule helpers
 - `name` is fixed to `clinerules` for a `.clinerules` file and derived from filename for `.clinerules/*.md`
 
 ### GitHub provider (`github.ts`)
@@ -151,7 +154,7 @@ The filename without `.instructions.md` is the rule name. Shared Markdown parsin
 - any other glob makes the rule non-always-apply; a missing `description` is generated from the globs;
 - missing `applyTo` produces a rulebook description plus a discovery warning.
 
-Because TTSR bucketing runs before always-apply/rulebook bucketing, a GitHub instruction carrying an accepted `condition` or `astCondition` is still TTSR-only regardless of `applyTo`.
+Because TTSR bucketing runs before always-apply/rulebook bucketing, a GitHub instruction carrying an accepted `condition`, `astCondition`, or `question` is still TTSR-only regardless of `applyTo`.
 
 ## 3. Frontmatter parsing behavior and ambiguity
 
@@ -213,13 +216,14 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 
 1. Drop rules listed in `ttsr.disabledRules`.
 2. Drop rules from the `builtin-defaults` provider when `ttsr.builtinRules === false`.
-3. Register rules with a non-empty `condition` or `astCondition` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
-4. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
-5. Put remaining rules with `description` into `rulebookRules`.
+3. Drop rules whose `agents` globs do not match the session's agent name (`main` for a top-level session, otherwise the agent definition name); rules without `agents` apply to every agent.
+4. Register rules with a non-empty `condition`, `astCondition`, or `question` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
+5. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
+6. Put remaining rules with `description` into `rulebookRules`.
 
 ### Bucket behavior
 
-- **TTSR bucket**: any enabled rule with a non-empty parsed `condition` (regex) or `astCondition` (ast-grep patterns) that `TtsrManager.addRule(...)` accepts. Takes priority over other buckets.
+- **TTSR bucket**: any enabled rule with a non-empty parsed `condition` (regex), `astCondition` (ast-grep patterns), or `question` (judged) that `TtsrManager.addRule(...)` accepts. Takes priority over other buckets.
 - **Always-apply bucket**: `alwaysApply === true`, not TTSR. Full content injected into system prompt. Resolvable via `rule://`.
 - **Rulebook bucket**: must have description, must not be TTSR, must not be `alwaysApply`. Listed in system prompt by name+description; content read on demand via `rule://`.
 - A rule with both a trigger condition and `alwaysApply` goes to TTSR only if TTSR registration accepts it; otherwise it can fall through to always-apply.
@@ -249,10 +253,33 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 - **Full rule content is auto-injected into the system prompt** (before the rulebook rules section).
 - Rule is also addressable via `rule://<name>` for re-reading.
 
-### `condition`, `astCondition`, `scope`, and `interruptMode`
+### `agents`
+
+- Restricts a rule to matching agents. Accepts a YAML sequence, a single string, or a comma-separated string; patterns are lowercased glob patterns matched case-insensitively against the agent definition name (`scout`, `reviewer`, `foreman-*`). Whitespace around commas inside a `{a, b}` glob-brace group is tolerated and normalized away.
+- The literal `main` matches the top-level session; a subagent with no definition name falls back to `sub`. Both `main` and `sub` are reserved: a custom agent definition cannot use either name (`parseAgentFields` rejects it), so neither sentinel can be shadowed by a real agent.
+- Omitted (or an empty list) means the rule applies to every agent — the pre-existing behavior.
+- Filtering happens once, in `bucketRules(...)` at session creation, before TTSR registration: an unmatched rule joins no bucket, is never compiled into `TtsrManager`, and is not addressable via `rule://` in that session.
+- Subagents receive the parent's unfiltered discovered rule list and re-evaluate `agents` under their own name, so a scout-only rule loads in scouts and nowhere else.
+
+  ```yaml
+  agents: [scout, "foreman-*"]
+  ```
+
+  ```yaml
+  # Main agent only; every subagent ignores this rule:
+  agents: main
+  ```
+
+### `condition`, `astCondition`, `question`, `scope`, and `interruptMode`
 
 - `condition` is the regex TTSR trigger field; legacy `ttsr_trigger` / `ttsrTrigger` are accepted as fallback inputs during parsing. A leading `(?i)`, `(?m)`, or `(?s)` inline flag group is translated to the equivalent JavaScript `RegExp` flags.
 - `astCondition` is the ast-grep trigger field: a string or YAML sequence of structural patterns, kept verbatim (no glob inference). It only matches on edit/write tool streams, where the language is inferred from the file path. A rule may set `condition`, `astCondition`, or both.
+- `question` makes the rule **judged**: a single natural-language yes/no question the `judge` model role answers about each completed in-scope output (reply, reasoning, or tool call). It never matches mid-stream and never interrupts; a yes delivers the rule as a warning (see `ttsr-injection-lifecycle.md` §10). When `condition`/`astCondition` are also set they only gate whether the question is asked, which keeps judge cost down. Runs per `ttsr.judge` (`auto` requires a native TypeSafe jev judge).
+
+  ```yaml
+  question: "Does the reply claim tests pass without showing they were run?"
+  scope: text
+  ```
 - `scope` narrows TTSR matching to an allowlist of stream surfaces. It accepts either a comma-separated YAML string or a YAML sequence. Omitting it watches assistant prose (`text`) and all tool arguments (`tool`), but not thinking.
 
   ```yaml

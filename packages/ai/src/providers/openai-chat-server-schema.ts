@@ -210,7 +210,7 @@ export const openaiChatRequestSchema = type({
 	"frequency_penalty?": "number",
 	"logit_bias?": type({ "[string]": "number" }),
 	"user?": "string",
-	"reasoning_effort?": "'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'",
+	"reasoning_effort?": "'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'",
 	"parallel_tool_calls?": "boolean",
 	"service_tier?": "'auto' | 'default' | 'flex' | 'scale' | 'priority'",
 	"metadata?": type({ "[string]": "unknown" }),

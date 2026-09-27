@@ -11,7 +11,10 @@ use napi_derive::napi;
 use pi_vcs::types as core;
 use tokio_util::sync::CancellationToken;
 
-use crate::task;
+use crate::{
+	iso::{IsoBackendKind, from_napi_kind, to_napi_kind},
+	task,
+};
 
 /// Build the JS `VcsError` on the JS thread and hand it to napi as the
 /// rejection/throw value. napi retains a reference to the constructed object,
@@ -65,15 +68,12 @@ fn path_string(path: impl AsRef<Path>) -> String {
 }
 fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
 	signal.and_then(|value| {
-		let aborted = value
-			.coerce_to_object()
-			.and_then(|object| object.get_named_property::<bool>("aborted"))
-			.unwrap_or(false);
-		let signal = AbortSignal::from_unknown(value).ok()?;
 		let token = CancellationToken::new();
-		if aborted {
+		if task::signal_aborted(&value) {
 			token.cancel();
+			return Some(token);
 		}
+		let signal = AbortSignal::from_unknown(value).ok()?;
 		let abort = token.clone();
 		signal.on_abort(move || abort.cancel());
 		Some(token)
@@ -119,6 +119,22 @@ pub struct VcsWorktreeEntry {
 	pub branch:   Option<String>,
 	pub detached: bool,
 }
+/// Worktree creation options.
+#[napi(object)]
+pub struct VcsWorktreeAddOptions {
+	pub detach:       bool,
+	pub clone:        bool,
+	pub backend:      Option<IsoBackendKind>,
+	/// Carry the source checkout's uncommitted changes into the new worktree
+	/// (target must be the source `HEAD`).
+	pub keep_changes: Option<bool>,
+}
+/// Worktree creation outcome.
+#[napi(object)]
+pub struct VcsWorktreeAddResult {
+	pub cloned_with: Option<IsoBackendKind>,
+	pub clone_error: Option<String>,
+}
 /// Commit author identity.
 #[napi(object)]
 pub struct VcsCommitAuthor {
@@ -151,12 +167,17 @@ pub struct VcsShowResult {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsDiffOptions {
-	pub cached:  Option<bool>,
-	pub base:    Option<String>,
-	pub head:    Option<String>,
-	pub files:   Option<Vec<String>>,
-	pub context: Option<u32>,
-	pub binary:  Option<bool>,
+	pub cached:    Option<bool>,
+	pub base:      Option<String>,
+	pub head:      Option<String>,
+	pub files:     Option<Vec<String>>,
+	pub context:   Option<u32>,
+	pub binary:    Option<bool>,
+	/// Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+	/// this many bytes, instead of buffering an arbitrarily large string.
+	/// Carried as a double so a budget past 2^32 reaches the renderer intact
+	/// (a `u32` field would wrap it); values beyond `usize` saturate.
+	pub max_bytes: Option<f64>,
 }
 /// Status query options.
 #[napi(object)]
@@ -305,12 +326,13 @@ impl From<core::ShowResult> for VcsShowResult {
 impl From<VcsDiffOptions> for core::DiffOptions {
 	fn from(v: VcsDiffOptions) -> Self {
 		Self {
-			cached:  v.cached.unwrap_or(false),
-			base:    v.base,
-			head:    v.head,
-			files:   v.files.unwrap_or_default(),
-			context: v.context,
-			binary:  v.binary.unwrap_or(false),
+			cached:    v.cached.unwrap_or(false),
+			base:      v.base,
+			head:      v.head,
+			files:     v.files.unwrap_or_default(),
+			context:   v.context,
+			binary:    v.binary.unwrap_or(false),
+			max_bytes: v.max_bytes.map(|v| v as usize),
 		}
 	}
 }
@@ -472,6 +494,15 @@ pub struct VcsRepo {
 #[napi]
 pub fn vcs_discover(env: Env, dir: String) -> Result<Option<VcsRepo>> {
 	pi_vcs::detect(Path::new(&dir))
+		.map(|repo| repo.map(|inner| VcsRepo { inner }))
+		.map_err(|err| rich_error(env, err))
+}
+
+/// Discover the repository presenting a directory: equal-root jj+git ties
+/// prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+#[napi]
+pub fn vcs_discover_for_display(env: Env, dir: String) -> Result<Option<VcsRepo>> {
+	pi_vcs::detect_for_display(Path::new(&dir))
 		.map(|repo| repo.map(|inner| VcsRepo { inner }))
 		.map_err(|err| rich_error(env, err))
 }
@@ -845,11 +876,26 @@ impl VcsGitRepo {
 		&self,
 		path: String,
 		ref_name: String,
-		detach: bool,
+		options: VcsWorktreeAddOptions,
 		signal: Option<Unknown>,
-	) -> Promise<()> {
+	) -> Promise<VcsWorktreeAddResult> {
 		blocking("vcs.worktreeAdd", self.inner.clone(), signal, move |r| {
-			r.worktree_add(Path::new(&path), &ref_name, detach)
+			let clone = if !options.clone {
+				core::WorktreeClone::Off
+			} else if let Some(kind) = options.backend {
+				core::WorktreeClone::Prefer(from_napi_kind(kind))
+			} else {
+				core::WorktreeClone::Auto
+			};
+			r.worktree_add(Path::new(&path), &ref_name, core::WorktreeAddOptions {
+				detach: options.detach,
+				clone,
+				keep_changes: options.keep_changes.unwrap_or(false),
+			})
+			.map(|result| VcsWorktreeAddResult {
+				cloned_with: result.cloned_with.map(to_napi_kind),
+				clone_error: result.clone_error,
+			})
 		})
 	}
 
@@ -1471,7 +1517,7 @@ mod tests {
 	use super::catch_panic;
 
 	/// A gix-style panic (e.g. worker-thread spawn `.expect(...)` hitting
-	/// ERROR_COMMITMENT_LIMIT) must surface as a typed backend error carrying
+	/// `ERROR_COMMITMENT_LIMIT`) must surface as a typed backend error carrying
 	/// the operation tag and panic message — never as an unwind.
 	#[test]
 	fn catch_panic_converts_native_panics_into_backend_errors() {

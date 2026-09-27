@@ -1,114 +1,142 @@
-/**
- * Resolve configuration values that may be shell commands, environment variables, or literals.
- *
- * Note: command execution is async to avoid blocking the TUI.
- */
-
 import { executeShell } from "@oh-my-pi/pi-natives";
-import { $envExact, ptree } from "@oh-my-pi/pi-utils";
+import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
-/** Cache for successful shell command results (persists for process lifetime). */
+const COMMAND_FAILURE_RETRY_MS = 30_000;
 const commandResultCache = new Map<string, string>();
-
-/** De-duplicates concurrent executions for the same command. */
+const commandFailureRetryAt = new Map<string, number>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
+const commandGeneration = new Map<string, number>();
 
-/**
- * Resolve a config value (API key, header value, etc.) to an actual value.
- * - If starts with "!", executes the rest as a shell command and uses stdout (cached)
- * - Otherwise checks environment variable first, then treats as literal (not cached)
- */
-export async function resolveConfigValue(config: string): Promise<string | undefined> {
-	if (config.startsWith("!")) {
-		return await executeCommand(config);
-	}
-	const envValue = $envExact(config);
-	return envValue || config;
+/** Materialize request headers for models and discovery without property-access side effects. */
+export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
+/** One raw header layer or previously composed request-time resolver. */
+export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
+
+/** Optional bearer-header derivation applied after explicitly configured header layers. */
+export interface ConfigHeaderResolutionOptions {
+	authHeader?: boolean;
+	apiKeyConfig?: string;
 }
 
-async function executeCommand(commandConfig: string): Promise<string | undefined> {
-	const cached = commandResultCache.get(commandConfig);
-	if (cached !== undefined) {
-		return cached;
-	}
+/** Identify command-backed values when collecting credentials that must be invalidated together. */
+export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
+	return valueConfig?.startsWith("!") === true;
+}
 
-	const existing = commandInFlight.get(commandConfig);
-	if (existing) {
-		return await existing;
-	}
+function commandKey(valueConfig: string): string {
+	return valueConfig.slice(1).trim();
+}
 
-	const command = commandConfig.slice(1);
-	const promise = runShellCommand(command, 10_000)
+/** Invalidate one command-backed value, including its failure backoff and pending cache generation. */
+export function invalidateCommandConfig(valueConfig: string | undefined): void {
+	if (!isCommandConfigValue(valueConfig)) return;
+	const command = commandKey(valueConfig);
+	commandResultCache.delete(command);
+	commandFailureRetryAt.delete(command);
+	commandInFlight.delete(command);
+	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
+}
+
+/** Invalidate every command-backed value without cancelling shared in-flight processes. */
+export function invalidateAllCommandConfigs(): void {
+	for (const command of new Set([
+		...commandResultCache.keys(),
+		...commandFailureRetryAt.keys(),
+		...commandInFlight.keys(),
+	])) {
+		commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
+	}
+	commandResultCache.clear();
+	commandFailureRetryAt.clear();
+	commandInFlight.clear();
+}
+
+async function executeCommand(valueConfig: string): Promise<string | undefined> {
+	const command = commandKey(valueConfig);
+
+	const cached = commandResultCache.get(command);
+	if (cached !== undefined) return cached;
+	const retryAt = commandFailureRetryAt.get(command);
+	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
+
+	const existing = commandInFlight.get(command);
+	if (existing) return await existing;
+
+	const generation = commandGeneration.get(command) ?? 0;
+	const promise: Promise<string | undefined> = (async () => {
+		const cwd = getProjectDir();
+		if (!(await directoryIsEnterable(cwd))) return undefined;
+		return await runShellCommand(command, 10_000, cwd);
+	})()
 		.then(result => {
-			if (result !== undefined) {
-				commandResultCache.set(commandConfig, result);
+			if ((commandGeneration.get(command) ?? 0) !== generation) return result;
+			if (result === undefined) {
+				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			} else {
+				commandFailureRetryAt.delete(command);
+				commandResultCache.set(command, result);
 			}
 			return result;
 		})
+		.catch(error => {
+			const code =
+				typeof (error as NodeJS.ErrnoException | null)?.code === "string"
+					? (error as NodeJS.ErrnoException).code
+					: "unknown";
+			logger.warn("config: !command value resolution failed", { code });
+			if ((commandGeneration.get(command) ?? 0) === generation) {
+				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			}
+			return undefined;
+		})
 		.finally(() => {
-			commandInFlight.delete(commandConfig);
+			if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
 		});
 
-	commandInFlight.set(commandConfig, promise);
+	commandInFlight.set(command, promise);
 	return await promise;
 }
 
 /**
- * Run one `!command` config-value resolution and capture stdout.
- *
- * Exported for testing (timeout and tree-kill semantics).
- *
- * On POSIX, ptree spawns through Bun with piped-only stdio, so descriptors
- * this process holds open — e.g. a credential a launcher passed us on a
- * private fd — cannot cross into the command, matching the models.yml apiKey
- * resolver's isolation (model-config-values.ts). On timeout it hard-kills the
- * whole descendant tree and only reports once that kill has completed, so a
- * credential helper that forked background work cannot outlive its budget;
- * stderr is drained to a truncated tail rather than mixed into the captured
- * value.
- *
- * Windows keeps the original natives Brush shell: existing `!command` values
- * depend on its POSIX-style grammar, and piped-only stdio changes nothing
- * there — child handle inheritance is governed by the CreateProcess
- * inheritable-handle set, not by which stdio streams are wired, so the
- * measured POSIX fd-inheritance leak has no Windows equivalent this switch
- * would close.
+ * Resolve a configuration value. Command values execute asynchronously and
+ * successful stdout is cached; environment-backed and literal values stay live.
  */
-export async function runShellCommand(command: string, timeoutMs: number): Promise<string | undefined> {
-	if (process.platform === "win32") {
-		try {
+export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
+	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
+	const envValue = $envExact(valueConfig);
+	return envValue || valueConfig;
+}
+
+/**
+ * Run one command-backed value with isolated stdio and a bounded process tree.
+ * POSIX uses an absolute shell, a detached process group, and Linux subreaper
+ * supervision so descendants cannot survive timeout. Windows retains Brush's
+ * established shell grammar and native process-tree cancellation.
+ */
+export async function runShellCommand(
+	command: string,
+	timeoutMs: number,
+	cwd: string = getProjectDir(),
+): Promise<string | undefined> {
+	try {
+		if (process.platform === "win32") {
 			let output = "";
-			const result = await executeShell({ command, timeoutMs }, (err, chunk) => {
-				if (!err) {
-					output += chunk;
-				}
+			const result = await executeShell({ command, cwd, timeoutMs }, (err, chunk) => {
+				if (!err) output += chunk;
 			});
-			if (result.timedOut || result.exitCode !== 0) {
-				return undefined;
-			}
+			if (result.timedOut || result.exitCode !== 0) return undefined;
 			const trimmed = output.trim();
 			return trimmed.length > 0 ? trimmed : undefined;
-		} catch {
-			return undefined;
 		}
-	}
-	try {
-		// Absolute OS shell, not a PATH-resolved name: a launcher may hand omp a
-		// minimal tool-only PATH (same shape as execSync's default shell).
+
 		const result = await ptree.exec(["/bin/sh", "-c", command], {
+			cwd,
 			timeout: timeoutMs,
 			allowNonZero: true,
 			allowAbort: true,
-			// POSIX process-group isolation keeps double-forked/reparented
-			// descendants reachable after they leave the shell's PID tree.
 			detached: true,
-			// Linux child-subreaper supervision retains workers that create a new
-			// session and outlive the intermediate process that launched them.
 			subreaper: process.platform === "linux",
 		});
-		// An aborted result can still carry a real exit code (the command may
-		// exit zero in the window between the timeout firing and the kill landing)
-		// — timed-out output is never a resolved credential.
 		if (!result.ok || result.exitError?.aborted) return undefined;
 		const trimmed = result.stdout.trim();
 		return trimmed.length > 0 ? trimmed : undefined;
@@ -117,25 +145,65 @@ export async function runShellCommand(command: string, timeoutMs: number): Promi
 	}
 }
 
-/**
- * Resolve all header values using the same resolution logic as API keys.
- */
-export async function resolveHeaders(
+/** Resolve one raw header record, preserving declaration order and omitting empty values. */
+export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
+	signal?: AbortSignal,
 ): Promise<Record<string, string> | undefined> {
+	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
-	for (const [key, value] of Object.entries(headers)) {
-		const resolvedValue = await resolveConfigValue(value);
-		if (resolvedValue) {
-			resolved[key] = resolvedValue;
-		}
+	let hasResolved = false;
+	for (const key in headers) {
+		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		if (!next) continue;
+		resolved[key] = next;
+		hasResolved = true;
 	}
-	return Object.keys(resolved).length > 0 ? resolved : undefined;
+	return hasResolved ? resolved : undefined;
 }
 
-/** Clear the config value command cache. Exported for testing. */
+/**
+ * Compose raw config headers and already-composed async header resolvers.
+ * Later sources win. The returned resolver materializes a plain record at the
+ * request boundary; no property access executes commands.
+ */
+export function createConfigHeaderResolver(
+	sources: readonly ConfigHeaderSource[],
+	options?: ConfigHeaderResolutionOptions,
+): ConfigHeaderResolver | undefined {
+	const active = sources.filter((source): source is Exclude<ConfigHeaderSource, undefined> => source !== undefined);
+	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	return async signal => {
+		signal?.throwIfAborted();
+		const resolved: Record<string, string> = {};
+		let hasResolved = false;
+		for (const source of active) {
+			const next =
+				typeof source === "function"
+					? await untilAborted(signal, () => source(signal))
+					: await resolveConfigHeaders(source, signal);
+			signal?.throwIfAborted();
+			if (!next) continue;
+			for (const key in next) {
+				resolved[key] = next[key];
+				hasResolved = true;
+			}
+		}
+		if (options?.authHeader && options.apiKeyConfig) {
+			const keyConfig = options.apiKeyConfig;
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			if (apiKey) {
+				resolved.Authorization = `Bearer ${apiKey}`;
+				hasResolved = true;
+			}
+		}
+		return hasResolved ? resolved : undefined;
+	};
+}
+
+/** Clear all command state. Exported for focused resolver tests. */
 export function clearConfigValueCache(): void {
-	commandResultCache.clear();
+	invalidateAllCommandConfigs();
 	commandInFlight.clear();
 }

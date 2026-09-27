@@ -127,14 +127,18 @@ Behavior:
 4. When the in-memory tail buffer would exceed spill threshold (`DEFAULT_MAX_BYTES`, 50KB), sink marks output truncated and starts artifact mirroring if an artifact path is available.
 5. If a file sink is opened, it first writes the current buffer, then all queued/subsequent sanitized chunks.
 6. In-memory buffer is trimmed to a tail window, or to head + elision marker + tail when head retention is configured.
-7. `dump()` returns summary including `artifactId` only when file sink creation succeeded.
+7. `dump()` finalizes the capture and returns `artifactId` only when no artifact I/O failure was observed. `artifactError` records the first failed operation (`open`, `write`, `flush`, or `end`) without persisting raw filesystem error text.
 
 Practical effect:
 
 - UI/tool return shows bounded output,
 - full sanitized output is preserved in artifact file and referenced as `artifact://<id>` when file-backed artifact mirroring succeeded.
 
-If file sink creation fails (I/O error, missing path, etc.), sink falls back to in-memory truncation only; full output is not persisted.
+If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. The streaming sink does not enable a disk cap or retry failed capture.
+
+The capture warning also survives background job delivery, `wait` recovery, non-consuming `read proc://<id>` inspection, cancellation, and transcript rebuilds. Capture failures belong to individual jobs, not the aggregate report. Oversized recovery snapshots can persist the complete annotated report, including healthy jobs' results, and advertise it as a "full report" rather than a full original command log. Each source capture warning appears once in model-facing text and once on its own live or rebuilt terminal row. Individual incomplete captures are still not re-spilled and advertised as full original output.
+
+Transcript rebuilds also read capture errors from historical per-job fields. A historical aggregate warning is retained when no job identifies its source; it is not repeated when a row already carries the same failure.
 
 ## URL access model
 
@@ -153,7 +157,7 @@ Handled by `ArtifactProtocolHandler` over registered active session artifact dir
 - when missing, reports available numeric artifact IDs
 - refuses to materialize a full artifact larger than 8 MiB; use bounded `read` selectors or the reported backing path for search/copy workflows
 
-Path-only consumers can resolve the backing file at any size without loading its bytes.
+`locate` returns the backing file path at any size without loading its bytes; `read`, search, and the bash URL filesystem go through it.
 
 Failure behavior:
 
@@ -165,12 +169,9 @@ Failure behavior:
 
 Handled by `AgentProtocolHandler` over registered active session artifact directories and `<artifactsDir>/<id>.md`:
 
-- `agent://<id>` returns markdown text
-- `agent://Parent/Child` first tries the nested output `Parent.Child.md`
-- only when no nested output matches does a slash path fall back to JSON extraction from the base output
-- `?q=` always performs JSON extraction
-- path and query extraction cannot be combined
-- extraction requires valid JSON and returns `application/json`
+- `agent://<id>` returns markdown text; nested subagent outputs use the dotted id (`agent://Parent.Child` reads `Parent.Child.md`)
+- a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
+- extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
 
 Failure behavior:
 
@@ -213,6 +214,8 @@ Blob implications after fork:
 
 `SessionManager.moveTo()` renames both session file and artifact directory to the new default session directory, with rollback logic if a later step fails. This preserves artifact identity while relocating session scope.
 
+When the destination artifact directory already exists — a session returning to a project it lived in before, whose old artifact path a subagent or eval subprocess kept writing to — the two directories are merged instead: entries move across, directories present on both sides merge recursively, and an entry whose name is already taken at the destination stays at the source (artifact IDs resolve by `<id>.` prefix, so neither copy is overwritten or renamed). A merged move is not rolled back by renaming the directory back; only the session-file rename is.
+
 ## Failure handling and fallback paths
 
 | Case                                                      | Behavior                                                                               |
@@ -225,9 +228,10 @@ Blob implications after fork:
 | No registered artifact dirs (`agent://`)                  | Throws `No session - agent outputs unavailable`                                        |
 | Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                                         |
 | Artifact ID not found                                     | Throws with available IDs listing                                                      |
-| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; bounded selectors/path-only workflows remain available |
+| Full `artifact://` resolution exceeds 8 MiB               | Rejects inline materialization; `locate`-based reads and search remain available       |
 | OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                                           |
 | Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data                   |
+| Artifact directory already exists at the move destination | Directories merged; an entry whose name or artifact id is taken stays at the source and is logged (warn) |
 
 ## Binary blob externalization vs text-output artifacts
 

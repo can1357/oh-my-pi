@@ -1,3 +1,11 @@
+import {
+	type VibeSessionState,
+	type VibeScreenSnapshot,
+	type VibeSpawnOutcome,
+	type VibeSendOutcome,
+	type VibeKillOutcome,
+	type VibeWaitOutcome,
+} from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe mode worker-session runtime.
  *
@@ -19,7 +27,7 @@ import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
 import { resolveAgentModelSelection } from "../config/model-resolver";
-import type { LocalProtocolOptions } from "../internal-urls";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
@@ -30,22 +38,25 @@ import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
-import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
+import { type AgentDefinition } from "../task/types";
+import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
-import { formatDuration } from "../tools/render-utils";
-import { ToolError } from "../tools/tool-errors";
+import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
 	parseLifecycleEvent,
 	VIBE_LIFECYCLE_CUSTOM_TYPE,
 	VIBE_LIFECYCLE_VERSION,
-	type VibeCli,
 	type VibeLifecycleBase,
 	type VibeLifecycleEvent,
 	type VibeSpawnLifecycleEvent,
 	type VibeTombstoneReason,
 } from "./lifecycle";
+import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+
+import { cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -57,9 +68,6 @@ export const VIBE_CLI_AGENT: Record<VibeCli, string> = {
 	fast: "sonic",
 	good: "task",
 };
-
-/** Worker session lifecycle as shown to the director. */
-export type VibeSessionState = "starting" | "running" | "idle" | "dead";
 
 /** One completed tool call in the per-turn activity trace. */
 interface VibeTraceEntry {
@@ -161,64 +169,6 @@ interface VibeRecord {
 	suspended: boolean;
 	/** True only after a terminal lifecycle event has durably flushed. */
 	terminalPersisted: boolean;
-}
-
-/**
- * Live per-session "screen" for rich rendering: what the worker is doing right
- * now (tool trace, current tool, streamed text tail) plus roster metadata.
- * Every string is already one-line sanitized.
- */
-export interface VibeScreenSnapshot {
-	id: string;
-	cli: VibeCli;
-	state: VibeSessionState;
-	model?: string;
-	turns: number;
-	queued: number;
-	/** Start of the in-flight turn, when running. */
-	turnStartedAt?: number;
-	/** Gist of the message that started the in-flight turn. */
-	turnMessage?: string;
-	currentTool?: string;
-	currentToolArgs?: string;
-	lastIntent?: string;
-	/** Completed tool calls of the in-flight turn, oldest first (tail). */
-	trace: string[];
-	/** Latest streamed worker text lines, oldest first. */
-	outputTail: string[];
-	lastActivity?: string;
-	lastActivityAt: number;
-}
-
-export interface VibeSpawnOutcome {
-	id: string;
-	jobId: string;
-}
-
-export interface VibeSendOutcome {
-	id: string;
-	/**
-	 * - `turn`: a new background turn was started (`jobId` set).
-	 * - `steered`: worker was mid-turn and streaming; delivered as steering.
-	 * - `queued`: worker was mid-turn but not steerable; drained into the next turn.
-	 */
-	mode: "turn" | "steered" | "queued";
-	jobId?: string;
-}
-
-export interface VibeKillOutcome {
-	id: string;
-	/** True when an in-flight turn job was cancelled along the way. */
-	cancelledTurn: boolean;
-}
-
-export interface VibeWaitOutcome {
-	/** Watched sessions whose snapshotted turn settled during (or before) the wait.
-	 * May overlap `stillRunning` when a queued follow-up turn already started. */
-	settled: Array<{ id: string; jobId: string; status: "completed" | "failed" | "cancelled"; resultText: string }>;
-	/** Watched sessions with a turn in flight when the wait returned. */
-	stillRunning: string[];
-	timedOut: boolean;
 }
 
 type VibeTeardownStatus = "pending" | "settled" | "failed";
@@ -397,7 +347,7 @@ export class VibeSessionRegistry {
 		if (!agent) {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
-		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
+		const agentModelOverrides = cfgTaskAgentModelOverrides.get(session.settings);
 		// Same contract as the task spawn path: the expansion discards the role
 		// alias (`@task`, `@smol`), so patterns and role identity come from one
 		// call — the child's inherited retry-fallback chain is keyed off the role.
@@ -948,7 +898,7 @@ export class VibeSessionRegistry {
 		if (record.turn) {
 			const live = registered?.session;
 			if (live?.isStreaming) {
-				await live.steer(message);
+				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
 			}
@@ -1050,7 +1000,7 @@ export class VibeSessionRegistry {
 		}
 
 		const settled = collectSettled();
-		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		manager.consumeJobResults(settled.map(entry => entry.jobId));
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
@@ -1320,10 +1270,7 @@ export class VibeSessionRegistry {
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
-		const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
-			getArtifactsDir: session.getArtifactsDir ?? (() => null),
-			getSessionId: session.getSessionId ?? (() => null),
-		};
+		const localProtocolOptions = sessionLocalProtocolOptions(session);
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
@@ -1341,7 +1288,7 @@ export class VibeSessionRegistry {
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
-			enableLsp: (session.enableLsp ?? true) && session.settings.get("task.enableLsp"),
+			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),
 			signal,
 			eventBus: session.eventBus,
 			subagentEventBus: session.subagentEventBus,

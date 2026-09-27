@@ -1,12 +1,13 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelPickerComponent, type ModelPickerOptions } from "@oh-my-pi/pi-coding-agent/modes/components/model-picker";
-import { resolveSegmentPalette } from "@oh-my-pi/pi-coding-agent/modes/components/segment-track";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ModelPickerComponent, type ModelPickerOptions } from "@oh-my-pi/pi-tui/overlays/model-picker";
+import { resolveSegmentPalette } from "@oh-my-pi/pi-tui/chrome/segment-track";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -14,11 +15,12 @@ function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000): Model {
+function makeModel(provider: string, id: string, contextWindow = 128_000, kind?: Model["kind"]): Model {
 	return buildModel({
 		id,
 		name: id,
-		api: "ollama-chat",
+		api: kind === "image" ? "openai-images" : "ollama-chat",
+		...(kind ? { kind } : {}),
 		provider,
 		baseUrl: "https://example.com",
 		reasoning: false,
@@ -71,7 +73,7 @@ function createPicker(options: {
 	const onCancel = vi.fn();
 	const picker = new ModelPickerComponent(
 		ui,
-		settings,
+		createModelBrowserSource(settings),
 		registry,
 		options.scoped ? modelsFn().map(model => ({ model })) : [],
 		{ onPick, onPickRole, onCancel },
@@ -89,6 +91,17 @@ describe("ModelPicker", () => {
 		if (!testTheme) {
 			throw new Error("Failed to load dark theme for ModelPicker tests");
 		}
+	});
+
+	test("shows kind-role metadata only on accepted model kinds", () => {
+		const chat = makeModel("test", "chat-model");
+		const image = makeModel("test", "image-model", 128_000, "image");
+		const settings = Settings.isolated({ modelRoles: { image: "test/image-model" } });
+		const { picker } = createPicker({ models: [chat, image], scoped: true, settings });
+
+		picker.handleInput("image");
+
+		expect(normalize(picker.render(220))).toContain("● image");
 	});
 
 	test("flags over-context models but keeps them selectable, reporting overContext on pick", () => {
@@ -180,6 +193,34 @@ describe("ModelPicker", () => {
 		// Enter without navigation picks the preselected current model.
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]?.id).toBe("bb-model");
+	});
+
+	test("search jumps to the first result when choices through the current model change", () => {
+		const models = [makeModel("test", "aa-unrelated"), makeModel("test", "bb-match"), makeModel("test", "cc-match")];
+		const { picker, onPick } = createPicker({
+			models,
+			scoped: true,
+			picker: { currentSelector: "test/cc-match" },
+		});
+
+		picker.handleInput("match");
+		picker.handleInput("\n");
+
+		expect(onPick.mock.calls[0]?.[0]?.id).toBe("bb-match");
+	});
+
+	test("search keeps the selection when every choice through it stays unchanged", () => {
+		const models = [makeModel("test", "aa-shared"), makeModel("test", "bb-shared"), makeModel("test", "cc-shared")];
+		const { picker, onPick } = createPicker({
+			models,
+			scoped: true,
+			picker: { currentSelector: "test/cc-shared" },
+		});
+
+		picker.handleInput("shared");
+		picker.handleInput("\n");
+
+		expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-shared");
 	});
 
 	test("shows and applies ctrl+p quick roles when search starts with @", () => {

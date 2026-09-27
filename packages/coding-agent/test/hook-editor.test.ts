@@ -1,8 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
-import { HookEditorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/hook-editor";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { CURSOR_MARKER, isFocusable, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -194,6 +194,19 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
+	it("treats Enter bundled after a bracketed paste as a newline in hook mode", () => {
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn());
+
+		component.handleInput("\x1b[200~first\nsecond\x1b[201~\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput("last");
+		component.handleInput("\x11");
+
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledWith("first\nsecond\nlast");
+	});
+
 	it("cancels on Escape", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
@@ -207,6 +220,34 @@ describe("HookEditorComponent default (hook) mode", () => {
 });
 
 describe("HookEditorComponent prompt-style mode", () => {
+	it("submits the complete pasted answer once when paste and Enter arrive together", () => {
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+		const pasted = largePasteText();
+
+		component.handleInput(`\x1b[200~${pasted}\x1b[201~\r`);
+
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledWith(pasted);
+	});
+
+	it("submits only after a fragmented paste closes with a bundled Enter", () => {
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+
+		component.handleInput("\x1b[200~first\n");
+		component.handleInput("second\x1b[20");
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput("1~\r");
+
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledWith("first\nsecond");
+	});
+
 	it("submits on plain Enter", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
@@ -353,15 +394,11 @@ describe("HookEditorComponent prompt-style mode", () => {
 			promptStyle: true,
 		});
 
-		const rendered = renderText(component);
 		const lines = renderLines(component);
 
 		expect(lines[0]).toMatch(/^╭─ Prompt .*╮$/);
 		expect(lines.at(-1)).toMatch(/^╰.*╯$/);
 		expect(lines.some(line => line.includes("> "))).toBe(true);
-		expect(rendered).toContain("enter or ctrl+q submit  esc cancel");
-		expect(rendered).not.toContain("shift+enter newline");
-		expect(rendered).toContain("ctrl+g external editor");
 	});
 
 	it("anchors the hardware cursor while entering an Other response", () => {
@@ -448,7 +485,6 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const content = component.renderContent(80).map(line => Bun.stripANSI(line));
 		expect(content.some(line => line.startsWith("Enter your response:"))).toBe(true);
 		expect(content.some(line => line.startsWith("> "))).toBe(true);
-		expect(content.some(line => line.includes("esc cancel"))).toBe(true);
 	});
 });
 

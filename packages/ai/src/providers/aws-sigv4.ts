@@ -137,18 +137,29 @@ function encodeRfc3986(str: string): string {
 	return encodeURIComponent(str).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function canonicalQuery(query: string | undefined): string {
+/**
+ * AWS's canonical-request spec encodes each name/value first, THEN sorts by
+ * the encoded form ("Sort the encoded parameter names by character code" —
+ * https://docs.aws.amazon.com/IAM/latest/UserGuide/create-canonical-request.html).
+ * Sorting the decoded form instead gives the wrong order whenever encoding
+ * changes a character's relative position — e.g. raw key `%7B` (decodes to
+ * `{`, 0x7B) vs `x` (0x78): decoded, `x` < `{`; encoded, `%` (0x25) < `x`, so
+ * `%7B` sorts first. A gateway that validates SigV4 (or AWS itself) computes
+ * the signature over ITS OWN canonicalization and rejects ours if the two
+ * disagree on order.
+ */
+export function canonicalQuery(query: string | undefined): string {
 	if (!query) return "";
 	const pairs: Array<[string, string]> = [];
 	for (const part of query.split("&")) {
 		if (!part) continue;
 		const eq = part.indexOf("=");
-		const k = eq === -1 ? part : part.slice(0, eq);
-		const v = eq === -1 ? "" : part.slice(eq + 1);
-		pairs.push([decodeURIComponent(k), decodeURIComponent(v)]);
+		const rawKey = eq === -1 ? part : part.slice(0, eq);
+		const rawValue = eq === -1 ? "" : part.slice(eq + 1);
+		pairs.push([encodeRfc3986(decodeURIComponent(rawKey)), encodeRfc3986(decodeURIComponent(rawValue))]);
 	}
 	pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-	return pairs.map(([k, v]) => `${encodeRfc3986(k)}=${encodeRfc3986(v)}`).join("&");
+	return pairs.map(([k, v]) => `${k}=${v}`).join("&");
 }
 
 export interface SignedHeaders {

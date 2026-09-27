@@ -1,0 +1,9 @@
+auth "zhipu-coding-plan" {
+	name "Zhipu Coding Plan (智谱)"
+	login "api-key" {
+		auth-url "https://bigmodel.cn/coding-plan/personal/overview"
+		instructions "Copy your API key from the Coding Plan dashboard"
+		prompt "Paste your Zhipu API key" placeholder="<id>.<secret>"
+		validate "chat-completions" label="Zhipu" base-url="https://open.bigmodel.cn/api/coding/paas/v4" model="glm-5.1"
+	}
+}

@@ -1,6 +1,12 @@
 // Provider-wire compat for "vercel-ai-gateway"; regenerated from the frozen census using deployment contract selectors.
 
 provider "vercel-ai-gateway" {
+	default-model "anthropic/claude-opus-5"
+	env "AI_GATEWAY_API_KEY"
+	discovery label="Vercel AI Gateway" allow-unauthenticated=#true {
+		env "VERCEL_AI_GATEWAY_API_KEY"
+	}
+
 	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
 	// ladder is the generic five-tier scale.
 	models "deepseek/*" {

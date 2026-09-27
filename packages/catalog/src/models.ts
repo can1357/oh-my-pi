@@ -1,6 +1,15 @@
 import { classifyModel } from "./compat/taxonomy";
 import MODELS from "./models.json" with { type: "json" };
-import type { Api, KnownProvider, Model, ModelCost, TokenCost, Usage } from "./types";
+import type {
+	Api,
+	EffectiveTokenCost,
+	KnownProvider,
+	Model,
+	ModelCost,
+	TimeBasedCost,
+	TokenCost,
+	Usage,
+} from "./types";
 
 /**
  * Static bundled model registry loaded from `models.json`.
@@ -48,38 +57,103 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
-function resolveTokenCost(cost: ModelCost, promptInputTokens: number): TokenCost {
-	const longContext = cost.longContext;
-	if (!longContext) return cost;
+function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
+	let rates: ModelCost | EffectiveTokenCost = cost;
+	let effectiveFrom = -Infinity;
+	if (timestamp !== undefined && cost.timeBased?.effectiveRates) {
+		for (const candidate of cost.timeBased.effectiveRates) {
+			if (candidate.effectiveFrom <= timestamp && candidate.effectiveFrom > effectiveFrom) {
+				rates = candidate;
+				effectiveFrom = candidate.effectiveFrom;
+			}
+		}
+	}
+	const longContext = rates.longContext;
+	if (!longContext) return rates;
 	const reachesThreshold =
 		promptInputTokens > longContext.inputThreshold ||
 		(longContext.inputThresholdInclusive === true && promptInputTokens === longContext.inputThreshold);
-	return reachesThreshold ? longContext : cost;
+	return reachesThreshold ? longContext : rates;
 }
 
-/** Price a prompt as fully uncached input under its active context-length tier. */
-export function calculateUncachedInputCost(cost: ModelCost, promptInputTokens: number): number {
-	const rates = resolveTokenCost(cost, promptInputTokens);
-	return (rates.input / 1_000_000) * promptInputTokens;
+function isPeakPricingPeriod(schedule: TimeBasedCost, timestamp: number): boolean {
+	// Unix epoch was Thursday. Arithmetic keeps this UTC-only without allocating a Date.
+	const day = Math.floor(timestamp / 86_400_000);
+	const weekday = (((day + 4) % 7) + 7) % 7;
+	const minute = Math.floor((timestamp - day * 86_400_000) / 60_000);
+	for (const window of schedule.peakWindows) {
+		if (minute >= window.startMinute && minute < window.endMinute && window.weekdays.includes(weekday)) return true;
+	}
+	return false;
 }
 
-/** Price one usage record from a token rate card, including active context tiers. */
-export function calculateUsageCost(cost: ModelCost, usage: Usage): Usage["cost"] {
+function timeBasedMultiplier(schedule: TimeBasedCost | undefined, timestamp: number | undefined): number {
+	if (!schedule || timestamp === undefined) return 1;
+	return isPeakPricingPeriod(schedule, timestamp) ? 1 : schedule.offPeakMultiplier;
+}
+
+/** Return the recurring UTC tariff period, independently of its monetary multiplier. */
+export function getTimeBasedPricingPeriod(cost: ModelCost, timestamp?: number): "peak" | "off-peak" | undefined {
+	const schedule = cost.timeBased;
+	if (!schedule) return undefined;
+	return isPeakPricingPeriod(schedule, timestamp ?? Date.now()) ? "peak" : "off-peak";
+}
+
+/** Return the next actual peak/off-peak change strictly after the Unix-ms timestamp. */
+export function getNextTimeBasedPricingTransition(cost: ModelCost, timestamp?: number): number | undefined {
+	const schedule = cost.timeBased;
+	if (!schedule) return undefined;
+	const now = timestamp ?? Date.now();
+	const firstDay = Math.floor(now / 86_400_000);
+	const horizon = now + 7 * 86_400_000;
+	let next = Infinity;
+	// All changes occur at window edges; one UTC week covers the entire recurrence.
+	for (let offset = 0; offset <= 7; offset++) {
+		const day = firstDay + offset;
+		const weekday = (((day + 4) % 7) + 7) % 7;
+		for (const window of schedule.peakWindows) {
+			if (!window.weekdays.includes(weekday)) continue;
+			for (let edge = 0; edge < 2; edge++) {
+				const minute = edge === 0 ? window.startMinute : window.endMinute;
+				const candidate = day * 86_400_000 + minute * 60_000;
+				if (candidate <= now || candidate > horizon || candidate >= next) continue;
+				// Overlapping/touching windows can hide an edge, including at midnight.
+				if (isPeakPricingPeriod(schedule, candidate - 1) !== isPeakPricingPeriod(schedule, candidate)) {
+					next = candidate;
+				}
+			}
+		}
+	}
+	return next === Infinity ? undefined : next;
+}
+
+/** Price a fully uncached prompt at its request timestamp (Unix ms); scheduled prices default to now. */
+export function calculateUncachedInputCost(cost: ModelCost, promptInputTokens: number, timestamp?: number): number {
+	const pricingTimestamp = cost.timeBased ? (timestamp ?? Date.now()) : undefined;
+	const rates = resolveTokenCost(cost, promptInputTokens, pricingTimestamp);
+	return (rates.input / 1_000_000) * promptInputTokens * timeBasedMultiplier(cost.timeBased, pricingTimestamp);
+}
+
+/** Price usage at its request timestamp (Unix ms); only scheduled prices default to now. */
+export function calculateUsageCost(cost: ModelCost, usage: Usage, timestamp?: number): Usage["cost"] {
 	const orchestration = usage.orchestration;
 	const promptInputTokens =
 		usage.input + usage.cacheRead + usage.cacheWrite + (orchestration?.input ?? 0) + (orchestration?.cacheRead ?? 0);
-	const rates = resolveTokenCost(cost, promptInputTokens);
-	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
-	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
-	usage.cost.cacheRead = (rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
-	usage.cost.cacheWrite = cacheWriteCost(rates, usage);
+	const pricingTimestamp = cost.timeBased ? (timestamp ?? Date.now()) : undefined;
+	const rates = resolveTokenCost(cost, promptInputTokens, pricingTimestamp);
+	const multiplier = timeBasedMultiplier(cost.timeBased, pricingTimestamp);
+	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * multiplier;
+	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * multiplier;
+	usage.cost.cacheRead =
+		(rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
+	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
 }
 
-/** Price one usage record from its model's token rate card. */
-export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
-	return calculateUsageCost(model.cost, usage);
+/** Price usage at its request timestamp (Unix ms); preserve the resulting monetary amounts for display. */
+export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage, timestamp?: number): Usage["cost"] {
+	return calculateUsageCost(model.cost, usage, timestamp);
 }
 
 /**

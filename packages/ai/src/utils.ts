@@ -7,6 +7,24 @@ type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
 
 export { isRecord } from "@oh-my-pi/pi-utils";
+/**
+ * Read a header value ignoring key casing. HTTP header names are
+ * case-insensitive, but `Record<string, string>` header bags are not, so a
+ * config-authored `User-Agent` and a caller-authored `user-agent` are the same
+ * header to every provider that lowercases before merging.
+ */
+export function getHeaderCaseInsensitive(
+	headers: Record<string, string> | undefined,
+	headerName: string,
+): string | undefined {
+	if (!headers) return undefined;
+	const normalizedName = headerName.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === normalizedName) return value;
+	}
+	return undefined;
+}
+
 export function normalizeSystemPrompts(systemPrompt: readonly string[] | string | undefined | null): string[] {
 	if (systemPrompt === undefined || systemPrompt === null) return [];
 	const prompts = Array.isArray(systemPrompt) ? systemPrompt : typeof systemPrompt === "string" ? [systemPrompt] : [];
@@ -22,24 +40,19 @@ export function normalizeToolCallId(id: string): string {
 
 type ResponsesToolItemIdPrefix = "fc" | "ctc";
 
+/** Preserve opaque call IDs for Responses replay while normalizing or generating the separate item ID. */
 export function normalizeResponsesToolCallId(
 	id: string,
 	itemPrefix: ResponsesToolItemIdPrefix = "fc",
 ): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
-		const normalizedCallId = truncateResponseItemId(callId, getIdPrefix(callId, "call"));
-		const normalizedItemId = normalizeResponsesItemId(itemId, itemPrefix);
-		return { callId: normalizedCallId, itemId: normalizedItemId };
+	const sep = id.search(/[\n|]/);
+	if (sep > 0) {
+		const callId = id.slice(0, sep);
+		const itemId = id.slice(sep + 1);
+		return { callId, itemId: normalizeResponsesItemId(itemId, itemPrefix) };
 	}
 	const hash = Bun.hash(id).toString(36);
-	const normalizedCallId = id.startsWith("call_") ? truncateResponseItemId(id, "call") : `call_${hash}`;
-	return { callId: normalizedCallId, itemId: `${itemPrefix}_${hash}` };
-}
-
-function getIdPrefix(id: string, fallback: string): string {
-	const prefix = id.match(/^([a-zA-Z][a-zA-Z0-9]*)_/)?.[1];
-	return prefix || fallback;
+	return { callId: id, itemId: `${itemPrefix}_${hash}` };
 }
 
 function getExplicitIdPrefix(id: string): string | undefined {
@@ -206,7 +219,6 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
-	const normalizedCallIds = new Map<string, string>();
 	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
@@ -216,7 +228,6 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 		const preserveForComputer = computerLinkedReasoningItems?.has(item) === true;
 		const sanitizedItem = sanitizeOpenAIResponsesHistoryItemForReplay(
 			item,
-			normalizedCallIds,
 			supportsImageDetailOriginal,
 			preserveForComputer,
 		);
@@ -315,6 +326,15 @@ export function stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(items:
  * Returns `undefined` for hidden-empty turns that only contain reasoning and an
  * empty assistant message, allowing callers to rebuild visible transcript
  * history instead of replaying stale native state.
+ *
+ * When the turn does carry replayable output, whitespace-only assistant
+ * messages are dropped rather than replayed. gpt-5.6 Codex ends a turn whose
+ * text all landed in the `commentary` phase with an empty `final_answer`
+ * message; replaying that item verbatim seeds the next turn with an empty slot
+ * the model then fills - `""` → `"\n\n"` → stray words → non-Latin residue -
+ * and each contaminated item is replayed in turn, so the drift compounds until
+ * the visible answer collapses. Codex CLI replays the empty item too
+ * (openai/codex#32389); this is the layer where omp can refuse to.
  */
 export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
@@ -322,34 +342,68 @@ export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 ): ResponseInput | undefined {
 	const sanitized = sanitizeOpenAIResponsesHistoryItemsForReplay(items, options);
 	let hasReplayableAssistantOutput = false;
+	let hasEmptyAssistantMessage = false;
 
 	for (const item of sanitized) {
 		if (item.type === "reasoning") continue;
-		if (item.type !== "message" || item.role !== "assistant") {
-			hasReplayableAssistantOutput = true;
-			break;
-		}
-		if (typeof item.content === "string") {
-			if (NON_WHITESPACE_RE.test(item.content)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
+		if (isEmptyAssistantMessage(item)) {
+			hasEmptyAssistantMessage = true;
 			continue;
 		}
-		for (const part of item.content) {
-			if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-			if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) {
-				hasReplayableAssistantOutput = true;
-				break;
-			}
-		}
-		if (hasReplayableAssistantOutput) break;
+		hasReplayableAssistantOutput = true;
 	}
 
-	return hasReplayableAssistantOutput ? sanitized : undefined;
+	if (!hasReplayableAssistantOutput) return undefined;
+	if (!hasEmptyAssistantMessage) return sanitized;
+	return dropEmptyAssistantMessagesForReplay(sanitized);
+}
+
+function isEmptyAssistantMessage(item: OpenAIResponsesReplayItem): boolean {
+	if (item.type !== "message" || item.role !== "assistant") return false;
+	if (typeof item.content === "string") return !NON_WHITESPACE_RE.test(item.content);
+	for (const part of item.content) {
+		if (part.type === "output_text" && NON_WHITESPACE_RE.test(part.text)) return false;
+		if (part.type === "refusal" && NON_WHITESPACE_RE.test(part.refusal)) return false;
+	}
+	return true;
+}
+
+/**
+ * Remove whitespace-only assistant messages plus any reasoning item left with
+ * no output to introduce: a reasoning item is only meaningful ahead of the
+ * output it produced, and a dangling one is rejected by the Responses API when
+ * it carries an id.
+ */
+function dropEmptyAssistantMessagesForReplay(items: ResponseInput): ResponseInput {
+	const kept: ResponseInput = [];
+	let pendingReasoning: ResponseInput = [];
+	let removedAssistantMessage = false;
+	const flushReasoning = (): void => {
+		kept.push(...pendingReasoning);
+		pendingReasoning = [];
+	};
+	for (const item of items) {
+		if (isOpenAIResponsesClientInputBoundary(item as unknown as Record<string, unknown>)) {
+			pendingReasoning = [];
+			removedAssistantMessage = false;
+			kept.push(item);
+			continue;
+		}
+		if (item.type === "reasoning") {
+			if (removedAssistantMessage) pendingReasoning = [];
+			removedAssistantMessage = false;
+			pendingReasoning.push(item);
+			continue;
+		}
+		if (isEmptyAssistantMessage(item)) {
+			removedAssistantMessage = true;
+			continue;
+		}
+		flushReasoning();
+		removedAssistantMessage = false;
+		kept.push(item);
+	}
+	return kept;
 }
 
 /**
@@ -389,7 +443,6 @@ export function sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(items: Re
 
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
-	normalizedCallIds: Map<string, string>,
 	supportsImageDetailOriginal: boolean,
 	preserveReasoningItemIds: boolean,
 ): OpenAIResponsesReplayItem | undefined {
@@ -408,9 +461,6 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	}
 	const { id: _id, ...sanitizedItem } = item;
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
-	if (typeof item.call_id === "string") {
-		sanitizedItem.call_id = normalizeReplayedResponsesHistoryCallId(item.call_id, normalizedCallIds);
-	}
 
 	return clampReplayItemImageDetail(
 		sanitizedItem,
@@ -444,14 +494,6 @@ function sanitizeOpenAIResponsesImageGenerationCallForReplay(
 		status: "completed",
 		result: item.result,
 	};
-}
-
-function normalizeReplayedResponsesHistoryCallId(value: string, normalizedValues: Map<string, string>): string {
-	const normalized = normalizedValues.get(value);
-	if (normalized) return normalized;
-	const next = truncateResponseItemId(value, getIdPrefix(value, "call"));
-	normalizedValues.set(value, next);
-	return next;
 }
 
 export function createOpenAIResponsesHistoryPayload(

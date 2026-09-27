@@ -148,7 +148,7 @@ describe("resolveOpenAICompat stream idle timeout", () => {
 	});
 
 	it("widens Kimi K2.6 reasoning streams across OpenAI-compatible hosts", () => {
-		const bundled = getBundledModel<"openai-completions">("firepass", "kimi-k2.6-turbo");
+		const bundled = getBundledModel<"openai-completions">("fireworks", "kimi-k2.6");
 		const canonicalRouter = buildModel({
 			...bundled,
 			id: "accounts/fireworks/routers/kimi-k2p6-turbo",

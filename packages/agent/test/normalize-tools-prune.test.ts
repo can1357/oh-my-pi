@@ -62,6 +62,19 @@ describe("normalizeTools — pruneDescriptions", () => {
 		expect(hasField(tool?.parameters, "nested")).toBe(true);
 	});
 
+	it("reuses injected parameters by identity across calls so downstream schema memos hit", () => {
+		const tool = makeTool();
+		for (const pruneDescriptions of [false, true]) {
+			const first = normalizeTools([tool], { injectIntent: true, pruneDescriptions })?.[0]?.parameters;
+			const second = normalizeTools([tool], { injectIntent: true, pruneDescriptions })?.[0]?.parameters;
+			expect(first).toBeDefined();
+			expect(second).toBe(first);
+		}
+		const bare = normalizeTools([tool], { injectIntent: true, pruneDescriptions: true })?.[0]?.parameters;
+		const described = normalizeTools([tool], { injectIntent: true })?.[0]?.parameters;
+		expect(described).not.toBe(bare);
+	});
+
 	it("injects the intent field WITHOUT a description when pruning", () => {
 		const tools = normalizeTools([makeTool()], { injectIntent: true, pruneDescriptions: true });
 		const params = tools?.[0]?.parameters;

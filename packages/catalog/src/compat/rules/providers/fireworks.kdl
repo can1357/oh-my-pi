@@ -1,6 +1,10 @@
 // Provider-wire compat for "fireworks"; regenerated from the frozen census using deployment contract selectors.
 
 provider "fireworks" priority=-1 {
+	default-model "kimi-k2.7-code"
+	env "FIREWORKS_API_KEY"
+	discovery label="Fireworks"
+
 	// Replaces the provider-keyed Fireworks minimal-effort remap.
 	thinking-effort-map {
 		minimal "none"

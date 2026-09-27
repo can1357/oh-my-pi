@@ -10,7 +10,7 @@ A provider is described in two halves:
 - **Auth half** (`packages/ai`): one declarative `ProviderDefinition` in the
   registry carrying env-key fallbacks and login/refresh flows. The
   `OAuthProvider` union, the env-key map, the `/login` provider list, the
-  `refreshOAuthToken` / `AuthStorage.login` dispatch, and the coding-agent
+  `refreshOAuthToken` / `AuthStorage.oauth.login` dispatch, and the coding-agent
   callback maps are derived from the registry.
 
 **Scope.** This is for a provider that reuses an existing wire API
@@ -84,7 +84,7 @@ from the catalog table and `OAuthProvider` from the registry.
 | `prepareRequest`        | Provider-owned request shaping before generic API dispatch. Returns the model and stream options to dispatch.                                                                                             |
 | `mapSimpleOptions`      | Projects the generic simple-stream option bag into provider-owned options.                                                                                                                                |
 | `prepareModelDiscovery` | Provider-owned authentication or endpoint setup for runtime model discovery.                                                                                                                              |
-| `login`                 | Interactive login. Present ⇒ member of `OAuthProvider`, dispatchable via `AuthStorage.login`, and shown in `/login` unless `showInLoginList` is false. Returns an API-key `string` or `OAuthCredentials`. |
+| `login`                 | Interactive login. Present ⇒ member of `OAuthProvider`, dispatchable via `AuthStorage.oauth.login`, and shown in `/login` unless `showInLoginList` is false. Returns an API-key `string` or `OAuthCredentials`. |
 | `refreshToken`          | OAuth refresher; omit for static-token providers (the dispatch returns credentials unchanged).                                                                                                            |
 | `getApiKey`             | Converts stored OAuth credentials into the API-key/token string used by the transport.                                                                                                                    |
 | `storeCredentialsAs`    | Store credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`).                                                                                                            |
@@ -112,5 +112,5 @@ from the catalog table and `OAuthProvider` from the registry.
   exported `createSimpleOpenAICompletionsOptions(providerId, baseUrl, config)` —
   no edits to `openai-compat.ts` required.
 - A `ProviderDefinition` may also be registered at runtime by an extension via
-  `registerOAuthProvider` (the `AuthStorage.login` dispatcher handles built-ins
+  `registerOAuthProvider` (the `AuthStorage.oauth.login` dispatcher handles built-ins
   and extensions through the same path).

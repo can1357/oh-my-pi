@@ -119,7 +119,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-agent-session-plan-ref-compaction-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
@@ -270,10 +270,10 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		emitHighUsageTurn(session);
 		const continuation = await waitForCall(call => call.callIndex > 0);
 
-		// The post-compaction continuation MUST carry the durable plan reference again.
-		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(false);
-		expect(continuation.messageTexts.some(text => text.includes(planUrl))).toBe(true);
-		expect(continuation.messageTexts.some(text => text.includes(`MUST read \`${planUrl}\``))).toBe(true);
+		// The post-compaction continuation MUST carry the plan again: inlined body
+		// plus the durable path as the recovery route.
+		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
 	});
 
 	it("re-injects the approved plan reference after snapcompact auto-compaction", async () => {
@@ -294,9 +294,8 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		emitHighUsageTurn(session);
 		const continuation = await waitForCall(call => call.callIndex > 0);
 
-		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(false);
-		expect(continuation.messageTexts.some(text => text.includes(planUrl))).toBe(true);
-		expect(continuation.messageTexts.some(text => text.includes(`MUST read \`${planUrl}\``))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
 	});
 
 	// Blast-radius guard: clearing the flag on every compaction must NOT start

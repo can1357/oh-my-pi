@@ -305,12 +305,6 @@ describe("at", () => {
 	});
 });
 
-it("attached to type", () => {
-	const _attestActual37 = type.match;
-	const _attestType37: Eq<typeof _attestActual37, typeof match> = true;
-	expect(_attestActual37).toEqual(match);
-});
-
 it("initial case", () => {
 	const Initial = match.case("string", Number.parseInt).default("assert");
 

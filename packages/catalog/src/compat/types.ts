@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { ThinkingControlMode } from "../types";
+import type { Api, KindApiKind, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -32,11 +32,9 @@ export interface CompiledRevisionPrefix {
 	anywhere?: boolean;
 }
 
-/** One compiled reviewed identity correction. */
-export interface CompiledIdentityOverride {
+interface CompiledIdentityOverrideFields {
 	id: string;
 	provider?: string;
-	model: string;
 	logical?: string;
 	class?: string;
 	family?: string;
@@ -48,6 +46,21 @@ export interface CompiledIdentityOverride {
 	provenance: string;
 	expiresAtMs?: number;
 }
+
+/** One compiled reviewed identity correction with exactly one bare-model selector. */
+export type CompiledIdentityOverride = CompiledIdentityOverrideFields &
+	(
+		| {
+				/** Exact bare-model selector. */
+				model: string;
+				glob?: never;
+		  }
+		| {
+				model?: never;
+				/** Anchored, case-insensitive bare-model glob. */
+				glob: string;
+		  }
+	);
 
 /** One compiled model class: matchers, families, revision rules, overrides. */
 export interface CompiledClass {
@@ -92,6 +105,14 @@ export interface CompiledEffortFamily {
 export type VariantTier = Effort | "off";
 
 /**
+ * Revision placeholder in a templated `variant-family` (`gemini-{rev}-flash`).
+ * A family whose id carries it is instantiated once per live revision that
+ * discovery advertises, so new generations of a lineage collapse without a
+ * new reviewed entry.
+ */
+export const REVISION_PLACEHOLDER = "{rev}";
+
+/**
  * One reviewed provider-scoped variant family: a logical model whose provider
  * serves per-effort/thinking sibling wire ids, with explicit routing, ladder,
  * and wire facts. Compiled from `variant-family` nodes in `_collapse.kdl`.
@@ -100,6 +121,11 @@ export interface CompiledVariantFamily {
 	provider: string;
 	id: string;
 	name: string;
+	/**
+	 * Revision constraint (`">=3.6"`) gating instantiation of a
+	 * {@link REVISION_PLACEHOLDER} template; absent on concrete families.
+	 */
+	revision?: string;
 	/** Member wire ids in priority order. */
 	members: string[];
 	/** Preferred default wire id when live. */
@@ -185,6 +211,8 @@ export interface CompiledRule {
 	source: string;
 	class?: string;
 	providers?: string[];
+	/** Request adapter identifiers matched by an `on-api` selector. */
+	apis?: string[];
 	family?: string;
 	revision?: CompiledRevisionTerm[];
 	models?: CompiledSelector[];
@@ -278,6 +306,12 @@ export interface CompiledExcludeModels {
 	match: CompiledMatchList;
 }
 
+/** Exact upstream discovery modes excluded from one provider's coding-model roster. */
+export interface CompiledExcludeDiscoveryModes {
+	provider: string;
+	modes: string[];
+}
+
 /** Provider plan-requirement tiers keyed by matcher token lists. */
 export interface CompiledPlanRequirement {
 	provider: string;
@@ -291,6 +325,12 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
+export interface CompiledRetryResetTimezone {
+	provider: string;
+	offset: string;
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
@@ -301,10 +341,320 @@ export interface CompiledBehavior {
 	hostedDefaults: CompiledHostedDefault[];
 	apiRoutes: CompiledApiRoutes[];
 	modelLimits: CompiledModelLimits[];
+	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	referenceIsolatedProviders: string[];
+}
+
+/**
+ * A string setting from `auth/*.kdl` that may be overridden by environment
+ * variables (consulted in order before `value`), stored obfuscated, or
+ * resolved at runtime by a named `@oh-my-pi/pi-ai` hook.
+ */
+export interface CompiledAuthValue {
+	value?: string;
+	env?: string[];
+	/** `base64`: the rule tree stores the value base64-encoded; decode before use. */
+	encoding?: "base64";
+	/** Hook name resolving the value at runtime; mutually exclusive with `value`. */
+	hook?: string;
+}
+
+/** One API-key validation probe run after the user pastes a key. */
+export type CompiledAuthValidation =
+	| {
+			kind: "chat-completions";
+			label?: string;
+			baseUrl: string;
+			model: string;
+			tolerateModelDenied?: boolean;
+			maxTokensField?: "max_tokens" | "max_completion_tokens";
+			maxTokens?: number;
+			optional?: boolean;
+	  }
+	| { kind: "anthropic-messages"; label?: string; baseUrl: string; model: string; optional?: boolean }
+	| {
+			kind: "models-endpoint";
+			label?: string;
+			url: string;
+			/** Env var holding an alternate base URL; `/models` is appended to it. */
+			baseUrlEnv?: string;
+			/** Hook returning extra request headers (may throw a configuration error). */
+			headersHook?: string;
+			optional?: boolean;
+	  };
+
+/** Paste-an-API-key login: optional browser hint, prompt, optional validation. */
+export interface CompiledApiKeyLogin {
+	kind: "api-key";
+	authUrl?: string;
+	instructions?: string;
+	prompt: string;
+	placeholder?: string;
+	/** Returned for an empty paste; presence also allows an empty answer. */
+	emptyFallback?: string;
+	normalize?: "strip-bearer";
+	validate?: CompiledAuthValidation;
+}
+
+/** How one `OAuthCredentials` field is derived from a token response. */
+export interface CompiledCredentialField {
+	/** Dot path into the JSON response body. */
+	path?: string;
+	/** JWT claim name read from the access token payload (first present wins). */
+	claim?: string[];
+	literal?: string;
+}
+
+/** Expiry derivation for a token response. */
+export type CompiledCredentialExpiry =
+	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number; fallbackMs?: number }
+	| { mode: "jwt"; skewMs: number; fallbackMs?: number }
+	| { mode: "never" };
+
+/** Token-response → `OAuthCredentials` projection. */
+export interface CompiledCredentialMap {
+	access: CompiledCredentialField;
+	refresh?: CompiledCredentialField;
+	expires: CompiledCredentialExpiry;
+	email?: CompiledCredentialField;
+	accountId?: CompiledCredentialField;
+	orgId?: CompiledCredentialField;
+	orgName?: CompiledCredentialField;
+	projectId?: CompiledCredentialField;
+	apiEndpoint?: CompiledCredentialField;
+	enterpriseUrl?: CompiledCredentialField;
+}
+
+/** Bearer GET that enriches credentials with identity fields. */
+export interface CompiledUserinfo {
+	url: string;
+	email?: string;
+	accountId?: string;
+}
+
+/**
+ * One token-endpoint style request. `params` values may use `{placeholders}`
+ * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
+ * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ */
+export interface CompiledOAuthRequest {
+	url: CompiledAuthValue;
+	body: "form" | "json";
+	/** Include the grant's standard parameter set before `params`. */
+	standard: boolean;
+	params: Record<string, string>;
+	headers: Record<string, string>;
+	timeoutMs?: number;
+}
+
+/** Callback transport configuration for authorization-code logins. */
+export interface CompiledCallback {
+	port: number;
+	path: string;
+	hostname: string;
+	redirectUri?: CompiledAuthValue;
+	portFallback: boolean;
+	manualOnly: boolean;
+	/** Temporarily receive a custom-scheme redirect through the native OS handler. */
+	nativeScheme: boolean;
+}
+
+/** Authorization-code login through a loopback, native-scheme, or manual callback. */
+export interface CompiledOAuthCodeLogin {
+	kind: "oauth-code";
+	clientId?: CompiledAuthValue;
+	clientSecret?: CompiledAuthValue;
+	/** `{base}` placeholder source (the provider's API origin). */
+	baseUrl?: CompiledAuthValue;
+	/** `{auth}` placeholder source for the authorize, token, and userinfo URLs when the issuer is a separate host. */
+	authUrl?: CompiledAuthValue;
+	authorizeUrl: CompiledAuthValue;
+	scopes: string[];
+	scopeSeparator: string;
+	pkce: boolean;
+	state: "hex" | "uuid" | "none";
+	/** Include the standard authorize query set before `authorizeParams`. */
+	standardAuthorizeParams: boolean;
+	authorizeParams: Record<string, string>;
+	instructions?: string;
+	callback: CompiledCallback;
+	token: CompiledOAuthRequest;
+	credential: CompiledCredentialMap;
+	userinfo?: CompiledUserinfo;
+	/** Hook run on the mapped credentials with the raw token response. */
+	afterExchange?: string;
+	/** Manual input starting with `prefix` is a pasted API key, validated at `validateUrl`. */
+	pasteKey?: { prefix: string; validateUrl: string };
+}
+
+/** RFC 8628 device-code login. */
+export interface CompiledDeviceCodeLogin {
+	kind: "device-code";
+	clientId: CompiledAuthValue;
+	/** `{base}` placeholder source for request URLs. */
+	baseUrl?: CompiledAuthValue;
+	scopes: string[];
+	scopeSeparator: string;
+	/** Hook returning headers merged into every request of the flow. */
+	headersHook?: string;
+	device: CompiledOAuthRequest;
+	token: CompiledOAuthRequest;
+	response: {
+		userCode: string;
+		deviceCode: string;
+		verificationUri: string;
+		verificationUriComplete?: string;
+		interval?: string;
+		expiresIn?: string;
+	};
+	/** `{user_code}` placeholder allowed. */
+	instructions: string;
+	credential: CompiledCredentialMap;
+	userinfo?: CompiledUserinfo;
+	afterExchange?: string;
+}
+
+/** Login implemented entirely by a named hook. */
+export interface CompiledCustomLogin {
+	kind: "custom";
+	hook: string;
+}
+
+export type CompiledLogin =
+	| CompiledApiKeyLogin
+	| CompiledOAuthCodeLogin
+	| CompiledDeviceCodeLogin
+	| CompiledCustomLogin;
+
+/** Refresh-token grant declared for a provider. */
+export type CompiledRefresh =
+	| { kind: "none" }
+	| { kind: "hook"; hook: string }
+	| {
+			kind: "request";
+			token: CompiledOAuthRequest;
+			/** Stored credential fields that must be present before refreshing. */
+			require: string[];
+			credential: CompiledCredentialMap;
+			userinfo?: CompiledUserinfo;
+			afterRefresh?: string;
+			headersHook?: string;
+	  };
+
+/** One provider's compiled auth policy (`auth/<id>.kdl`). */
+export interface CompiledAuthProvider {
+	id: string;
+	name: string;
+	env?: { vars: string[] } | { hook: string };
+	allowsMissingApiKey?: boolean;
+	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
+	orgScopedIdentity?: boolean;
+	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
+	oauthTokenEnv?: string[];
+	/** APIs whose provider transport resolves credentials without a stored account. */
+	nativeAuthApis?: string[];
+	available?: boolean;
+	showInLoginList?: boolean;
+	storeAs?: string;
+	callbackPort?: number;
+	pasteCode?: boolean;
+	apiKeyFormat: "bearer" | "structured";
+	expiry?: "jwt-or-never";
+	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
+	result?: "api-key";
+	login?: CompiledLogin;
+	refresh?: CompiledRefresh;
+}
+
+/** Compiled auth stratum: providers in `/login` display order. */
+export interface CompiledAuth {
+	providers: CompiledAuthProvider[];
+}
+
+/**
+ * When a provider's seed rows enter the generated bundle:
+ * - `always`: every regeneration; same-id upstream/discovery rows win dedup.
+ * - `fallback`: only when authoritative catalog discovery did not succeed.
+ * - `empty`: only when no other source produced a row for the provider.
+ */
+export type SeedBundlePolicy = "always" | "fallback" | "empty";
+
+/** Catalog-generation discovery settings (`discovery` node in `providers/<id>.kdl`). */
+export interface CompiledProviderDiscovery {
+	/** Human-readable name for generator log messages. */
+	label: string;
+	/** Env vars checked for a generation-time API key; defaults to the provider's `env`. */
+	envVars?: string[];
+	/** OAuth provider whose stored credential may stand in for an API key. */
+	oauthProvider?: string;
+	/** Discovery proceeds without credentials. */
+	allowUnauthenticated?: boolean;
+}
+
+/**
+ * One authored seed row: the intrinsic `ModelSpec` fields plus optional
+ * explicit `thinking` / `compat` overrides compiled from the axis vocabulary
+ * (keyed by resolved field, value-validated at compile time). `seeds.ts`
+ * projects rows to `ModelSpec` at the JSON boundary.
+ */
+export interface CompiledSeedModel {
+	id: string;
+	name: string;
+	api: Api;
+	provider: string;
+	baseUrl: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	supportsTools?: boolean;
+	cost: TokenCost;
+	contextWindow: number | null;
+	maxTokens: number | null;
+	thinking?: Record<string, unknown>;
+	compat?: Record<string, unknown>;
+}
+
+/** A provider's authored seed rows (`seed` node in `providers/<id>.kdl`). */
+export interface CompiledSeed {
+	bundle: SeedBundlePolicy;
+	/**
+	 * `seed`: rows are prepended after upstream merging so they outrank same-id
+	 * rows and never receive cross-provider reference fills. `upstream`
+	 * (default): rows are appended and same-id upstream rows win.
+	 */
+	precedence: "upstream" | "seed";
+	/** Rows in declaration order (inherited `models-from` rows appended last). */
+	models: CompiledSeedModel[];
+}
+
+/**
+ * One model provider's catalog entry: the non-code half of what the runtime
+ * and generator know about a provider. A `providers/<id>.kdl` file
+ * declares one by carrying `default-model`; files without it are wire-compat
+ * only (custom provider ids such as `llama.cpp`).
+ */
+export interface CompiledProvider {
+	id: string;
+	/** Preferred model id when no explicit selection is made. */
+	defaultModel: string;
+	/** Env vars consulted, in order, for the runtime API-key fallback. */
+	envVars?: string[];
+	/** The runtime creates a model manager even without a valid API key. */
+	allowUnauthenticated?: boolean;
+	/** Successful runtime discovery replaces bundled provider models instead of merging. */
+	dynamicModelsAuthoritative?: boolean;
+	/** Generator backfills never copy reasoning/input/limits from same-id rows on other hosts. */
+	skipCrossProviderReferenceFills?: boolean;
+	/** Present only for providers enrolled in `generate-models.ts` discovery. */
+	discovery?: CompiledProviderDiscovery;
+	/** Non-chat model kinds mapped to their runtime transport APIs. */
+	kindApis?: Partial<Record<KindApiKind, Api>>;
+	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
+	seed?: CompiledSeed;
 }
 
 /** The complete compiled rule tree persisted as `rules.json`. */
@@ -316,6 +666,9 @@ export interface CompiledCompatRules {
 	taxonomy: CompiledTaxonomy;
 	cascade: CompiledCascade;
 	behavior: CompiledBehavior;
+	auth: CompiledAuth;
+	/** Catalog provider entries keyed by provider id, sorted. */
+	providers: Record<string, CompiledProvider>;
 }
 
 /** Structured identity of one classified model. */
@@ -338,6 +691,8 @@ export interface ModelIdentity {
 export interface ResolveTarget {
 	/** Deployment provider hosting the model. */
 	provider: string;
+	/** Request adapter used to serialize the model. */
+	api: string;
 	/** Centrally classified vendor lineage. */
 	class: string;
 	/** Classified product family within the class, when known. */
@@ -355,4 +710,12 @@ export interface ResolvedAxes {
 	wire: Record<string, unknown>;
 	thinking: Record<string, unknown>;
 	catalog: Record<string, unknown>;
+	/**
+	 * Reasoning capability after the exact-model effort upgrade: `true` when the
+	 * target reported reasoning or an exact rule declares a ladder for it (the
+	 * reviewed correction to metadata-less discovery rows). Compat resolvers
+	 * read this instead of the raw spec flag, or one id resolves two different
+	 * wire contracts depending on whether it came from discovery or the bake.
+	 */
+	reasoning: boolean;
 }

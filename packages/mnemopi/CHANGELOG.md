@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed recall matching query words inside unrelated words (`1Password` matched memories about `pass` or `word`), which crowded exact matches out of the results ([#13322](https://github.com/can1357/oh-my-pi/pull/13322) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed sleep summaries corrupting words that merely contain a shortened term, such as `incomplete` → `inDONE`, `completed` → `DONEd` and `Networking` → `NetOK` ([#13320](https://github.com/can1357/oh-my-pi/pull/13320) by [@alphastorm](https://github.com/alphastorm)).
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved SQLite vector search and import performance by reducing repeated database metadata checks.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
+- Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

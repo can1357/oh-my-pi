@@ -3,6 +3,7 @@ import { completeSimple, getEnvApiKey, stream, streamSimple } from "@oh-my-pi/pi
 import type { Context, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { ollamaCloudModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/ollama";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
@@ -143,6 +144,64 @@ describe("ollama-cloud provider support", () => {
 			mode: "effort",
 			efforts: [Effort.High, Effort.Max],
 		});
+	});
+
+	test("applies the DeepSeek effort contract to discovered ollama-cloud models", async () => {
+		// `/api/show` reports only the boolean `thinking` capability, so discovery
+		// must not synthesize a tier vocabulary: doing so shadows the KDL ladder
+		// (explicit thinking outranks rules) and silently clamps `max` down to
+		// `high` on the DeepSeek V4 line, whose real wire vocabulary is
+		// low/high/max (#8334 regression). `deepseek-v4.1-flash` and the dated
+		// tags below are the ids Ollama Cloud actually serves.
+		const ids = [
+			"deepseek-v4.1-flash",
+			"deepseek-v4-flash:0731",
+			"deepseek-v4-pro:0813",
+			"deepseek-v4-flash",
+			"glm-5.3",
+			"glm-5.2",
+		];
+		const fetchMock: FetchImpl = vi.fn(async input => {
+			const url = String(input);
+			if (url === "https://ollama.com/api/tags") {
+				return new Response(JSON.stringify({ models: ids.map(id => ({ name: id, model: id })) }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "https://ollama.com/api/show") {
+				return new Response(
+					JSON.stringify({
+						capabilities: ["completion", "thinking"],
+						model_info: { "deepseek.context_length": 1_048_576 },
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		});
+
+		const options = ollamaCloudModelManagerOptions({ apiKey: "cloud-test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const effortsFor = (id: string) => {
+			const model = models?.find(candidate => candidate.id === id);
+			return model ? getSupportedEfforts(buildModel(model)) : undefined;
+		};
+
+		// Flash/V4 keep the wire-exact three-tier ladder, so `max` is reachable
+		// instead of clamping to `high`.
+		expect(effortsFor("deepseek-v4.1-flash")).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(effortsFor("deepseek-v4-flash:0731")).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(effortsFor("deepseek-v4-flash")).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(effortsFor("deepseek-v4-pro:0813")).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		// GLM-5.3 exposes low/high/max; GLM-5.2 stays on its two-tier scale.
+		expect(effortsFor("glm-5.3")).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(effortsFor("glm-5.2")).toEqual([Effort.High, Effort.Max]);
+		// No discovered ladder may advertise `minimal`: `/api/chat` rejects it
+		// outright (`invalid think value: "minimal"`).
+		for (const id of ids) {
+			expect(effortsFor(id)).not.toContain(Effort.Minimal);
+		}
 	});
 
 	test("tolerates individual /api/show failures during model discovery", async () => {

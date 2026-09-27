@@ -23,8 +23,8 @@ unsafe extern "C" {
 }
 
 pub(super) fn capture_permission() -> bool {
-	// SAFETY: This non-prompting TCC preflight has no arguments and is available on
-	// supported macOS versions.
+	// SAFETY: This non-prompting TCC preflight has no arguments and is available
+	// on supported macOS versions.
 	unsafe { CGPreflightScreenCaptureAccess() }
 }
 
@@ -58,9 +58,9 @@ impl MacCapture {
 			let width = monitor.width().map_err(metadata_error)?;
 			let height = monitor.height().map_err(metadata_error)?;
 			let scale = f64::from(monitor.scale_factor().map_err(metadata_error)?);
-			// xcap's macOS friendly_name path matches CGDirectDisplayID to NSScreenNumber,
-			// then returns NSScreen.localizedName(). Keep the model-number name as
-			// fallback.
+			// xcap's macOS friendly_name path matches CGDirectDisplayID to
+			// NSScreenNumber, then returns NSScreen.localizedName(). Keep the
+			// model-number name as fallback.
 			let name = monitor
 				.friendly_name()
 				.or_else(|_| monitor.name())
@@ -95,8 +95,8 @@ impl MacCapture {
 		Ok(displays)
 	}
 
-	// Discovery stays on the capture object for backend symmetry; Quartz needs no
-	// selector state.
+	// Discovery stays on the capture object for backend symmetry; Quartz needs
+	// no selector state.
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
 		if !capture_permission() {

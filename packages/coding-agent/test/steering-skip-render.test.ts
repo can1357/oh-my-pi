@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { formatStatusIcon } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { formatStatusIcon } from "@oh-my-pi/pi-tui/render/render-utils";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -42,6 +42,28 @@ describe("mid-turn steering skip rendering", () => {
 			expect(rendered).not.toContain("╭");
 			expect(rendered).toContain("Skipped due to pending peer interrupt");
 		}
+	}, 15_000);
+
+	it("keeps the card tint on the truncation ellipsis after the styled line's reset", async () => {
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("dark theme missing");
+		const pendingBg = uiTheme.getBgAnsi("toolPendingBg");
+		const tui = new TUI(new VirtualTerminal(60, 20));
+		const component = new ToolExecutionComponent("edit", { path: "a.ts" }, {}, undefined, tui);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: SKIP_TEXT }],
+				details: { __synthetic: true, source: "interrupt_skipped", executed: false },
+			},
+			false,
+		);
+
+		const line = component.render(60).find(l => l.includes("Skipped") && l.includes("…"));
+		if (!line) throw new Error("expected a truncated skip line");
+		// truncateToWidth closes the styled text with a full SGR reset before the
+		// ellipsis; the card background must be re-opened after it.
+		const beforeEllipsis = line.slice(0, line.indexOf("…"));
+		expect(beforeEllipsis.slice(beforeEllipsis.lastIndexOf("\x1b[0m"))).toContain(pendingBg);
 	}, 15_000);
 
 	it("still renders a genuine edit failure as an error", async () => {

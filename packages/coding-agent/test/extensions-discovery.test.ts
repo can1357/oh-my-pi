@@ -190,6 +190,57 @@ describe("extensions discovery", () => {
 		]);
 	});
 
+	it("uses inherited roots instead of local extension inputs during cold discovery", async () => {
+		const inherited = tempDir.join("inherited.ts");
+		const configured = tempDir.join("configured.ts");
+		const unwanted = path.join(extensionsDir, "unwanted.ts");
+		await Bun.write(inherited, extensionCodeWithTool("inherited-tool"));
+		await Bun.write(configured, extensionCodeWithTool("configured-tool"));
+		await Bun.write(unwanted, extensionCodeWithTool("unwanted-tool"));
+		const settings = Settings.isolated({ extensions: [unwanted] });
+		const paths = await discoverSessionExtensionPaths(
+			{
+				additionalExtensionPaths: [unwanted],
+				extensionRoots: () => ({
+					explicit: [inherited],
+					mode: "explicit-only",
+					configured: [configured],
+					configuredLevel: "project",
+				}),
+			},
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual(["inherited-tool"]);
+	});
+
+	it("uses the inherited configured lane when merging cold extension discovery", async () => {
+		const inherited = tempDir.join("inherited.ts");
+		const unwanted = tempDir.join("unwanted.ts");
+		await Bun.write(inherited, extensionCodeWithTool("inherited-tool"));
+		await Bun.write(unwanted, extensionCodeWithTool("unwanted-tool"));
+		const settings = Settings.isolated({ extensions: [unwanted] });
+		const paths = await discoverSessionExtensionPaths(
+			{
+				disableExtensionDiscovery: true,
+				additionalExtensionPaths: [unwanted],
+				extensionRoots: () => ({
+					explicit: [],
+					mode: "merge",
+					configured: [inherited],
+					configuredLevel: "project",
+				}),
+			},
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+		const tools = result.extensions.flatMap(extension => [...extension.tools.keys()]);
+		expect(tools).toContain("inherited-tool");
+		expect(tools).not.toContain("unwanted-tool");
+	});
+
 	it("explicit-only discovery ignores unreadable optional hook directories", async () => {
 		const packageDir = path.join(tempDir.path(), "explicit-package");
 		const sourceDir = path.join(packageDir, "src");
@@ -479,6 +530,20 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("exists.ts");
+	});
+
+	it("does not fall back to index.ts when a configured manifest only declares missing entries", async () => {
+		const configuredDir = path.join(tempDir.path(), "configured-package");
+		fs.mkdirSync(configuredDir);
+		fs.writeFileSync(path.join(configuredDir, "index.ts"), extensionCodeWithTool("decoy-index"));
+		fs.writeFileSync(
+			path.join(configuredDir, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./missing.ts"] } }),
+		);
+
+		const paths = await discoverExtensionPaths([configuredDir], tempDir.path(), undefined, { ambient: false });
+
+		expect(paths).toEqual([]);
 	});
 
 	it("loads extensions and registers commands", async () => {

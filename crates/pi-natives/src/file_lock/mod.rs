@@ -5,6 +5,8 @@
 //! on a persistent sidecar because they lack a process-owned in-memory name
 //! registry with automatic crash recovery.
 
+use std::{io, path::Path};
+
 use napi::JsString;
 use napi_derive::napi;
 
@@ -49,37 +51,57 @@ pub struct FileLock {
 
 #[napi]
 impl FileLock {
+	/// Try to acquire a lock directly from native Rust code.
+	///
+	/// This is crate-only so native subsystems share the same kernel-backed
+	/// ownership primitive without exposing another JavaScript API.
+	pub(crate) fn try_acquire_path(path: &Path) -> io::Result<Self> {
+		let path = path.to_str().ok_or_else(|| {
+			io::Error::new(io::ErrorKind::InvalidInput, "lock path is not valid UTF-8")
+		})?;
+		platform::try_acquire(path).map(|inner| Self { inner })
+	}
+
 	/// Try to acquire `path` without blocking.
 	#[napi(factory)]
 	pub fn try_acquire(path: JsString) -> napi::Result<Self> {
 		let path = js::utf8(path)?;
-		let inner = platform::try_acquire(&path).map_err(|error| {
+		Self::try_acquire_path(Path::new(&*path)).map_err(|error| {
 			napi::Error::from_reason(format!(
 				"Failed to acquire native file lock for {}: {error}",
 				&*path
 			))
-		})?;
-		Ok(Self { inner })
+		})
 	}
 
 	/// Whether this handle owns the requested lock.
 	#[napi(getter)]
 	#[allow(clippy::missing_const_for_fn, reason = "napi method signature")]
 	pub fn acquired(&self) -> bool {
+		self.is_acquired()
+	}
+
+	/// Whether this native handle owns the requested lock.
+	pub(crate) const fn is_acquired(&self) -> bool {
 		self.inner.is_some()
 	}
 
 	/// Release this handle's ownership without affecting a successor.
 	#[napi]
 	pub fn release(&mut self) -> napi::Result<()> {
+		self.release_native().map_err(|error| {
+			napi::Error::from_reason(format!("Failed to release native file lock: {error}"))
+		})
+	}
+
+	/// Release native ownership while preserving the handle on failure.
+	pub(crate) fn release_native(&mut self) -> io::Result<()> {
 		let Some(mut inner) = self.inner.take() else {
 			return Ok(());
 		};
 		if let Err(error) = inner.release() {
 			self.inner = Some(inner);
-			return Err(napi::Error::from_reason(format!(
-				"Failed to release native file lock: {error}"
-			)));
+			return Err(error);
 		}
 		Ok(())
 	}

@@ -1,9 +1,21 @@
 import type { Mock } from "bun:test";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { loginAlibabaCodingPlan } from "../src/registry/alibaba-coding-plan";
 import * as apiKeyValidation from "../src/registry/api-key-validation";
 import { getOAuthApiKey } from "../src/registry/oauth/index";
 import type { OAuthController } from "../src/registry/oauth/types";
+import { getProviderDefinition } from "../src/registry/registry";
+
+function registeredLogin(options: OAuthController) {
+	const login = getProviderDefinition("alibaba-coding-plan")?.login;
+	if (!login) throw new Error("Alibaba Coding Plan login is not registered");
+	return login(options);
+}
+
+async function loginAlibabaCodingPlan(options: OAuthController) {
+	const result = await registeredLogin(options);
+	if (typeof result === "string") throw new Error("Expected Alibaba Coding Plan OAuth credentials");
+	return result;
+}
 
 describe("alibaba-coding-plan endpoint selection", () => {
 	let validateSpy: Mock<typeof apiKeyValidation.validateOpenAICompatibleApiKey>;

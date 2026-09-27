@@ -233,7 +233,7 @@ describe("replaceLlmImagesWithText", () => {
 			{
 				role: "toolResult",
 				toolCallId: "c1",
-				toolName: "inspect_image",
+				toolName: "read",
 				content: [{ type: "image", data: "bbbb", mimeType: "image/png" }],
 				isError: false,
 				timestamp: 2,

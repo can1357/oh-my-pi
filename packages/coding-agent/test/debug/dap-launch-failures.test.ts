@@ -14,7 +14,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/dap/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { DebugTool } from "@oh-my-pi/pi-coding-agent/tools/debug";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 
 const TEST_ADAPTER: DapResolvedAdapter = {
 	name: "lldb-dap",
@@ -29,6 +29,42 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	connectMode: "stdio",
 	acceptsDirectoryProgram: false,
 };
+
+it("rejects pending DAP work and terminates an adapter with invalid framing", async () => {
+	const client = await DapClient.spawn({
+		adapter: {
+			...TEST_ADAPTER,
+			command: process.execPath,
+			resolvedCommand: process.execPath,
+			args: ["run", path.join(import.meta.dir, "../fixtures/malformed-jsonrpc-peer.ts")],
+		},
+		cwd: process.cwd(),
+	});
+	try {
+		const request = client.sendRequest("initialize", {}, undefined, 60_000);
+		const event = client.waitForEvent("stopped", undefined, undefined, 60_000);
+		const results = await withTimeout(
+			Promise.allSettled([request, event]),
+			5_000,
+			"Invalid framing did not reject pending DAP work",
+		);
+		for (const result of results) {
+			expect(result.status).toBe("rejected");
+			if (result.status === "rejected") {
+				expect(result.reason).toBeInstanceOf(Error);
+				expect((result.reason as Error).message).toMatch(/Content-Length.*limit/);
+			}
+		}
+		await expect(client.sendRequest("threads", {})).rejects.toThrow(/not running/);
+		await withTimeout(
+			client.proc.exited.catch(() => {}),
+			5_000,
+			"Malformed adapter remained alive",
+		);
+	} finally {
+		await client.dispose();
+	}
+}, 10_000);
 
 const DELAYED_UNIX_SOCKET_ADAPTER = `
 const listenPrefix = "--listen=unix:";

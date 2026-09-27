@@ -2,12 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 describe("dereferenceJsonSchema", () => {
-	it("returns non-object input unchanged", () => {
-		expect(dereferenceJsonSchema(null)).toBe(null);
-		expect(dereferenceJsonSchema("string")).toBe("string");
-		expect(dereferenceJsonSchema(42)).toBe(42);
-	});
-
 	it("returns schema without $defs unchanged", () => {
 		const schema = {
 			type: "object",

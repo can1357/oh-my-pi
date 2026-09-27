@@ -444,6 +444,27 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(healing.drainCompleted()).toHaveLength(1);
 	});
 
+	it("strips leaked orphan DSML close tags with no matching open (issue #10556)", () => {
+		// Long-session degradation: the model leaks bare closers into visible text.
+		// They must never survive into stored content, where replay reinforces the
+		// XML-protocol mimicry that drops subsequent tool calls.
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		const leaked = "分析文本。\n\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+		const visible = healing.feed(leaked) + healing.flushPending();
+		expect(visible).toBe("分析文本。\n\n\n\n");
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+
+	it("preserves whitespace after orphan DSML closers split across chunk boundaries", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		const leaked = "text</｜DSML｜parameter> \n  </|DSML|invoke>\n\tmore";
+		let visible = "";
+		for (let i = 0; i < leaked.length; i += 5) visible += healing.feed(leaked.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(visible).toBe("text \n  \n\tmore");
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+
 	it("heals a leaked thinking fence while still reconstructing the tool call", () => {
 		// The DSML grammar's xml scanner does not parse thinking; proving the fence
 		// is lifted shows the always-on thinking healer runs alongside it.

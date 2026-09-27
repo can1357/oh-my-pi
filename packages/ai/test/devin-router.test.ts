@@ -241,4 +241,170 @@ describe("streamDevin router assignment", () => {
 		}).result();
 		expect(on.recorded.chat?.disableParallelToolCalls).toBe(false);
 	});
+
+	it("normalizes tool schemas for Gemini-backed Devin models", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({});
+		const geminiContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), geminiContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown; nullable?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: "number", nullable: true });
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("normalizes tool schemas when the router assigns a Gemini backend", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({
+			assignment: { assignmentJwt: "assign-jwt", modelUid: "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW" },
+		});
+		const toolContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		await streamDevin(devinModel({ modelRouter: true }), toolContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown; nullable?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: "number", nullable: true });
+	});
+
+	it("keeps verbatim tool schemas for non-Gemini models", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({});
+		const toolContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		await streamDevin(devinModel({}, "claude-sonnet-4-5"), toolContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: ["number", "null"] });
+	});
+
+	it("hides proxy HTML in Devin HTTP errors while preserving the status", async () => {
+		const auth = fakeDevin({});
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(
+					"<html><head><title>504 Gateway Time-out</title></head><body><h1>504 Gateway Time-out</h1></body></html>",
+					{
+						status: 504,
+						statusText: "Gateway Time-out",
+						headers: { "content-type": "text/html", "retry-after": "1" },
+					},
+				);
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
+		expect(result.errorMessage).not.toContain("<html>");
+	});
+
+	it.each([
+		["C0 escape", "\u001b[2J<html>injected</html>"],
+		["C1 CSI", "\u009b2Jinjected"],
+		["DEL", "inject\u007fed"],
+	])("suppresses %s bytes materialized from JSON error envelopes", async (_label, message) => {
+		const auth = fakeDevin({});
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(JSON.stringify({ error: { message } }), {
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBe("Devin API error 502 Bad Gateway");
+	});
+
+	it("truncates oversized error details on a code-point boundary", async () => {
+		const auth = fakeDevin({});
+		// 4095 units of padding put the astral pair astride the 4096 cutoff.
+		const message = `${"x".repeat(4095)}\u{1f600}tail`;
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(JSON.stringify({ error: { message } }), {
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBeDefined();
+		expect(result.errorMessage?.isWellFormed()).toBe(true);
+		expect(result.errorMessage?.endsWith("x")).toBe(true);
+		expect(result.errorMessage).not.toContain("\ufffd");
+	});
 });

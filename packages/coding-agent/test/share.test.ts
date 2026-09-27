@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SessionData } from "../src/export/html";
 import {
 	buildShareSnapshot,
@@ -13,6 +15,7 @@ import type { SessionManager } from "../src/session/session-manager";
 
 const IV_LENGTH = 12;
 const TEST_MAX_SEALED_BYTES = 4_000;
+const CLI_ENTRY = path.join(import.meta.dir, "..", "src", "cli.ts");
 
 async function makeKey(): Promise<CryptoKey> {
 	const bytes = new Uint8Array(32);
@@ -589,5 +592,33 @@ describe("shareSession", () => {
 		} finally {
 			server.stop(true);
 		}
+	});
+});
+
+describe("share command", () => {
+	test("rejects a missing path without creating or uploading a session", async () => {
+		using tempDir = TempDir.createSync("@omp-share-missing-");
+		const sessionArg = "./ghost.jsonl";
+		const missingSession = path.join(tempDir.path(), "ghost.jsonl");
+		const proc = Bun.spawn([process.execPath, CLI_ENTRY, "share", sessionArg], {
+			cwd: tempDir.path(),
+			env: {
+				...process.env,
+				NO_COLOR: "1",
+				PI_CODING_AGENT_DIR: path.join(tempDir.path(), "agent"),
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+
+		expect(exitCode).toBe(1);
+		expect(stdout).toBe("");
+		expect(stderr).toBe(`Session "${sessionArg}" not found.\n`);
+		expect(await Bun.file(missingSession).exists()).toBe(false);
 	});
 });

@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+
+import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 type Spy = Mock<(...args: unknown[]) => unknown>;
 type StartPendingSubmissionSpy = Mock<InteractiveModeContext["startPendingSubmission"]>;
@@ -21,12 +24,8 @@ type FakeEditor = {
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
 	onLeftAtStart?: () => void;
-	onHistorySearch?: () => void;
 	onPasteImage?: () => void;
 	onCopyPrompt?: () => void;
-	onExpandTools?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
 	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	setText(text: string): void;
@@ -35,6 +34,7 @@ type FakeEditor = {
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
+	spaceHold: SpaceHoldGesture;
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 };
@@ -126,6 +126,7 @@ function createContext(): {
 		setActionKeys: vi.fn(),
 		setCustomKeyHandler: vi.fn(),
 		clearCustomKeyHandlers: vi.fn(),
+		spaceHold: new SpaceHoldGesture(() => {}),
 		pendingImages: [],
 		pendingImageLinks: [],
 	};
@@ -215,6 +216,7 @@ function createContext(): {
 		unfocusSession: vi.fn(async () => {}),
 		focusParentSession: vi.fn(async () => {}),
 		handleSTTToggle: vi.fn(),
+		dictationSpaceHold: vi.fn(),
 		handleBtwEscape,
 		handleBtwCommand,
 		hasActiveBtw,
@@ -326,8 +328,10 @@ describe("InputController escape behavior", () => {
 
 	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
 		const { ctx, editor, spies } = createContext();
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).isStreaming = true;
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).queuedMessageCount = 1;
+		// Stubbed session: only the streaming/interrupt gate fields matter here.
+		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
+		session.isStreaming = true;
+		session.hasInterruptibleInput = true;
 		const order: string[] = [];
 		spies.abort.mockImplementation(async () => {
 			order.push("abort");
@@ -376,7 +380,7 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
-	it("aborts a streaming loop iteration without pausing the loop", () => {
+	it("suspends a streaming loop iteration and pauses the loop", () => {
 		const { ctx, editor, spies } = createContext();
 		const pauseLoop = vi.fn();
 		ctx.loopModeEnabled = true;
@@ -387,9 +391,9 @@ describe("InputController escape behavior", () => {
 		controller.setupKeyHandlers();
 		editor.onEscape?.();
 
-		expect(pauseLoop).not.toHaveBeenCalled();
-		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(pauseLoop).toHaveBeenCalledTimes(1);
+		expect(spies.cancelPendingSubmission).toHaveBeenCalledTimes(1);
 	});
 
 	it("pauses an idle loop and cancels its pending submission", () => {
@@ -697,7 +701,7 @@ describe("InputController escape behavior", () => {
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {
-		Settings.instance.override("doubleEscapeAction", "none");
+		cfgDoubleEscapeAction.override(Settings.instance, "none");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -707,6 +711,24 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("opens the session tree on double-Esc when the action is tree", () => {
+		cfgDoubleEscapeAction.override(Settings.instance, "tree");
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+		editor.onEscape?.();
+
+		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+		// Same forced viewport repaint as the rewind path: without it the
+		// overlay paint is deferred past the escape input grace and double-Esc
+		// reads as dead on long sessions.
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
 		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 	it("preserves typed editor text on Esc without opening selectors or aborting", () => {

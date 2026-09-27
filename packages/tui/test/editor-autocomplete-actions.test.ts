@@ -72,6 +72,188 @@ describe("Editor async autocomplete scheduling", () => {
 	});
 });
 
+class ModelMentionProvider implements AutocompleteProvider {
+	readonly requests: string[] = [];
+
+	constructor(private readonly acceptedPrefixes?: readonly string[]) {}
+
+	async getSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+		this.requests.push(textBeforeCursor);
+		const match = /(?:^|\s)(\^[^\s]*)$/.exec(textBeforeCursor);
+		const prefix = match?.[1];
+		if (prefix === undefined || (this.acceptedPrefixes && !this.acceptedPrefixes.includes(prefix))) return null;
+		return { prefix, items: [{ value: "a/x", label: "a/x" }] };
+	}
+
+	applyCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		item: AutocompleteItem,
+		prefix: string,
+	): { lines: string[]; cursorLine: number; cursorCol: number } {
+		const line = lines[cursorLine] ?? "";
+		const textBeforeCursor = line.slice(0, cursorCol);
+		const livePrefix = /(?:^|\s)(\^[^\s]*)$/.exec(textBeforeCursor)?.[1] ?? prefix;
+		const replaceStart = cursorCol - livePrefix.length;
+		const completed = `^${item.value} `;
+		const nextLines = [...lines];
+		nextLines[cursorLine] = line.slice(0, replaceStart) + completed + line.slice(cursorCol);
+		return { lines: nextLines, cursorLine, cursorCol: replaceStart + completed.length };
+	}
+}
+
+describe("Editor model mention autocomplete", () => {
+	it("triggers at line, space, and tab boundaries but not inside a token", async () => {
+		for (const before of ["", "ask ", "ask\t"]) {
+			const provider = new ModelMentionProvider();
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(provider);
+			if (before) editor.insertText(before);
+
+			editor.handleInput("^");
+			await untilAutocompleteShown(editor);
+
+			expect(provider.requests.at(-1)).toBe(`${before}^`);
+		}
+
+		const provider = new ModelMentionProvider();
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(provider);
+		for (const char of "a^b") editor.handleInput(char);
+
+		expect(provider.requests).toEqual([]);
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+
+	it("starts on a follow-up character and after bulk insertion", async () => {
+		const acceptedPrefixes = ["^a"];
+		const provider = new ModelMentionProvider(acceptedPrefixes);
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(provider);
+
+		const bareCaretChecked = onceAutocompleteUpdate(editor);
+		editor.handleInput("^");
+		await bareCaretChecked;
+		expect(editor.isShowingAutocomplete()).toBe(false);
+
+		editor.handleInput("a");
+		await untilAutocompleteShown(editor);
+		expect(provider.requests.at(-1)).toBe("^a");
+
+		const insertedProvider = new ModelMentionProvider(acceptedPrefixes);
+		const insertedEditor = new Editor(defaultEditorTheme);
+		insertedEditor.setAutocompleteProvider(insertedProvider);
+		insertedEditor.insertText("see ^a");
+		await untilAutocompleteShown(insertedEditor);
+
+		expect(insertedProvider.requests.at(-1)).toBe("see ^a");
+	});
+
+	it("keeps model completion open while mention characters are typed", async () => {
+		const provider = new ModelMentionProvider();
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(provider);
+
+		editor.handleInput("^");
+		await untilAutocompleteShown(editor);
+
+		const refreshed = onceAutocompleteUpdate(editor);
+		editor.handleInput("a/x");
+		await refreshed;
+
+		expect(provider.requests.at(-1)).toBe("^a/x");
+		expect(editor.isShowingAutocomplete()).toBe(true);
+	});
+
+	it("reopens when backspace, undo, or forward delete restores a live mention", async () => {
+		const acceptedPrefixes = ["^a"];
+
+		const backspaceEditor = new Editor(defaultEditorTheme);
+		backspaceEditor.setAutocompleteProvider(new ModelMentionProvider(acceptedPrefixes));
+		const rejectedSuffixChecked = onceAutocompleteUpdate(backspaceEditor);
+		backspaceEditor.handleInput("^ab");
+		await rejectedSuffixChecked;
+		backspaceEditor.handleInput("\x7f");
+		await untilAutocompleteShown(backspaceEditor);
+		expect(backspaceEditor.getText()).toBe("^a");
+
+		const undoEditor = new Editor(defaultEditorTheme);
+		undoEditor.setText("^a");
+		undoEditor.setAutocompleteProvider(new ModelMentionProvider(acceptedPrefixes));
+		const typedSuffixChecked = onceAutocompleteUpdate(undoEditor);
+		undoEditor.handleInput("b");
+		await typedSuffixChecked;
+		undoEditor.handleInput("\x1b[45;5u"); // Ctrl+-: undo
+		await untilAutocompleteShown(undoEditor);
+		expect(undoEditor.getText()).toBe("^a");
+
+		const deleteEditor = new Editor(defaultEditorTheme);
+		deleteEditor.setText("^ax");
+		deleteEditor.setAutocompleteProvider(new ModelMentionProvider(acceptedPrefixes));
+		deleteEditor.handleInput("\x01"); // Ctrl+A
+		deleteEditor.handleInput("\x06"); // Ctrl+F
+		deleteEditor.handleInput("\x06"); // Ctrl+F
+		deleteEditor.handleInput("\x1b[3~"); // Delete
+		await untilAutocompleteShown(deleteEditor);
+		expect(deleteEditor.getText()).toBe("^a");
+	});
+
+	it("accepts a stale popup while the live text is still a mention", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(new ModelMentionProvider());
+		editor.insertText("ask ");
+
+		editor.handleInput("^");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("a");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("ask ^a/x ");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+});
+
+describe("Editor slash argument autocomplete", () => {
+	it("re-evaluates a closed popup after typing an argument separator", async () => {
+		const argumentPrefixes: string[] = [];
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{
+						name: "probe",
+						getArgumentCompletions(argumentPrefix) {
+							argumentPrefixes.push(argumentPrefix);
+							return /^\S+\s/.test(argumentPrefix) ? [{ value: "scope", label: "scope" }] : null;
+						},
+					},
+				],
+				"/tmp",
+			),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		const popupClosed = onceAutocompleteUpdate(editor);
+		for (const char of "probe a") editor.handleInput(char);
+		await popupClosed;
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(argumentPrefixes).toEqual(["a"]);
+
+		const popupOpened = onceAutocompleteUpdate(editor);
+		editor.handleInput(" ");
+		await popupOpened;
+		expect(argumentPrefixes).toEqual(["a", "a "]);
+		expect(editor.isShowingAutocomplete()).toBeTrue();
+	});
+});
+
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
 		lines: string[],
@@ -200,6 +382,99 @@ describe("Editor slash autocomplete acceptance", () => {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps autocomplete open after accepting an @ directory with Tab", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-at-directory-tab-"));
+		try {
+			fs.mkdirSync(path.join(baseDir, "packages", "tui"), { recursive: true });
+			fs.mkdirSync(path.join(baseDir, "packages", "utils"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			editor.setText("@pack");
+
+			const autocompleteOpened = untilAutocompleteShown(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+
+			editor.handleInput("\t");
+			await untilAutocompleteShown(editor);
+
+			expect(editor.getText()).toBe("@packages/");
+			expect(editor.isShowingAutocomplete()).toBe(true);
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps autocomplete open after accepting an @ directory with Enter", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-at-directory-enter-"));
+		try {
+			fs.mkdirSync(path.join(baseDir, "packages", "tui"), { recursive: true });
+			fs.mkdirSync(path.join(baseDir, "packages", "utils"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.setText("@pack");
+
+			const autocompleteOpened = untilAutocompleteShown(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+
+			editor.handleInput("\r");
+			await untilAutocompleteShown(editor);
+
+			expect(editor.getText()).toBe("@packages/");
+			expect(editor.isShowingAutocomplete()).toBe(true);
+			expect(submitted).toBe("");
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	it("submits a slash-command directory argument with Enter instead of chaining into it", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-slash-directory-enter-"));
+		try {
+			const normalizedBaseDir = baseDir.replace(/\\/g, "/");
+			const target = `${normalizedBaseDir}/sibling`;
+			fs.mkdirSync(path.join(target, "child"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const getSuggestions = provider.getSuggestions;
+			let chainedRequests = 0;
+			provider.getSuggestions = (...args) => {
+				chainedRequests += 1;
+				return getSuggestions.call(provider, ...args);
+			};
+			editor.setAutocompleteProvider(provider);
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+
+			editor.setText(`/move ${target}`);
+			const autocompleteOpened = onceAutocompleteUpdate(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+			expect(editor.isShowingAutocomplete()).toBe(true);
+
+			// Enter with the popup open accepts the selection and returns; it never
+			// submits. A chained regular request would reopen it on the directory's
+			// children, so let the queued callback run before observing the state.
+			editor.handleInput("\r");
+			await Promise.resolve();
+			expect(chainedRequests).toBe(0);
+			expect(editor.isShowingAutocomplete()).toBe(false);
+
+			editor.handleInput("\r");
+			expect(submitted).toBe(`/move ${target}/`);
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
 	it("shows a sole forced file suggestion before applying it", async () => {
 		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-single-file-tab-"));
 		try {

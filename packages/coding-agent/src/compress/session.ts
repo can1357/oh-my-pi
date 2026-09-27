@@ -29,7 +29,8 @@ export async function createCompressSession(options: {
 	agentId?: string;
 }): Promise<CompressSession> {
 	const cwd = options.cwd ?? getProjectDir();
-	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	const settings = await Settings.init({ cwd });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	// An absent selector means "whatever the session is configured to use", which

@@ -8,7 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, SessionLockError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
@@ -245,6 +245,174 @@ describe("FileSessionStorage.writeTextSync", () => {
 
 		expect(second.ino).not.toBe(first.ino);
 		expect(await Bun.file(sessionPath).text()).toBe("second\n");
+	});
+
+	it("keeps open readers on the old file when replacement initially fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original snapshot\n");
+		const reader = fs.openSync(sessionPath, "r");
+		const original = fs.fstatSync(reader);
+		const rename = fs.renameSync;
+		let failed = false;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (!failed && target === sessionPath) {
+				failed = true;
+				throw Object.assign(new Error("replace blocked"), { code: "EPERM" });
+			}
+			rename(source, target);
+		});
+		try {
+			storage.writeTextSync(sessionPath, "replacement snapshot\n");
+			expect(fs.readFileSync(reader, "utf8")).toBe("original snapshot\n");
+			expect(fs.statSync(sessionPath).ino).not.toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("replacement snapshot\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			renameSpy.mockRestore();
+			fs.closeSync(reader);
+		}
+	});
+
+	it("restores the original identity and content if the EPERM replacement retry fails", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const rename = fs.renameSync;
+		let attempts = 0;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (typeof source === "string" && source.endsWith(".tmp") && target === sessionPath) {
+				attempts++;
+				throw Object.assign(new Error(attempts === 1 ? "replace blocked" : "retry failed"), {
+					code: attempts === 1 ? "EPERM" : "EIO",
+				});
+			}
+			rename(source, target);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("retry failed");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
+	it("preserves the original when staging the replacement fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const write = fs.writeFileSync;
+		const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, content, options) => {
+			if (typeof file === "string" && path.dirname(file) === tempDir && file.endsWith(".tmp")) {
+				throw Object.assign(new Error("staging denied"), { code: "EPERM" });
+			}
+			write(file, content, options);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("staging denied");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("keeps an open writer appending to the replaced file after a rewrite", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "header\n");
+		const writer = storage.openWriter(sessionPath);
+		try {
+			// A rewrite renames a fresh inode over the path; a writer opened before
+			// it would otherwise keep appending to the orphaned file and lose the
+			// turn. Re-opening the live path under the publish lock must place the
+			// line in the replaced file.
+			storage.writeTextSync(sessionPath, "rewritten\n");
+			const appendSync = writer.appendSync?.bind(writer);
+			if (!appendSync) throw new Error("File writer must expose appendSync");
+			appendSync("appended\n");
+			expect(await Bun.file(sessionPath).text()).toBe("rewritten\nappended\n");
+			const files = await fsp.readdir(tempDir);
+			expect(files).not.toContain(".session.jsonl.lock");
+			expect(files.some(file => file.endsWith(".tmp"))).toBe(false);
+		} finally {
+			await writer.close();
+		}
+	});
+
+	it("fails closed for a held publish lock instead of writing outside it", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A live holder (this process) is never stolen: both the writer and the
+		// rewrite must wait out the bounded retry window and then reject rather
+		// than publish around the lock.
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}\n`);
+		try {
+			await expect(storage.writeTextAtomic(sessionPath, "replacement\n")).rejects.toBeInstanceOf(SessionLockError);
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow(SessionLockError);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+		} finally {
+			fs.unlinkSync(lockPath);
+		}
+	});
+
+	it("steals a contentless publish lock orphaned by a crash instead of bricking the file", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A kill between lock create and holder record leaves a contentless
+		// file no live process owns. Once older than the acquisition budget
+		// it must be stealable, or every later publish fails until manual
+		// removal (hV-oE).
+		fs.writeFileSync(lockPath, "");
+		const aged = new Date(Date.now() - 60_000);
+		fs.utimesSync(lockPath, aged, aged);
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+
+	it("waits out the budget before stealing a sub-budget contentless lock", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A live acquirer may still be between create and record, so a
+		// contentless file younger than the acquisition budget must not be
+		// stolen on sight: backdate to 400ms (100ms shy of the 500ms budget)
+		// and require the acquisition to wait for it to age out instead of
+		// succeeding instantly (hV-oE).
+		fs.writeFileSync(lockPath, "");
+		const backdated = new Date(Date.now() - 400);
+		fs.utimesSync(lockPath, backdated, backdated);
+		const start = Date.now();
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(Date.now() - start).toBeGreaterThanOrEqual(50);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+
+	it("steals a dead holder publish lock", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// 2^30 is above any real PID maximum: recovery must reclaim the lock.
+		fs.writeFileSync(lockPath, `${2 ** 30}:${Date.now()}\n`);
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
 	});
 });
 

@@ -1,7 +1,17 @@
 // Provider-wire compat for "amazon-bedrock"; regenerated from the frozen census using deployment contract selectors.
 
 provider "amazon-bedrock" {
+	default-model "us.anthropic.claude-opus-5-5"
+
+	// The Converse assembler positions content blocks by wire index
+	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
+	stream-revision "possible"
 	class "anthropic" {
+		family "fable" {
+			revision ">=5.1 <5.2" {
+				thinking-efforts "low" "medium" "high" "xhigh" "max"
+			}
+		}
 		family "opus" {
 			revision ">=4.6 <4.7" {
 				thinking-mode "anthropic-adaptive"
@@ -15,6 +25,8 @@ provider "amazon-bedrock" {
 	}
 	class "openai" {
 		thinking-mode "effort"
+		// OpenAI models reject Converse image blocks nested inside toolResult content.
+		requires-tool-result-image-hoisting #true
 	}
 	class "deepseek" {
 		requires-reasoning-content-for-all-assistant-turns #true
@@ -28,9 +40,36 @@ provider "amazon-bedrock" {
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "budget"
+		// Opaque application-inference-profile ARNs carry no vendor signal, so an
+		// OpenAI-backed profile classifies here and would otherwise nest images in
+		// toolResult content and hit the same rejection. Hoisting is accepted by
+		// every Converse model measured, so it is the safe default for unknowns.
+		requires-tool-result-image-hoisting #true
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "moonshot.kimi-k2-thinking" {
 		thinking-requires-effort #true
+	}
+	// The Qwen rows arrive with maxTokens copied from the upstream context
+	// window (262000 on a 262144 window), so a request that does not set an
+	// output budget of its own asks Bedrock for more than the model accepts
+	// and gets a 400 back ("you requested 262000 output tokens"). AWS
+	// publishes the real caps on the model cards — 8K for Qwen3-Next 80B A3B
+	// and Qwen3 VL 235B A22B, 16K for Qwen3 Coder Next — and the context
+	// windows already match, so only the output side needs patching (#12089).
+	models "qwen.qwen3-next-80b-a3b" {
+		limits-patch {
+			max-tokens 8000
+		}
+	}
+	models "qwen.qwen3-vl-235b-a22b" {
+		limits-patch {
+			max-tokens 8000
+		}
+	}
+	models "qwen.qwen3-coder-next" {
+		limits-patch {
+			max-tokens 16000
+		}
 	}
 }

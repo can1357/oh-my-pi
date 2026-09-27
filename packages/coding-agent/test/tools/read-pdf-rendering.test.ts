@@ -5,7 +5,8 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool, type ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as pdfRead from "@oh-my-pi/pi-coding-agent/tools/read-pdf";
 import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -21,7 +22,7 @@ function makeSession(cwd: string): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "images.autoResize": false, "inspect_image.mode": "off" }),
+		settings: Settings.isolated({ "images.autoResize": false }),
 	} as ToolSession;
 }
 

@@ -50,6 +50,45 @@ describe("buildHttp400DumpPayload", () => {
 		expect(payload.headers?.["x-api-key"]).toBe("[redacted]");
 		expect(payload.headers?.["content-type"]).toBe("application/json");
 	});
+
+	it("redacts a query string carried by a configurable baseUrl (e.g. Bedrock gateway routing)", () => {
+		const gatewayDump: RawHttpRequestDump = {
+			...dump,
+			url: "https://gateway.example.com/bedrock/model/anthropic.claude-opus-4-8/converse-stream?code=secret-token",
+		};
+		const payload = buildHttp400DumpPayload(gatewayDump, new HttpError(400, "x"), "x");
+
+		expect(payload.url).not.toContain("secret-token");
+		expect(payload.url).toBe(
+			"https://gateway.example.com/bedrock/model/anthropic.claude-opus-4-8/converse-stream[redacted-query]",
+		);
+	});
+
+	it("leaves a query-less URL untouched", () => {
+		const payload = buildHttp400DumpPayload(dump, new HttpError(400, "x"), "x");
+		expect(payload.url).toBe("https://api.anthropic.com/v1/messages");
+	});
+
+	it("redacts provider-specific auth headers the fixed list never named", () => {
+		const googleDump: RawHttpRequestDump = {
+			provider: "google",
+			api: "google-generative-ai",
+			model: "gemini-2.5-flash",
+			method: "POST",
+			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+			headers: {
+				"x-goog-api-key": "AIzaSy-live-google-key",
+				"x-amz-security-token": "aws-session-token",
+				"content-type": "application/json",
+			},
+			body: { generationConfig: {} },
+		};
+		const payload = buildHttp400DumpPayload(googleDump, new HttpError(400, "x"), "x");
+
+		expect(payload.headers?.["x-goog-api-key"]).toBe("[redacted]");
+		expect(payload.headers?.["x-amz-security-token"]).toBe("[redacted]");
+		expect(payload.headers?.["content-type"]).toBe("application/json");
+	});
 });
 
 describe("shouldDumpRejectedRequest", () => {

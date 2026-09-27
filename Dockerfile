@@ -22,7 +22,7 @@
 #     FROM ${PI_BASE} AS pi-base
 ###############################################################################
 
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.2
 
 ############################
 # 1) natives-builder — Rust + Bun → pi_natives.linux-<arch>.node (local cargo)
@@ -42,7 +42,7 @@ ENV BUN_INSTALL=/opt/bun \
     OMP_NATIVE_CARGO_PROFILE=ci
 
 # clang/libclang-dev: bindgen for pipewire-sys/libspa-sys (Linux desktop capture);
-# cmake/make/ninja-build: audiopus_sys builds bundled libopus via CMake.
+# cmake/make/ninja-build: opusic-sys builds bundled libopus via CMake.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl ca-certificates pkg-config libssl-dev unzip git \
@@ -127,7 +127,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CARGO_HOME=/data/cache/cargo \
     CARGO_TARGET_DIR=/data/cache/cargo-target \
     RUSTUP_HOME=/data/cache/rustup \
-    PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/bun-node-fallback-bin
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -137,6 +137,14 @@ RUN apt-get update \
 
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && /opt/bun/bin/bun --version
+
+# `node` → bun, last on PATH (same layout as the oven/bun images) so
+# `#!/usr/bin/env node` package bins (oxlint, oxfmt, …) run for every uid.
+# Bun's own fallback is a /tmp/bun-node-<hash> dir created 0700 by the first
+# user that needs it; the image build runs as root, so it would bake a dir
+# no robomp slot user can enter.
+RUN mkdir -p /usr/local/bun-node-fallback-bin \
+    && ln -s /opt/bun/bin/bun /usr/local/bun-node-fallback-bin/node
 
 # Rustup launcher only — the real toolchain is fetched lazily into RUSTUP_HOME
 # on first cargo invocation, driven by pi's `rust-toolchain.toml`. Keeps the

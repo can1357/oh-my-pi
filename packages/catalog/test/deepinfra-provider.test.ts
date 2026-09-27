@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { DEEPINFRA_BASE_URL, deepinfraModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -57,16 +56,6 @@ function catalogFixture(): Response {
 }
 
 describe("DeepInfra built-in provider", () => {
-	test("registers catalog descriptor with DEEPINFRA_API_KEY env discovery", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "deepinfra");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
-		expect(descriptor?.catalogDiscovery?.envVars).toContain("DEEPINFRA_API_KEY");
-		expect(descriptor?.catalogDiscovery?.allowUnauthenticated).toBe(true);
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.deepinfra).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
-	});
-
 	test("maps chat models from tagged catalog metadata and drops non-chat surfaces", async () => {
 		const requests: Array<{ url: string; authorization: string | null }> = [];
 		const fetchMock = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -139,6 +128,51 @@ describe("DeepInfra built-in provider", () => {
 		const mapped = models?.find(item => item.id === referenceId);
 		expect(mapped?.contextWindow).toBe(256000);
 		expect(mapped?.maxTokens).toBe(256000);
+	});
+
+	test("applies metadata.discount to the token rate card", async () => {
+		// DeepInfra publishes `pricing.*` at list price and a separate
+		// `discount` fraction; the user is billed `pricing * (1 - discount)`.
+		// GLM-5.2 is the live example (input 0.75 @ 35% off = 0.4875), and a
+		// `discount: null` row must keep list price untouched.
+		const fetchMock = async (): Promise<Response> =>
+			Response.json({
+				object: "list",
+				data: [
+					{
+						id: "vendor/on-promo",
+						object: "model",
+						metadata: {
+							context_length: 1048576,
+							pricing: { input_tokens: 0.75, output_tokens: 2.4, cache_read_tokens: 0.14 },
+							discount: 0.35,
+							tags: ["chat", "prompt_cache", "reasoning"],
+						},
+					},
+					{
+						id: "vendor/full-price",
+						object: "model",
+						metadata: {
+							context_length: 131072,
+							pricing: { input_tokens: 0.09, output_tokens: 0.18 },
+							discount: null,
+							tags: ["chat"],
+						},
+					},
+				],
+			});
+
+		const options = deepinfraModelManagerOptions({ fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		const promo = models?.find(item => item.id === "vendor/on-promo");
+		expect(promo?.cost.input).toBeCloseTo(0.4875, 10);
+		expect(promo?.cost.output).toBeCloseTo(1.56, 10);
+		expect(promo?.cost.cacheRead).toBeCloseTo(0.091, 10);
+		expect(promo?.cost.cacheWrite).toBe(0);
+
+		const fullPrice = models?.find(item => item.id === "vendor/full-price");
+		expect(fullPrice?.cost).toEqual({ input: 0.09, output: 0.18, cacheRead: 0, cacheWrite: 0 });
 	});
 
 	test("ships no bundled row whose output cap exceeds its context window", () => {

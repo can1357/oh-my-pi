@@ -1,5 +1,135 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import * as os from "node:os";
+import * as path from "node:path";
+import { formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+
+describe("formatScreenshot", () => {
+	function fakeResized(
+		overrides?: Partial<{
+			width: number;
+			height: number;
+			originalWidth: number;
+			originalHeight: number;
+			wasResized: boolean;
+			buffer: Uint8Array;
+			mimeType: string;
+			decodeFailed: boolean;
+		}>,
+	): {
+		buffer: Uint8Array;
+		mimeType: string;
+		originalWidth: number;
+		originalHeight: number;
+		width: number;
+		height: number;
+		wasResized: boolean;
+		decodeFailed?: boolean;
+		get data(): string;
+	} {
+		const buf = overrides?.buffer ?? new Uint8Array(2048);
+		return {
+			buffer: buf,
+			mimeType: overrides?.mimeType ?? "image/webp",
+			originalWidth: overrides?.originalWidth ?? 800,
+			originalHeight: overrides?.originalHeight ?? 600,
+			width: overrides?.width ?? 800,
+			height: overrides?.height ?? 600,
+			wasResized: overrides?.wasResized ?? false,
+			decodeFailed: overrides?.decodeFailed,
+			get data() {
+				return Buffer.from(buf).toString("base64");
+			},
+		};
+	}
+
+	it("formats full-res save with home-relative path", () => {
+		const filePath = path.join(os.homedir(), "screenshots", "capture.png");
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: true,
+				savedMimeType: "image/png",
+				savedByteLength: 2048,
+				dest: filePath,
+				resized,
+			}),
+		).toEqual([
+			"Screenshot captured",
+			"Saved: image/png (2.00 KB) to ~/screenshots/capture.png",
+			"Model: image/webp (1.00 KB, 800x600)",
+		]);
+	});
+
+	it("formats non-home path without tilde", () => {
+		const filePath = path.join(path.parse(os.homedir()).root, "omp-render-utils", "capture.png");
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: true,
+				savedMimeType: "image/png",
+				savedByteLength: 2048,
+				dest: filePath,
+				resized,
+			}),
+		).toEqual([
+			"Screenshot captured",
+			`Saved: image/png (2.00 KB) to ${filePath}`,
+			"Model: image/webp (1.00 KB, 800x600)",
+		]);
+	});
+
+	it("formats temp-only screenshot without save line", () => {
+		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(3072) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: false,
+				savedMimeType: "image/webp",
+				savedByteLength: 3072,
+				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
+				resized,
+			}),
+		).toEqual(["Screenshot captured", "Format: image/webp (3.00 KB)", "Dimensions: 800x600"]);
+	});
+
+	it("surfaces screenshots that could not be resized", () => {
+		const resized = fakeResized({ decodeFailed: true, mimeType: "image/png", buffer: new Uint8Array(4096) });
+
+		expect(
+			formatScreenshot({
+				saveFullRes: false,
+				savedMimeType: "image/png",
+				savedByteLength: 4096,
+				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
+				resized,
+			}),
+		).toContain("Resize: image decoder failed; using original image bytes");
+	});
+
+	it("appends dimension note when image was resized", () => {
+		const resized = fakeResized({
+			wasResized: true,
+			originalWidth: 1600,
+			originalHeight: 1200,
+			width: 800,
+			height: 600,
+		});
+
+		const lines = formatScreenshot({
+			saveFullRes: false,
+			savedMimeType: "image/webp",
+			savedByteLength: 2048,
+			dest: path.join(os.tmpdir(), "shot.png"),
+			resized,
+		});
+
+		expect(lines).toContain(
+			"[Image: original 1600x1200, displayed at 800x600. Multiply coordinates by 2.00 to map to original image.]",
+		);
+	});
+});
 
 // 1x1 red PNG (69 bytes) — used as a Bun.Image seed to synthesize larger fixtures
 // without checking binary blobs into the repo.

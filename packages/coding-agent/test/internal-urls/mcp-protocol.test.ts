@@ -16,6 +16,7 @@ function createMockManager(opts: {
 }) {
 	return {
 		getConnectedServers: () => opts.servers ?? [],
+		waitForPendingConnections: async () => {},
 		getServerResources: (name: string) => opts.resources?.get(name),
 		ensureServerResources: async (name: string) => opts.ensureResources?.(name),
 		readServerResource: async (_name: string, _uri: string) => {

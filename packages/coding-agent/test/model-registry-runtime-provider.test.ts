@@ -73,14 +73,14 @@ describe("ModelRegistry runtime provider registration", () => {
 		return registry.getAll().filter(model => model.provider === providerName);
 	}
 
-	function expectProviderHeader(
+	async function expectProviderHeader(
 		registry: ModelRegistry,
 		providerName: string,
 		headerName: string,
 		expectedValue: string | undefined,
-	): void {
+	): Promise<void> {
 		for (const model of getProviderModels(registry, providerName)) {
-			expect(model.headers?.[headerName]).toBe(expectedValue);
+			expect((await registry.resolveModelHeaders(model))?.[headerName]).toBe(expectedValue);
 		}
 	}
 
@@ -90,11 +90,11 @@ describe("ModelRegistry runtime provider registration", () => {
 		headerName: string,
 		expectedValue: string | undefined,
 	): Promise<void> {
-		expectProviderHeader(registry, providerName, headerName, expectedValue);
+		await expectProviderHeader(registry, providerName, headerName, expectedValue);
 		await registry.refresh("offline");
-		expectProviderHeader(registry, providerName, headerName, expectedValue);
+		await expectProviderHeader(registry, providerName, headerName, expectedValue);
 		await registry.refreshProvider(providerName, "offline");
-		expectProviderHeader(registry, providerName, headerName, expectedValue);
+		await expectProviderHeader(registry, providerName, headerName, expectedValue);
 	}
 
 	async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: string): Promise<void> {
@@ -115,17 +115,21 @@ describe("ModelRegistry runtime provider registration", () => {
 	): Promise<void> {
 		const model = registry.find(providerName, modelId);
 		expect(model?.baseUrl).toBe(baseUrl);
-		expect(model?.headers?.[headerName]).toBe(headerValue);
+		expect(model && (await registry.resolveModelHeaders(model))?.[headerName]).toBe(headerValue);
 		await registry.refresh("offline");
-		expect(registry.find(providerName, modelId)?.baseUrl).toBe(baseUrl);
-		expect(registry.find(providerName, modelId)?.headers?.[headerName]).toBe(headerValue);
+		const refreshed = registry.find(providerName, modelId);
+		expect(refreshed?.baseUrl).toBe(baseUrl);
+		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.[headerName]).toBe(headerValue);
 		await registry.refreshProvider(providerName, "offline");
-		expect(registry.find(providerName, modelId)?.baseUrl).toBe(baseUrl);
-		expect(registry.find(providerName, modelId)?.headers?.[headerName]).toBe(headerValue);
+		const providerRefreshed = registry.find(providerName, modelId);
+		expect(providerRefreshed?.baseUrl).toBe(baseUrl);
+		expect(providerRefreshed && (await registry.resolveModelHeaders(providerRefreshed))?.[headerName]).toBe(
+			headerValue,
+		);
 	}
 
 	test("does not discover ClinePass without credentials", async () => {
-		const peek = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		const peek = vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
 		try {
 			await registry.refresh("online");
 		} finally {
@@ -205,10 +209,10 @@ describe("ModelRegistry runtime provider registration", () => {
 		await expectProviderHeaderAcrossRefresh(registry, providerName, runtimeHeader, "runtime-header");
 
 		registry.clearSourceRegistrations("ext://runtime");
-		expectProviderHeader(registry, providerName, runtimeHeader, undefined);
+		await expectProviderHeader(registry, providerName, runtimeHeader, undefined);
 	});
 
-	test("registerProvider keeps runtime header objects live for request-time reads", () => {
+	test("registerProvider keeps runtime header objects live for request-time reads", async () => {
 		const providerHeaders: Record<string, string> = { "X-Request-ID": "request-1" };
 		const modelHeaders: Record<string, string> = { "X-Message-ID": "message-1" };
 
@@ -230,7 +234,8 @@ describe("ModelRegistry runtime provider registration", () => {
 		modelHeaders["X-Model-Turn-ID"] = "model-turn-2";
 
 		const model = registry.find("runtime-provider", "runtime-model");
-		expect({ ...model?.headers }).toEqual({
+		if (!model) throw new Error("Expected runtime model");
+		expect(await registry.resolveModelHeaders(model)).toEqual({
 			"X-Request-ID": "request-2",
 			"X-Turn-ID": "turn-2",
 			"X-Message-ID": "message-2",
@@ -246,7 +251,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		await expectProviderHeaderAcrossRefresh(registry, providerName, "Authorization", "Bearer RUNTIME_AUTH_KEY");
 
 		registry.clearSourceRegistrations("ext://runtime");
-		expectProviderHeader(registry, providerName, "Authorization", undefined);
+		await expectProviderHeader(registry, providerName, "Authorization", undefined);
 	});
 
 	test("registerProvider applies remoteCompaction-only overrides to existing provider models across refresh", async () => {
@@ -425,7 +430,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		// harnesses) gives the anthropic manager a fetchDynamicModels hook whose
 		// endpoint fetch starts only after the catalog abort — its deadline timer
 		// arms after the last advanceTimersByTime and the refresh hangs forever.
-		const peekSpy = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		const peekSpy = vi.spyOn(authStorage.keys, "peek").mockResolvedValue(undefined);
 		let catalogFetches = 0;
 		let abortedFetches = 0;
 		const stalledFetch: FetchImpl = (_input, init) => {
@@ -657,7 +662,10 @@ describe("ModelRegistry runtime provider registration", () => {
 		);
 
 		const configuredRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
-		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+		const configuredModel = configuredRegistry.find("anthropic", modelId);
+		expect(configuredModel && (await configuredRegistry.resolveModelHeaders(configuredModel))?.[sharedHeader]).toBe(
+			configHeaderValue,
+		);
 
 		configuredRegistry.registerProvider(
 			"anthropic",
@@ -667,7 +675,10 @@ describe("ModelRegistry runtime provider registration", () => {
 		await expectProviderHeaderAcrossRefresh(configuredRegistry, "anthropic", sharedHeader, runtimeHeaderValue);
 
 		configuredRegistry.clearSourceRegistrations("ext://runtime");
-		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+		const restoredModel = configuredRegistry.find("anthropic", modelId);
+		expect(restoredModel && (await configuredRegistry.resolveModelHeaders(restoredModel))?.[sharedHeader]).toBe(
+			configHeaderValue,
+		);
 	});
 
 	test("runtime-registered models inherit configured provider guardrails", () => {
@@ -718,12 +729,12 @@ describe("ModelRegistry runtime provider registration", () => {
 		};
 
 		registry.registerProvider("runtime-provider", config, "ext://runtime");
-		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(true);
+		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(true);
 
 		await registry.refresh("offline");
 
 		// The fallback resolver should still find the API key after refresh
-		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(true);
+		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(true);
 
 		delete process.env.TEST_RUNTIME_KEY;
 	});
@@ -831,11 +842,11 @@ describe("ModelRegistry runtime provider registration", () => {
 		const sourceBHeader = "X-Source-B-Header";
 
 		registry.registerProvider(providerName, { headers: { [sourceAHeader]: "from-source-a" } }, "ext://a");
-		expectProviderHeader(registry, providerName, sourceAHeader, "from-source-a");
+		await expectProviderHeader(registry, providerName, sourceAHeader, "from-source-a");
 
 		registry.registerProvider(providerName, { headers: { [sourceBHeader]: "from-source-b" } }, "ext://b");
 		await expectProviderHeaderAcrossRefresh(registry, providerName, sourceAHeader, undefined);
-		expectProviderHeader(registry, providerName, sourceBHeader, "from-source-b");
+		await expectProviderHeader(registry, providerName, sourceBHeader, "from-source-b");
 	});
 
 	test("multiple extension providers survive refresh independently", async () => {
@@ -905,7 +916,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("oauth.modifyModels projection survives refresh and refreshProvider", async () => {
-		await authStorage.set("projecting-provider", {
+		await authStorage.credentials.set("projecting-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -915,10 +926,12 @@ describe("ModelRegistry runtime provider registration", () => {
 		// Mirrors a credential-aware provider: the registered `models` array is a
 		// pre-discovery bootstrap, and modifyModels swaps in the catalog the
 		// account actually has.
+		const providerHeaders = { "X-Parent": "parent", "X-Mode": "base" };
 		const config: ProviderConfigInput = {
 			api: "custom-projection-api",
 			baseUrl: "https://example.invalid/",
 			streamSimple,
+			headers: providerHeaders,
 			models: [baseModel],
 			oauth: {
 				name: "Projecting OAuth",
@@ -931,6 +944,7 @@ describe("ModelRegistry runtime provider registration", () => {
 						...(models.find(model => model.provider === "projecting-provider") as Model<Api>),
 						id: "projected-model",
 						name: "Projected Model",
+						headers: { "X-Mode": "projected" },
 					},
 				],
 			},
@@ -940,21 +954,116 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		const projectedIds = () => getProviderModels(registry, "projecting-provider").map(model => model.id);
 		expect(projectedIds()).toEqual(["projected-model"]);
+		await expectProviderHeader(registry, "projecting-provider", "X-Parent", "parent");
+		await expectProviderHeader(registry, "projecting-provider", "X-Mode", "projected");
+		providerHeaders["X-Parent"] = "rotated";
 
 		// The model selector reloads the registry offline every time it opens; the
 		// projection must not fall back to the bootstrap `models` array.
 		await registry.refresh("offline");
 		expect(projectedIds()).toEqual(["projected-model"]);
+		await expectProviderHeader(registry, "projecting-provider", "X-Parent", "rotated");
+		await expectProviderHeader(registry, "projecting-provider", "X-Mode", "projected");
 
 		await registry.refreshProvider("projecting-provider", "offline");
 		expect(projectedIds()).toEqual(["projected-model"]);
+		await expectProviderHeader(registry, "projecting-provider", "X-Parent", "rotated");
+		await expectProviderHeader(registry, "projecting-provider", "X-Mode", "projected");
 
 		registry.clearSourceRegistrations("ext://oauth");
 		expect(getProviderModels(registry, "projecting-provider")).toEqual([]);
 	});
 
+	test("oauth.modifyModels output is materialized through buildModel", async () => {
+		await authStorage.credentials.set("materializing-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// Extensions author specs, so a hook that builds its own catalog (rather
+		// than deriving it from the models it was handed) returns records with no
+		// resolved surface at all. The registry must still hand out built models:
+		// consumers read `identity` unconditionally.
+		const config: ProviderConfigInput = {
+			api: "custom-materialize-api",
+			baseUrl: "https://example.invalid/",
+			streamSimple,
+			models: [baseModel],
+			oauth: {
+				name: "Materializing OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models => [
+					...models.filter(model => model.provider !== "materializing-provider"),
+					{
+						...baseModel,
+						id: "claude-sonnet-4-5",
+						name: "Synthesized Model",
+						provider: "materializing-provider",
+						api: "custom-materialize-api",
+						baseUrl: "https://example.invalid/",
+					} as unknown as Model<Api>,
+				],
+			},
+		};
+
+		registry.registerProvider("materializing-provider", config, "ext://oauth");
+
+		const [projected, ...rest] = getProviderModels(registry, "materializing-provider");
+		expect(rest).toEqual([]);
+		expect(projected?.id).toBe("claude-sonnet-4-5");
+		expect(projected?.identity).toEqual({ class: "anthropic", family: "sonnet", revision: "4.5.0" });
+		expect(projected?.tokenizer).toBe("claude-v3");
+	});
+
+	test("a spec-shaped projected model keeps its sparse compat override", async () => {
+		await authStorage.credentials.set("compat-provider", {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+
+		// On a spec the sparse override lives in `compat`, not `compatConfig`, so
+		// the row cannot be projected back to spec stage before it is built —
+		// that reads the absent `compatConfig` and drops the override, and the
+		// request handler stops sending the cache header the extension asked for.
+		const config: ProviderConfigInput = {
+			api: "openai-completions",
+			baseUrl: "https://example.invalid/",
+			models: [baseModel],
+			oauth: {
+				name: "Compat OAuth",
+				login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+				refreshToken: async credentials => credentials,
+				getApiKey: credentials => credentials.access,
+				modifyModels: models => [
+					...models.filter(model => model.provider !== "compat-provider"),
+					{
+						...baseModel,
+						id: "synthesized-model",
+						provider: "compat-provider",
+						api: "openai-completions",
+						baseUrl: "https://example.invalid/",
+						compat: { promptCacheSessionHeader: "x-grok-conv-id" },
+					} as unknown as Model<Api>,
+				],
+			},
+		};
+
+		registry.registerProvider("compat-provider", config, "ext://oauth");
+
+		const [projected] = getProviderModels(registry, "compat-provider") as Model<"openai-completions">[];
+		expect(projected?.id).toBe("synthesized-model");
+		expect(projected?.compat?.promptCacheSessionHeader).toBe("x-grok-conv-id");
+		expect(projected?.compatConfig).toEqual({ promptCacheSessionHeader: "x-grok-conv-id" });
+	});
+
 	test("a throwing modifyModels degrades to the unprojected catalog", async () => {
-		await authStorage.set("throwing-provider", {
+		await authStorage.credentials.set("throwing-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -989,7 +1098,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a throwing modifyModels logs once per distinct failure", async () => {
-		await authStorage.set("noisy-provider", {
+		await authStorage.credentials.set("noisy-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1032,7 +1141,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a non-idempotent modifyModels does not compound across refreshes", async () => {
-		await authStorage.set("appending-provider", {
+		await authStorage.credentials.set("appending-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1078,7 +1187,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		// The SDK and CLI loaders drain pending registrations one at a time, so an
 		// earlier provider's projection is still in #models when the next arrives.
 		const registerAppending = async (providerName: string, apiId: string) => {
-			await authStorage.set(providerName, {
+			await authStorage.credentials.set(providerName, {
 				type: "oauth",
 				access: "access-token",
 				refresh: "refresh-token",
@@ -1130,7 +1239,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups preserve whole-catalog modifyModels projections", async () => {
 		const hiddenModel = registry.getAll().find(model => model.provider === "anthropic");
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1168,7 +1277,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("provider-scoped lookups do not intern other providers' transient projections", async () => {
 		const anthropicId = registry.getAll().find(model => model.provider === "anthropic")?.id;
-		await authStorage.set("changing-provider", {
+		await authStorage.credentials.set("changing-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1207,7 +1316,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("registering another provider reapplies whole-catalog modifyModels projections", async () => {
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1248,7 +1357,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("runtime transport overrides reapply whole-catalog modifyModels projections", async () => {
 		const proxyBaseUrl = "https://proxy.example.invalid/v1";
-		await authStorage.set("filtering-provider", {
+		await authStorage.credentials.set("filtering-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1281,7 +1390,7 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("online discovery reapplies modifiers to an unprojected full catalog", async () => {
 		const target = registry.getAll().find(model => model.provider === "anthropic");
-		await authStorage.set("renaming-provider", {
+		await authStorage.credentials.set("renaming-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1327,7 +1436,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	});
 
 	test("a modifyModels that mutates in place then throws cannot corrupt the catalog", async () => {
-		await authStorage.set("mutating-provider", {
+		await authStorage.credentials.set("mutating-provider", {
 			type: "oauth",
 			access: "access-token",
 			refresh: "refresh-token",
@@ -1378,5 +1487,51 @@ describe("ModelRegistry runtime provider registration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("resolves a configured provider base URL before any model is discovered", () => {
+		// `omp usage` constructs a registry and probes credentials immediately, so
+		// a discovery-only provider (no bundled rows) has no model to read a URL
+		// from yet. Deriving solely from discovered models returned `undefined`
+		// here, and the usage probe then sent a proxy-scoped key to the
+		// provider's canonical host.
+		const providerName = "charm-hyper";
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({ providers: { [providerName]: { baseUrl: "https://gateway.internal" } } }),
+		);
+		const configured = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		// Cache-cold by construction: this provider bundles no rows.
+		expect(configured.getAll().some(model => model.provider === providerName)).toBe(false);
+		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
+	});
+
+	test("prefers a configured provider base URL over a model-level one", () => {
+		// The other half of the precedence contract, and the half a green suite
+		// cannot prove: every other `getProviderBaseUrl` caller in these tests
+		// stubs the method. `getProviderHeaders` is documented as provider-level
+		// "without including per-model overrides", so a provider-scoped accessor
+		// must not answer with some model's own baseUrl.
+		const providerName = "charm-hyper";
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					[providerName]: {
+						baseUrl: "https://gateway.internal",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ ...baseModel, id: "glm-5.3", baseUrl: "https://model-level.example/v1" }],
+					},
+				},
+			}),
+		);
+		const configured = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		// The model really does carry a different baseUrl, so this is a genuine
+		// conflict rather than a vacuous assertion.
+		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
+		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
 	});
 });
