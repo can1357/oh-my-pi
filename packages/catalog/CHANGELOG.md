@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Model.promptCache`, per-retention-tier prompt-cache entry lifetimes in seconds (`short` / `long`), declared per provider through the `prompt-cache` KDL rule (bundled: direct Anthropic, 5 min / 1 h). Custom models and `modelOverrides` opt in with the models.yml `promptCache` key ([#12699](https://github.com/can1357/oh-my-pi/pull/12699) by [@KamijoToma](https://github.com/KamijoToma)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added
