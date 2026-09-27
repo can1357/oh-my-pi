@@ -594,12 +594,13 @@ export class ModelControls {
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
-	 * `complexity` is a delegator's difficulty rationale (task-spawned turns only).
+	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
+	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number, complexity?: string): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -622,7 +623,7 @@ export class ModelControls {
 			};
 			try {
 				resolved = await classifyDifficulty(
-					{ request: promptText, complexity },
+					{ request: promptText, solutionSpace },
 					{
 						settings: this.#host.settings,
 						registry: this.#host.modelRegistry,
