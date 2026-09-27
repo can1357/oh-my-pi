@@ -2347,15 +2347,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Ordinary input must install its waiter synchronously; pause only when a prior tool restoration is pending. */
+	#needsToolPresentationRestore(): boolean {
+		const interviewPhase = this.#guidedGoalInterview?.phase;
+		return (
+			this.#guidedGoalInterviewSwitchRollback !== undefined ||
+			interviewPhase === "cleanup-failed" ||
+			interviewPhase === "restoring" ||
+			this.#goalModeExitPending !== undefined ||
+			this.session.getGoalModeState()?.mode === "exiting"
+		);
+	}
+
 	async getUserInput(): Promise<SubmittedUserInput> {
-		const submitWasDisabled = this.editor.disableSubmit;
-		this.editor.disableSubmit = true;
-		this.ui.requestRender();
-		try {
-			await this.#waitForToolPresentationBeforeInput();
-		} finally {
-			this.editor.disableSubmit = submitWasDisabled;
+		if (this.#needsToolPresentationRestore()) {
+			const submitWasDisabled = this.editor.disableSubmit;
+			this.editor.disableSubmit = true;
 			this.ui.requestRender();
+			try {
+				await this.#waitForToolPresentationBeforeInput();
+			} finally {
+				this.editor.disableSubmit = submitWasDisabled;
+				this.ui.requestRender();
+			}
 		}
 		const { promise, resolve } = Promise.withResolvers<SubmittedUserInput>();
 		this.onInputCallback = input => {
@@ -6473,11 +6487,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// pending input callback against a session that is already disposing.
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
-		if (this.#guidedGoalInterview?.phase === "dispatching") {
-			await this.session.abort();
-		}
-		await this.#restoreGuidedGoalInterviewTools();
-		await this.#retryPendingGoalModeExit(true);
 
 		// Surface progress before any asynchronous cleanup, including live commands
 		// and BTW history writes, so the user sees a reason for the pause.
@@ -6487,6 +6496,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
 		try {
+			if (this.#guidedGoalInterview?.phase === "dispatching") {
+				await this.session.abort();
+			}
+			await this.#restoreGuidedGoalInterviewTools();
+			await this.#retryPendingGoalModeExit(true);
 			this.#streamPublisher?.dispose();
 			this.#streamPublisher = undefined;
 			await this.#recorder?.stop();
