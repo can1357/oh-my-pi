@@ -85,4 +85,70 @@ describe("InteractiveMode.setEditorComponent", () => {
 		mode.setEditorComponent(undefined);
 		expect(mode.editor.disableSubmit).toBe(false);
 	});
+
+	it("shows stash feedback in the composer placeholder and restores the current hint", () => {
+		vi.useFakeTimers();
+		try {
+			const ordinaryHint = Bun.stripANSI(mode.editor.placeholder?.() ?? "");
+			expect(ordinaryHint).not.toBe("");
+			const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+
+			mode.notifyComposerStash();
+
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe("Prompt stashed");
+			expect(Bun.stripANSI(mode.editor.render(80).join("\n"))).toContain("Prompt stashed");
+			expect(requestRender).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(100);
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe("Prompt stashed");
+
+			vi.advanceTimersByTime(10_000);
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe(ordinaryHint);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels stash feedback when a saved draft is restored", () => {
+		vi.useFakeTimers();
+		try {
+			const ordinaryHint = Bun.stripANSI(mode.editor.placeholder?.() ?? "");
+			const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+
+			mode.notifyComposerStash();
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe("Prompt stashed");
+
+			vi.advanceTimersByTime(100);
+			mode.cancelComposerStashNotice();
+
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe(ordinaryHint);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+
+			vi.advanceTimersByTime(10_000);
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe(ordinaryHint);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels the stash feedback timer when transient session UI is cleared", () => {
+		vi.useFakeTimers();
+		try {
+			const ordinaryHint = Bun.stripANSI(mode.editor.placeholder?.() ?? "");
+			const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+
+			mode.notifyComposerStash();
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe("Prompt stashed");
+
+			mode.clearTransientSessionUi();
+			requestRender.mockClear();
+			vi.advanceTimersByTime(10_000);
+
+			expect(Bun.stripANSI(mode.editor.placeholder?.() ?? "")).toBe(ordinaryHint);
+			expect(requestRender).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

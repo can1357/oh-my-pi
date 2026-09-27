@@ -305,6 +305,7 @@ export class InputController {
 				editor.clearDraft();
 			}
 			this.#stashedDraft = currentDraft;
+			this.ctx.notifyComposerStash();
 		} else if (this.#stashedDraft) {
 			this.#restoreStashIfEmpty();
 		}
@@ -329,6 +330,7 @@ export class InputController {
 		this.ctx.editor.restoreComposerDraft(draft);
 		this.#restoredStashText = this.ctx.editor.getText();
 		this.#restoredStashImages = [...this.ctx.editor.pendingImages];
+		this.ctx.cancelComposerStashNotice();
 		this.ctx.ui.requestRender();
 	}
 
@@ -2173,6 +2175,14 @@ export class InputController {
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
+		}
+		// Keep a previously restored Ctrl+S draft separate from the queued entries.
+		// This applies to both Alt+Up and restore-all, but not explicit currentText merges.
+		if (currentText === undefined && this.isRestoredStashDraft()) {
+			this.#stashedDraft = this.ctx.editor.captureComposerDraft();
+			this.#restoredStashText = undefined;
+			this.#restoredStashImages = undefined;
+			this.ctx.editor.clearDraft();
 		}
 		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
 		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
