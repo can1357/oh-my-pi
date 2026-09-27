@@ -2480,3 +2480,238 @@ def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
         assert not list(ws_root.glob(".trash-*"))
     assert pool_marker.exists(), "sweep must never touch the shared clone pool"
     assert mgr.reclaim_all_caches() == 0
+
+_COMMIT_ENV = os.environ | {
+    "GIT_AUTHOR_NAME": "robomp-bot",
+    "GIT_AUTHOR_EMAIL": "robomp-bot@example.invalid",
+    "GIT_COMMITTER_NAME": "robomp-bot",
+    "GIT_COMMITTER_EMAIL": "robomp-bot@example.invalid",
+}
+
+
+def _commit_agent_work(repo_dir: Path, name: str, message: str) -> None:
+    (repo_dir / name).write_text("agent work\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", name],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_COMMIT_ENV,
+    )
+
+
+def _advance_upstream_main(tmp_path: Path) -> str:
+    seed = tmp_path / "seed"
+    (seed / "remote.txt").write_text("new remote state\n", encoding="utf-8")
+    subprocess.run(["git", "add", "remote.txt"], cwd=str(seed), check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "advance remote"],
+        cwd=str(seed),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(seed), check=True, capture_output=True, text=True)
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(seed),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+
+
+def _merge_base_with_origin_main(repo_dir: Path) -> tuple[str, str]:
+    def probe(args: list[str]) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    return probe(["merge-base", "HEAD", "origin/main"]), probe(["rev-parse", "origin/main"])
+
+
+def test_ensure_workspace_rebases_stale_local_branch_on_resume(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=42,
+        title="something is wrong",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    _commit_agent_work(ws.repo_dir, "feature.txt", "agent work")
+    agent_head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    remote_head = _advance_upstream_main(tmp_path)
+
+    resumed = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=42,
+        title="something is wrong",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    assert resumed.branch == ws.branch
+    merge_base, base_tip = _merge_base_with_origin_main(resumed.repo_dir)
+    assert base_tip == remote_head, "resume must see the advanced origin/main"
+    assert merge_base == remote_head, "resumed branch must be rebased onto current origin/main"
+    head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(resumed.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert head != remote_head and head != agent_head
+    subjects = (
+        subprocess.run(
+            ["git", "log", "--format=%s", "origin/main..HEAD"],
+            cwd=str(resumed.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
+    assert subjects == ["agent work"]
+    assert (resumed.repo_dir / "feature.txt").read_text() == "agent work\n"
+    assert (resumed.repo_dir / "remote.txt").read_text() == "new remote state\n"
+
+
+def test_ensure_workspace_resume_skips_rebase_when_worktree_dirty(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=43,
+        title="dirty resume",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    (ws.repo_dir / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
+    stale_head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    _advance_upstream_main(tmp_path)
+
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=43,
+        title="dirty resume",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert head == stale_head
+    assert (ws.repo_dir / "wip.txt").read_text() == "uncommitted\n"
+
+
+def test_ensure_workspace_resume_skips_rebase_when_branch_has_remote(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=44,
+        title="pushed branch",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    _commit_agent_work(ws.repo_dir, "feature.txt", "agent work")
+    subprocess.run(
+        ["git", "push", "origin", f"{ws.branch}:{ws.branch}"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_COMMIT_ENV,
+    )
+    stale_head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    _advance_upstream_main(tmp_path)
+
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=44,
+        title="pushed branch",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert head == stale_head
