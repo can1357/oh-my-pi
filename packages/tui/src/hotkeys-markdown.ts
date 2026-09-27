@@ -141,6 +141,10 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				{ keys: [act("app.thinking.toggle")], action: "Toggle thinking block visibility" },
 				{ keys: [act("app.editor.external")], action: "Edit message in external editor" },
 				{ keys: [act("app.local.open")], action: "Open a local:// file in external editor" },
+				{
+					keys: [act("app.editor.stash")],
+					action: "Stash the draft; on an empty editor restore it (also restores after sending another prompt)",
+				},
 				{ keys: [act("app.retry")], action: "Retry last failed assistant turn" },
 				{ keys: [act("app.clipboard.pasteImage")], action: "Paste image or text from clipboard" },
 				{
@@ -155,14 +159,7 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				},
 				{ keys: [act("app.live.toggle")], action: "Start/stop live voice mode (/live)" },
 				{
-					keys: [
-						act("app.agents.hub"),
-						{ text: " / " },
-						act("app.session.observe"),
-						{ text: " / double-tap " },
-						hints(["left"]),
-						{ text: " (empty editor)" },
-					],
+					keys: [act("app.agents.hub"), { text: " / double-tap " }, hints(["left"]), { text: " (empty editor)" }],
 					action: "Open the agent hub",
 				},
 				{ keys: [{ token: "#<number>" }], action: "GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)" },
