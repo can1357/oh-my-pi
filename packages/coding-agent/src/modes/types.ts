@@ -5,6 +5,7 @@ import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } fro
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
+import type { RemoteDialogHosts } from "./remote-dialogs";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { Settings } from "../config/settings";
 import type {
@@ -164,6 +165,12 @@ export interface InteractiveModeContext {
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/**
+	 * Remote surfaces (collab guests, Telegram chats, …) that may answer a
+	 * dialog the TUI is showing; the first `answered` result wins and the rest
+	 * are aborted. A remote host registers itself for its own lifetime.
+	 */
+	remoteDialogHosts: RemoteDialogHosts;
 	eventController: EventController;
 	eventBus?: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */

@@ -6,6 +6,7 @@ import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
+import { RemoteDialogHosts } from "../../../src/modes/remote-dialogs";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
@@ -62,6 +63,7 @@ function makeHarness() {
 		addAutocompleteProvider,
 		syncComposerShape: vi.fn(),
 		showStatus: vi.fn(),
+		remoteDialogHosts: new RemoteDialogHosts(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);
