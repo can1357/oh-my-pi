@@ -37,7 +37,7 @@ export interface CollabStatus {
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
-	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean; maxLength?: number };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
