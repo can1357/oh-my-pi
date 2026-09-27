@@ -939,14 +939,10 @@ describe("device writes honor lenientArgValidation", () => {
 			name: lenient ? "lenient_dev" : "strict_dev",
 			label: "fixture",
 			description: "fixture",
-			// A CLOSED schema: the beside-case below exercises the host's
-			// unrecognized-key heal, which must not fire for a lenient device.
-			parameters: {
-				type: "object",
-				additionalProperties: false,
-				properties: { op: { type: "string" } },
-				required: ["op"],
-			} as never,
+			// A closed schema (`"+": "reject"`): the beside-case below exercises the
+			// host's unrecognized-key heal, which deletes `extra` to validate and must
+			// put it back for a lenient device.
+			parameters: type({ op: "string", "+": "reject" }),
 			lenientArgValidation: lenient,
 			async execute(_id: string, args: Record<string, unknown>) {
 				seen.push(args);
