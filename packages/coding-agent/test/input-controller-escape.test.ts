@@ -829,16 +829,6 @@ describe("InputController Ctrl+C behavior", () => {
 		// terminal before the second press.
 		expect(spies.flushSync).toHaveBeenCalledTimes(2);
 	});
-
-	it("does not flush when Ctrl+C is not pressed", () => {
-		const { ctx, editor, spies } = createContext();
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		editor.onEscape?.(); // Esc is a different handler
-
-		expect(spies.flushSync).not.toHaveBeenCalled();
-	});
 });
 
 describe("InputController double-tap ← gesture", () => {

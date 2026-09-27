@@ -93,21 +93,6 @@ describe("resolvePluginSource", () => {
 		expect(resolved.tempCloneRoot).toBeUndefined();
 	});
 
-	// Network-dependent: object sources attempt real git clones
-	it.skip("resolves github object source via git clone", async () => {
-		const entry = makeEntry({ source: "github", repo: "nonexistent-owner/nonexistent-repo" });
-		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(
-			/git clone failed/,
-		);
-	});
-
-	it.skip("resolves url object source via git clone", async () => {
-		const entry = makeEntry({ source: "url", url: "https://example.com/nonexistent.git" });
-		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(
-			/git clone failed/,
-		);
-	});
-
 	it("throws when resolved directory does not exist", async () => {
 		const entry = makeEntry("./plugins/nonexistent-plugin");
 		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(

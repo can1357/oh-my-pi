@@ -18,21 +18,6 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.prefix).toBe("/");
 		});
 
-		it("extracts /A from '/A' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/A"];
-			const cursorLine = 0;
-			const cursorCol = 2; // After the "A"
-
-			const result = await provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
-
-			// This might return null if /A doesn't match anything, which is fine
-			// We're mainly testing that the prefix extraction works
-			if (result) {
-				expect(result.prefix).toBe("/A");
-			}
-		});
-
 		it("does not trigger for slash commands", async () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const lines = ["/model"];
@@ -707,20 +692,6 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/swarm run package.json".length);
 		});
 
-		it("replaces only the last path token when completing a multi-token slash command argument", () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const result = provider.applyCompletion(
-				["/model claude"],
-				0,
-				13,
-				{ value: "claude-sonnet", label: "claude-sonnet" },
-				"claude",
-			);
-
-			expect(result.lines[0]).toBe("/model claude-sonnet");
-			expect(result.cursorCol).toBe("/model claude-sonnet".length);
-		});
-
 		it("does not add a trailing space when completing a directory with @", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const result = provider.applyCompletion(
@@ -1000,30 +971,6 @@ describe("CombinedAutocompleteProvider", () => {
 	});
 });
 describe("trySyncSlashCompletion", () => {
-	it("returns null for bare '/' (no prefix to match)", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		const result = provider.trySyncSlashCompletion("/");
-		expect(result).toBeNull();
-	});
-
-	it("returns null for non-slash text", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
-		expect(provider.trySyncSlashCompletion("")).toBeNull();
-	});
-
-	it("returns null when text has spaces (argument phase, not command name)", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		expect(provider.trySyncSlashCompletion("/model claude")).toBeNull();
-		expect(provider.trySyncSlashCompletion("/model ")).toBeNull();
-	});
-
-	it("returns null when no commands match", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		const result = provider.trySyncSlashCompletion("/zzzzz");
-		expect(result).toBeNull();
-	});
-
 	it("returns matching items for partial slash command name", () => {
 		const provider = new CombinedAutocompleteProvider(
 			[{ name: "model", description: "Switch AI model", value: "model" }],

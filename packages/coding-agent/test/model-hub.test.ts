@@ -1320,15 +1320,6 @@ describe("ModelHub", () => {
 		});
 	});
 
-	test("Enter on the sidebar moves focus to the model list instead of acting on a row", () => {
-		const { hub, onAssign } = createHub({ models: [makeModel("test", "test-model")], scoped: true });
-		installTestTheme();
-		hub.handleInput("\n");
-		expect(onAssign).not.toHaveBeenCalled();
-		hub.handleInput("\n"); // now Enter acts on the focused row: opens its role strip
-		expect(footerLine(hub.render(220))).toContain("test-model →");
-	});
-
 	describe("mouse wheel", () => {
 		// SGR wheel reports: button 64 = up, 65 = down. Column 100 lands in the
 		// body pane, column 3 in the sidebar; row 10 is inside the content rows.

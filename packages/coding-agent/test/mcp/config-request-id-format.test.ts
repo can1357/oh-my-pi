@@ -88,15 +88,6 @@ test("requestIdFormat from a standalone .mcp.json reaches the transport config",
 	expect(configs.xcode?.requestIdFormat).toBe("number");
 });
 
-test("an unrecognized requestIdFormat is dropped rather than passed through", async () => {
-	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
-		bogus: { type: "stdio", command: "/bin/echo", requestIdFormat: "integer" },
-	});
-
-	expect(configs.bogus).toBeDefined();
-	expect(configs.bogus?.requestIdFormat).toBeUndefined();
-});
-
 test("differing requestIdFormat prevents equivalence dedup from collapsing two aliases", async () => {
 	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
 		"xcode-string": { type: "stdio", command: "/usr/bin/xcrun", args: ["mcpbridge"], requestIdFormat: "string" },

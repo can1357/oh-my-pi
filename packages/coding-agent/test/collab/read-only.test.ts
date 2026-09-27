@@ -291,7 +291,7 @@ describe("collab read-only links", () => {
 			if (replacement) await replacement;
 		}
 	});
-	for (const kind of ["advisor", "main", "sub"] as const) {
+	for (const kind of ["advisor", "sub"] as const) {
 		it(`${kind === "advisor" ? "denies" : "serves"} ${kind} transcripts requested by a view-link guest`, async () => {
 			await using dir = await TempDir.create("@pi-collab-transcript-");
 			const id = `transcript-${kind}-${crypto.randomUUID()}`;

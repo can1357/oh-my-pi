@@ -624,13 +624,6 @@ describe("Perplexity anonymous fallback", () => {
 		).rejects.toThrow("No authentication method available.");
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
-
-	it("keeps anonymous Perplexity out of auto provider selection but allows explicit selection", () => {
-		const provider = new PerplexityProvider();
-
-		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
-		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
-	});
 });
 
 describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {

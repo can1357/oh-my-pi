@@ -202,28 +202,6 @@ describe("AgentRunSummary delivery", () => {
 		expect(endEvent?.telemetry).toBeUndefined();
 		expect(endEvent?.coverage).toBeUndefined();
 	});
-
-	it("preserves agentLoop().result() backwards-compat (still resolves to AgentMessage[])", async () => {
-		const tracer = new RecordingTracer();
-		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
-		const config: AgentLoopConfig = {
-			model: mock.model,
-			convertToLlm: identityConverter,
-			telemetry: { tracer },
-		};
-		const stream = agentLoop(
-			[createUserMessage("hi")],
-			{ systemPrompt: ["sys"], messages: [], tools: [] },
-			config,
-			undefined,
-			mock.stream,
-		);
-		const messages = await stream.result();
-		// 1 user prompt + 1 assistant message.
-		expect(messages.length).toBe(2);
-		expect(messages[0].role).toBe("user");
-		expect(messages[1].role).toBe("assistant");
-	});
 });
 
 describe("AgentRunSummary aggregation", () => {

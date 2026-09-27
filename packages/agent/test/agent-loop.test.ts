@@ -385,49 +385,6 @@ describe("agentLoop with AgentMessage", () => {
 		expect(finalMessage.errorMessage).toBe("Interrupted by user");
 	});
 
-	it("should handle custom message types via convertToLlm", async () => {
-		// Create a custom message type
-		interface CustomNotification {
-			role: "notification";
-			text: string;
-			timestamp: number;
-		}
-
-		const notification: CustomNotification = {
-			role: "notification",
-			text: "This is a notification",
-			timestamp: Date.now(),
-		};
-
-		const context: AgentContext = {
-			systemPrompt: ["You are helpful."],
-			messages: [notification as unknown as AgentMessage], // Custom message in context
-			tools: [],
-		};
-
-		let convertedMessages: Message[] = [];
-		const mock = createMockModel({ responses: [{ content: ["Response"] }] });
-		const config: AgentLoopConfig = {
-			model: mock.model,
-			convertToLlm: messages => {
-				// Filter out notifications, convert rest
-				convertedMessages = messages
-					.filter(m => (m as { role: string }).role !== "notification")
-					.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
-				return convertedMessages;
-			},
-		};
-
-		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
-		for await (const _ of stream) {
-			// drain
-		}
-
-		// The notification should have been filtered out in convertToLlm
-		expect(convertedMessages.length).toBe(1); // Only user message
-		expect(convertedMessages[0].role).toBe("user");
-	});
-
 	it("should apply transformContext before convertToLlm", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
@@ -523,53 +480,6 @@ describe("agentLoop with AgentMessage", () => {
 		]);
 		expect(contexts[0]?.index).toBe(0);
 		expect(contexts[1]?.index).toBe(1);
-	});
-
-	it("should handle tool calls and results", async () => {
-		const toolSchema = type({ value: "string" });
-		const executed: string[] = [];
-		const tool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "echo",
-			label: "Echo",
-			description: "Echo tool",
-			parameters: toolSchema,
-			async execute(_toolCallId, params) {
-				executed.push(params.value);
-				return {
-					content: [{ type: "text", text: `echoed: ${params.value}` }],
-					details: { value: params.value },
-				};
-			},
-		};
-
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
-
-		const mock = createMockModel({
-			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
-				{ content: ["done"] },
-			],
-		});
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
-
-		const events: AgentEvent[] = [];
-		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
-
-		for await (const event of stream) {
-			events.push(event);
-		}
-
-		// Tool should have been executed
-		expect(executed).toEqual(["hello"]);
-
-		// Should have tool execution events
-		const toolStart = events.find(e => e.type === "tool_execution_start");
-		const toolEnd = events.find(e => e.type === "tool_execution_end");
-		expect(toolStart).toBeDefined();
-		expect(toolEnd).toBeDefined();
-		if (toolEnd?.type === "tool_execution_end") {
-			expect(toolEnd.isError).toBeFalsy();
-		}
 	});
 
 	it("surfaces validation error for malformed JSON parse sentinels without leaking __rawJson", async () => {

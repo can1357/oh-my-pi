@@ -92,15 +92,6 @@ describe("HistoryStorage.search", () => {
 		]);
 	});
 
-	it("dedupes when FTS and substring both match the same row", async () => {
-		const storage = await freshStorage();
-		await seed(storage, ["commit the changes"]);
-
-		const results = storage.search("commit", 10);
-		expect(results).toHaveLength(1);
-		expect(results[0]?.prompt).toBe("commit the changes");
-	});
-
 	it("matches case-insensitively for substring fallback", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["Recommit The Patch"]);

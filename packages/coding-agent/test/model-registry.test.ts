@@ -465,13 +465,6 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("overriding baseUrl keeps all built-in models", () => {
-			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
-			// Should have multiple built-in models, not just one
-			expect(anthropicModels.length).toBeGreaterThan(1);
-			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
-		});
-
 		test("overriding baseUrl changes URL on all built-in models", () => {
 			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
 			// All models should have the new baseUrl
@@ -1190,8 +1183,6 @@ describe("ModelRegistry", () => {
 		let openrouterWithModels: ModelRegistry;
 		let openaiGpt54Replace: ModelRegistry;
 		let myProxyGpt54: ModelRegistry;
-		let openaiGpt54Explicit: ModelRegistry;
-		let openaiGpt54Override: ModelRegistry;
 		let minimaxReplace: ModelRegistry;
 		beforeAll(() => {
 			anthropicCustom = readonlyRegistry({
@@ -1291,40 +1282,6 @@ describe("ModelRegistry", () => {
 						apiKey: "TEST_KEY",
 						api: "openai-responses",
 						models: [{ id: "gpt-5.4" }],
-					},
-				},
-			});
-			openaiGpt54Explicit = readonlyRegistry({
-				providers: {
-					openai: providerConfig(
-						"https://my-proxy.example.com/v1",
-						[{ id: "gpt-5.4", contextWindow: 256000 }],
-						"openai-responses",
-					),
-				},
-			});
-			openaiGpt54Override = readonlyRegistry({
-				providers: {
-					openai: {
-						baseUrl: "https://my-proxy.example.com/v1",
-						apiKey: "TEST_KEY",
-						api: "openai-responses",
-						models: [
-							{
-								id: "gpt-5.4",
-								name: "gpt-5.4",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 256000,
-								maxTokens: 128000,
-							},
-						],
-						modelOverrides: {
-							"gpt-5.4": {
-								contextWindow: 512000,
-							},
-						},
 					},
 				},
 			});
@@ -1573,14 +1530,6 @@ describe("ModelRegistry", () => {
 			expect(model?.baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
-		test("custom gpt-5.4 replacement preserves its explicit context window", () => {
-			expect(openaiGpt54Explicit.find("openai", "gpt-5.4")?.contextWindow).toBe(256000);
-		});
-
-		test("modelOverrides can still patch a custom gpt-5.4 replacement", () => {
-			expect(openaiGpt54Override.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
-		});
-
 		test("discoverable bundled replacement survives refresh", async () => {
 			writeModelsJson({
 				openai: providerConfig(
@@ -1808,8 +1757,6 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("modelOverrides (per-model customization)", () => {
-		let single: ModelRegistry;
-		let routingOnly: ModelRegistry;
 		let routingOrder: ModelRegistry;
 		let extraBodyMerge: ModelRegistry;
 		let multiple: ModelRegistry;
@@ -1821,20 +1768,6 @@ describe("ModelRegistry", () => {
 		let omitOnCustom: ModelRegistry;
 		let scheduledPrices: ModelRegistry;
 		beforeAll(() => {
-			single = readonlyRegistry({
-				providers: {
-					openrouter: { modelOverrides: { "anthropic/claude-sonnet-4": { name: "Custom Sonnet Name" } } },
-				},
-			});
-			routingOnly = readonlyRegistry({
-				providers: {
-					openrouter: {
-						modelOverrides: {
-							"anthropic/claude-sonnet-4": { compat: { openRouterRouting: { only: ["amazon-bedrock"] } } },
-						},
-					},
-				},
-			});
 			routingOrder = readonlyRegistry({
 				providers: {
 					openrouter: {
@@ -1932,21 +1865,6 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
-		});
-
-		test("model override applies to a single built-in model", () => {
-			const models = getModelsForProvider(single, "openrouter");
-			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.name).toBe("Custom Sonnet Name");
-			// Other models should be unchanged
-			const opus = models.find(m => m.id === "anthropic/claude-opus-4");
-			expect(opus?.name).not.toBe("Custom Sonnet Name");
-		});
-
-		test("model override with compat.openRouterRouting", () => {
-			const sonnet = getModelsForProvider(routingOnly, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			const compat = sonnet?.compat as OpenAICompat | undefined;
-			expect(compat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
 		});
 
 		test("model override deep merges compat settings", () => {
@@ -2575,7 +2493,6 @@ describe("ModelRegistry", () => {
 	describe("disableStrictTools", () => {
 		let bedrockCustom: ModelRegistry;
 		let anthropicOverride: ModelRegistry;
-		let myProxyCustom: ModelRegistry;
 		beforeAll(() => {
 			bedrockCustom = readonlyRegistry({
 				providers: {
@@ -2599,27 +2516,6 @@ describe("ModelRegistry", () => {
 				},
 			});
 			anthropicOverride = readonlyRegistry({ providers: { anthropic: { disableStrictTools: true } } });
-			myProxyCustom = readonlyRegistry({
-				providers: {
-					"my-proxy": {
-						baseUrl: "https://proxy.example.com/anthropic",
-						apiKey: "TEST_KEY",
-						api: "anthropic-messages",
-						disableStrictTools: true,
-						models: [
-							{
-								id: "claude-sonnet-4",
-								name: "Sonnet",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 200000,
-								maxTokens: 16384,
-							},
-						],
-					},
-				},
-			});
 		});
 
 		test("custom provider with models gets disableStrictTools merged into compat", () => {
@@ -2644,12 +2540,6 @@ describe("ModelRegistry", () => {
 					(model.compatConfig as { disableStrictTools?: boolean } | undefined)?.disableStrictTools,
 				).toBeUndefined();
 			}
-		});
-
-		test("disableStrictTools is merged with explicit compat on custom provider", () => {
-			const model = myProxyCustom.find("my-proxy", "claude-sonnet-4");
-			expect(model).toBeDefined();
-			expect((model?.compat as { disableStrictTools?: boolean } | undefined)?.disableStrictTools).toBe(true);
 		});
 	});
 

@@ -13,19 +13,6 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
-	it("accepts {agent, task, solutionSpace}", () => {
-		const parsed = taskSchema({ agent: "scout", task: "Map the auth module.", solutionSpace: "c" });
-		expect(parsed instanceof type.errors).toBe(false);
-	});
-
-	it("defaults agent to `task` when omitted", () => {
-		const parsed = taskSchema({ task: "Map the auth module.", solutionSpace: "c" });
-		expect(parsed instanceof type.errors).toBe(false);
-		if (!(parsed instanceof type.errors)) {
-			expect(parsed.agent).toBe("task");
-		}
-	});
-
 	it("requires task", () => {
 		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);

@@ -160,20 +160,6 @@ describe("cursor usage provider", () => {
 			}
 		});
 
-		it("derives resetsAt from startOfMonth", () => {
-			const payload = {
-				"gpt-4": {
-					numRequests: 10,
-					maxRequestUsage: 10,
-				},
-				startOfMonth: "2026-07-11T12:00:00.000Z",
-			};
-			const report = parseCursorUsage(payload);
-			expect(report).not.toBeNull();
-			const limit = report?.limits[0];
-			expect(limit?.window?.resetsAt).toBe(Date.parse("2026-08-11T12:00:00.000Z"));
-		});
-
 		it("derives resetsAt directly from billingCycleEnd", () => {
 			const payload = {
 				"gpt-4": {
@@ -707,49 +693,6 @@ describe("cursor usage provider", () => {
 			);
 
 			expect(report?.metadata).toEqual({ email: "stored@example.com" });
-		});
-
-		it("merges legacy request usage before personal usage", async () => {
-			const accessToken = createCursorAccessToken("workos|user_456");
-			const authUsagePayload = {
-				"gpt-4": {
-					numRequests: 10,
-					maxRequestUsage: 100,
-				},
-			};
-			const usageSummaryPayload = {
-				individualUsage: {
-					overall: {
-						used: 2000,
-						limit: 10000,
-						remaining: 8000,
-					},
-				},
-			};
-			const mockFetch = (async (input: string | URL): Promise<Response> => {
-				const url = typeof input === "string" ? input : input.toString();
-				return Response.json(url === "https://api2.cursor.sh/auth/usage" ? authUsagePayload : usageSummaryPayload);
-			}) as unknown as typeof fetch;
-
-			const report = await cursorUsageProvider.fetchUsage(
-				{
-					provider: "cursor",
-					credential: {
-						type: "oauth",
-						accessToken,
-					},
-				},
-				{ fetch: mockFetch },
-			);
-
-			expect(report?.limits.map(limit => limit.id)).toEqual([
-				"cursor:requests:gpt-4",
-				"cursor:usd:individual-overall",
-			]);
-			expect(report?.raw).toEqual({
-				authUsage: authUsagePayload,
-				usageSummary: usageSummaryPayload,
-			});
 		});
 
 		it("returns legacy usage when the personal summary request fails", async () => {

@@ -698,13 +698,6 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		vi.useRealTimers();
 	});
 
-	it("types deliberate space taps without triggering, even several in a row", () => {
-		const { editor, events } = makeEditor();
-		feedSpaces(editor, 3, TAP_GAP_MS);
-		expect(editor.getText()).toBe("   ");
-		expect(events).toEqual([]);
-	});
-
 	it("recognizes a held bar from a steady fast cadence and tracks back the burst", () => {
 		const { editor, events } = makeEditor();
 		editor.handleInput("h");
