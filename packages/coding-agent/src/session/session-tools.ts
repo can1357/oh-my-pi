@@ -1863,35 +1863,39 @@ export class SessionTools {
 	 */
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
-		// Extensions may contribute skill directories (resources_discover).
-		// Re-emit on every refresh so /reload-plugins picks up changes.
 		const runner = this.#host.extensionRunner();
-		const discoveredResources = runner
-			? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
-			: undefined;
-		const extensionDirectories = discoveredResources?.skillPaths.map(entry => entry.path);
-		if (this.#skillsReloadable) {
-			await this.#applyDiscoveredSkills(extensionDirectories);
-		} else if (this.#mergeDiscoveredSkillPaths) {
-			// A subagent's inherited snapshot is fixed for perf, not frozen:
-			// mirror `discoverStartupSkillPaths` so `/reload-plugins` in a task,
-			// eval, or vibe child still folds new or changed extension skill
-			// directories into the snapshot instead of silently discarding them.
-			// An EMPTY result reconciles too — previously contributed skills
-			// whose directory is no longer returned must drop back out.
-			await this.#mergeDiscoveredSkillDirectories(extensionDirectories ?? []);
+		const rediscover = async (): Promise<void> => {
+			// Extensions may contribute skill directories (resources_discover).
+			// Re-emit on every refresh so /reload-plugins picks up changes.
+			const discoveredResources = runner
+				? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
+				: undefined;
+			const extensionDirectories = discoveredResources?.skillPaths.map(entry => entry.path);
+			if (this.#skillsReloadable) {
+				await this.#applyDiscoveredSkills(extensionDirectories);
+			} else if (this.#mergeDiscoveredSkillPaths) {
+				// A subagent's inherited snapshot is fixed for perf, not frozen:
+				// mirror `discoverStartupSkillPaths` so `/reload-plugins` in a task,
+				// eval, or vibe child still folds new or changed extension skill
+				// directories into the snapshot instead of silently discarding them.
+				// An EMPTY result reconciles too — previously contributed skills
+				// whose directory is no longer returned must drop back out.
+				await this.#mergeDiscoveredSkillDirectories(extensionDirectories ?? []);
+			}
+			await this.refreshBaseSystemPrompt();
+			this.#host.notifyCommandMetadataChanged();
+		};
+		if (!runner) {
+			await rediscover();
+			return;
 		}
-		await this.refreshBaseSystemPrompt();
-		this.#host.notifyCommandMetadataChanged();
-		// The `resources_discover` handler above can call sendMessage/sendUserMessage
-		// (e.g. to announce a directory it just found) from the same shared action
-		// context startup uses; that call starts an async send the action itself
-		// never exposes a promise for. Each mode's own startup queue
-		// (runtime-init.ts/acp-agent.ts/extension-ui-controller.ts) is long out of
-		// scope by the time `/reload-plugins` runs this, so settle it through the
-		// runner's own tracking instead (PR #9379 review) — otherwise the send is
-		// left running with nothing to observe it settle.
-		await runner?.drainPendingSends();
+		// A `resources_discover` handler can call sendMessage/sendUserMessage (e.g.
+		// to announce a directory it just found); a triggered turn would read the
+		// pre-reload skill snapshot (PR #9379 review). The runner holds those sends
+		// until the rediscovered skills and prompt are applied, then this settles
+		// them — each mode's startup scope is long gone by `/reload-plugins`.
+		await runner.sends.withHeld(rediscover);
+		await runner.sends.drain();
 	}
 
 	/**

@@ -7,6 +7,7 @@ import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capabili
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -235,7 +236,7 @@ describe("persisted subagent revival", () => {
 		const initialize = vi.fn();
 		const onError = vi.fn();
 		const emit = vi.fn(async () => undefined);
-		const extensionRunner = { initialize, onError, emit };
+		const extensionRunner = { initialize, onError, emit, sends: new ExtensionSendQueue() };
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
 			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
 		);
@@ -414,7 +415,12 @@ describe("persisted subagent revival", () => {
 		const cwd = makeTempDir("@pi-revive-skill-discovery-");
 		const sessionFile = await createPersistedSession(cwd);
 		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
-		const extensionRunner = { initialize: vi.fn(), onError: vi.fn(), emit: vi.fn(async () => undefined) };
+		const extensionRunner = {
+			initialize: vi.fn(),
+			onError: vi.fn(),
+			emit: vi.fn(async () => undefined),
+			sends: new ExtensionSendQueue(),
+		};
 		const revived = createRevivedSession([], extensionRunner);
 		const discoverStartupSkillPaths = vi.fn(async () => {});
 		// `createRevivedSession`'s stub is a plain test double with a known

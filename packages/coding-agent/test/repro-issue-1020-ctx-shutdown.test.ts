@@ -5,6 +5,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -33,6 +34,7 @@ async function createHost(initializeUi: boolean) {
 		getComposerShapes: () => [],
 		onError() {},
 		async emit() {},
+		sends: new ExtensionSendQueue(),
 	};
 	const host = Object.assign(Object.create(InteractiveMode.prototype), {
 		shutdownRequested: false,

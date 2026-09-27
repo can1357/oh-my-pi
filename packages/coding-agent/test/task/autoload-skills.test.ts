@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionSendQueue } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-queue";
+import type { ExtensionActions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import * as skillsModule from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -415,41 +417,44 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		enableLsp: false,
 	};
 
-	it("persists session_init.systemPrompt after startup skill discovery has run, not before", async () => {
-		// A mutable "live" system prompt: discoverStartupSkillPaths appends to it,
-		// mirroring session-tools.ts's refreshBaseSystemPrompt rebuilding
-		// session.agent.state.systemPrompt when a resources_discover handler
-		// contributes a directory.
-		const systemPromptParts = ["base prompt"];
-		const appendSessionInitCalls: Array<{ systemPrompt: string }> = [];
+	/**
+	 * A subagent session whose runner, session_init persistence and discovery
+	 * are observable. Built inline (rather than via createMockSession + post-hoc
+	 * field assignment) so every overridden member is part of the object literal
+	 * the single `as unknown as AgentSession` cast applies to, not an assignment
+	 * against an already-typed (and therefore readonly-checked) reference.
+	 */
+	function createStartupSession(overrides: {
+		systemPromptParts: string[];
+		appendSessionInit: (init: { systemPrompt: string }) => string;
+		discoverStartupSkillPaths: () => Promise<void>;
+		onSessionStart?: (actions: ExtensionActions) => void;
+		sendUserMessage?: () => Promise<void>;
+	}): AgentSession {
 		const listeners: Array<(event: AgentSessionEvent) => void> = [];
 		const emit = (event: AgentSessionEvent) => {
 			for (const listener of listeners) listener(event);
 		};
-
-		// Built inline (rather than via createMockSession + post-hoc field
-		// assignment) so extensionRunner/appendSessionInit/discoverStartupSkillPaths
-		// are part of the object literal the single `as unknown as AgentSession`
-		// cast below applies to, not assignments against an already-typed
-		// (and therefore readonly-checked) AgentSession reference.
-		const session = {
+		let actions: ExtensionActions | undefined;
+		return {
 			...createSessionDefaults(),
 			state: { messages: [] as unknown[] },
 			skills: [],
-			agent: { state: { systemPrompt: systemPromptParts } },
+			agent: { state: { systemPrompt: overrides.systemPromptParts } },
 			getAgentId: () => undefined,
 			model: undefined,
 			extensionRunner: {
-				initialize: vi.fn(),
-				onError: vi.fn(),
-				emit: vi.fn(async () => undefined),
-			},
-			sessionManager: {
-				appendSessionInit: (init: { systemPrompt: string }) => {
-					appendSessionInitCalls.push(init);
-					return "init-id";
+				initialize: (initialActions: ExtensionActions) => {
+					actions = initialActions;
 				},
+				onError: vi.fn(),
+				emit: vi.fn(async (event: { type: string }) => {
+					if (event.type === "session_start" && actions) overrides.onSessionStart?.(actions);
+					return undefined;
+				}),
+				sends: new ExtensionSendQueue(),
 			},
+			sessionManager: { appendSessionInit: overrides.appendSessionInit },
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
@@ -469,11 +474,29 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 				});
 			},
 			sendCustomMessage: vi.fn(async () => {}),
+			sendUserMessage: overrides.sendUserMessage ?? vi.fn(async () => {}),
 			getLastAssistantMessage: () => undefined,
-			discoverStartupSkillPaths: vi.fn(async () => {
-				systemPromptParts.push("discovered skill notice");
-			}),
+			discoverStartupSkillPaths: overrides.discoverStartupSkillPaths,
 		} as unknown as AgentSession;
+	}
+
+	it("persists session_init.systemPrompt after startup skill discovery has run, not before", async () => {
+		// A mutable "live" system prompt: discoverStartupSkillPaths appends to it,
+		// mirroring session-tools.ts's refreshBaseSystemPrompt rebuilding
+		// session.agent.state.systemPrompt when a resources_discover handler
+		// contributes a directory.
+		const systemPromptParts = ["base prompt"];
+		const appendSessionInitCalls: Array<{ systemPrompt: string }> = [];
+		const session = createStartupSession({
+			systemPromptParts,
+			appendSessionInit: init => {
+				appendSessionInitCalls.push(init);
+				return "init-id";
+			},
+			discoverStartupSkillPaths: async () => {
+				systemPromptParts.push("discovered skill notice");
+			},
+		});
 
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -483,5 +506,32 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		// Persisted verbatim by persisted-revive.ts on every cold revival — must
 		// reflect the post-discovery prompt, not the pre-discovery snapshot.
 		expect(appendSessionInitCalls[0]?.systemPrompt).toBe("base prompt\n\ndiscovered skill notice");
+	});
+
+	it("runs a session_start-triggered turn after discovery and session_init (regression: PR #9379 review, executor.ts startup sends)", async () => {
+		// The turn must see the child's discovered skills, and its records must
+		// follow session_init: persisted-agents.ts reads agent metadata from the
+		// first records of the session file only.
+		const order: string[] = [];
+		const session = createStartupSession({
+			systemPromptParts: ["base prompt"],
+			appendSessionInit: () => {
+				order.push("session_init");
+				return "init-id";
+			},
+			discoverStartupSkillPaths: async () => {
+				order.push("discovery");
+			},
+			onSessionStart: actions => actions.sendUserMessage("hello from session_start"),
+			sendUserMessage: async () => {
+				order.push("send");
+			},
+		});
+
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		await runSubprocess({ ...baseOptions });
+
+		expect(order).toEqual(["discovery", "session_init", "send"]);
 	});
 });

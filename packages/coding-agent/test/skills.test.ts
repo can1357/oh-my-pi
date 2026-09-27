@@ -1655,6 +1655,84 @@ export default function (pi) {
 		}
 	});
 
+	it("gives a turn triggered from inside a resources_discover handler visibility into the skills that handler returns (regression: PR #9379 review, runtime-init.ts discovery-handler sends)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-discover-handler-turn-"));
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			await writeStartupSkill(tempDir);
+
+			// The same handler announces itself and contributes the directory; the
+			// turn it triggers must not race ahead of the prompt rebuild.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "discover-and-announce.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", () => {
+		pi.sendUserMessage("found a skill directory");
+		return { skillPaths: [${JSON.stringify(tempDir)}] };
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const skillVisibleAtCallTime: boolean[] = [];
+			const mock = createMockModel({
+				handler: () => {
+					skillVisibleAtCallTime.push(
+						session?.skills.some(skill => skill.name === "startup-discovered-skill") ?? false,
+					);
+					return { content: ["ack"] };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			expect(skillVisibleAtCallTime).toEqual([true]);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("drains a reload-triggered resources_discover sendUserMessage via refreshSkills (regression: PR #9379 review, session-tools.ts refreshSkills)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-refresh-drain-"));
 		const authStorage = createInMemoryAuthStorage();
@@ -1768,6 +1846,86 @@ export default function (pi) {
 					m => m.role === "assistant" && m.content.some(c => c.type === "text" && c.text === "ack"),
 				),
 			).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("gives a reload-triggered turn visibility into the skills its resources_discover handler returns (regression: PR #9379 review, session-tools.ts refreshSkills)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reload-handler-turn-"));
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			await writeStartupSkill(tempDir);
+			// Contributes the directory, and announces it, only on a reload pass.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "reload-discover-and-announce.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", event => {
+		if (event.reason !== "reload") return undefined;
+		pi.sendUserMessage("found a skill directory on reload");
+		return { skillPaths: [${JSON.stringify(tempDir)}] };
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const skillVisibleAtCallTime: boolean[] = [];
+			const mock = createMockModel({
+				handler: () => {
+					skillVisibleAtCallTime.push(
+						session?.skills.some(skill => skill.name === "startup-discovered-skill") ?? false,
+					);
+					return { content: ["ack"] };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+			expect(runtimeErrors).toEqual([]);
+			expect(skillVisibleAtCallTime).toEqual([]);
+
+			await session.refreshSkills();
+
+			expect(skillVisibleAtCallTime).toEqual([true]);
 		} finally {
 			await session?.dispose();
 			authStorage.close();

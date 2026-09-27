@@ -3498,6 +3498,91 @@ describe("ACP extension session_start/resources_discover send draining (PR #9379
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("gives a session_start-triggered turn visibility into skills a resources_discover handler contributes (regression: PR #9379 review, acp-agent.ts startup sends)", async () => {
+		const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-session-start-turn-discovery-"));
+		const agentDir = path.join(tempDir, "agent");
+		await fs.promises.mkdir(agentDir, { recursive: true });
+		setAgentDir(agentDir);
+		await Settings.init({ agentDir, inMemory: true });
+
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			const skillsDir = path.join(tempDir, "skills");
+			await fs.promises.mkdir(path.join(skillsDir, "acp-startup-skill"), { recursive: true });
+			await fs.promises.writeFile(
+				path.join(skillsDir, "acp-startup-skill", "SKILL.md"),
+				"---\nname: acp-startup-skill\ndescription: Contributed by resources_discover at ACP startup.\n---\n\nbody\n",
+			);
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.promises.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "acp-session-start-turn.ts");
+			await fs.promises.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("session_start", () => {
+		pi.sendUserMessage("hello");
+	});
+	pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(skillsDir)}] }));
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			// Recorded inside the model call: the state that turn actually saw.
+			const skillVisibleAtCallTime: boolean[] = [];
+			const mock = createMockModel({
+				handler: () => {
+					skillVisibleAtCallTime.push(session?.skills.some(skill => skill.name === "acp-startup-skill") ?? false);
+					return { content: ["ack"] };
+				},
+			});
+			const agentCore = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent: agentCore,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const connection = {
+				sessionUpdate: async () => {},
+				signal: new AbortController().signal,
+				closed: Promise.withResolvers<void>().promise,
+			} as unknown as AgentSideConnection;
+			const acpSession = session;
+			const agent = new AcpAgent(connection, async () => acpSession);
+
+			await agent.newSession({ cwd: tempDir, mcpServers: [] });
+
+			expect(skillVisibleAtCallTime).toEqual([true]);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("ACP agent MCP server configuration (late-connecting servers)", () => {

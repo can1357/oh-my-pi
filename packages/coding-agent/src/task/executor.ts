@@ -4213,26 +4213,33 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void monitor.abortActiveSession();
 			}
 
-			const pendingExtensionMessages: Array<Promise<unknown>> = [];
+			// Extension sends dispatch through the runner, which holds them until
+			// startup discovery has rebuilt the prompt and `session_init` is
+			// persisted, and tracks them so this startup and a later
+			// `/reload-plugins` (`refreshSkills`) can drain them.
 			const extensionRunner = session.extensionRunner;
 			if (extensionRunner) {
 				extensionRunner.initialize(
 					{
 						sendMessage: (message, options) => {
-							const sendPromise = session.sendCustomMessage(message, options).catch(e => {
-								logger.error("Extension sendMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
+							const sendPromise = extensionRunner.sends
+								.dispatch(() => session.sendCustomMessage(message, options))
+								.catch(e => {
+									logger.error("Extension sendMessage failed", {
+										error: e instanceof Error ? e.message : String(e),
+									});
 								});
-							});
-							pendingExtensionMessages.push(sendPromise);
+							extensionRunner.sends.track(sendPromise);
 						},
 						sendUserMessage: (content, options) => {
-							const sendPromise = session.sendUserMessage(content, options).catch(e => {
-								logger.error("Extension sendUserMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
+							const sendPromise = extensionRunner.sends
+								.dispatch(() => session.sendUserMessage(content, options))
+								.catch(e => {
+									logger.error("Extension sendUserMessage failed", {
+										error: e instanceof Error ? e.message : String(e),
+									});
 								});
-							});
-							pendingExtensionMessages.push(sendPromise);
+							extensionRunner.sends.track(sendPromise);
 						},
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
@@ -4270,53 +4277,54 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				extensionRunner.onError(err => {
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });
 				});
-				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
-				const drainPendingExtensionMessages = async (): Promise<void> => {
-					while (pendingExtensionMessages.length > 0) {
-						await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
-					}
-				};
-				await drainPendingExtensionMessages();
-				// Same post-session_start snapshot as print/RPC/TUI sessions
-				// (runtime-init): extension-contributed skill directories from
-				// resources_discover must reach freshly created task subagents too,
-				// not only revived ones (which route through initializeExtensions).
-				await awaitAbortable(session.discoverStartupSkillPaths());
-				// A resources_discover handler can call sendMessage/sendUserMessage
-				// (e.g. to announce a discovered directory) from the same shared
-				// action context as any other handler; drain those too so they
-				// land before autoload/prompt, not silently in flight when the
-				// session moves on.
-				await drainPendingExtensionMessages();
 			}
-
-			// Persist the subagent's revival contract only after startup skill
-			// discovery has had a chance to run: `discoverStartupSkillPaths()`
-			// above rebuilds `session.agent.state.systemPrompt` when a
-			// `resources_discover` handler contributed a directory, and a
-			// cold-revived session (persisted-revive.ts) replays this exact
-			// string verbatim — capturing it before discovery ran would freeze
-			// every future revival on the pre-discovery prompt (PR #9379 review).
-			session.sessionManager.appendSessionInit({
-				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
-				task,
-				tools: persistedSubagentTools,
-				agent: agent.name,
-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
-				resolvedModel: progress.resolvedModel,
-				readOnly: isReadOnlyAgent(agent),
-				spawns: spawnsEnv,
-				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
-				compactionThreshold: options.compactionThresholdOverride,
-				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				// Isolated runs are never revivable (worktree merged + cleaned):
-				// stamp the contract so cold revival leaves them transcript-only
-				// even when the workspace was retained for recovery.
-				isolated: worktree !== undefined || undefined,
-			});
+			// Persist the subagent's revival contract after startup skill
+			// discovery — `discoverStartupSkillPaths()` rebuilds
+			// `session.agent.state.systemPrompt` when a `resources_discover`
+			// handler contributed a directory, and a cold-revived session
+			// (persisted-revive.ts) replays this exact string verbatim — but
+			// before any held startup send runs: `readPersistedAgentMetadata()`
+			// (registry/persisted-agents.ts) only scans the first records of the
+			// session file, so `session_init` must precede the conversation.
+			const persistSessionInit = (): void => {
+				session.sessionManager.appendSessionInit({
+					systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
+					task,
+					tools: persistedSubagentTools,
+					agent: agent.name,
+					modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+					resolvedModel: progress.resolvedModel,
+					readOnly: isReadOnlyAgent(agent),
+					spawns: spawnsEnv,
+					readSummarize: agent.readSummarize,
+					advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+					compactionThreshold: options.compactionThresholdOverride,
+					outputSchema,
+					outputSchemaMode: options.outputSchemaMode,
+					restrictToolNames: restrictToolNames || undefined,
+					// Isolated runs are never revivable (worktree merged + cleaned):
+					// stamp the contract so cold revival leaves them transcript-only
+					// even when the workspace was retained for recovery.
+					isolated: worktree !== undefined || undefined,
+				});
+			};
+			if (extensionRunner) {
+				// A `session_start` or `resources_discover` handler that starts a
+				// turn stays held until discovery has rebuilt the prompt and
+				// `session_init` is persisted, so that turn sees the child's
+				// extension-contributed skills (PR #9379 review) — the same
+				// post-session_start snapshot print/RPC/TUI sessions get (runtime-init).
+				await extensionRunner.sends.withHeld(async () => {
+					await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
+					await awaitAbortable(session.discoverStartupSkillPaths());
+					persistSessionInit();
+				});
+				// Settle the released startup sends so they land before autoload/prompt,
+				// not silently in flight when the session moves on.
+				await awaitAbortable(extensionRunner.sends.drain());
+			} else {
+				persistSessionInit();
+			}
 
 			unsubscribe = monitor.attach(session);
 

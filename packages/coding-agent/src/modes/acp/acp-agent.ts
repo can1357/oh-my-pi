@@ -2566,33 +2566,25 @@ export class AcpAgent implements Agent {
 		}
 		// resources_discover and session_start handlers share this action context, so
 		// a handler calling sendMessage/sendUserMessage starts an async session send
-		// that the action itself does not expose a promise for. Track every such
-		// send here so they can be drained before returning — mirrors
-		// `initializeExtensions`'s equivalent queue (runtime-init.ts,
-		// `pendingExtensionSends`), which print/RPC mode use instead of this
-		// direct-wiring path.
-		const pendingExtensionSends: Promise<unknown>[] = [];
-		const drainPendingExtensionSends = async (): Promise<void> => {
-			while (pendingExtensionSends.length > 0) {
-				await Promise.all(pendingExtensionSends.splice(0));
-			}
-		};
-
+		// that the action itself does not expose a promise for. Every such send
+		// dispatches through the runner, which holds it until startup discovery
+		// below has rebuilt the prompt and tracks it for draining — the same
+		// sequence `initializeExtensions` (runtime-init.ts) runs for print/RPC.
 		extensionRunner.initialize(
 			{
 				sendMessage: (message, options) => {
-					const trackedSend = record.session.sendCustomMessage(message, options).catch((error: unknown) => {
-						logger.warn("ACP extension sendMessage failed", { error });
-					});
-					pendingExtensionSends.push(trackedSend);
-					extensionRunner.trackPendingSend(trackedSend);
+					const trackedSend = extensionRunner.sends
+						.dispatch(() => record.session.sendCustomMessage(message, options))
+						.catch((error: unknown) => {
+							logger.warn("ACP extension sendMessage failed", { error });
+						});
+					extensionRunner.sends.track(trackedSend);
 				},
 				sendUserMessage: (content, options) => {
-					const sendTask = record.session.sendUserMessage(content, options);
+					const sendTask = extensionRunner.sends.dispatch(() => record.session.sendUserMessage(content, options));
 					this.#trackExtensionUserMessage(record, sendTask);
 					const trackedSend = sendTask.catch(() => {});
-					pendingExtensionSends.push(trackedSend);
-					extensionRunner.trackPendingSend(trackedSend);
+					extensionRunner.sends.track(trackedSend);
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
@@ -2664,23 +2656,22 @@ export class AcpAgent implements Agent {
 			uiContext,
 			"rpc",
 		);
-		await extensionRunner.emit({ type: "session_start" });
-		// A session_start handler can call sendMessage/sendUserMessage (e.g. to
-		// announce startup state) from the same shared action context as any
-		// other handler; drain those before resources_discover so they land in
-		// order.
-		await drainPendingExtensionSends();
-		// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
-		// only now are runtime actions wired, so extension-contributed skill directories
-		// are folded into the session's skill snapshot before the first prompt.
-		await record.session.discoverStartupSkillPaths();
-		// A resources_discover handler can likewise call sendMessage/sendUserMessage
-		// (e.g. to announce a discovered directory); the action starts the send but
-		// never exposes its promise, so without this an immediate `session/prompt`
-		// could observe the session as still streaming and race the startup turn.
-		// Drain before returning so every extension-triggered send is settled —
-		// mirrors `initializeExtensions`'s post-discovery drain (runtime-init.ts).
-		await drainPendingExtensionSends();
+		// A `session_start` or `resources_discover` handler can call
+		// sendMessage/sendUserMessage synchronously; a triggered turn would read
+		// the system prompt before `discoverStartupSkillPaths()` has folded any
+		// extension-contributed skill directories into it (PR #9379 review). Hold
+		// those sends until discovery has rebuilt the prompt.
+		await extensionRunner.sends.withHeld(async () => {
+			await extensionRunner.emit({ type: "session_start" });
+			// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
+			// only now are runtime actions wired, so extension-contributed skill directories
+			// are folded into the session's skill snapshot before the first prompt.
+			await record.session.discoverStartupSkillPaths();
+		});
+		// The actions start sends but never expose their promises, so without this
+		// an immediate `session/prompt` could observe the session as still
+		// streaming and race the startup turn.
+		await extensionRunner.sends.drain();
 		record.extensionsConfigured = true;
 	}
 
