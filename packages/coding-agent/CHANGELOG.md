@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.hideWorkingRow` (default off) to hide the spinner/working-message row above the editor while a turn runs, reclaiming one line on dense screens; the status-line spinner and turn timer still show activity and the interrupt key still works
+
 ## [18.3.4] - 2026-09-27
 
 ### Breaking Changes

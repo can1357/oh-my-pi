@@ -308,6 +308,7 @@ import {
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
+	cfgDisplayHideWorkingRow,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
@@ -392,6 +393,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.hideWorkingRow": cfgDisplayHideWorkingRow,
 	"terminal.showImages": cfgTerminalShowImages,
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
@@ -2942,6 +2944,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (hideToolActivity) this.ui.clearInlineImages();
 			// Visibility changes must rebuild retired terminal history.
 			resetDisplay = true;
+		}
+		if (any("display.hideWorkingRow") && cfgDisplayHideWorkingRow.get(this.settings)) {
+			// Toggled on mid-turn: retire the live row immediately so the line is
+			// reclaimed without waiting for the next submission. Toggling back on
+			// (visible) re-mounts on the next ensureLoadingAnimation() call, so an
+			// idle toggle cannot strand a stale working row.
+			if (this.loadingAnimation) this.#stopLoadingAnimation(true);
+			this.#pendingWorkingMessage = undefined;
+			this.ui.requestRender();
 		}
 		if (any("terminal.showImages")) {
 			const visible = cfgTerminalShowImages.get(this.settings);
@@ -6596,6 +6607,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	ensureLoadingAnimation(): void {
 		if (this.autoCompactionLoader || this.retryLoader) return;
+		if (cfgDisplayHideWorkingRow.get(this.settings)) {
+			// Row hidden: the status-line brand spinner plus turn timer keep
+			// signaling the running turn, so drop any live row and stay empty.
+			if (this.loadingAnimation) this.#stopLoadingAnimation(true);
+			this.#pendingWorkingMessage = undefined;
+			return;
+		}
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
 			this.statusContainer.disposeChildren();

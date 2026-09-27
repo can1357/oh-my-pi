@@ -589,6 +589,19 @@ export const cfgDisplayHideToolActivity = register({
 	},
 });
 
+export const cfgDisplayHideWorkingRow = register({
+	id: "display.hideWorkingRow",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Hide Working Row",
+		description:
+			"Hide the spinner/working-message row above the editor while a turn runs; the status-line spinner and turn timer still show activity and the interrupt key still works",
+	},
+});
+
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
 	type: "boolean",
