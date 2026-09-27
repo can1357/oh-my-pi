@@ -22,7 +22,7 @@
 | `path` | `string` | No | Glob, file, directory, internal URL, or internal-URL glob — or several of those as a semicolon-delimited list (`"src/**/*.ts; test/**/*.ts"`); omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters remain literal. Each target becomes its own walk root and multi-target scans run concurrently. Internal URLs glob below their root (`local://*.md`, `omp://**/*.md`); `ssh://` is rejected because its read tier (`exec`) exceeds this tool's `read` approval. |
 | `hidden` | `boolean` | No | Include hidden files. Defaults to `true`. |
 | `gitignore` | `boolean` | No | Respect `.gitignore` during local native globbing. Defaults to `true`; set `false` to include gitignored files. |
-| `limit` | `number` | No | Max returned paths. Defaults to `200`; finite positive inputs are floored then clamped to `1..200`. |
+| `limit` | `number` | No | Max returned paths. Defaults to `200`; finite positive inputs are floored with a minimum of `1`. Requests above `1000` are rejected; partition the pattern or scope to a deeper directory to enumerate more matches. |
 
 `glob` is enabled by default (`glob.enabled = true`) and is an essential tool.
 
@@ -32,6 +32,7 @@ The tool returns a single text block plus structured `details`.
 - Success text: matching paths grouped as a multi-level, prefix-folded directory tree (`formatGroupedPaths()`): one `#` per nesting level, single-child directory chains fold into one header (`# a/b/c/`), and files are listed bare under the deepest owning header; root-level matches are listed without a header. Directory matches carry a trailing `/`. Exact file inputs return that file path as one line.
 - Empty result text: `No files found matching pattern`, optionally followed by a timeout or missing-path notice.
 - Multi-path partial miss: appends `Skipped missing paths: ...` after the result block, or after the empty-result line.
+- Result limit reached: below the maximum, `meta.limits.resultLimit` suggests a retry of `min(2 × limit, 1000)` (rendered as `Use limit=N for more`); at `limit: 1000` the text instead ends with `[1000 results maximum reached. Partition the pattern or scope to a deeper directory for more]` and no retry limit is suggested.
 - `details` may include:
   - `scopePath`: display form of the searched root or merged roots.
   - `fileCount`: number of paths returned after result limiting.
@@ -54,14 +55,14 @@ The tool returns a single text block plus structured `details`.
    - glob later in the path => split at the first glob-bearing segment.
    - internal URL => split below its `scheme://` root like a later-segment glob (`local://*.md` → base `local://`, non-recursive `*.md`); the glob tail is percent-decoded with encoded metacharacters kept literal, and `router.isGlob()` keeps queries, fragments, and host authorities out of the glob.
 6. `resolveSearchBase()` converts the base path to an absolute path under the session cwd; internal URLs stay URLs. A resolved `/` is rejected with `Searching from root directory '/' is not allowed`.
-7. `limit` defaults to `DEFAULT_LIMIT` (`200`), must be positive and finite, is floored, then clamped to `MAX_LIMIT` (`200`). `hidden` and `gitignore` both default to `true`. An internal timeout of `5` seconds (`5000` ms) is built via `AbortSignal.timeout(...)`.
+7. `limit` defaults to `DEFAULT_LIMIT` (`200`), must be positive and finite, and is floored with a minimum of `1`; values above `MAX_LIMIT` (`1000`) are rejected before scanning. `hidden` and `gitignore` both default to `true`. An internal timeout of `5` seconds (`5000` ms) is built via `AbortSignal.timeout(...)`.
 8. Execution then branches:
    - **Custom operations branch**: if `GlobToolOptions.operations.glob` exists, the tool checks existence with `operations.exists()`, short-circuits exact-file inputs via `operations.stat()` when available, then calls `operations.glob(globPattern, searchPath, { ignore: ["**/node_modules/**", "**/.git/**"], limit })`.
    - **Built-in local branch**: the tool stats each target's `searchPath` (URL targets through the URL filesystem). Exact-file inputs return immediately. Directory inputs call `natives.glob()` with `hidden`, `maxResults: effectiveLimit`, `sortByMtime: true`, `gitignore: useGitignore`, `recursive: false` (recursion comes from the `**/` prefix `parseFindPattern()` adds), the combined abort signal, and `filesystem: urlFilesystem.shellFilesystem()` so URL roots walk natively; multi-target calls run their globs concurrently.
 9. In the local branch, optional `onMatch` callbacks convert each match to a display path (cwd-relative for host paths, a full URL with percent-encoded segments below a URL root via `resolveSearchResultPath()`) and emit throttled progress updates.
 10. After native glob returns, JS merges per-target results, deduplicates repeated display paths, and sorts the merged list by `mtime` descending before formatting paths.
 11. `buildResult()` applies `applyListLimit()` to cap the array again at `effectiveLimit`, formats paths with `formatGroupedPaths()` (from `@oh-my-pi/pi-utils`), appends notices, then runs `truncateHead()` with `maxLines: Number.MAX_SAFE_INTEGER`. In practice this leaves the 50 KB byte cap in place while disabling the default 3000-line cap.
-12. `toolResult()` packages text plus `details`, and records result-limit / truncation metadata for renderers.
+12. `toolResult()` packages text plus `details`, and records result-limit / truncation metadata for renderers. The result-limit retry suggestion is capped at `MAX_LIMIT` so the advertised follow-up is always accepted.
 
 ## Modes / Variants
 - **Exact file path**: if the parsed input has no glob and the resolved path stats as a file, output is that one path.
@@ -86,7 +87,7 @@ The tool returns a single text block plus structured `details`.
 
 ## Limits & Caps
 - Default result limit: `200` (`DEFAULT_LIMIT` in `packages/coding-agent/src/tools/glob.ts`).
-- Maximum result limit: `200` (`MAX_LIMIT`); larger inputs are clamped.
+- Maximum requested result limit: `1000` (`MAX_LIMIT`); larger requests fail with instructions to partition the pattern or scope to a deeper directory instead of being silently clamped or risking excessive native allocations.
 - Local glob timeout: fixed at `5000` ms.
 - Output byte cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`).
 - Default generic line cap in `truncateHead()` is `3000`, but `glob` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so byte size — not line count — is the practical output truncation cap.

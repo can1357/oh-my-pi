@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { FileType } from "@oh-my-pi/pi-natives";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
 import { GlobTool } from "../../src/tools/glob";
@@ -40,6 +44,70 @@ async function expectRootSearchRejected(searchPath: string): Promise<void> {
 describe("GlobTool.execute", () => {
 	test.each(["/", "//"])("rejects bare root search path %s", async searchPath => {
 		await expectRootSearchRejected(searchPath);
+	});
+
+	test("retrieves every match when following the result-limit retry hint", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-"));
+		const filenames = Array.from({ length: 230 }, (_, index) => `file-${String(index).padStart(3, "0")}.txt`);
+		try {
+			await Promise.all(filenames.map(filename => Bun.write(path.join(cwd, filename), "")));
+			const tool = new GlobTool(createSession(cwd));
+			const initial = await tool.execute("glob-limit-initial", { path: "*.txt", gitignore: false });
+			expect(initial.details?.files).toHaveLength(200);
+
+			const hint = formatOutputNotice(initial.details?.meta);
+			const suggestedLimit = /Use limit=(\d+) for more/.exec(hint)?.[1];
+			expect(suggestedLimit).toBeDefined();
+			const retry = await tool.execute("glob-limit-retry", {
+				path: "*.txt",
+				limit: Number(suggestedLimit),
+				gitignore: false,
+			});
+			expect(new Set(retry.details?.files)).toEqual(new Set(filenames));
+		} finally {
+			await removeWithRetries(cwd);
+		}
+	});
+
+	test("rejects a large limit instead of collecting unbounded matches", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-large-"));
+		try {
+			await Bun.write(path.join(cwd, "a.txt"), "");
+			await expect(
+				new GlobTool(createSession(cwd)).execute("glob-limit-large", {
+					path: "*.txt",
+					limit: 1_000_000,
+					gitignore: false,
+				}),
+			).rejects.toThrow(/Limit cannot exceed 1000;.*partition the pattern/);
+		} finally {
+			await removeWithRetries(cwd);
+		}
+	});
+
+	test("never suggests a retry limit above the maximum", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-limit-max-"));
+		try {
+			await Promise.all(
+				Array.from({ length: 1001 }, (_, index) => Bun.write(path.join(cwd, `file-${index}.txt`), "")),
+			);
+			const tool = new GlobTool(createSession(cwd));
+			const partial = await tool.execute("glob-limit-partial", { path: "*.txt", limit: 600, gitignore: false });
+			const suggestedLimit = /Use limit=(\d+) for more/.exec(formatOutputNotice(partial.details?.meta))?.[1];
+			expect(suggestedLimit).toBe("1000");
+
+			const atMax = await tool.execute("glob-limit-max", {
+				path: "*.txt",
+				limit: Number(suggestedLimit),
+				gitignore: false,
+			});
+			expect(atMax.details?.files).toHaveLength(1000);
+			expect(formatOutputNotice(atMax.details?.meta)).not.toContain("Use limit=");
+			const text = atMax.content[0]?.type === "text" ? atMax.content[0].text : "";
+			expect(text).toContain("Partition the pattern or scope to a deeper directory");
+		} finally {
+			await removeWithRetries(cwd);
+		}
 	});
 
 	test("rejects a caller abort during preparation without launching a native scan", async () => {
