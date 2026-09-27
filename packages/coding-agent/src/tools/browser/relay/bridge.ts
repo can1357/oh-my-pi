@@ -141,8 +141,17 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
+	/** Set when the user cancelled the debugger for this tab; cleared on navigation. */
 	banned = false;
+	/**
+	 * Last `chrome.debugger.attach` refusal for this tab, surfaced on the commands
+	 * that could not be forwarded. Chrome refuses attaches transiently — another
+	 * debugger (DevTools, a devtools-style extension) holding the tab, a renderer
+	 * swap mid-attach — and reports the misleading "Cannot access a chrome-extension://
+	 * URL of different extension" for any such refusal, so the raw text is the only
+	 * actionable detail available.
+	 */
+	lastAttachError: string | undefined;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -195,8 +204,23 @@ class TabState {
 /** URLs `chrome.debugger` cannot attach to; hidden from downstream discovery entirely. */
 const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
+/**
+ * Command error for a tab whose debugger could not be attached. Chrome words
+ * every attach refusal as "Cannot access a chrome-extension:// URL of different
+ * extension", which reads as a relay bug unless the reason is spelled out: the
+ * usual cause is another debugger (DevTools, a devtools-style extension) holding
+ * the tab, which Chrome allows only one of at a time.
+ */
+function attachFailureMessage(tab: TabState): string {
+	const reason = tab.lastAttachError ? `: ${tab.lastAttachError}` : "";
+	return `Cannot attach debugger to tab ${tab.tabKey} (${tab.url})${reason} — another debugger (DevTools or a devtools-style extension) may be holding this tab`;
+}
+
 const RPC_TIMEOUT_MS = 20_000;
 /** Concurrent chrome.debugger attach RPCs the relay will ever issue at once. */
+/** chrome.debugger.attach attempts per command, and the linear backoff between them. */
+const ATTACH_ATTEMPTS = 3;
+const ATTACH_RETRY_DELAY_MS = 150;
 const ATTACH_CONCURRENCY = 4;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
@@ -232,16 +256,21 @@ export class RelayBridge {
 	#groupQueue: TabState[] = [];
 	/** True while {@link #drainGroupQueue} runs — group RPCs must never overlap. */
 	#groupDraining = false;
+	/** Backoff between {@link #attachWithRetry} attempts; 0 disables the wait (tests). */
+	#attachRetryDelayMs: number;
 
 	constructor(
 		opts: {
 			log?: (message: string, data?: Record<string, unknown>) => void;
 			/** Group tabs the agent actively drives under one per-window Chrome tab group. */
 			group?: { title: string; color: string } | null;
+			/** Override the linear attach-retry backoff (default {@link ATTACH_RETRY_DELAY_MS}). */
+			attachRetryDelayMs?: number;
 		} = {},
 	) {
 		this.#log = opts.log ?? (() => {});
 		this.#group = opts.group ?? null;
+		this.#attachRetryDelayMs = opts.attachRetryDelayMs ?? ATTACH_RETRY_DELAY_MS;
 	}
 
 	/** True once the extension has completed its hello handshake. */
@@ -657,7 +686,7 @@ export class RelayBridge {
 		// needs the debugger (auto-attach only mints sessions). A failed attach
 		// fails this command with a named error instead of wedging the client.
 		if (realSessionId === undefined && !(await this.#ensureAttached(tab))) {
-			this.#replyError(conn, msg, `Cannot attach debugger to tab ${tab.tabKey} (${tab.url})`);
+			this.#replyError(conn, msg, attachFailureMessage(tab));
 			return;
 		}
 		try {
@@ -1001,9 +1030,20 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		this.#resetRuntime(tab);
+		// Only an explicit user cancellation is a lasting opt-out. Chrome also
+		// reports `target_closed` for detaches that leave the tab alive (renderer
+		// swaps, an idle service worker dropping its attachments, a failed
+		// re-attach after the extension reconnects) and those are transient: the
+		// next forwarded command re-attaches lazily (#forwardToTab) and succeeds
+		// again once Chrome allows it.
+		//
+		// Banning and retracting here instead destroyed every downstream session
+		// for a tab that was still open: `#retractTab` emits Target.detachedFromTarget,
+		// so every live puppeteer Page for the tab went dead and each later command
+		// failed with "Attempted to use detached Frame" until the tab's URL changed.
+		// A genuine tab close still retracts through #onTabRemoved.
+		if (reason !== "canceled_by_user") return;
 		tab.banned = true;
-		// The debugger is gone but the tab (and its omp-group membership) stays:
-		// losing the attachment is not a reason to scatter the group.
 		this.#retractTab(tab);
 	}
 
@@ -1278,19 +1318,21 @@ export class RelayBridge {
 		const inst = this.#instances.get(tab.instanceId);
 		if (tab.banned || !inst?.socket) return false;
 		if (tab.attaching) return await tab.attaching;
-		const attempt = this.#withAttachPermit(() => this.#rpc({ op: "attach", tabId: tab.tabId }, inst))
+		const attempt = this.#withAttachPermit(() => this.#attachWithRetry(tab, inst))
 			.then(() => {
 				tab.attached = true;
 				tab.reattachedAfterDetach = true;
+				tab.lastAttachError = undefined;
 				return true;
 			})
 			.catch(err => {
-				this.#log("attach failed", {
-					tabKey: tab.tabKey,
-					url: tab.url,
-					error: err instanceof Error ? err.message : String(err),
-				});
-				if (!(err instanceof ExtensionReplacedError)) tab.banned = true;
+				// Do not ban: Chrome's attach refusals are transient (another
+				// debugger attached for a moment, a renderer swap, a tab that
+				// briefly reports another extension's frame). Banning made the
+				// tab invisible to every client for the rest of the epoch, so it
+				// could never recover even after Chrome accepted attaches again.
+				tab.lastAttachError = err instanceof Error ? err.message : String(err);
+				this.#log("attach failed", { tabKey: tab.tabKey, url: tab.url, error: tab.lastAttachError });
 				return false;
 			})
 			.finally(() => {
@@ -1298,6 +1340,34 @@ export class RelayBridge {
 			});
 		tab.attaching = attempt;
 		return await attempt;
+	}
+
+	/**
+	 * `chrome.debugger.attach` for this tab, retried a bounded number of times.
+	 * Chrome refuses attaches while another debugger holds the tab (DevTools, a
+	 * devtools-style extension) and reports it as "Cannot access a chrome-extension://
+	 * URL of different extension"; the holder is usually gone within a beat, so a
+	 * couple of short retries turn most of those into a successful command instead
+	 * of a failed user action.
+	 */
+	async #attachWithRetry(tab: TabState, inst: ExtInstance): Promise<void> {
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= ATTACH_ATTEMPTS; attempt++) {
+			// The tab may have been attached by a concurrent command's attach in
+			// the meantime (tab.attached is only set once the RPC resolves).
+			if (tab.attached) return;
+			try {
+				await this.#rpc({ op: "attach", tabId: tab.tabId }, inst);
+				return;
+			} catch (err) {
+				lastError = err;
+				if (err instanceof ExtensionReplacedError) throw err;
+				if (attempt < ATTACH_ATTEMPTS && this.#attachRetryDelayMs > 0) {
+					await Bun.sleep(this.#attachRetryDelayMs * attempt);
+				}
+			}
+		}
+		throw lastError;
 	}
 
 	#attachActive = 0;
