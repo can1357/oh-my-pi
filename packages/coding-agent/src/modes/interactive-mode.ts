@@ -36,7 +36,6 @@ import {
 	TERMINAL,
 	Text,
 	type TUI,
-	renderProgressBar,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
@@ -62,6 +61,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -98,6 +98,8 @@ import {
 	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
 	type JudgmentBatchProgress,
 } from "../eval/judgment-batch-events";
+import { onDownloadActivity } from "../downloads/activity";
+import { DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
 import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
@@ -105,7 +107,6 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
@@ -117,6 +118,8 @@ import {
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage, type HistoryScope } from "../session/history-storage";
+import { syncTextPrediction, textPredictionBackend } from "../predict/client";
+import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
@@ -258,6 +261,8 @@ import {
 } from "./loop-limit";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
+import { hintUsage } from "../utils/usage-counter";
 import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
@@ -422,8 +427,6 @@ type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
-const JUDGMENT_BATCH_PROGRESS_BAR_WIDTH = 18;
-const JUDGMENT_BATCH_PROGRESS_MIN_BAR_WIDTH = 4;
 const DEFAULT_WORKING_MESSAGE = "Working…";
 
 interface WorkingMessageAccent {
@@ -624,83 +627,6 @@ class StatusHudContainer extends AnchoredLiveContainer {
 			return childLines;
 		}
 		return this.mode.renderCompactStatusLine(width, childLines);
-	}
-}
-
-/** Editor-anchored, right-aligned progress rows for concurrent judge batches. */
-class JudgmentBatchProgressHud implements Component {
-	readonly #batches = new Map<string, JudgmentBatchProgress>();
-
-	update(progress: JudgmentBatchProgress): void {
-		this.#batches.set(progress.id, progress);
-	}
-
-	delete(id: string): void {
-		this.#batches.delete(id);
-	}
-
-	clear(): void {
-		this.#batches.clear();
-	}
-
-	render(width: number): readonly string[] {
-		const rowWidth = Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
-		if (rowWidth === 0) return [];
-		const rows: string[] = [];
-		for (const progress of this.#batches.values()) rows.push(this.#renderRow(progress, rowWidth));
-		return rows;
-	}
-
-	#renderRow(progress: JudgmentBatchProgress, width: number): string {
-		const countText = `${progress.done}/${progress.total}`;
-		// Zero cost means unpriced (local/native without catalog pricing), not free — omit rather than show $0.
-		const costText = progress.cost > 0 ? ` · ${formatCost(progress.cost)}` : "";
-		const failedText = progress.failed > 0 ? ` · ${progress.failed} failed` : "";
-		const compactFailedText = progress.failed > 0 ? ` +${progress.failed}!` : "";
-		let failure = failedText;
-		if (
-			failure &&
-			visibleWidth(countText) +
-				visibleWidth(costText) +
-				visibleWidth(failure) +
-				JUDGMENT_BATCH_PROGRESS_MIN_BAR_WIDTH +
-				1 >
-				width &&
-			visibleWidth(countText) + visibleWidth(costText) + visibleWidth(compactFailedText) <= width
-		) {
-			failure = compactFailedText;
-		}
-
-		const styledCount = theme.bold(theme.fg("text", countText));
-		const styledCost = costText ? theme.fg("dim", costText) : "";
-		const styledFailure = failure ? theme.fg("warning", failure) : "";
-		let tail = `${styledCount}${styledCost}${styledFailure}`;
-		let remaining = width - visibleWidth(tail);
-		if (remaining > 1) {
-			const barWidth = Math.min(JUDGMENT_BATCH_PROGRESS_BAR_WIDTH, remaining - 1);
-			const bar = renderProgressBar(progress.done, barWidth, {
-				min: 0,
-				max: Math.max(1, progress.total),
-				minWidth: barWidth,
-				maxWidth: barWidth,
-				style: {
-					filled: "━",
-					empty: "─",
-					styleFilled: text => theme.fg("accent", text),
-					styleEmpty: text => theme.fg("dim", text),
-				},
-			});
-			tail = `${bar} ${tail}`;
-			remaining = width - visibleWidth(tail);
-		}
-
-		const intent = sanitizeStatusText(progress.intent);
-		if (remaining > 1) {
-			const label = truncateToWidth(intent, remaining - 1, "");
-			if (label) tail = `${theme.fg("dim", label)} ${tail}`;
-		}
-		if (visibleWidth(tail) > width) tail = theme.bold(theme.fg("text", truncateToWidth(countText, width, "")));
-		return `${" ".repeat(Math.max(0, width - visibleWidth(tail)))}${tail}`;
 	}
 }
 
@@ -955,7 +881,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	ui: TUI;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
-	judgmentBatchProgressContainer: Container;
+	/** Judge-batch and automatic-download progress rows above the working line. */
+	progressHudContainer: Container;
 	statusContainer: Container;
 	/** Whether {@link statusContainer} rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
 	statusRowOccupied = false;
@@ -1004,6 +931,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
+	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -1356,6 +1284,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -1411,6 +1340,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = this.composer.ui;
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
+		this.editor.placeholder = () => this.#composerHint();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		this.editor.modelMentionLabel = selector => {
@@ -1473,8 +1403,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
-		this.judgmentBatchProgressContainer = new AnchoredLiveContainer();
-		this.judgmentBatchProgressContainer.addChild(this.#judgmentBatchProgressHud);
+		this.progressHudContainer = new AnchoredLiveContainer();
+		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
+		this.progressHudContainer.addChild(this.#downloadActivityHud);
+		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
 		this.subagentContainer = new AnchoredLiveContainer();
@@ -1511,10 +1443,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncEditorMaxHeight();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
+		setWordPredictionHost(textPredictionBackend);
 		try {
 			this.historyStorage = HistoryStorage.open();
 			this.#installHistoryStorage(this.editor);
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
+			// The prediction daemon learns from history.db; nudge it once each prompt is durable.
+			this.historyStorage.setAddListener(syncTextPrediction);
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
@@ -1567,7 +1502,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
-		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
@@ -1663,6 +1597,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.isInitialized) return;
 
 		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
+		// Before first paint, so hints the user already learned never flash on.
+		await logger.time("InteractiveMode.init:hintUsage", () => hintUsage.load());
 
 		// Route SIGINT/SIGTERM/SIGHUP/uncaughtException through the same teardown
 		// the TUI Ctrl+C keypress path performs: persist the in-progress editor
@@ -1783,9 +1719,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.errorBannerContainer,
 				this.modelCycleContainer,
 				this.deferredCommandContainer,
-				// Judge batches stay editor-anchored and update independently of eval
-				// transcript output, directly above the working/throughput/title row.
-				this.judgmentBatchProgressContainer,
+				// Judge batches and automatic downloads stay editor-anchored and update
+				// independently of transcript output, directly above the working/throughput/title row.
+				this.progressHudContainer,
 				// Working loader / transient status sits below the sticky todo + subagent
 				// HUDs, just above the editor's hook-widget top margin — so it reads next to
 				// the prompt while keeping the one-line gap above the editor (the band
@@ -2647,7 +2583,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} Esc suspends the ongoing loop; /loop again to disable.`,
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} ${appKey(this.keybindings, "app.interrupt")} suspends the ongoing loop; /loop again to disable.`,
 		);
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
@@ -3244,8 +3180,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
+		this.#runningSubagentCount = agentIds.length;
 		this.statusLine.setRunningSubagents(agentIds);
 		if (options.requestRender !== false) this.ui.requestRender();
+	}
+
+	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
+	#composerHint(): string | undefined {
+		return resolveComposerHint({
+			runningAgents: this.#runningSubagentCount,
+			focusedOnAgent: this.focusedAgentId !== undefined,
+			conversationStarted: this.viewSession.messages.length > 0,
+			keybindings: this.keybindings,
+			uses: id => hintUsage.get(id),
+		});
 	}
 
 	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
@@ -4605,7 +4553,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				helpText: dialogOptions?.helpText,
 				initialIndex: dialogOptions?.initialIndex,
 				slider: extra?.slider,
-				externalEditorLabel: this.keybindings.getDisplayString("app.editor.external") || undefined,
+				externalEditorLabel: appKey(this.keybindings, "app.editor.external") || undefined,
 				annotationState: dialogOptions?.annotationState,
 			},
 			{
@@ -5812,7 +5760,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined;
 		// The overlay now owns the dynamic, focus-aware help line; the caller only
 		// supplies the trailing cancel hint.
-		const helpText = "esc cancel";
+		const helpText = `${editorKey("tui.select.cancel")} cancel`;
 		// In-overlay edits (section deletes/undo) and section annotations. Deletes
 		// update `editedContent` (and mirror to disk); annotations build `feedback`
 		// that the Refine branch re-prompts the model with.
@@ -6063,6 +6011,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		stopSharedSpinnerTicker();
 		this.#liveCommandController.dispose();
 		this.#clearJudgmentBatchProgress();
+		this.#downloadActivityHud.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
@@ -6153,7 +6102,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#teardownFailed = this.session.isDisposed;
 		this.showError(
 			this.#teardownFailed
-				? `Could not ${action} session: ${detail}\nPress Ctrl+C again to exit without saving the session log.`
+				? `Could not ${action} session: ${detail}\nPress ${appKey(this.keybindings, "app.clear")} again to exit without saving the session log.`
 				: `Could not ${action} session: ${detail}`,
 		);
 	}
@@ -6365,6 +6314,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
+		nextEditor.placeholder = () => this.#composerHint();
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		nextEditor.modelMentionLabel = selector => {
@@ -6694,7 +6644,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// leads with the interrupt affordance instead of a second spinner.
 				// The leading space nudges the row one column right of the flush-left
 				// status rows so the interrupt glyph reads as indented.
-				[` ${theme.icon.esc}`],
+				[` ${appKey(this.keybindings, "app.interrupt")}`],
 			);
 			this.loadingAnimation.setTrailer(() => this.#workingRowTrailer());
 			this.statusContainer.addChild(this.loadingAnimation);

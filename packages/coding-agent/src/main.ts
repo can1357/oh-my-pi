@@ -26,6 +26,7 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -112,12 +113,20 @@ import {
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
+import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
+import {
+	getChangelogPath,
+	readLastChangelogVersion,
+	resolveStartupChangelogForDisplay,
+	type StartupChangelogSelection,
+} from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
+import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
+import { CliUsageError } from "./cli/usage-error";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { cfgToolsApprovalMode } from "./tools/settings";
@@ -244,7 +253,7 @@ export async function readPipedInput(): Promise<string | undefined> {
 		? undefined
 		: setTimeout(() => {
 				process.stderr.write(
-					`${chalk.dim("Reading prompt from piped stdin (waiting for EOF; ctrl+c to abort)…")}\n`,
+					`${chalk.dim(`Reading prompt from piped stdin (waiting for EOF; ${formatKeyHint("ctrl+c")} to abort)…`)}\n`,
 				);
 			}, 1000);
 	notice?.unref?.();
@@ -337,7 +346,7 @@ export function buildModelScopeNotification(
 			return `${scopedModel.model.id}${thinkingStr}`;
 		})
 		.join(", ");
-	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
+	return { kind: "info", message: `Model scope: ${modelList} (${formatKeyHint("ctrl+p")} to cycle)` };
 }
 export async function submitInteractiveInput(
 	mode: Pick<
@@ -2139,11 +2148,16 @@ export async function runRootCommand(
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
 
-		// OTEL: register global OTLP exporters when an endpoint is configured via
-		// env, then switch on the agent loop's telemetry hooks so traces, run-level
-		// metrics, and structured logs have source events to export. Content capture
-		// remains governed by OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
-		await logger.time("initTelemetryExport", initTelemetryExport);
+		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
+		// exporters when an endpoint is configured via env, then switch on the agent
+		// loop's telemetry hooks so traces, run-level metrics, and structured logs
+		// have source events to export. Content capture remains governed by
+		// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
+		await logger.time(
+			"initTelemetryExport",
+			initTelemetryExport,
+			cfgTelemetryOtlpExportEnabled.get(settingsInstance),
+		);
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
@@ -2265,6 +2279,26 @@ export async function runRootCommand(
 				stdoutIsTTY: process.stdout.isTTY,
 			});
 
+			// Read the changelog marker before the changelog resolution below writes it.
+			// The probe may spawn a detached interpreter; abort it on process exit so Ctrl-C
+			// during startup cannot orphan a hung configured python.interpreter.
+			let pythonEvalWarningPromise: Promise<string | undefined> | undefined;
+			if (isInteractive) {
+				const pythonEvalProbeAbort = new AbortController();
+				const unregisterPythonEvalProbe = postmortem.register(
+					"python-eval-startup-probe",
+					() => pythonEvalProbeAbort.abort(),
+					{ exitOnly: true },
+				);
+				pythonEvalWarningPromise = resolveFirstLaunchPythonEvalWarning({
+					args: parsedArgs,
+					lastChangelogVersion: await readLastChangelogVersion(),
+					cwd: sessionOptions.cwd ?? getProjectDir(),
+					settings: settingsInstance,
+					signal: pythonEvalProbeAbort.signal,
+				}).finally(unregisterPythonEvalProbe);
+			}
+
 			// Startup changelog is only consumed by interactive mode below; kick the
 			// CHANGELOG.md parse off now so it overlaps session creation instead of
 			// serializing after it.
@@ -2291,10 +2325,17 @@ export async function runRootCommand(
 				preloadedExtensions: extensionsResult,
 			});
 
+			const sessionToolNames = session.getAllToolNames();
 			try {
-				validateToolNames(initialArgs.tools, session.getAllToolNames());
+				validateToolNames(initialArgs.tools, sessionToolNames);
 			} catch (error) {
 				await session.dispose();
+				// With no working eval backend, `--tools eval` is rejected here, before the startup
+				// notification path; carry the interpreter diagnosis instead of a bare "Unknown tool".
+				const evalWarning = sessionToolNames.includes("eval") ? undefined : await pythonEvalWarningPromise;
+				if (evalWarning && error instanceof CliUsageError) {
+					throw new CliUsageError(`${error.message}\n${evalWarning}`);
+				}
 				throw error;
 			}
 
@@ -2390,6 +2431,11 @@ export async function runRootCommand(
 					// terminal in raw mode here, and the TUI's first clearScrollback paint
 					// would wipe a pre-TUI line anyway.
 					notifs.push(modelScopeNotification);
+				}
+
+				const pythonEvalWarning = await pythonEvalWarningPromise;
+				if (pythonEvalWarning) {
+					notifs.push({ kind: "warn", message: pythonEvalWarning });
 				}
 
 				if ($env.PI_TIMING) {

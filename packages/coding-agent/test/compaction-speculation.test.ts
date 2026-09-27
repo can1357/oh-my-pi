@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -698,6 +699,93 @@ describe("async speculative compaction", () => {
 		maintenance = createMaintenance({ methodOrder: ["snapcompact", "soft"] });
 		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1, CONTEXT_WINDOW)).toBe(false);
 		expect(maintenance.speculationState).toBe("idle");
+	});
+
+	function useNativeCompactionModel(): void {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote", "snapcompact"] });
+	}
+
+	it("falls back without re-sending a native speculation that failed for good", async () => {
+		useNativeCompactionModel();
+		// The on-demand compaction ran out of output tokens: the same request
+		// fails the same way at every later boundary.
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(
+				new compactionModule.NativeCompactionError(
+					new Error("Anthropic compaction response carried no compaction block (stop reason: length)"),
+				),
+			);
+		const snapSpy = vi.spyOn(snapcompactModule, "compact").mockImplementation(async preparation => ({
+			summary: "snapcompact archive",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion;
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		// Later boundaries neither re-send it nor hold the threshold pass for it.
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 500, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("idle");
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(false);
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 1_000,
+		});
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.method : undefined).toBe("snapcompact");
+		expect(snapSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		// The committed compaction starts a new cycle with a fresh native attempt.
+		appendSummarizableConversation();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("running");
+		await maintenance.speculationCompletion;
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps speculating natively after a failure a retry can clear", async () => {
+		useNativeCompactionModel();
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(
+				new compactionModule.NativeCompactionError(
+					new AIError.ProviderHttpError("Anthropic compaction failed: Overloaded", 529),
+				),
+			);
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion;
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 500, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("running");
+		await maintenance.speculationCompletion;
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("gives a new session a fresh native speculation", async () => {
+		useNativeCompactionModel();
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(
+				new compactionModule.NativeCompactionError(
+					new Error("Anthropic compaction response carried no compaction block (stop reason: length)"),
+				),
+			);
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion;
+		await sessionManager.newSession();
+		appendSummarizableConversation();
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("running");
+		await maintenance.speculationCompletion;
+		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("discards an armed summary when post-snapshot branch growth prevents recovery headroom", async () => {

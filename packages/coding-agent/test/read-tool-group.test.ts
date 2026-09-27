@@ -288,7 +288,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(highlightedInput).toBe("line 1\nline 2\nline 3");
 		expect(rendered).toContain("line 1");
 		expect(rendered).not.toContain("line 4");
-		expect(rendered.toLowerCase()).toContain("ctrl+o");
+		expect(rendered).toContain("2 more lines");
 	});
 
 	it("does not render a duplicate summary row when inline previews are enabled", () => {

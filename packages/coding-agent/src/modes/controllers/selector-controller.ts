@@ -6,6 +6,8 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -132,8 +134,6 @@ import {
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
-
-const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 interface ModelOverlayModules {
 	ModelHubComponent: typeof ModelHubComponentType;
@@ -657,7 +657,7 @@ export class SelectorController {
 			await this.ctx.session.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
-			const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
+			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
 			this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
 		};
 		if (!compactFirst) {
@@ -747,7 +747,6 @@ export class SelectorController {
 				currentContextTokens,
 				currentSelector,
 				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
-				taskModeKeyLabel: this.ctx.keybindings.getDisplayString("app.model.selectTemporary") || "alt+p",
 				taskSelector,
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
@@ -1367,7 +1366,7 @@ export class SelectorController {
 							this.ctx.ui,
 							spinner => theme.fg("accent", spinner),
 							text => theme.fg("muted", text),
-							"Summarizing branch... (esc to cancel)",
+							`Summarizing branch... (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
 							getSymbolTheme().spinnerFrames,
 						);
 						this.ctx.statusContainer.addChild(summaryLoader);
@@ -1846,7 +1845,11 @@ export class SelectorController {
 				// editor's `/login <url>` path is unreachable while the dialog holds
 				// focus (#5339).
 				onManualCodeInput: useManualInput
-					? signal => dialog.showManualInput(MANUAL_LOGIN_PROMPT, signal)
+					? signal =>
+							dialog.showManualInput(
+								`Paste the authorization code (or full redirect URL), then press ${editorKey("tui.input.submit")}:`,
+								signal,
+							)
 					: undefined,
 			});
 			// Scope the post-login refresh to the just-authenticated provider with an

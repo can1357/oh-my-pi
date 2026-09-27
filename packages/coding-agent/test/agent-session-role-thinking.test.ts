@@ -439,7 +439,7 @@ describe("AgentSession role model thinking behavior", () => {
 		});
 
 		expect(classifierSpy).toHaveBeenCalledTimes(1);
-		expect(classifierSpy.mock.calls[0]?.[0]).toContain("implement the focused parser fix");
+		expect(classifierSpy.mock.calls[0]?.[0]?.request).toContain("implement the focused parser fix");
 		expect(promptSpy).toHaveBeenCalledTimes(1);
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.thinkingLevel).toBe(Effort.Medium);

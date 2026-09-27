@@ -17,6 +17,7 @@
   - `packages/coding-agent/src/web/search/providers/anthropic.ts` — Claude web-search provider.
   - `packages/coding-agent/src/web/search/providers/brave.ts` — Brave Search API adapter.
   - `packages/coding-agent/src/web/search/providers/codex.ts` — OpenAI Codex SSE adapter.
+  - `packages/coding-agent/src/web/search/providers/openai.ts` — billed OpenAI API Responses adapter, separate from Codex OAuth.
   - `packages/coding-agent/src/web/search/providers/duckduckgo.ts` — DuckDuckGo HTML frontend scraper.
   - `packages/coding-agent/src/web/search/providers/ecosia.ts` — Ecosia browser-backed scraper.
   - `packages/coding-agent/src/web/search/providers/exa.ts` — Exa API or MCP adapter.
@@ -87,7 +88,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 2. `executeSearch()` builds the candidate pool with `roleCandidatePool("web", …)`: available models the `web` role accepts, i.e. `web/*` search-engine catalog models (kind `search`) and chat models that declare a `webSearch` grounding. It then orders candidates:
    - if `params.model` is set (not in the model-facing schema; `omp q --model <selector>` sets it), that selector resolves to at most one candidate, marked explicit;
    - otherwise `resolveRoleChain("web", …)` (`packages/coding-agent/src/config/model-resolver.ts`) yields the `web` role chain described under [Provider selection](#modes--variants).
-3. Candidates are walked in order. A `search`-kind model loads its engine by catalog id through `getSearchProvider()`; a chat model loads its grounding backend (`gemini`, `anthropic`, `codex`, `xai`, `openrouter`) through `getGroundedSearchProvider()`. Provider modules load only when a candidate reaches them. Explicit candidates are checked with `isExplicitlyAvailable()`, others with `isAvailable()`. An unavailable non-explicit candidate is skipped silently; an unavailable explicit candidate is recorded as a failure (`<Provider> web search is unavailable. Configure its credentials or select the automatic provider chain.`) and the walk continues.
+3. Candidates are walked in order. A `search`-kind model loads its engine by catalog id through `getSearchProvider()`; a chat model loads its grounding backend (`gemini`, `anthropic`, `codex`, `openai`, `xai`, `openrouter`) through `getGroundedSearchProvider()`. Provider modules load only when a candidate reaches them. Explicit candidates are checked with `isExplicitlyAvailable()`, others with `isAvailable()`. An unavailable non-explicit candidate is skipped silently; an unavailable explicit candidate is recorded as a failure (`<Provider> web search is unavailable. Configure its credentials or select the automatic provider chain.`) and the walk continues.
 4. If no candidate was available and none failed, `executeSearch()` returns `Error: No web search model configured.` (or `No web search model matches selector "<model>".` when `params.model` was given) with `details.response.provider = "none"`.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
    - `query`,
@@ -106,12 +107,12 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 
 ## Modes / Variants
 - **Provider selection**
-  - Provider choice is the `web` model role. A candidate is a catalog model: `web/<engine>` for a search engine (for example `web/brave`, `web/duckduckgo`), or a chat model whose catalog entry declares a `webSearch` grounding (for example `anthropic/claude-haiku-4-5`), in which case that model runs the grounded search.
+  - Provider choice is the `web` model role. A candidate is a catalog model: `web/<engine>` for a search engine (for example `web/brave`, `web/duckduckgo`), or a chat model whose catalog entry declares a `webSearch` grounding (for example `anthropic/claude-haiku-4-5`, bundled `openai/gpt-6-luna`, or `openai/gpt-5.6-luna`), in which case that model runs the grounded search.
   - **Primary**: `modelRoles.web`. If it is set, its first selector pattern that matches an available model becomes the first candidate and is explicit. If it is unset, the role resolves through the built-in `web` priority list.
   - **Fallbacks**: `retry.fallbackChains.web`. If it is set (even as an empty list), exactly those selectors follow the primary and are explicit. If it is unset, every entry of the built-in `web` priority list that matches an available model follows as a non-explicit candidate. Duplicate models are dropped, and a model listed by any explicit selector stays explicit.
   - **Explicit vs automatic**: explicit candidates use `isExplicitlyAvailable()`, so Perplexity, Exa, Firecrawl, and Public Web can run their unauthenticated/keyless paths when you select them. Automatic candidates use `isAvailable()` and are skipped when their credentials are missing.
   - **Per-request selector**: `SearchQueryParams.model` (`omp q --model web/duckduckgo "…"`) replaces the whole chain with that single explicit candidate.
-  - **Default chain** (the `web` list in `packages/coding-agent/src/priority.json`): `web/parallel`, `web/perplexity`, `google/gemini-2.5-flash`, `google-antigravity/gemini-2.5-flash`, `anthropic/claude-haiku-4-5`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.6`, `openai-codex/gpt-5.5`, `xai/grok-4.5`, `xai-oauth/grok-4.5`, `web/zai`, `web/exa`, `web/tinyfish`, `web/jina`, `web/kagi`, `web/tavily`, `web/firecrawl`, `web/brave`, `web/kimi`, `web/synthetic`, `web/ollama`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel uses authenticated search when configured and its credential-free MCP otherwise. `public` is explicit-only: its `isAvailable()` returns `false`, so the automatic chain never fans out to it.
+  - **Default chain** (the `web` list in `packages/coding-agent/src/priority.json`): `web/parallel`, `web/perplexity`, `google/gemini-2.5-flash`, `google-antigravity/gemini-2.5-flash`, `anthropic/claude-haiku-4-5`, `openai-codex/gpt-6-luna`, `openai-codex/gpt-5.6-luna`, `openai-codex/gpt-5.6`, `openai-codex/gpt-5.5`, `openai/gpt-6-luna`, `openai/gpt-5.6-luna`, `xai/grok-4.5`, `xai-oauth/grok-4.5`, `web/zai`, `web/exa`, `web/tinyfish`, `web/jina`, `web/kagi`, `web/tavily`, `web/firecrawl`, `web/brave`, `web/kimi`, `web/synthetic`, `web/ollama`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel uses authenticated search when configured and its credential-free MCP otherwise. The API-billed `openai/*` entries follow every Codex entry, so a Codex failure exhausts the ChatGPT-subscription fallbacks before any OpenAI API request is billed. `public` is explicit-only: its `isAvailable()` returns `false`, so the automatic chain never fans out to it.
   - **Legacy settings**: on load, `packages/coding-agent/src/config/settings.ts` migrates `providers.webSearch`, `providers.webSearchOrder`, `providers.webSearchExclude`, and `providers.webSearchGeminiModel` into `modelRoles.web` plus `retry.fallbackChains.web`, then deletes the old keys. The migration never overwrites a role or chain that is already set. The migrated chain is the listed providers followed by the default chain, with the Gemini entries using the configured Gemini model and excluded providers removed.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
@@ -144,11 +145,19 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` and `num_search_results` are collapsed together before dispatch: `num_results = params.numSearchResults ?? params.limit`.
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage.searchRequests`, `model`, `requestId`.
   - **Codex** — `packages/coding-agent/src/web/search/providers/codex.ts`
-    - Availability: OAuth credential for `openai-codex` in `agent.db`; refresh is lazy during search. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
+    - Availability: OAuth credential for `openai-codex` in `agent.db`; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
     - Querying: streams the Codex Responses endpoint with hosted `web_search` and `search_context_size: "high"`. Google-style directives are re-emitted in the query.
-    - Model: the selected `web` candidate; the default chain tries `openai-codex/gpt-5.6-luna`, then `gpt-5.6`, then `gpt-5.5` as separate candidates. A completion without a `web_search_call` is rejected rather than presented as searched content.
+    - Model: the selected `web` candidate; the default chain tries `openai-codex/gpt-6-luna`, then `openai-codex/gpt-5.6-luna`, then `gpt-5.6`, then `gpt-5.5` as separate candidates. A completion without a `web_search_call` is rejected rather than presented as searched content.
     - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
     - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
+  - **OpenAI API** — `packages/coding-agent/src/web/search/providers/openai.ts`
+    - Availability: `OPENAI_API_KEY` or an API key configured for the `openai` provider in the model registry. It resolves credentials for the selected `openai` model and does not use `openai-codex` OAuth.
+    - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`.
+    - Model: catalog grounding is limited to verified Responses web-search models (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`); Realtime-only and unverified models are not `web` candidates. The default chain tries `openai/gpt-6-luna`, then `openai/gpt-5.6-luna`, after all `openai-codex/*` entries.
+    - A generated answer is rejected unless the response includes an actual `web_search_call`. `usage.searchRequests` counts `search` actions, not `open_page` or `find_in_page`, and is omitted when there are none.
+    - `site:` hosts map to `filters.allowed_domains`; other directives are re-emitted in the query. `max_tokens` passes through as `max_output_tokens`. Ignores `recency` and `temperature`.
+    - `num_search_results ?? limit` hard-caps parsed sources/citations locally (default `10`, max `100`); answer-cited URLs are collected first, so they survive the cap ahead of merely consulted sources. HTTP failures report OpenAI's structured `type`/`code`/`param`, never the free-form error message (which can echo a masked key).
+    - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`, `requestId`, `authMode: "api_key"`.
   - **xAI** — `packages/coding-agent/src/web/search/providers/xai.ts`
     - Availability: `shouldPreferXAIOAuth()` prefers the `xai-oauth` credential — true when `XAI_OAUTH_TOKEN` is set or a stored `xai-oauth` credential exists whose origin would not be shadowed by a shared `XAI_API_KEY` env key — otherwise `authStorage.keys.source("xai")` (`XAI_API_KEY` env or `agent.db` credential for `xai`).
     - Querying: POSTs the Responses API with the selected `web` candidate's model id (the default chain uses `grok-4.5`), `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
@@ -249,7 +258,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Side Effects
 - Network
   - Calls one or more external search providers over HTTPS until one succeeds or all fail.
-  - Provider-specific transports include JSON POST, JSON GET, SSE streaming (Perplexity OAuth/API, Gemini, Codex), and JSON-RPC over HTTP (Z.AI).
+  - Provider-specific transports include JSON POST (including OpenAI Responses), JSON GET, SSE streaming (Perplexity OAuth/API, Gemini, Codex), and JSON-RPC over HTTP (Z.AI).
 - Subprocesses / native bindings
   - Most HTTP/API adapters spawn nothing. Google, Ecosia, and Mojeek first try a plain fetch, but failed, non-2xx, or challenged production responses can acquire the project-shared broker-owned headless Chromium. Hosts without a CLI worker entry (such as an embedded SDK host) instead launch process-local Chromium.
   - This fallback can start a Chromium process and create its browser-profile lifecycle. On first browser use it can also download Chromium into the omp Puppeteer cache unless a system Chromium or `PUPPETEER_EXECUTABLE_PATH` is available. The search adapter itself uses no native binding.
@@ -260,7 +269,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Default chain length: 28 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
+- Default chain length: 30 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -274,6 +283,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).
+- OpenAI API local sources/citations cap: `num_search_results` before `limit`, default `10`, max `100`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/openai.ts`).
 - xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => default `10`, max `30`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
 - Anthropic defaults: model `claude-haiku-4-5`, `DEFAULT_MAX_TOKENS = 4096` when the provider omits `max_tokens` (`packages/coding-agent/src/web/search/providers/anthropic.ts`).

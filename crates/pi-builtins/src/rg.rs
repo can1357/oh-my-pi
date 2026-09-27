@@ -893,7 +893,7 @@ fn build_rust_matcher(patterns: &[String], cli: &Rg) -> Result<RegexMatcher, gre
 		.crlf(crlf);
 	if cli.null_data {
 		builder.line_terminator(Some(b'\0'));
-	} else if !cli.multiline {
+	} else if !cli.multiline && !crlf {
 		builder.line_terminator(Some(b'\n'));
 	}
 	builder.build_many(patterns)
@@ -2018,6 +2018,15 @@ mod tests {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n");
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+	}
+
+	#[test]
+	fn crlf_anchors_end_of_line_before_carriage_return() {
+		// Defends: `--crlf` must configure the matcher and searcher with the
+		// same terminator; a mismatch fails every search with a config error.
+		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n");
 	}
 
 	#[test]

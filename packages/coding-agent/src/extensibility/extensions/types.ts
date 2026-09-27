@@ -100,6 +100,8 @@ import type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	ContextEvent,
 	GoalUpdatedEvent,
 	RetryFallbackAppliedEvent,
@@ -426,6 +428,29 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * The agent a session runs. Extension factories are rebound to every subagent session
+ * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
+ */
+export interface ExtensionAgentIdentity {
+	/**
+	 * `"main"` for a top-level session, `"sub"` for any spawned session. Check this, not `depth`,
+	 * to tell subagents apart: `/tan` clones are subagents at depth 0.
+	 */
+	kind: "main" | "sub";
+	/** Agent registry id, e.g. `"Main"` or `"0-Explore"`. */
+	id: string;
+	/**
+	 * Lowercased agent definition name, e.g. `"main"`, `"task"`, `"explore"`. Subagents spawned
+	 * without a definition (such as `/tan` clones) report `"sub"`.
+	 */
+	name: string;
+	/** Task-tool nesting depth: 0 for a top-level session and for subagents not spawned by `task`. */
+	depth: number;
+	/** Registry id of the spawning agent; absent for a top-level session. */
+	parentId?: string;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -459,6 +484,8 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/** Identity of the agent this session runs: the top-level session or a subagent. */
+	agent: ExtensionAgentIdentity;
 	/**
 	 * Whether the current project/workspace is trusted. OMP performs no
 	 * project-trust gating — project-level settings and extensions load
@@ -742,6 +769,18 @@ export type {
 // ============================================================================
 
 export type { ContextEvent } from "../shared-events";
+
+// ============================================================================
+// Cache Warming Events
+// ============================================================================
+
+export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../shared-events";
+export type {
+	CacheWarmingAction,
+	CacheWarmingDecision,
+	CacheWarmingMode,
+	CacheWarmingStatus,
+} from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
@@ -1096,6 +1135,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -1269,6 +1309,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+	on(
+		event: "cache_warming_decision",
+		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;

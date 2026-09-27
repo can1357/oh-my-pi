@@ -177,7 +177,8 @@ type SpecialKey =
 	| "f12";
 
 type BaseKey = Letter | Digit | KeySymbol | SpecialKey;
-type ModifierName = "ctrl" | "shift" | "alt" | "super";
+/** Modifier key names as they appear in {@link KeyId} chords. */
+export type ModifierName = "ctrl" | "shift" | "alt" | "super";
 
 type ModifiedKeyId<Key extends string, RemainingModifiers extends ModifierName = ModifierName> = {
 	[M in RemainingModifiers]: `${M}+${Key}` | `${M}+${ModifiedKeyId<Key, Exclude<RemainingModifiers, M>>}`;

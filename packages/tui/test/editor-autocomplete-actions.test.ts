@@ -70,6 +70,63 @@ describe("Editor async autocomplete scheduling", () => {
 		await updated;
 		expect(editor.isShowingAutocomplete()).toBeTrue();
 	});
+
+	it("narrows a stale @ list to the typed token while the refresh is pending", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions(lines, cursorLine, cursorCol) {
+				const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+				if (text !== "@") return Promise.withResolvers<null>().promise;
+				return Promise.resolve({
+					items: ["@.cache/", "@other/", "@widget-app/"].map(value => ({ value, label: value.slice(1) })),
+					prefix: "@",
+				});
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		let submitted: string | undefined;
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		const shown = untilAutocompleteShown(editor);
+		editor.handleInput("@");
+		await shown;
+		for (const char of "widget") editor.handleInput(char);
+
+		const narrowed = editor.render(80).join("\n");
+		expect(narrowed).toContain("widget-app/");
+		expect(narrowed).not.toContain(".cache/");
+		expect(narrowed).not.toContain("other/");
+
+		editor.handleInput("x");
+		expect(editor.render(80).join("\n")).toContain("Searching…");
+		editor.handleInput("\r");
+		expect(submitted).toBe("@widgetx");
+	});
+
+	it("shows interim suggestions a slow provider reports before resolving", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions(lines, cursorLine, cursorCol, _signal, onPartial) {
+				const prefix = (lines[cursorLine] ?? "").slice(0, cursorCol);
+				onPartial?.({ items: [{ value: "@widget-app/", label: "widget-app/" }], prefix });
+				return Promise.withResolvers<null>().promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+
+		editor.setText("@widget");
+		const shown = untilAutocompleteShown(editor);
+		editor.handleInput("\t");
+		await shown;
+
+		expect(editor.render(80).join("\n")).toContain("widget-app/");
+	});
 });
 
 class ModelMentionProvider implements AutocompleteProvider {

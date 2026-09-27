@@ -26,10 +26,17 @@ import {
 	skillChipStyle,
 	skillToken,
 } from "./composer-attachments";
-import { MacOSSpellingProvider, type SpellingFeatures } from "./macos-spelling";
+import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "./magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
+import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
+
+/** Independently switchable prose-assistance features of the composer. */
+export interface SpellingFeatures extends MacOSSpellingFeatures {
+	/** Word-completion engine; `off` disables ghost text. */
+	autocomplete: WordCompletionMethod;
+}
 
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
@@ -374,6 +381,7 @@ export type ComposerChipDescriptor =
  */
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
+	#wordCompletion = new WordCompletionProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -432,14 +440,24 @@ export class CustomEditor extends Editor {
 			this.#requestShimmerRepaint?.();
 		};
 		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.#wordCompletion.onUpdate = requestTextAssistRepaint;
 		this.onTextAssistApplied = requestTextAssistRepaint;
-		this.setTextAssistProvider(this.#spelling);
+		this.setTextAssistProvider({
+			getWordCompletion: (lines, cursorLine, cursorCol) =>
+				this.#wordCompletion.getWordCompletion(lines, cursorLine, cursorCol),
+			wordCompletionFeedback: (lines, cursorLine, cursorCol, suggestion, accepted) =>
+				this.#wordCompletion.wordCompletionFeedback(lines, cursorLine, cursorCol, suggestion, accepted),
+			tryAutocorrect: (lines, cursorLine, cursorCol) => this.#spelling.tryAutocorrect(lines, cursorLine, cursorCol),
+			getWordReplacements: (lines, cursorLine, cursorCol) =>
+				this.#spelling.getWordReplacements(lines, cursorLine, cursorCol),
+		});
 		if (args[0] instanceof TUI) this.tui = args[0];
 	}
 
-	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	/** Independently configure typo detection, the word-completion engine, and autocorrect. */
 	setSpellingFeatures(features: SpellingFeatures): void {
-		this.#spelling.setFeatures(features);
+		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
+		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then

@@ -15,7 +15,7 @@ import {
 	skillChipStyle,
 } from "../prompt/composer-attachments";
 import { MODEL_MENTION_TAG_RE } from "../prompt/model-mention-syntax";
-import { fileHyperlink } from "../render";
+import { expandKeyHint, fileHyperlink } from "../render";
 import { imageReferenceHyperlink } from "../prompt/image-references";
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
@@ -198,7 +198,7 @@ class SyntheticSummary implements Component {
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		if (this.#cache?.width === width) return this.#cache.lines;
-		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		const hint = `${theme.sep.dot.trim()} ${expandKeyHint()}`;
 		const lines = [` ${theme.fg("dim", truncateSummary(`${this.#summary} ${hint}`, Math.max(10, width - 1)))}`];
 		this.#cache = { width, lines };
 		return lines;

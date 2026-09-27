@@ -331,10 +331,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		key: "webSearch",
 		set: "catalog",
 		shape: "scalar",
-		values: ["gemini", "anthropic", "codex", "xai", "openrouter"],
+		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {

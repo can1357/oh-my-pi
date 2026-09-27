@@ -15,6 +15,7 @@ import {
 import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
+import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
@@ -31,7 +32,7 @@ export interface ComposerPreferences {
 	readonly imeSafeCursor: boolean;
 	readonly autocompleteMaxVisible: number;
 	readonly spellingTypoDetection: boolean;
-	readonly spellingAutocomplete: boolean;
+	readonly spellingAutocomplete: WordCompletionMethod;
 	readonly spellingAutocorrect: boolean;
 }
 
@@ -45,7 +46,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	imeSafeCursor: false,
 	autocompleteMaxVisible: 10,
 	spellingTypoDetection: true,
-	spellingAutocomplete: true,
+	spellingAutocomplete: "auto",
 	spellingAutocorrect: false,
 };
 

@@ -2,6 +2,91 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `telemetry.otlpExportEnabled` setting (`/settings` → Providers → Privacy) that stops OMP from exporting OTLP traces, logs, and metrics even when `OTEL_*` endpoints are set in its environment; export stays enabled by default ([#13444](https://github.com/can1357/oh-my-pi/pull/13444) by [@krizh-p](https://github.com/krizh-p))
+- Added a first-launch warning when Python eval is enabled but no working Python interpreter is found, pointing to `python.interpreter` and `omp setup python --check` ([#13529](https://github.com/can1357/oh-my-pi/pull/13529) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- The `eval` tool description now notes that the kernel may be shared with the parent session and concurrent `task` subagents ([#13521](https://github.com/can1357/oh-my-pi/pull/13521) by [@radkawar](https://github.com/radkawar))
+
+### Fixed
+
+- Fixed Windows sessions started from an 8.3 short path (such as `C:\Users\ADMINI~1\project`) using the short spelling as the project directory, and home-directory paths written with 8.3 aliases not being shortened to `~` in the status line, tool labels, and errors ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
+- Fixed `edit` `PUT >N` moving a shallower insert (Go `case`, `} else {`) past a closing brace when that breaks the file's syntax ([#13520](https://github.com/can1357/oh-my-pi/pull/13520) by [@radkawar](https://github.com/radkawar))
+- Fixed `omp update` and other one-shot commands on Windows printing "ended before completing" and exiting 1 after they had actually completed ([#13470](https://github.com/can1357/oh-my-pi/issues/13470))
+- Fixed `omp update` on Windows printing "ended before completing: the event loop drained" and exiting 1 when no `~/.npmrc` or `~/.bunfig.toml` exists ([#13470](https://github.com/can1357/oh-my-pi/issues/13470))
+- Fixed `wait` with no owned background jobs blocking silently for up to 30 minutes while its parent or a peer kept running; it now returns after a 5-second window that grows to 5 minutes on repeated waits and names who is still running ([#13513](https://github.com/can1357/oh-my-pi/issues/13513), [#13516](https://github.com/can1357/oh-my-pi/pull/13516) by [@H4vC](https://github.com/H4vC))
+
+## [18.3.5] - 2026-09-27
+
+### Added
+
+- Added API-key-billed OpenAI Responses web search (`openai/gpt-6-luna`, then `openai/gpt-5.6-luna`), tried after every Codex entry in the default search fallback chain so ChatGPT-subscription search is exhausted before any API usage is billed ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added prompt-cache warming, ported from [earendil-works/pi](https://github.com/earendil-works/pi): shortly before a prompt-cache entry expires, the main agent loop replays its last request and cuts the replay off at the first generated token, so idle gaps no longer force a full-prefix cache re-write. A refresh fires only when the expected avoided-miss cost clears its cost by $0.05, and warming stops as soon as a refresh misses the cache. Controlled by `providers.cacheWarming` (`off` / `streaming` / `idle`, default `idle`); idle warming covers 5-minute entries only, and models without a declared `promptCache` lifetime are never warmed. Extensions can override each decision through the `cache_warming_decision` event ([#12699](https://github.com/can1357/oh-my-pi/pull/12699) by [@KamijoToma](https://github.com/KamijoToma)).
+
+## [18.3.4] - 2026-09-27
+
+### Breaking Changes
+
+- Replaced the `task` tool's `complexity` field with `solutionSpace`, a description of how open-ended the subtask is; `auto` thinking for spawned subagents now picks effort from it alone
+
+### Changed
+
+- `auto` thinking now picks effort for every turn by how open-ended the problem is, so large volumes of mechanical work no longer raise it
+
+### Fixed
+
+- Fixed agents looping for hours when every turn spends the whole output limit on reasoning: length-stop retries now tell the model its reasoning was discarded and to act in smaller steps, and a subagent whose length-stop recovery gives up now fails with that error instead of being re-prompted into the same loop
+- Fixed tagging a model with `^` mid-session dropping the provider prompt cache for every following turn: new `m<N>` pseudonyms now arrive as a hidden session notice instead of rewriting the `task` description, which only absorbs them at a base-prompt rebuild
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added a unified predictive text engine with N-gram, SmolLM2, and macOS native providers, including cross-engine blending, background model downloads, and a cross-process prediction daemon.
+- Added the `omp predict` command for evaluating completion performance and support for ingesting existing Claude Code and Codex prompt histories to bootstrap predictions on new installations.
+- Added `omp skill list [dir] [--json]` to report skills resolved for a session directory, including discovery warnings in JSON output.
+- Added a centralized progress display for background tool and model downloads, including support for downloading the SmolLM2-135M word-completion model.
+- Added dynamic evaluation guidance through hidden session notices.
+- Added a required `complexity` rationale to the `task` tool to improve automatic thinking-depth selection.
+- Agents using `task` or `bash` now receive the `wait` tool for background-process coordination, and subagents can receive it when explicitly requested.
+- Added context-aware suggestions to empty composers based on agent activity and effort.
+- Added optional global or per-project memory scopes to the `retain` and `learn` tools when Mnemopi scoping is enabled.
+- Added `/btw` to focused subagent views for asking questions about that agent's transcript with separate side-conversation history.
+
+### Changed
+
+- Completion behavior now uses the N-gram engine for standard `auto` completion across platforms, with blended N-gram and SmolLM confidence scoring where applicable; the SmolLM2 model uses a 145 MB GGUF (Q8_0) download and is prefetched only when explicitly activated.
+- Updated `spelling.autocomplete` to use an enum-based engine configuration.
+- Completion ghost text is now preserved through manual keystrokes.
+- Window input actions now default to background execution; set `takeover: true` to opt into foreground activation, with clarified cross-platform coordinate and activation behavior.
+- `omp tiny-models download` can now download the word-completion model.
+- Updated `/play` help, read-tool summaries, platform-aware shortcut labels, and other UI hints for clearer interaction guidance.
+- Updated the empty-submit behavior to account for live-steered messages and surface pending live-steering status in the UI.
+- `ps --all` now includes exited global services, while the default view shows live global services.
+- Orchestrator task documentation now follows a Target/Change/Acceptance format.
+- Slash-command and hint usage tracking is now persistent and namespaced.
+
+### Fixed
+
+- Preserved MCP `structuredContent` in live tool-result details so evaluation callers can consume server data without reparsing model-facing JSON; spilled results continue to retain an artifact reference without duplicating the payload in session history.
+- Fixed Collab hosts becoming unable to reclaim a room after a brief network interruption; hosts now retry room recovery without losing guests or queued updates.
+- Fixed one-shot commands that stopped before completing, such as `omp config set` on a fresh Windows profile, incorrectly exiting successfully without output; they now report failure with diagnostic guidance.
+
+## [18.3.2] - 2026-09-25
+
+### Added
+
+- Added `ctx.agent` to the extension context, reporting whether the session is the top-level agent or a subagent, plus its registry id, agent definition name, task depth and parent id, so handlers rebound to subagent sessions can tell which agent they serve ([#13314](https://github.com/can1357/oh-my-pi/pull/13314) by [@andrebrait](https://github.com/andrebrait))
+- Added tracking of Anthropic's usage-limit wrap-up allowance for Claude subscription accounts: after the 5-hour or weekly limit is reached, the status line and `/slow status` show `limit reached · wrapping up · resets HH:MM`, and the agent is told to wrap up when neither low priority nor extra usage will continue the work ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- `providers.anthropic.slowMode` now controls only the low-priority lane; the usage-limit wrap-up allowance is tracked for every first-party Claude subscription account ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
+- Enter on the `/model` hub sidebar now moves focus to the model list (like →) instead of acting on the highlighted row ([#13347](https://github.com/can1357/oh-my-pi/pull/13347) by [@H4vC](https://github.com/H4vC))
+
 ### Fixed
 
 - Fixed the Windows bash tool exporting `TEMP`, `TMP`, and `TMPDIR` with 8.3 short names such as `ADMINI~1`, so they now match the long-form `pwd`/`$PWD` after `cd "$TEMP"` ([#13265](https://github.com/can1357/oh-my-pi/pull/13265) by [@CoderTCY](https://github.com/CoderTCY))
@@ -10,6 +95,8 @@
 - Fixed hashline `PUT N*` / `CUT N*` on the first statement of a block (for example a Go or Python function that opens with an `if`) also replacing or deleting every statement after it ([#13153](https://github.com/can1357/oh-my-pi/issues/13153), [#13154](https://github.com/can1357/oh-my-pi/pull/13154) by [@radkawar](https://github.com/radkawar))
 - Fixed the `Full output: artifact://` link on large background bash and eval results pointing at a truncated copy with `[…elided…]` gaps instead of the complete output ([#13142](https://github.com/can1357/oh-my-pi/issues/13142), [#13143](https://github.com/can1357/oh-my-pi/pull/13143) by [@radkawar](https://github.com/radkawar))
 - Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
+- Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
+- Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.1] - 2026-09-25
 
@@ -35,6 +122,7 @@
 - Added RPC session management through `open_session`, plus corresponding TypeScript and Python client APIs including `openSession`, `setEventFilter`, `onPromptResult`, `onSessionSettled`, and `waitForSettled`.
 - Added `attachment://` and `conflict://` resource URL handlers.
 - Added a per-server MCP `instructions: false` option to keep a server's guidance out of the system prompt while retaining its tools.
+- Added stale tool-result eviction for advisors: before each review, an advisor replaces its own `read`/`grep`/`glob` output from reviews older than the latest one with a short placeholder, so it stops re-sending that output on every request. The deltas it reviews, the notes it wrote, and other tool results such as `recall` are never touched. Turn it off with `advisor.evictStaleResults` ([#13238](https://github.com/can1357/oh-my-pi/pull/13238) by [@alnaggar-dev](https://github.com/alnaggar-dev))
 
 ### Changed
 

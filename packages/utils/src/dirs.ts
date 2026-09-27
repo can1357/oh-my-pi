@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
 
@@ -154,6 +155,11 @@ function standardizeMacOSPath(p: string): string {
 	return p;
 }
 
+/** Keep the current directory's spelling while expanding Windows 8.3 aliases. */
+function standardizeProjectPath(p: string): string {
+	return process.platform === "win32" ? expandWindowsLongPath(p) : standardizeMacOSPath(p);
+}
+
 export function resolveEquivalentPath(inputPath: string): string {
 	const resolvedPath = path.resolve(inputPath);
 	try {
@@ -200,29 +206,33 @@ let projectDir: string | undefined;
 /** Get the project directory. */
 export function getProjectDir(): string {
 	if (projectDir === undefined) {
+		let cwd: string | undefined;
 		try {
-			projectDir = standardizeMacOSPath(process.cwd());
+			cwd = process.cwd();
 		} catch {
 			const candidates = [process.env.PWD, os.homedir(), os.tmpdir()];
 			for (const candidate of candidates) {
 				if (!candidate || !path.isAbsolute(candidate)) continue;
 				try {
 					process.chdir(candidate);
-					projectDir = standardizeMacOSPath(candidate);
+					cwd = candidate;
 					break;
 				} catch {}
 			}
-			if (projectDir === undefined) {
+			if (cwd === undefined) {
 				throw new Error("Unable to determine an accessible working directory");
 			}
 		}
+		// Normalize outside the fallback: a native-addon failure is not an inaccessible cwd,
+		// and must surface as itself instead of relocating the process.
+		projectDir = standardizeProjectPath(cwd);
 	}
 	return projectDir;
 }
 
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	const resolved = standardizeMacOSPath(path.resolve(dir));
+	const resolved = standardizeProjectPath(path.resolve(dir));
 	process.chdir(resolved);
 	projectDir = resolved;
 }

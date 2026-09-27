@@ -116,7 +116,6 @@ import {
 	type TextBlockParam,
 } from "./anthropic-wire";
 import {
-	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
 	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
 	adoptRequiredClaudeCodeVersion,
@@ -1591,31 +1590,6 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
-function parseAnthropicWireUsage(value: unknown): AnthropicWireUsage | undefined {
-	if (!isRecord(value)) return undefined;
-	const cacheCreation = isRecord(value.cache_creation)
-		? {
-				...(typeof value.cache_creation.ephemeral_5m_input_tokens === "number"
-					? { ephemeral_5m_input_tokens: value.cache_creation.ephemeral_5m_input_tokens }
-					: {}),
-				...(typeof value.cache_creation.ephemeral_1h_input_tokens === "number"
-					? { ephemeral_1h_input_tokens: value.cache_creation.ephemeral_1h_input_tokens }
-					: {}),
-			}
-		: undefined;
-	return {
-		...(typeof value.input_tokens === "number" ? { input_tokens: value.input_tokens } : {}),
-		...(typeof value.output_tokens === "number" ? { output_tokens: value.output_tokens } : {}),
-		...(typeof value.cache_read_input_tokens === "number"
-			? { cache_read_input_tokens: value.cache_read_input_tokens }
-			: {}),
-		...(typeof value.cache_creation_input_tokens === "number"
-			? { cache_creation_input_tokens: value.cache_creation_input_tokens }
-			: {}),
-		...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
-	};
-}
-
 function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackContent | undefined {
 	if (!isRecord(value) || value.type !== "fallback") return undefined;
 	const from = isRecord(value.from) && typeof value.from.model === "string" ? value.from.model : undefined;
@@ -2072,7 +2046,6 @@ const streamAnthropicOnce = (
 				});
 			}
 
-			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
 			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
@@ -2208,7 +2181,7 @@ const streamAnthropicOnce = (
 					model,
 					apiKey,
 					extraBetas,
-					stream: !zeroOutputCacheRefresh,
+					stream: true,
 					interleavedThinking: options?.interleavedThinking ?? true,
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
@@ -2321,89 +2294,6 @@ const streamAnthropicOnce = (
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
-
-			if (zeroOutputCacheRefresh) {
-				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
-				// Anthropic rejects `tool_choice: {type:"tool"|"any"}` with `max_tokens: 0`
-				// ("tool_choice ... cannot be used when max_tokens is 0", #12597). A refresh
-				// replays the captured turn's payload, which can carry a forced selector
-				// (e.g. a forced yield). A zero-output keep-alive produces no tokens, so the
-				// forced choice is meaningless here — drop it so the request is accepted.
-				const refreshChoiceType = refreshParams.tool_choice?.type;
-				if (refreshChoiceType === "tool" || refreshChoiceType === "any") {
-					delete refreshParams.tool_choice;
-				}
-				rawRequestDump = {
-					provider: model.provider,
-					api: output.api,
-					model: model.id,
-					method: "POST",
-					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
-					body: refreshParams,
-				};
-				const { requestSignal } = activeAbortTracker;
-				// A replayed compaction block needs the beta on injected clients too.
-				// Route by the client's own endpoint when it exposes one.
-				const refreshBetaRouteUrl =
-					options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl;
-				let refreshHeaders: Record<string, string> | undefined;
-				if (options?.client !== undefined && !isVertexRawPredictUrl(refreshBetaRouteUrl)) {
-					if (carriesSignedCompaction(refreshParams)) {
-						refreshHeaders = mergeAnthropicBetaHeader(refreshHeaders ?? mergedCallerHeaders, COMPACTION_BETA);
-					}
-					if (carriesLegacyCompactionEdit(refreshParams)) {
-						refreshHeaders = mergeAnthropicBetaHeader(
-							refreshHeaders ?? mergedCallerHeaders,
-							LEGACY_COMPACTION_BETA,
-						);
-					}
-				}
-				const requestOptions = {
-					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
-					maxRetries: 0,
-					...(refreshHeaders ? { headers: refreshHeaders } : {}),
-				};
-				const request: unknown =
-					isOAuthToken && client.beta
-						? client.beta.messages.create(refreshParams, requestOptions)
-						: client.messages.create(refreshParams, requestOptions);
-				if (!hasAnthropicRawResponseRequest(request)) {
-					throw new AIError.AnthropicStreamEnvelopeError(
-						"Anthropic cache refresh request did not expose a raw response",
-					);
-				}
-				const response = await request.asResponse();
-				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
-				const body: unknown = await response.json();
-				if (!isRecord(body)) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh returned a malformed response");
-				}
-				const wireUsage = parseAnthropicWireUsage(body.usage);
-				if (!wireUsage) {
-					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh response omitted usage");
-				}
-				if (typeof body.id === "string") output.responseId = body.id;
-				applyReportedInputTransformations(
-					output,
-					params,
-					providerSessionState,
-					body.input_transformations,
-					seenInputTransformations,
-				);
-				output.usage.input = wireUsage.input_tokens ?? 0;
-				output.usage.output = wireUsage.output_tokens ?? 0;
-				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
-				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
-				applyAnthropicUsageExtras(output.usage, wireUsage);
-				output.usage.totalTokens =
-					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-				calculateCost(model, output.usage, output.timestamp);
-				output.duration = performance.now() - startTime;
-				stream.push({ type: "start", partial: output });
-				stream.push({ type: "done", reason: "stop", message: output });
-				stream.end();
-				return;
-			}
 
 			// Opt-in flag: the response parser only honors `fallback` content
 			// blocks and `usage.iterations` when the current request opted into
@@ -4255,6 +4145,9 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
  */
 const ANTHROPIC_CONTROL = Symbol("anthropicControl");
 
+/** `max_tokens` requested when the catalog has no output ceiling for the model. */
+const UNKNOWN_MODEL_MAX_OUTPUT_TOKENS = 64_000;
+
 /** One control message: tool changes (removals first) and an optional per-message effort. */
 type AnthropicControlSpec = { toolChanges: AnthropicToolChange[]; effort?: AnthropicOutputEffort };
 
@@ -4738,11 +4631,9 @@ function buildParams(
 	}
 	const outputConfig = Object.keys(outputConfigEntries).length ? outputConfigEntries : undefined;
 
-	// Claude Code requests at most 64k output tokens; clamp only OAuth requests,
-	// where the wire fingerprint must match. API-key callers keep the full model
-	// ceiling (e.g. 128k on Opus 4.8).
-	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
-	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
+	// OAuth and API-key requests alike get the full model ceiling; Claude Code
+	// itself requests 128k on Opus 5.5.
+	const maxOutputTokens = model.maxTokens ?? UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
 
 	// A caller-owned client targets its own endpoint: route body betas by the
 	// client's URL when it exposes one, not the model's routing. Otherwise the
@@ -4773,7 +4664,7 @@ function buildParams(
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
-		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? modelMaxTokens),
+		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? maxOutputTokens),
 		...(thinking && { thinking }),
 		...(contextManagement && { context_management: contextManagement }),
 		...(compactionRequest && {

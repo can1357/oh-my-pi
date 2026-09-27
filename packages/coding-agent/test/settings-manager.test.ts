@@ -31,6 +31,7 @@ import {
 	cfgTerminalShowProgress,
 	cfgSetupVersion,
 	cfgStatusLineLeftSegments,
+	cfgSpellingAutocomplete,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import {
@@ -1385,6 +1386,14 @@ describe("Settings", () => {
 			await writeSettings({ snapcompact: { systemPrompt: false } });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(cfgSnapcompactSystemPrompt.get(settings)).toBe("none");
+		});
+
+		it("migrates legacy spelling.autocomplete booleans to the engine enum", async () => {
+			expect(cfgSpellingAutocomplete.get(Settings.isolated({ "spelling.autocomplete": true }))).toBe("auto");
+			expect(cfgSpellingAutocomplete.get(Settings.isolated({ "spelling.autocomplete": false }))).toBe("off");
+			await writeSettings({ spelling: { autocomplete: false } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(cfgSpellingAutocomplete.get(settings)).toBe("off");
 		});
 
 		it("migrates legacy inlineToolDescriptors booleans to the on/off enum", () => {

@@ -1015,9 +1015,11 @@ describe("AgentSession auto-compaction progress guard", () => {
 			expect(session.agent.state.messages).toContain(truncated);
 		});
 
-		it("retries a reasoning-only turn without compacting", async () => {
+		it("retries a reasoning-only turn without compacting, telling the model its reasoning was discarded", async () => {
 			// Signed thinking is replay-worthy but delivers nothing: the budget went
-			// to reasoning, so retry rather than keep a truncated non-answer.
+			// to reasoning, so retry rather than keep a truncated non-answer. The retry
+			// must not re-send the identical context: a model that burned the whole cap
+			// planning would re-plan into the same cap forever.
 			const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
@@ -1031,6 +1033,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 					message: expect.objectContaining({ role: "assistant", stopReason: "length" }),
 				}),
 			);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({
+				role: "developer",
+				content: [{ type: "text", text: expect.stringContaining("1024-token output limit") }],
+			});
 		});
 	});
 
@@ -1106,6 +1112,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(attempts).toBe(INCOMPLETE_RECOVERY_MAX_RETRIES + 1);
 		expect(continueSpy).toHaveBeenCalledTimes(INCOMPLETE_RECOVERY_MAX_RETRIES);
 		expect(errorNotices.some(message => /length/i.test(message))).toBe(true);
+		// The capped turn is dropped from history; its failure must stay visible to
+		// post-settle readers, or the task executor sees an idle run and re-prompts
+		// it straight back into the loop.
+		expect(session.getLastAssistantMessage()).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("Length-stop recovery gave up"),
+		});
 		expect(sessionManager.getBranch()).not.toContainEqual(
 			expect.objectContaining({
 				type: "message",

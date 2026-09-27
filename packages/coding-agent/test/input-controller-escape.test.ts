@@ -328,8 +328,10 @@ describe("InputController escape behavior", () => {
 
 	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
 		const { ctx, editor, spies } = createContext();
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).isStreaming = true;
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).queuedMessageCount = 1;
+		// Stubbed session: only the streaming/interrupt gate fields matter here.
+		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
+		session.isStreaming = true;
+		session.hasInterruptibleInput = true;
 		const order: string[] = [];
 		spies.abort.mockImplementation(async () => {
 			order.push("abort");

@@ -1247,6 +1247,7 @@ async function runLoopBody(
 				config,
 				telemetry,
 				invokeAgentSpan,
+				[],
 			);
 			for (const result of executionResult.toolResults) {
 				currentContext.messages.push(result);
@@ -1619,6 +1620,7 @@ async function runLoopBody(
 						config,
 						telemetry,
 						invokeAgentSpan,
+						[...liveAccepted, ...liveDeferred],
 					);
 					toolResults.push(...executionResult.toolResults);
 
@@ -1801,6 +1803,27 @@ interface PreparedProviderCall {
 }
 
 /**
+ * Classify the first `count` steering messages for a tool-batch interrupt:
+ * any user-authored message wins, then agent-attributed user messages, else
+ * system steering (advisor cards, hidden directives). Shared by the agent's
+ * queue peek and the loop's live-taken steering.
+ */
+export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
+	if (count === 0) return { queued: false };
+	let hasAgentSteering = false;
+	for (let i = 0; i < count; i++) {
+		const message = messages[i];
+		const role = "role" in message ? message.role : undefined;
+		const attribution = "attribution" in message ? message.attribution : undefined;
+		if (attribution === "user") return { queued: true, source: "user" };
+		if (role !== "user") continue;
+		if (attribution !== "agent") return { queued: true, source: "user" };
+		hasAgentSteering = true;
+	}
+	return { queued: true, source: hasAgentSteering ? "agent" : "system" };
+}
+
+/**
  * Offer queued steering to a provider that can deliver it into the response it
  * is streaming. Latency decides whether steering lands before the model commits
  * to its next output, so claims convert only the steering batch — message-level
@@ -1818,7 +1841,11 @@ function openLiveSteering(
 	const bound = (signal: AbortSignal): AbortSignal => (loopSignal ? AbortSignal.any([signal, loopSignal]) : signal);
 	return new LiveSteeringChannel({
 		wait: signal => waitForSteeringMessages(bound(signal)),
-		take: signal => getSteeringMessages(bound(signal)),
+		take: async signal => {
+			const messages = await getSteeringMessages(bound(signal));
+			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
+			return messages;
+		},
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))
@@ -3002,6 +3029,9 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
+	// Steering the provider took off the queue during the response that emitted
+	// this batch; it injects at this batch's boundary like queued steering.
+	liveSteering: readonly AgentMessage[],
 ): Promise<{ toolResults: ToolResultMessage[]; additionalContext?: string }> {
 	const tools = currentContext.tools;
 	const {
@@ -3143,7 +3173,10 @@ async function executeToolCalls(
 		// injection boundary below; polling it here would strand or drop messages.
 		let steeringQueued = false;
 		let steeringSource: SteeringInterruptSource | undefined;
-		if (hasSteeringMessages) {
+		if (liveSteering.length > 0) {
+			steeringQueued = true;
+			steeringSource = steeringQueueState(liveSteering).source;
+		} else if (hasSteeringMessages) {
 			const queuedState = await hasSteeringMessages();
 			if (typeof queuedState === "boolean") {
 				steeringQueued = queuedState;
@@ -3490,6 +3523,9 @@ async function executeToolCalls(
 	const watchSteeringWhileRunning =
 		(softInterrupts || records.some(record => record.interruptible)) &&
 		(hasSteeringMessages !== undefined || hasAsidePeek);
+	// Live-taken steering is already pending: interrupt before any call starts
+	// so not-yet-started interruptible waits are skipped outright.
+	if (liveSteering.length > 0) await checkSteering();
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
 	const steeringWatchAbortController = new AbortController();

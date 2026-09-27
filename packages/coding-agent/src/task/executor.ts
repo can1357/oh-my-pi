@@ -104,7 +104,7 @@ import {
 	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
-import { arrayValuedLabels } from "./yield-assembly";
+import { yieldSectionShapes } from "./yield-assembly";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
 	cfgTaskPrewalk,
@@ -468,6 +468,8 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
+	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
+	solutionSpace?: string;
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -737,7 +739,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
 			}
 		} else {
-			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
+			const assembled = assembleYieldResult(yieldItems, lastAssistantText, yieldSectionShapes(outputSchema));
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
 				if (includeStructuredOutput) {
@@ -2161,11 +2163,18 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
-	// Invoked when the initial prompt loses a prompt race (AgentBusyError) before
-	// retrying. Lets the caller restore a safe contract and detach its monitor
-	// while backing off. Absent, the busy error keeps the old path.
-	onPromptBusy?: () => Promise<void>,
+	options: {
+		/** Open-endedness description forwarded to the session's `auto` thinking classifier. */
+		solutionSpace?: string;
+		/**
+		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
+		 * retrying. Lets the caller restore a safe contract and detach its monitor
+		 * while backing off. Absent, the busy error keeps the old path.
+		 */
+		onPromptBusy?: () => Promise<void>;
+	} = {},
 ): Promise<DriveOutcome> {
+	const { solutionSpace, onPromptBusy } = options;
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2209,7 +2218,7 @@ async function driveSessionToYield(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+					await awaitAbortable(session.prompt(task, { attribution: "agent", solutionSpace }));
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -3324,18 +3333,20 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
 	try {
-		outcome = await driveSessionToYield(session, monitor, message, async () => {
-			attemptUnsubscribe();
-			logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
-			await session.setWorkPoolYieldItems([]);
-			if (signal) {
-				await untilAborted(signal, () => session.waitForIdle());
-			} else {
-				await session.waitForIdle();
-			}
-			resetYieldTurnState(session.getToolByName("yield"));
-			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-			attemptUnsubscribe = monitor.attach(session);
+		outcome = await driveSessionToYield(session, monitor, message, {
+			onPromptBusy: async () => {
+				attemptUnsubscribe();
+				logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
+				await session.setWorkPoolYieldItems([]);
+				if (signal) {
+					await untilAborted(signal, () => session.waitForIdle());
+				} else {
+					await session.waitForIdle();
+				}
+				resetYieldTurnState(session.getToolByName("yield"));
+				await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+				attemptUnsubscribe = monitor.attach(session);
+			},
 		});
 		if (monitor.yieldCalled()) {
 			// A follow-up turn's accepted yield is the run's final result too:
@@ -3490,6 +3501,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		if (backends.python || backends.js) expanded.push("eval");
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
+	}
+	// Agents that can start background work (`task`, `bash`) need `wait` to block on it;
+	// without it they `sleep`. Runs after `exec` expansion and the max-depth `task` strip.
+	// `createTools` still drops it when no wake source (async/IRC/services) is enabled.
+	// Restricted sessions own their explicit list and are never widened.
+	if (
+		toolNames &&
+		!options.restrictToolNames &&
+		!toolNames.includes("wait") &&
+		(toolNames.includes("task") || toolNames.includes("bash"))
+	) {
+		toolNames = [...toolNames, "wait"];
 	}
 	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
@@ -3839,6 +3862,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
+				// Subagents are short-lived; never schedule background warm requests.
+				cacheWarming: false,
 				// A revived session restores the tier history it persisted (including
 				// tiers a provider rejected or an extension changed since spawn); only
 				// the fresh spawn resolves the per-agent override.
@@ -4181,7 +4206,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task);
+			const outcome = await driveSessionToYield(session, monitor, task, { solutionSpace: options.solutionSpace });
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.

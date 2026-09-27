@@ -18,12 +18,14 @@ import {
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
@@ -46,6 +48,7 @@ import type {
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionAgentIdentity,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -60,6 +63,9 @@ import type {
 	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	CacheWarmingAction,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
@@ -347,6 +353,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolResultEvent
 	| UserBashEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -443,6 +450,14 @@ interface ToolRegistrationScope {
 	signal?: AbortSignal;
 	closed: boolean;
 }
+
+/** Identity reported by a session that is not a subagent and received no explicit identity. */
+export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
+	kind: "main",
+	id: MAIN_AGENT_ID,
+	name: MAIN_AGENT_RULE_NAME,
+	depth: 0,
+});
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
@@ -623,6 +638,8 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
+		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -889,6 +906,31 @@ export class ExtensionRunner {
 	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
 		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
+	}
+
+	/**
+	 * Asks extensions to override a prompt-cache warming decision. The last
+	 * handler returning an action wins; handler failures are reported through
+	 * the extension error listeners and leave the warmer's decision standing.
+	 */
+	async emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
+		let action = event.action;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext();
+			for (const handler of handlers) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					handlerTimeoutForEvent(event.type),
+				)) as CacheWarmingDecisionEventResult | undefined;
+				if (result?.action !== undefined) action = result.action;
+			}
+		}
+		return action;
 	}
 	/** Registers the interactive transcript gate that must settle before a tool approval is presented. */
 	setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>): () => void {
@@ -1249,6 +1291,7 @@ export class ExtensionRunner {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
 			isProjectTrusted: () => true,
+			agent: this.agent,
 			get model() {
 				return getModel();
 			},

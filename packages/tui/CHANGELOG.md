@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [18.3.5] - 2026-09-27
+
+### Added
+
+- Added an "OpenAI API" option to the setup wizard's web-search step; the existing ChatGPT-OAuth option is now labeled "OpenAI Codex" ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added responsive ghost-text word completion with pluggable backend providers, context-aware prose filtering, and feedback support.
+- Improved autocomplete responsiveness for high-latency file discovery by showing interim suggestions and a searching state while results are refreshed.
+
+### Changed
+
+- Improved word-completion acceptance and persistence when typing through existing ghost text, including more natural handling of trailing spaces and punctuation.
+- Made keyboard labels across the TUI platform-aware so shortcuts are displayed using the appropriate key names for the user's operating system.
+- Updated the process monitor to distinguish target scope from current and global scope in its labels.
+
+### Fixed
+
+- Fixed autocomplete submission so Enter commits the current input correctly while suggestions are still loading.
+- Fixed the background tint for truncated skip lines.
+
+### Removed
+
+- Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+
 ## [18.3.1] - 2026-09-25
 
 ### Breaking Changes

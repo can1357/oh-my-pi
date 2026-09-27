@@ -18,7 +18,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { rawKeyHint } from "../chrome/keybinding-hints";
+import { editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { contentRowWidth, renderScrollableList } from "../chrome/selector-helpers";
 import { MenuSelection } from "../components/menu-selection";
@@ -229,10 +229,11 @@ export class HistorySearchComponent extends OverlayPanel {
 		const label = this.#scopeAt(this.#scopeIndex).label;
 		this.title = `History (${label})`;
 		const dot = theme.fg("dim", theme.sep.dot);
-		const hints = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select")];
+		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
+		const hints = [navigate, rawKeyHint("enter", "select")];
 		// A one-scope ring cannot cycle, so advertising Tab would promise a no-op.
 		if (this.#scopes.length > 1) hints.push(rawKeyHint("tab", this.#scopeAt(this.#scopeIndex + 1).label));
-		hints.push(rawKeyHint("esc", "cancel"));
+		hints.push(keyHint("tui.select.cancel", "cancel"));
 		this.#hint.setText(hints.join(dot));
 	}
 

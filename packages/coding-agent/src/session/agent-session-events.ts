@@ -21,6 +21,12 @@ export type AgentSessionEvent =
 			 * own work (retry, compaction continuation, stop-time reminders).
 			 */
 			yielded?: boolean;
+			/**
+			 * True on a non-terminal end whose only possible resume is a background-job result
+			 * (no queued input, no continuation the agent scheduled itself). The wake is not
+			 * guaranteed: a cancelled or suppressed job never delivers one.
+			 */
+			awaitingAsyncWork?: boolean;
 	  })
 	| {
 			type: "auto_compaction_start";

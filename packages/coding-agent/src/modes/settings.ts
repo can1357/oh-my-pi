@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -13,6 +14,7 @@ import {
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -451,8 +453,9 @@ export const cfgTuiCodexResetFireworks = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Codex Reset Fireworks",
-		description:
-			"Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until Escape",
+		get description() {
+			return `Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until ${formatKeyHint("escape")}`;
+		},
 	},
 });
 
@@ -514,8 +517,10 @@ export const cfgTuiMouse = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Mouse Click-to-Focus",
-		description:
-			"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+		},
 	},
 });
 
@@ -729,8 +734,9 @@ export const cfgTuiVimMode = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Vim Editing Mode",
-		description:
-			"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		get description() {
+			return `Modal prompt editing. ${formatKeyHint("escape")} leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes`;
+		},
 	},
 });
 
@@ -808,8 +814,9 @@ export const cfgHistoryScope = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Prompt History Scope",
-		description:
-			"Which prompts the Up arrow recalls: all projects by default, or this session, the current folder or this repository (worktrees included)",
+		get description() {
+			return `Which prompts the ${formatKeyHint("up")} arrow recalls: all projects by default, or this session, the current folder or this repository (worktrees included)`;
+		},
 		options: HISTORY_SCOPE_OPTIONS,
 	},
 });
@@ -823,8 +830,9 @@ export const cfgHistorySearchScope = register({
 		tab: "interaction",
 		group: "Input",
 		label: "History Search Scope",
-		description:
-			"Which scope Ctrl+R opens on: this session, the current folder, this repository or all projects; Tab and Shift+Tab change it while the panel is open",
+		get description() {
+			return `Which scope ${formatKeyHint("ctrl+r")} opens on: this session, the current folder, this repository or all projects; ${formatKeyHints(["tab", "shift+tab"])} change it while the panel is open`;
+		},
 		options: HISTORY_SCOPE_OPTIONS,
 	},
 });
@@ -837,8 +845,9 @@ export const cfgComposerRecallClearedDrafts = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Recall Cleared Drafts",
-		description:
-			"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		get description() {
+			return `Keep drafts cleared with ${formatKeyHint("ctrl+c")} in local ${formatKeyHints(["up", "down"])} history until exit; disabling affects future clears`;
+		},
 	},
 });
 
@@ -851,8 +860,9 @@ export const cfgDoubleEscapeAction = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Double-Escape Action",
-		description:
-			"What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing",
+		get description() {
+			return `What pressing ${formatKeyHint("escape")} twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing`;
+		},
 	},
 });
 
@@ -904,14 +914,33 @@ export const cfgSpellingTypoDetection = register({
 
 export const cfgSpellingAutocomplete = register({
 	id: "spelling.autocomplete",
-	type: "boolean",
-	default: true,
+	type: "enum",
+	values: WORD_COMPLETION_METHODS,
+	default: "auto",
 	ui: {
 		tab: "interaction",
 		group: "Input",
-		label: "Word Autocomplete (macOS)",
-		description: "Show macOS dictionary word completions as inline hints accepted with Tab",
-		condition: "macOS",
+		label: "Word Autocomplete",
+		get description() {
+			return `Show predicted word completions as inline hints: ${formatKeyHint("tab")} accepts with a space, ${formatKeyHint("right")} without`;
+		},
+		options: [
+			{ value: "off", label: "Off", description: "No word completion" },
+			{
+				value: "auto",
+				label: "Auto",
+				description: "N-gram (nothing to download)",
+			},
+			{ value: "ngram", label: "N-gram", description: "Learns your vocabulary from prompt history" },
+			{
+				value: "smollm",
+				label: "SmolLM",
+				description: "Small on-device language model blended with N-gram (downloads weights on first use)",
+			},
+			...(process.platform === "darwin"
+				? [{ value: "apple" as const, label: "Apple", description: "macOS dictionary completions" }]
+				: []),
+		],
 	},
 });
 

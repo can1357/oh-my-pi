@@ -19,6 +19,7 @@ import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -226,6 +227,10 @@ export class EventController {
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
+	/** Bumped at every `agent_start`; an async-wait watch stands down once a new run begins. */
+	#runEpoch = 0;
+	/** Epoch of the in-flight {@link #finishWhenAsyncWorkDrains} watch, if any. */
+	#asyncDrainWatchEpoch: number | undefined = undefined;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -900,6 +905,7 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#runEpoch += 1;
 		// A run with no user prompt in it (synthetic-only: `/goal` kickoff,
 		// approved-plan execution) must not measure prompt→yield from an unrelated
 		// earlier prompt. Normal user turns reseed via message_start before
@@ -1487,7 +1493,12 @@ export class EventController {
 				}
 			}
 		}
-		if (event.message.role === "user") return;
+		if (event.message.role === "user") {
+			// Live steering stays listed until the agent appends it, which follows
+			// message_start: drop its Steering chip now.
+			this.ctx.updatePendingMessagesDisplay();
+			return;
+		}
 		const unlockedThinkingVisibility =
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
 		if (unlockedThinkingVisibility && this.ctx.streamingComponent) {
@@ -2042,16 +2053,26 @@ export class EventController {
 		// then). Mirrors the collab guest's !isStreaming loader reconciler.
 		if (this.ctx.session.isStreaming) return;
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
-		// end of the run: an unsuppressed async job (a `/vibe` worker turn, a bash
-		// `async` job, etc.) will re-wake the loop when its result is delivered.
-		// `AgentSession` tags this on the deferred event (see `#hasPendingAsyncWake`
-		// in agent-session.ts). Skip the idle title/loader teardown so the tab keeps
-		// reading "working"; the later terminal `agent_end` performs it. Still flush
-		// a deferred model switch — the plan-mode reconciler queues it to apply once
-		// the current stream ends, and `#finishAgentEnd` is otherwise its only flush
-		// site, so the automatic continuation would otherwise run on the old
-		// model/thinking level until the terminal settle.
+		// end of the run: the agent's own continuation (reminder, retry, queued
+		// steer/follow-up, IRC wake) follows, or background work may re-wake it.
+		// Skip the idle title/loader teardown; the later terminal `agent_end`
+		// performs it. Still flush a deferred model switch — the plan-mode
+		// reconciler queues it to apply once the current stream ends, and
+		// `#finishAgentEnd` is otherwise its only flush site, so the automatic
+		// continuation would otherwise run on the old model/thinking level until
+		// the terminal settle.
 		if (event.isTerminal === false) {
+			// `awaitingAsyncWork`: the model handed control back and only a
+			// background-job result can resume it. The title tracks the model, so it
+			// goes idle now — before any await, so a wake landing mid-flush keeps the
+			// `working` its `agent_start` sets. That wake is not guaranteed (a
+			// cancelled job enqueues no delivery; acknowledged/watched ones are
+			// suppressed), so the loader/progress teardown waits out the background
+			// work instead of a terminal `agent_end` that may never come.
+			if (event.awaitingAsyncWork === true) {
+				setTerminalTitleState("idle");
+				void this.#finishWhenAsyncWorkDrains(event);
+			}
 			await this.ctx.flushPendingModelSwitch();
 			// Reaching here means the first guard passed, so `isStreaming` is already
 			// false: a command issued from now on mounts immediately. Leaving earlier
@@ -2067,6 +2088,39 @@ export class EventController {
 		// This settle may belong to an extension-started turn while the main
 		// input loop remains asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
+	}
+
+	/**
+	 * Terminal teardown for an async-wait settle whose wake never arrives. Mirrors
+	 * `RpcSessionSettleWatcher`: wait out owner-scoped background work, then — if
+	 * no new run started and the session is quiet — run the same teardown a
+	 * terminal `agent_end` would. A real wake starts a run (bumping the epoch)
+	 * whose own `agent_end` finalizes it instead.
+	 */
+	async #finishWhenAsyncWorkDrains(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		const epoch = this.#runEpoch;
+		if (this.#asyncDrainWatchEpoch === epoch) return;
+		this.#asyncDrainWatchEpoch = epoch;
+		const session = this.ctx.session;
+		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
+		// prompt that produced it is still admitted, and a new submission starts a
+		// run whose `agent_start` bumps the epoch anyway.
+		const superseded = () => this.#runEpoch !== epoch || this.ctx.session !== session || session.isStreaming;
+		try {
+			while (!superseded() && session.hasPendingAsyncWork()) {
+				await session.settleAsyncWork();
+			}
+			await this.#runSerialized(async () => {
+				if (superseded() || session.hasPendingAsyncWork()) return;
+				setTerminalTitleState("idle");
+				await this.#finishAgentEnd(event);
+				if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
+			});
+		} catch (error) {
+			logger.warn("Async-wait settle teardown failed", { error: String(error) });
+		} finally {
+			if (this.#asyncDrainWatchEpoch === epoch) this.#asyncDrainWatchEpoch = undefined;
+		}
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
@@ -2147,7 +2201,7 @@ export class EventController {
 	 * label carries no dangling whitespace.
 	 */
 	#maintenanceEscHint(): string {
-		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
+		return this.ctx.focusedAgentId ? "" : ` (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
 	}
 
 	async #handleAutoCompactionStart(

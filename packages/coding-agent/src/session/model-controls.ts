@@ -594,11 +594,13 @@ export class ModelControls {
 
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
+	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
+	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
+	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -620,21 +622,24 @@ export class ModelControls {
 				parentId: this.#host.sessionManager.getLeafId(),
 			};
 			try {
-				resolved = await classifyDifficulty(promptText, {
-					settings: this.#host.settings,
-					registry: this.#host.modelRegistry,
-					model,
-					sessionId: this.#host.sessionId(),
-					signal: controller.signal,
-					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
-					onUsage: usage => {
-						const entryId = this.#host.sessionManager.appendModelUsage(
-							{ purpose: "auto-thinking", ...usage },
-							usageOwner,
-						);
-						if (entryId) usageOwner.parentId = entryId;
+				resolved = await classifyDifficulty(
+					{ request: promptText, solutionSpace },
+					{
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						model,
+						sessionId: this.#host.sessionId(),
+						signal: controller.signal,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: usage => {
+							const entryId = this.#host.sessionManager.appendModelUsage(
+								{ purpose: "auto-thinking", ...usage },
+								usageOwner,
+							);
+							if (entryId) usageOwner.parentId = entryId;
+						},
 					},
-				});
+				);
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
 					error: error instanceof Error ? error.message : String(error),

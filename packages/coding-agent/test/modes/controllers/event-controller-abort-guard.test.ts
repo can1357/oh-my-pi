@@ -378,8 +378,44 @@ describe("EventController — error toast gated while auto-retry is pending", ()
 	});
 });
 
+function asyncWaitEnd(): Extract<AgentSessionEvent, { type: "agent_end" }> {
+	return {
+		...makeAgentEndEvent([makeAssistantMessage("stop")]),
+		isTerminal: false,
+		yielded: true,
+		awaitingAsyncWork: true,
+	};
+}
+
+/** Session whose owned background job is pending until `drain()` settles it without delivering a wake. */
+function makeAsyncWaitContext() {
+	let pending = true;
+	const settled = Promise.withResolvers<void>();
+	const ctx = createInteractiveModeContext({
+		sessionManager: { getSessionName: () => "test-session" },
+		session: {
+			// The real settle is emitted while its prompt is still admitted.
+			hasAdmittedSubmission: true,
+			hasPendingAsyncWork: () => pending,
+			settleAsyncWork: () => settled.promise,
+		},
+	});
+	const drain = () => {
+		pending = false;
+		settled.resolve();
+	};
+	return { ctx, drain };
+}
+
+/** One macrotask hop: every microtask continuation queued so far has run. */
+async function nextMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	await promise;
+}
+
 describe("EventController — terminal title across a non-terminal agent_end", () => {
-	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a pending async-wake pause (isTerminal:false)", async () => {
+	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a scheduled continuation (isTerminal:false, not yielded)", async () => {
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		const ctx = makeTurnEndContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
@@ -389,11 +425,61 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 			...makeAgentEndEvent([makeAssistantMessage("stop")]),
 			isTerminal: false,
 		} as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal: false });
-		// The async job still runs: never drop to `idle`, never run #finishAgentEnd teardown.
+		// The agent's own continuation (reminder/retry) follows: never drop to `idle`, never run #finishAgentEnd teardown.
 		expect(stateSpy).not.toHaveBeenCalledWith("idle");
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the working title on a queued steer/follow-up or IRC continuation (isTerminal:false, yielded:true, no awaitingAsyncWork)", async () => {
+		// `AgentSession#flushPendingAgentEnd` re-tags a built terminal end as
+		// non-terminal when queued input is about to drain; `yielded` stays true.
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const ctx = makeTurnEndContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const controller = new EventController(ctx);
+		await controller.handleEvent({
+			...makeAgentEndEvent([makeAssistantMessage("stop")]),
+			isTerminal: false,
+			yielded: true,
+		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
+		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(markActivityEnd).not.toHaveBeenCalled();
+	});
+
+	it("drops the title to idle at an async-wait settle and tears down once background work drains without a wake", async () => {
+		// A cancelled or acknowledged background job never delivers a wake, so no
+		// terminal agent_end follows; without this, title and loader spin forever.
+		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const { ctx, drain } = makeAsyncWaitContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const tornDown = Promise.withResolvers<void>();
+		markActivityEnd.mockImplementation(() => tornDown.resolve());
+		const controller = new EventController(ctx);
+		await controller.handleEvent(asyncWaitEnd());
+		expect(stateSpy).toHaveBeenCalledWith("idle");
+		// The job is still running: loader/progress teardown waits for it.
+		expect(markActivityEnd).not.toHaveBeenCalled();
+
+		drain();
+		await tornDown.promise;
+		expect(markActivityEnd).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves teardown to the woken run when background work resumes the agent", async () => {
+		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const { ctx, drain } = makeAsyncWaitContext();
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
+		const controller = new EventController(ctx);
+		await controller.handleEvent(asyncWaitEnd());
+		// The job result woke the loop: a new run starts before the drain completes.
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+
+		drain();
+		await nextMacrotask();
+		// The woken run's own agent_end finalizes; this settle must not stop its loader.
+		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 
 	it("transitions to idle and tears down on the terminal agent_end", async () => {

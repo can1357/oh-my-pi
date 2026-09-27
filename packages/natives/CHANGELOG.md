@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `expandWindowsLongPath` and `getWindowsShortPath`, which convert Windows paths between long and 8.3 spellings without resolving symlinks or junctions; import them from `@oh-my-pi/pi-natives/path` to load the addon only on first use on Windows ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
+
+## [18.3.5] - 2026-09-27
+
+### Changed
+
+- Improved syntax highlighting to use about 5x less memory and run 3-5x faster by compiling grammars with Oniguruma instead of fancy-regex; highlighted output is unchanged.
+
+### Fixed
+
+- Fixed SmolLM word completion (`spelling.autocomplete: smollm`) being about 25x slower on Windows x64 and Intel Macs; suggestions are unchanged ([#13488](https://github.com/can1357/oh-my-pi/pull/13488) by [@H4vC](https://github.com/H4vC))
+- Fixed snapcompact frames for stretched shapes rendering about 3-4x slower on Windows x64, Intel Macs, and Linux CPUs without AVX2; frames are visually unchanged ([#13496](https://github.com/can1357/oh-my-pi/pull/13496) by [@H4vC](https://github.com/H4vC))
+
+## [18.3.4] - 2026-09-27
+
+### Fixed
+
+- Fixed the native addon keeping every `bun test --isolate`/`--parallel` test file's global object and module graph alive, which grew each test worker by ~15 MB per file until the run was OOM-killed.
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added a `TextPredictor` N-API binding for managing the high-performance ghost-text completion engine.
+
+### Changed
+
+- Updated desktop input-control capabilities to use a unified `takeover` setting, including `takeover: true` for forced foreground pointer interaction.
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

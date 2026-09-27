@@ -42,6 +42,9 @@ import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesS
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
 import { padToWidth } from "../render/utils";
+import { expandKeyHint } from "../render/render-utils";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	appendOutlineEntries,
 	type ComposedColumn,
@@ -486,16 +489,17 @@ export class RewindSelectorComponent implements Component {
 						prepared,
 					}).column;
 		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
 			header: [this.#header()],
 			body: {
 				lines: composed.lines,
 				anchor: this.#outlineAnchor(composed),
 			},
-			footer: [
-				theme.fg("dim", `${position}↑/↓ step  ${lateral}  f filter  enter rewind  ctrl+o expand  esc cancel`),
-			],
+			footer: [theme.fg("dim", `${position}${keys}`)],
 		};
 	}
 
@@ -525,6 +529,8 @@ export class RewindSelectorComponent implements Component {
 			matches.length === 0
 				? theme.fg("error", "no matches")
 				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const keys = `${upDown} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${editorKey("tui.select.cancel")} show all`;
 		return {
 			header: [this.#header()],
 			body: {
@@ -539,7 +545,7 @@ export class RewindSelectorComponent implements Component {
 						: undefined,
 			},
 			footer: [
-				`${theme.fg("accent", "filter:")} ${query}${theme.fg("accent", "▏")}  ${count}  ${theme.fg("dim", "↑/↓ step  ←/→ user turns  enter rewind  esc show all")}`,
+				`${theme.fg("accent", "filter:")} ${query}${theme.fg("accent", "▏")}  ${count}  ${theme.fg("dim", keys)}`,
 			],
 		};
 	}

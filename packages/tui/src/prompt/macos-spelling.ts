@@ -4,6 +4,7 @@ import type { EditorInlineReplacement, EditorTextAssistProvider, EditorWordRepla
 import { logger } from "@oh-my-pi/pi-utils";
 import { isMagicKeyword } from "./magic-keywords";
 import { maskNonProse } from "./markdown-prose";
+import { isProseWord, lineContext, ProseSource, type SpellingDecorationContext } from "./prose-gate";
 
 /** Styled underline: red curly undercurl via colon-subparameter SGR (4:3 + SGR 58 color). */
 const STYLED_TYPO_MARKS = { start: "\x1b[4:3m\x1b[58:2::255:95:95m", end: "\x1b[4:0m\x1b[59m" } as const;
@@ -14,35 +15,20 @@ const STYLED_TYPO_MARKS = { start: "\x1b[4:3m\x1b[58:2::255:95:95m", end: "\x1b[
  */
 const FLAT_TYPO_MARKS = { start: "\x1b[4m", end: "\x1b[24m" } as const;
 
-const WORD_SUFFIX = /[\p{L}\p{M}']+$/u;
 const COMPLETED_WORD = /([\p{L}\p{M}']+)([\s.,;:!?"\])}])$/u;
-const CODEISH_CHARACTERS = "\\/@_=:{}[]<>";
-const CAMEL_CASE = /\p{Ll}\p{Lu}/u;
 const CACHE_LIMIT = 256;
-const MAX_SPELLING_BUFFER_LENGTH = 20_000;
-const MAX_SPELLING_LINE_LENGTH = 1_000;
 const WORD_BOUNDARY = /[\s.,;:!?"\])}]/u;
 
 /** Independently switchable macOS prose-assistance features. */
-export interface SpellingFeatures {
+export interface MacOSSpellingFeatures {
 	typoDetection: boolean;
-	autocomplete: boolean;
 	autocorrect: boolean;
-}
-
-/** Logical source location for one rendered editor segment. */
-export interface SpellingDecorationContext {
-	editorText: string;
-	lines: readonly string[];
-	line: number;
-	startCol: number;
 }
 
 /** Native spelling operations used by {@link MacOSSpellingProvider}. */
 export interface SpellingBackend {
 	isAvailable(): boolean;
 	checkSpelling(text: string): Promise<readonly native.SpellingRange[]>;
-	completeWord(text: string, start: number, length: number): Promise<readonly string[]>;
 	autocorrectWord(text: string, start: number, length: number): Promise<string | null>;
 	spellingGuesses(text: string, start: number, length: number): Promise<readonly string[]>;
 }
@@ -51,41 +37,21 @@ const NATIVE_BACKEND: SpellingBackend = {
 	isAvailable: () =>
 		typeof native.macOSSpellCheckerAvailable === "function" &&
 		typeof native.macOSCheckSpelling === "function" &&
-		typeof native.macOSCompleteWord === "function" &&
 		typeof native.macOSAutocorrectWord === "function" &&
 		typeof native.macOSSpellingGuesses === "function" &&
 		native.macOSSpellCheckerAvailable(),
 	checkSpelling: text => native.macOSCheckSpelling(text),
-	completeWord: (text, start, length) => native.macOSCompleteWord(text, start, length),
 	autocorrectWord: (text, start, length) => native.macOSAutocorrectWord(text, start, length),
 	spellingGuesses: (text, start, length) => native.macOSSpellingGuesses(text, start, length),
 };
 
-function tokenAt(text: string, start: number, end: number): string {
-	let tokenStart = start;
-	while (tokenStart > 0 && !/\s/.test(text[tokenStart - 1] ?? "")) tokenStart--;
-	let tokenEnd = end;
-	while (tokenEnd < text.length && !/\s/.test(text[tokenEnd] ?? "")) tokenEnd++;
-	return text.slice(tokenStart, tokenEnd);
-}
-
-function isProseWord(text: string, masked: string, start: number, end: number): boolean {
-	if (start < 0 || end <= start || end > text.length) return false;
-	if (masked.slice(start, end).trim().length === 0) return false;
-	const token = tokenAt(text, start, end);
-	for (const char of token) {
-		if (CODEISH_CHARACTERS.includes(char)) return false;
-	}
-	if (CAMEL_CASE.test(token) || /\d/.test(token)) return false;
-	return !text.trimStart().startsWith("/") && !text.startsWith("->") && !text.startsWith("=>");
-}
-
 /**
- * Bridges Apple's spelling service into the editor's separate typo,
- * word-completion, and autocorrection paths.
+ * Bridges Apple's spelling service into the editor's typo and autocorrection
+ * paths. Word completion is the cross-platform `WordCompletionProvider`
+ * (`word-completion.ts`).
  */
 export class MacOSSpellingProvider implements EditorTextAssistProvider {
-	#features: SpellingFeatures = { typoDetection: false, autocomplete: false, autocorrect: false };
+	#features: MacOSSpellingFeatures = { typoDetection: false, autocorrect: false };
 	#available: boolean;
 	#availabilityChecked = false;
 	#cacheGeneration = 0;
@@ -93,12 +59,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
 	#automaticTypoActive = false;
 	#automaticTypoQueue = new Map<string, string>();
-	#completionCache = new Map<string, string | null>();
-	#completionActiveKey: string | undefined;
-	#completionQueued: { key: string; line: string; start: number; prefix: string } | undefined;
-	#sourceText = "";
-	#sourceMask = "";
-	#sourceLineOffsets: number[] = [];
+	#prose = new ProseSource();
 	/** Underline open/close pair, chosen once from the terminal's styled-underline capability. */
 	readonly #marks: { start: string; end: string };
 
@@ -113,17 +74,16 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		this.#marks = styledUnderlines ? STYLED_TYPO_MARKS : FLAT_TYPO_MARKS;
 	}
 
-	/** Apply all three independent feature gates and invalidate rendered typo ranges. */
-	setFeatures(features: SpellingFeatures): void {
+	/** Apply both independent feature gates and invalidate rendered typo ranges. */
+	setFeatures(features: MacOSSpellingFeatures): void {
 		if (
 			this.#features.typoDetection === features.typoDetection &&
-			this.#features.autocomplete === features.autocomplete &&
 			this.#features.autocorrect === features.autocorrect
 		) {
 			return;
 		}
 		this.#features = { ...features };
-		if (!this.#availabilityChecked && (features.typoDetection || features.autocomplete || features.autocorrect)) {
+		if (!this.#availabilityChecked && (features.typoDetection || features.autocorrect)) {
 			this.#availabilityChecked = true;
 			this.#available = typeof this.backend.isAvailable === "function" && this.backend.isAvailable();
 		}
@@ -137,7 +97,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		decorate: (span: string) => string = value => value,
 	): string {
 		if (!this.#available || !this.#features.typoDetection || text.length === 0) return decorate(text);
-		if (!this.#sourceRangeIsProse(context, context.startCol, context.startCol + text.length)) {
+		if (!this.#prose.isProse(context, context.startCol, context.startCol + text.length)) {
 			return decorate(text);
 		}
 		const lane = `${context.line}:${context.startCol}`;
@@ -160,7 +120,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			// must never re-emit already-rendered text: that doubles it on screen and
 			// desyncs the rendered width from the measured width (cursor drift).
 			if (range.start < cursor || end > text.length) continue;
-			if (!this.#sourceRangeIsProse(context, context.startCol + range.start, context.startCol + end)) {
+			if (!this.#prose.isProse(context, context.startCol + range.start, context.startCol + end)) {
 				continue;
 			}
 			rendered += decorate(text.slice(cursor, range.start));
@@ -168,26 +128,6 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			cursor = end;
 		}
 		return rendered + decorate(text.slice(cursor));
-	}
-
-	/** Return the cached macOS completion suffix for the word ending at the cursor. */
-	getWordCompletion(lines: string[], cursorLine: number, cursorCol: number): string | null {
-		if (!this.#available || !this.#features.autocomplete) return null;
-		const line = lines[cursorLine] ?? "";
-		if (/^[\p{L}\p{M}']/u.test(line.slice(cursorCol))) return null;
-		const match = WORD_SUFFIX.exec(line.slice(0, cursorCol));
-		if (!match || match[0].length < 2) return null;
-		const start = cursorCol - match[0].length;
-		const masked = maskNonProse(line);
-		if (!isProseWord(line, masked, start, cursorCol)) return null;
-		const context = this.#context(lines, cursorLine);
-		if (!this.#sourceRangeIsProse(context, start, cursorCol)) return null;
-
-		const prefix = match[0];
-		const key = `${start}:${prefix.length}:${line}`;
-		if (this.#completionCache.has(key)) return this.#completionCache.get(key) ?? null;
-		this.#scheduleWordCompletion(key, line, start, prefix);
-		return null;
 	}
 
 	/** Return the confident macOS correction after a completed prose word. */
@@ -207,8 +147,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const start = match.index;
 		const masked = maskNonProse(textBeforeCursor);
 		if (!isProseWord(textBeforeCursor, masked, start, start + word.length)) return null;
-		const context = this.#context(lines, cursorLine);
-		if (!this.#sourceRangeIsProse(context, start, start + word.length)) return null;
+		const context = lineContext(lines, cursorLine);
+		if (!this.#prose.isProse(context, start, start + word.length)) return null;
 		try {
 			const correction = await this.backend.autocorrectWord(textBeforeCursor, start, word.length);
 			if (!correction || correction === word) return null;
@@ -228,15 +168,15 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (!this.#available || !this.#features.typoDetection) return null;
 
 		const line = lines[cursorLine] ?? "";
-		const context = this.#context(lines, cursorLine);
-		if (!this.#sourceRangeIsProse(context, 0, line.length)) return null;
+		const context = lineContext(lines, cursorLine);
+		if (!this.#prose.isProse(context, 0, line.length)) return null;
 		const ranges = this.#typoCache.get(line) ?? (await this.#loadTypoRanges(line));
 		const range = ranges.find(candidate => {
 			const end = candidate.start + candidate.length;
 			return (
 				cursorCol >= candidate.start &&
 				(cursorCol <= end || (cursorCol === end + 1 && WORD_BOUNDARY.test(line[end] ?? ""))) &&
-				this.#sourceRangeIsProse(context, candidate.start, end)
+				this.#prose.isProse(context, candidate.start, end)
 			);
 		});
 		if (!range || !this.#available || !this.#features.typoDetection) return null;
@@ -365,92 +305,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		return ranges;
 	}
 
-	#scheduleWordCompletion(key: string, line: string, start: number, prefix: string): void {
-		if (this.#completionActiveKey === key || this.#completionQueued?.key === key) return;
-		if (this.#completionActiveKey !== undefined) {
-			this.#completionQueued = { key, line, start, prefix };
-			return;
-		}
-		this.#startWordCompletion(key, line, start, prefix);
-	}
-	#startWordCompletion(key: string, line: string, start: number, prefix: string): void {
-		this.#completionActiveKey = key;
-		const generation = this.#cacheGeneration;
-		const request = this.#fetchWordCompletion(key, line, start, prefix, generation);
-		const finished = (): void => {
-			if (this.#completionActiveKey === key) this.#completionActiveKey = undefined;
-			const queued = this.#completionQueued;
-			this.#completionQueued = undefined;
-			if (queued && this.#available && this.#features.autocomplete && !this.#completionCache.has(queued.key)) {
-				this.#startWordCompletion(queued.key, queued.line, queued.start, queued.prefix);
-			}
-		};
-		void request.then(finished, finished);
-	}
-
-	async #fetchWordCompletion(
-		key: string,
-		line: string,
-		start: number,
-		prefix: string,
-		generation: number,
-	): Promise<void> {
-		try {
-			const completions = await this.backend.completeWord(line, start, prefix.length);
-			if (generation !== this.#cacheGeneration || !this.#available) return;
-			const lowerPrefix = prefix.toLocaleLowerCase();
-			let suffix: string | null = null;
-			for (const completion of completions) {
-				if (completion.length > prefix.length && completion.toLocaleLowerCase().startsWith(lowerPrefix)) {
-					suffix = completion.slice(prefix.length);
-					break;
-				}
-			}
-			if (this.#completionCache.size >= CACHE_LIMIT) this.#completionCache.clear();
-			this.#completionCache.set(key, suffix);
-			// A null suffix means no ghost text; the current paint is already right.
-			if (suffix !== null && this.#completionQueued === undefined) this.onUpdate?.();
-		} catch (error) {
-			this.#disable(error);
-		}
-	}
-
-	#context(lines: readonly string[], line: number): SpellingDecorationContext {
-		return { editorText: lines.join("\n"), lines, line, startCol: 0 };
-	}
-
-	#sourceRangeIsProse(context: SpellingDecorationContext, startCol: number, endCol: number): boolean {
-		if (context.editorText.length > MAX_SPELLING_BUFFER_LENGTH || startCol < 0 || endCol <= startCol) {
-			return false;
-		}
-		const line = context.lines[context.line];
-		if (line === undefined || line.length > MAX_SPELLING_LINE_LENGTH || endCol > line.length) return false;
-		this.#prepareSource(context);
-		const lineOffset = this.#sourceLineOffsets[context.line];
-		if (lineOffset === undefined) return false;
-		return this.#sourceMask.slice(lineOffset + startCol, lineOffset + endCol).trim().length > 0;
-	}
-
-	#prepareSource(context: SpellingDecorationContext): void {
-		if (this.#sourceText === context.editorText) return;
-		this.#sourceText = context.editorText;
-		this.#sourceMask = maskNonProse(context.editorText);
-		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-		this.#sourceLineOffsets = new Array<number>(context.lines.length);
-		let offset = 0;
-		for (let line = 0; line < context.lines.length; line++) {
-			this.#sourceLineOffsets[line] = offset;
-			offset += (context.lines[line]?.length ?? 0) + 1;
-		}
-	}
-
 	#clearCaches(): void {
 		this.#cacheGeneration++;
 		this.#typoCache.clear();
 		this.#typoInFlight.clear();
 		this.#automaticTypoQueue.clear();
-		this.#completionCache.clear();
-		this.#completionQueued = undefined;
 	}
 
 	#disable(error: unknown): void {
