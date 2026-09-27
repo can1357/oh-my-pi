@@ -118,8 +118,15 @@ import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
+import {
+	getChangelogPath,
+	readLastChangelogVersion,
+	resolveStartupChangelogForDisplay,
+	type StartupChangelogSelection,
+} from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
+import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
+import { CliUsageError } from "./cli/usage-error";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { cfgToolsApprovalMode } from "./tools/settings";
@@ -2272,6 +2279,26 @@ export async function runRootCommand(
 				stdoutIsTTY: process.stdout.isTTY,
 			});
 
+			// Read the changelog marker before the changelog resolution below writes it.
+			// The probe may spawn a detached interpreter; abort it on process exit so Ctrl-C
+			// during startup cannot orphan a hung configured python.interpreter.
+			let pythonEvalWarningPromise: Promise<string | undefined> | undefined;
+			if (isInteractive) {
+				const pythonEvalProbeAbort = new AbortController();
+				const unregisterPythonEvalProbe = postmortem.register(
+					"python-eval-startup-probe",
+					() => pythonEvalProbeAbort.abort(),
+					{ exitOnly: true },
+				);
+				pythonEvalWarningPromise = resolveFirstLaunchPythonEvalWarning({
+					args: parsedArgs,
+					lastChangelogVersion: await readLastChangelogVersion(),
+					cwd: sessionOptions.cwd ?? getProjectDir(),
+					settings: settingsInstance,
+					signal: pythonEvalProbeAbort.signal,
+				}).finally(unregisterPythonEvalProbe);
+			}
+
 			// Startup changelog is only consumed by interactive mode below; kick the
 			// CHANGELOG.md parse off now so it overlaps session creation instead of
 			// serializing after it.
@@ -2298,10 +2325,17 @@ export async function runRootCommand(
 				preloadedExtensions: extensionsResult,
 			});
 
+			const sessionToolNames = session.getAllToolNames();
 			try {
-				validateToolNames(initialArgs.tools, session.getAllToolNames());
+				validateToolNames(initialArgs.tools, sessionToolNames);
 			} catch (error) {
 				await session.dispose();
+				// With no working eval backend, `--tools eval` is rejected here, before the startup
+				// notification path; carry the interpreter diagnosis instead of a bare "Unknown tool".
+				const evalWarning = sessionToolNames.includes("eval") ? undefined : await pythonEvalWarningPromise;
+				if (evalWarning && error instanceof CliUsageError) {
+					throw new CliUsageError(`${error.message}\n${evalWarning}`);
+				}
 				throw error;
 			}
 
@@ -2397,6 +2431,11 @@ export async function runRootCommand(
 					// terminal in raw mode here, and the TUI's first clearScrollback paint
 					// would wipe a pre-TUI line anyway.
 					notifs.push(modelScopeNotification);
+				}
+
+				const pythonEvalWarning = await pythonEvalWarningPromise;
+				if (pythonEvalWarning) {
+					notifs.push({ kind: "warn", message: pythonEvalWarning });
 				}
 
 				if ($env.PI_TIMING) {
