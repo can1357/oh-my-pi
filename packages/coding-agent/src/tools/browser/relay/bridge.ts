@@ -223,6 +223,8 @@ class TabState {
 const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
 const RPC_TIMEOUT_MS = 20_000;
+/** Concurrent chrome.debugger attach RPCs the relay will ever issue at once. */
+const ATTACH_CONCURRENCY = 4;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -374,8 +376,10 @@ export class RelayBridge {
 			tab.attached = false;
 			tab.attaching = null;
 			this.#resetRuntime(tab);
-			// The extension dissolves omp groups on disconnect (or died along
-			// with them); grouping state is unknowable until the next hello.
+			// Chrome-side membership survives the link loss, but we can no
+			// longer verify it: forget our bookkeeping (never treating the
+			// blind window as a user opt-out) so the next claim re-syncs via a
+			// group RPC.
 			tab.grouped = false;
 			tab.grouping = false;
 			tab.ompGroupId = undefined;
@@ -521,13 +525,10 @@ export class RelayBridge {
 		const touched = new Set<string>();
 		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
 		conn.sessions.clear();
-		// Tabs this client claimed leave the omp group unless another claimant
-		// remains — session holders don't count: the long-lived registry
-		// connection holds sessions on every tab without driving any of them.
-		for (const tabId of conn.claims) {
-			const tab = this.#tabs.get(tabId);
-			if (tab) this.#syncTabGrouping(tab);
-		}
+		// Claims die with the connection, but grouped tabs STAY in the omp group:
+		// membership follows the tab's lifetime, not the driving session's. The
+		// group therefore holds exactly the tabs omp created/drove — released
+		// tabs included — until each tab is closed or the user pulls it out.
 		conn.claims.clear();
 		// Drop the debugger (and its infobar) from tabs nobody drives anymore.
 		for (const tabKey of touched) this.#detachIfUnheld(tabKey);
@@ -757,6 +758,13 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return true;
 		}
+		// Lazy attachment: the first real command for a tab is what actually
+		// needs the debugger (auto-attach only mints sessions). A failed attach
+		// fails this command with a named error instead of wedging the client.
+		if (realSessionId === undefined && !(await this.#ensureAttached(tab))) {
+			this.#replyError(conn, msg, `Cannot attach debugger to tab ${tab.tabKey} (${tab.url})`);
+			return;
+		}
 		try {
 			const result = await this.#rpc(
 				{
@@ -876,18 +884,17 @@ export class RelayBridge {
 			}
 			case "Target.setAutoAttach": {
 				conn.autoAttach = true;
-				// Discarded tabs can stall debugger calls. Retract targets already
-				// announced by Target.setDiscoverTargets so Puppeteer can connect().
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab) && !tab.discarded);
-				await Promise.all(tabs.map(tab => this.#ensureAttached(tab, { retryAfterDiscard: true })));
-				for (const tab of tabs) {
-					if (!tab.attached || tab.discarded || !this.#eligible(tab)) {
-						// Failed or newly discarded tabs must not hold up connect().
-						this.#retractTab(tab);
-						this.#detachIfUnheld(tab.tabKey);
-						continue;
-					}
-					this.#emitTabAttached(conn, tab);
+				// Mint sessions for every eligible tab — but do NOT attach the
+				// debugger here. Each attach costs a chrome.debugger roundtrip plus
+				// an infobar; eagerly attaching every tab on every downstream
+				// connect floods the extension (dozens of concurrent sendCommands,
+				// some of which Chrome silently never answers → 20s RPC timeouts
+				// and torn-down pages). Attachment happens lazily on the first
+				// forwarded command instead (#forwardToTab), so only tabs that are
+				// actually driven pay the cost. Unattachable tabs surface as
+				// command-time errors rather than init-time retractions.
+				for (const tab of this.#tabs.values()) {
+					if (this.#eligible(tab)) this.#emitTabAttached(conn, tab);
 				}
 				for (const tab of this.#tabs.values()) {
 					if (tab.announced && tab.discarded && this.#eligible(tab)) {
@@ -1135,9 +1142,8 @@ export class RelayBridge {
 		tab.attaching = null;
 		this.#resetRuntime(tab);
 		tab.banned = true;
-		// The user dismissed the debugger infobar (or the attach was torn
-		// down): release the tab's omp-group membership too.
-		this.#syncTabGrouping(tab);
+		// The debugger is gone but the tab (and its omp-group membership) stays:
+		// losing the attachment is not a reason to scatter the group.
 		this.#retractTab(tab);
 	}
 
@@ -1165,6 +1171,9 @@ export class RelayBridge {
 			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
 				tab.grouped = false;
 				tab.groupOptOut = true;
+				this.#log("tab left omp group", { tabKey: key, from: tab.ompGroupId, to: snap.groupId });
+			} else if (snap.groupId !== tab.groupId) {
+				this.#log("tab group changed", { tabKey: key, from: tab.groupId, to: snap.groupId });
 			}
 			tab.update(snap);
 			if (tab.discarded && tab.attaching && !tab.attachCancelled) {
@@ -1235,7 +1244,12 @@ export class RelayBridge {
 
 	// ---- tab grouping -----------------------------------------------------------
 
-	/** A tab belongs in the omp group when claimed by a client, controllable, unpinned, not user-opted-out, and not already in a user group. */
+	/**
+	 * A tab joins the omp group when claimed by a client, controllable, unpinned,
+	 * not user-opted-out, and not already in a user group. Membership is sticky:
+	 * releasing the claim (session end, worker restart) never ungroups — the
+	 * group shrinks only when a tab closes or the user drags it out.
+	 */
 	#groupWorthy(tab: TabState): boolean {
 		if (!this.#claimed(tab.tabKey) || !this.#eligible(tab) || tab.pinned || tab.groupOptOut) return false;
 		return tab.grouped || tab.groupId === -1;
@@ -1248,18 +1262,10 @@ export class RelayBridge {
 		if (worthy.length > 0) this.#requestGroup(worthy);
 	}
 
-	/** Reconcile one tab's group membership after a lifecycle event. */
+	/** Add one tab to the omp group once it becomes claim-worthy. Never ungroups. */
 	#syncTabGrouping(tab: TabState): void {
 		if (!this.#group) return;
-		if (this.#groupWorthy(tab)) {
-			if (!tab.grouped && !tab.grouping) this.#requestGroup([tab]);
-			return;
-		}
-		if (tab.grouped) {
-			tab.grouped = false;
-			tab.ompGroupId = undefined;
-			void this.#rpc({ op: "ungroup", tabIds: [tab.tabId] }, this.#instanceFor(tab)).catch(() => {});
-		}
+		if (this.#groupWorthy(tab) && !tab.grouped && !tab.grouping) this.#requestGroup([tab]);
 	}
 
 	/**
@@ -1447,7 +1453,7 @@ export class RelayBridge {
 			sessionId,
 			targetInfo: this.#tabInfo(tab, true),
 			waitingForDebugger: false,
-		});
+	});
 	}
 
 	async #ensureAttached(tab: TabState, opts: { retryAfterDiscard?: boolean } = {}): Promise<boolean> {
@@ -1466,7 +1472,7 @@ export class RelayBridge {
 		}
 		const generation = tab.attachGeneration;
 		const cancelled = Promise.withResolvers<boolean>();
-		const request = this.#rpc({ op: "attach", tabId: tab.tabId }, inst)
+		const request = this.#withAttachPermit(() => this.#rpc({ op: "attach", tabId: tab.tabId }, inst))
 			.then(() => {
 				tab.attached = true;
 				tab.reattachedAfterDetach = true;
@@ -1497,6 +1503,25 @@ export class RelayBridge {
 		tab.attaching = attempt;
 		tab.cancelAttach = () => cancelled.resolve(false);
 		return await attempt;
+	}
+
+	#attachActive = 0;
+	#attachQueue: Array<() => void> = [];
+
+	/** Run `fn` under a global attach-RPC concurrency limit of {@link ATTACH_CONCURRENCY}. */
+	async #withAttachPermit<T>(fn: () => Promise<T>): Promise<T> {
+		if (this.#attachActive >= ATTACH_CONCURRENCY) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#attachQueue.push(resolve);
+			await promise;
+		}
+		this.#attachActive++;
+		try {
+			return await fn();
+		} finally {
+			this.#attachActive--;
+			this.#attachQueue.shift()?.();
+		}
 	}
 
 	#eligible(tab: TabState): boolean {

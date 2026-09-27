@@ -307,7 +307,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("group")).toHaveLength(1);
 	});
 
-	it("ungroups when the claiming client disconnects, even while another connection still holds sessions", async () => {
+	it("keeps the tab in the omp group when the claiming client disconnects, even with no other claimant", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -322,9 +322,12 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 		bridge.cdpClosed(workerConn);
-		const ungroups = ext.rpcs("ungroup");
-		expect(ungroups).toHaveLength(1);
-		expect(ungroups[0]!.tabIds).toEqual([1]);
+		// Membership is sticky: the group holds released tabs until the tab
+		// itself closes or the user drags it out — never an ungroup on release.
+		expect(ext.rpcs("ungroup")).toHaveLength(0);
+		// A later tabUpdated that still reports the group is not an opt-out.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		expect(ext.rpcs("group")).toHaveLength(1);
 	});
 
 	it("never overlaps group RPCs: a tab claimed mid-flight waits for the pending group", async () => {
