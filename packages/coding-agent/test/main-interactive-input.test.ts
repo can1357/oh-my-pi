@@ -146,12 +146,14 @@ describe("submitInteractiveInput", () => {
 			resume: vi.fn(async () => {}),
 			isStreaming: false,
 		};
-		const input = createInput();
+		const onAccepted = vi.fn();
+		const input = createInput({ onAccepted });
 
 		await submitInteractiveInput(mode, session, input);
 
 		expect(mode.markPendingSubmissionStarted).toHaveBeenCalledWith(input);
 		expect(session.prompt).not.toHaveBeenCalled();
+		expect(onAccepted).not.toHaveBeenCalled();
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
@@ -179,10 +181,44 @@ describe("submitInteractiveInput", () => {
 				display: false,
 				attribution: "agent",
 			},
-			{ streamingBehavior: "followUp" },
+			{ streamingBehavior: "followUp", onAccepted: undefined },
 		);
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 		expect(mode.showError).not.toHaveBeenCalled();
+	});
+
+	it("does not consume a stash for loop or goal automation, but accepts a typed submission", async () => {
+		let stashAvailable = true;
+		const mode = createMode();
+		const session = {
+			prompt: vi.fn(async (_text: string, options?: { onAccepted?: () => void }) => {
+				options?.onAccepted?.();
+				return true;
+			}),
+			promptCustomMessage: vi.fn(async (_message: unknown, options?: { onAccepted?: () => void }) => {
+				options?.onAccepted?.();
+				return true;
+			}),
+			isStreaming: false,
+		};
+		await submitInteractiveInput(mode, session, createInput({ text: "loop iteration" }));
+		await submitInteractiveInput(
+			mode,
+			session,
+			createInput({ text: "goal iteration", customType: "goal-continuation" }),
+		);
+		expect(stashAvailable).toBe(true);
+		await submitInteractiveInput(
+			mode,
+			session,
+			createInput({
+				text: "typed",
+				onAccepted: () => {
+					stashAvailable = false;
+				},
+			}),
+		);
+		expect(stashAvailable).toBe(false);
 	});
 
 	it("passes followUp on a plain idle submission so a racing turn queues instead of erroring", async () => {
@@ -198,7 +234,11 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
+		expect(session.prompt).toHaveBeenCalledWith("loop prompt", {
+			images: undefined,
+			streamingBehavior: "followUp",
+			onAccepted: undefined,
+		});
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 
@@ -218,6 +258,7 @@ describe("submitInteractiveInput", () => {
 		expect(session.prompt).toHaveBeenCalledWith("interrupt now", {
 			images: undefined,
 			streamingBehavior: "steer",
+			onAccepted: undefined,
 		});
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
@@ -239,9 +280,25 @@ describe("submitInteractiveInput", () => {
 
 		await submitInteractiveInput(mode, session, input);
 
-		expect(session.prompt).toHaveBeenCalledWith("/void-cmd", { images: undefined, streamingBehavior: "followUp" });
+		expect(session.prompt).toHaveBeenCalledWith("/void-cmd", {
+			images: undefined,
+			streamingBehavior: "followUp",
+			onAccepted: undefined,
+		});
 		expect(mode.pauseLoop).toHaveBeenCalledTimes(1);
 		expect(mode.showError).not.toHaveBeenCalled();
+	});
+
+	it("accepts a locally consumed typed command only after successful dispatch", async () => {
+		const onAccepted = vi.fn();
+		const mode = createMode();
+		const session = {
+			prompt: vi.fn(async () => false),
+			promptCustomMessage: vi.fn(async () => true),
+			isStreaming: false,
+		};
+		await submitInteractiveInput(mode, session, createInput({ text: "/local", onAccepted }));
+		expect(onAccepted).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps the loop armed when dispatch starts a turn", async () => {

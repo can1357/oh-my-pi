@@ -43,6 +43,7 @@ app.history.search: []
 | `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                   |
 | `app.editor.external`        | `Ctrl+G`                                                              | Edit the draft in `$VISUAL` / `$EDITOR`                                                                                                                |
 | `app.local.open`             | `Alt+G`                                                               | Pick a session `local://` file and edit it in `$VISUAL` / `$EDITOR` (same as `/local`)                                                                 |
+| `app.editor.stash`           | `Ctrl+S`                                                              | Stash a draft, or restore it from an empty editor |
 | `app.message.followUp`       | `Ctrl+Q`, `Ctrl+Enter`                                                | Queue a follow-up message                                                                                                                              |
 | `app.message.dequeue`        | `Alt+Up`, `Shift+Up`                                                  | Dequeue a queued message back into the editor                                                                                                          |
 | `app.retry`                  | `F5`, `Alt+R`                                                         | Retry the last failed assistant turn                                                                                                                   |
@@ -76,6 +77,12 @@ With `stt.enabled` on, the native composer shows a microphone beside Send. Click
 Dictation started with this button stays in the draft, regardless of `stt.submitTrigger`. Review or edit the text, then press Enter or click Send. While dictation is recording or transcribing into the draft, Enter and Send do nothing.
 
 For live English transcription, select **Nemotron 0.6B (live streaming, English)** in `omp setup speech`, or set `modelRoles.dictation` to `local/nemotron-streaming-en-0.6b`. Words appear in the draft while you speak. The first recording waits for the model to load before opening the microphone; start speaking when the button says **Recording · Stop**. Later recordings reuse the loaded model. See [local speech models](local-models.md#speech-to-text) for download and language details.
+
+## Stash a prompt temporarily
+
+Press `Ctrl+S` with a nonempty draft to stash its text, cursor position, Vim input mode, collapsed pastes, and image attachments, leaving the editor empty. Press `Ctrl+S` again while the editor is empty to restore it, or submit a separate prompt to restore the stashed draft as soon as that submission is accepted (without waiting for the model turn or a queued message to run). If another draft is already stashed, `Ctrl+S` swaps the two drafts rather than discarding either. Automatic loop/goal continuations and delivery of previously queued prompts do not consume the stash. An empty or failed submission does not consume it. The stash is local to the current editor and is not added to prompt history.
+
+`Alt+A` opens Agent Hub. Existing `app.session.observe` and `observeSessions` remaps migrate to `app.agents.hub`; the obsolete action is no longer available. If you explicitly remap the Hub to `Ctrl+S`, that binding takes precedence over the stash default; bind `app.editor.stash` separately to keep both actions. The session selector has its own key scope: even an explicit `app.session.toggleSort: Ctrl+S` does not disable editor stash.
 
 ## Recover a cleared prompt
 
