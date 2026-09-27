@@ -204,6 +204,37 @@ test("a child skill symlinked outside the plugin root is rejected by containment
 	expect(names).not.toContain("sneaky-link");
 });
 
+test("a child symlinked outside the plugin root does not turn a declared skill directory into a collection (regression: PR #9379 review, hasChildSkillDir containment)", async () => {
+	const outside = path.join(tempDir, "outside-child-skill");
+	writeFile(
+		path.join(outside, "SKILL.md"),
+		"---\nname: outside-child-skill\ndescription: Lives outside the plugin\n---\nbody\n",
+	);
+	writeFile(
+		path.join(ext, "package.json"),
+		JSON.stringify({
+			name: path.basename(ext),
+			omp: { extensions: ["./src/main.ts"], skills: ["./skills/leaf-skill"] },
+		}),
+	);
+	writeFile(
+		path.join(ext, "skills", "leaf-skill", "SKILL.md"),
+		"---\nname: leaf-skill\ndescription: The declared skill itself\n---\nbody\n",
+	);
+	writeFile(
+		path.join(ext, "skills", "leaf-skill", "examples", "demo", "SKILL.md"),
+		"---\nname: demo\ndescription: Fixture inside the skill\n---\nbody\n",
+	);
+	fs.symlinkSync(outside, path.join(ext, "skills", "leaf-skill", "escaping-child"), "dir");
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	const names = skills.map(skill => skill.name);
+	expect(names).toContain("leaf-skill");
+	expect(names).not.toContain("demo");
+	expect(names).not.toContain("outside-child-skill");
+});
+
 test("a namespace symlink pointing outside the plugin root is rejected before enumeration (PR #9379 round-7 review)", async () => {
 	// An external COLLECTION (no top-level SKILL.md): reached only through the
 	// one-level namespace descent, which must prove containment BEFORE the

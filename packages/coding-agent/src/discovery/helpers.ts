@@ -30,7 +30,7 @@ import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
-import { realpathIfExists, resolveContainedPath } from "./contained-path";
+import { type ContainedPathResolution, realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
 /**
@@ -536,91 +536,82 @@ export async function scanSkillsFromDir(
 
 	// Containment gate (Agent Plugins §4.1): a candidate reached through a
 	// symlink inside a declared directory may resolve outside the plugin
-	// root; prove containment before the read consumes external content.
-	const loadContained = async (skillPath: string): Promise<void> => {
-		if (containWithin === undefined) return loadSkill(skillPath);
-		const resolved = await resolveContainedPath(containWithin, skillPath);
-		if (resolved.status === "outside") {
-			warnings.push(`Skipping skill outside the plugin root: ${skillPath}`);
-			return;
-		}
-		if (resolved.status === "missing") return;
-		return loadSkill(skillPath);
+	// root; prove containment before any probe follows that link or the read
+	// consumes external content (PR #9379 review). Without containment this is
+	// an async existence check.
+	const skillFileStatus = async (skillPath: string): Promise<ContainedPathResolution["status"]> => {
+		if (containWithin === undefined) return (await Bun.file(skillPath).exists()) ? "ok" : "missing";
+		return (await resolveContainedPath(containWithin, skillPath)).status;
 	};
+	// Loads a proven candidate; returns false only when no candidate exists.
+	const loadIfPresent = async (skillPath: string): Promise<boolean> => {
+		const status = await skillFileStatus(skillPath);
+		if (status === "missing") return false;
+		if (status === "outside") {
+			warnings.push(`Skipping skill outside the plugin root: ${skillPath}`);
+			return true;
+		}
+		await loadSkill(skillPath);
+		return true;
+	};
+	const candidateEntries = entries.filter(
+		entry => !entry.name.startsWith(".") && (entry.isDirectory() || entry.isSymbolicLink()),
+	);
 
 	// A manifest-declared directory that is itself a collection — its own
 	// SKILL.md alongside one-level-deep child skill directories, not a single
 	// leaf — must still surface those children (PR #9379 review): only a
-	// direct child with its own `SKILL.md` disqualifies `selfIsBoundary` from
-	// stopping the scan; a two-level-deep fixture (`examples/demo/SKILL.md`)
-	// does not, matching the one-level nesting the loop below itself scans.
+	// direct child with its own contained `SKILL.md` disqualifies
+	// `selfIsBoundary` from stopping the scan; a two-level-deep fixture
+	// (`examples/demo/SKILL.md`) or a child symlinked out of the plugin root
+	// does not, matching what the loop below itself would load.
 	const hasChildSkillDir =
-		options.selfIsBoundary &&
-		entries.some(
-			entry =>
-				entry.name.startsWith(".") === false &&
-				(entry.isDirectory() || entry.isSymbolicLink()) &&
-				fs.existsSync(path.join(dir, entry.name, "SKILL.md")),
-		);
-	const work: Promise<void>[] = [];
+		options.selfIsBoundary === true &&
+		(
+			await Promise.all(candidateEntries.map(entry => skillFileStatus(path.join(dir, entry.name, "SKILL.md"))))
+		).includes("ok");
 	if (options.includeSelf) {
-		const selfSkillPath = path.join(dir, "SKILL.md");
-		if (fs.existsSync(selfSkillPath)) {
-			await loadContained(selfSkillPath);
-			if (options.selfIsBoundary && !hasChildSkillDir) {
-				// A directly declared skill directory is a leaf, not a collection:
-				// its own SKILL.md defines the single skill, and nested fixtures
-				// (`examples/demo/SKILL.md`) must not surface as separate skills.
-				items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
-				return { items, warnings };
-			}
+		const selfPresent = await loadIfPresent(path.join(dir, "SKILL.md"));
+		if (selfPresent && options.selfIsBoundary && !hasChildSkillDir) {
+			// A directly declared skill directory is a leaf, not a collection:
+			// its own SKILL.md defines the single skill, and nested fixtures
+			// (`examples/demo/SKILL.md`) must not surface as separate skills.
+			items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
+			return { items, warnings };
 		}
 	}
-	for (const entry of entries) {
-		if (entry.name.startsWith(".")) continue;
-		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-		const skillPath = path.join(dir, entry.name, "SKILL.md");
-		if (fs.existsSync(skillPath)) {
-			work.push(loadContained(skillPath));
-			continue;
-		}
-		// Namespace directory: curated pools nest one level (<dir>/<ns>/<skill>/SKILL.md),
-		// e.g. skills/core-ops/deel/SKILL.md via the symlinked pools in ~/.claude/skills
-		// and ~/.config/opencode/skills. A dir without its own SKILL.md is scanned exactly
-		// one level deeper; deeper nesting stays invisible.
-		const namespaceDir = path.join(dir, entry.name);
-		if (containWithin !== undefined) {
-			// The readdir below FOLLOWS a symlinked namespace dir, so containment
-			// must be proven before enumeration — not only per candidate file —
-			// or a link to a large or sensitive external tree gets traversed.
-			const resolved = await resolveContainedPath(containWithin, namespaceDir);
-			if (resolved.status === "outside") {
-				warnings.push(`Skipping skill namespace outside the plugin root: ${namespaceDir}`);
-				continue;
+	await Promise.all(
+		candidateEntries.map(async entry => {
+			if (await loadIfPresent(path.join(dir, entry.name, "SKILL.md"))) return;
+			// Namespace directory: curated pools nest one level (<dir>/<ns>/<skill>/SKILL.md),
+			// e.g. skills/core-ops/deel/SKILL.md via the symlinked pools in ~/.claude/skills
+			// and ~/.config/opencode/skills. A dir without its own SKILL.md is scanned exactly
+			// one level deeper; deeper nesting stays invisible.
+			const namespaceDir = path.join(dir, entry.name);
+			if (containWithin !== undefined) {
+				// The readdir below FOLLOWS a symlinked namespace dir, so containment
+				// must be proven before enumeration — not only per candidate file —
+				// or a link to a large or sensitive external tree gets traversed.
+				const resolved = await resolveContainedPath(containWithin, namespaceDir);
+				if (resolved.status === "outside") {
+					warnings.push(`Skipping skill namespace outside the plugin root: ${namespaceDir}`);
+					return;
+				}
+				if (resolved.status === "missing") return;
 			}
-			if (resolved.status === "missing") continue;
-		}
-		let children: fs.Dirent[];
-		try {
-			children = await fs.promises.readdir(namespaceDir, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		for (const child of children) {
-			if (child.name.startsWith(".")) continue;
-			if (!child.isDirectory() && !child.isSymbolicLink()) continue;
-			const nestedSkillPath = path.join(dir, entry.name, child.name, "SKILL.md");
-			// Async existence check folded into `work` (not awaited inline) so
-			// scanning a namespace with many children stays fully concurrent
-			// instead of serially blocking the event loop with sync fs stats.
-			work.push(
-				Bun.file(nestedSkillPath)
-					.exists()
-					.then(exists => (exists ? loadContained(nestedSkillPath) : undefined)),
+			let children: fs.Dirent[];
+			try {
+				children = await fs.promises.readdir(namespaceDir, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			await Promise.all(
+				children
+					.filter(child => !child.name.startsWith(".") && (child.isDirectory() || child.isSymbolicLink()))
+					.map(child => loadIfPresent(path.join(namespaceDir, child.name, "SKILL.md"))),
 			);
-		}
-	}
-	await Promise.all(work);
+		}),
+	);
 
 	// Deterministic ordering: async file reads complete nondeterministically, so sort after loading.
 	items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
