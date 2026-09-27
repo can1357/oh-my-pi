@@ -60,6 +60,13 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("exposes the OTLP export opt-out in provider privacy settings", () => {
+		const preference = getSettingsForTab(createSettingsHost().entries, "providers").find(
+			setting => setting.path === "telemetry.otlpExportEnabled",
+		);
+		expect(preference?.group).toBe("Privacy");
+	});
+
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths = ["advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set<string>(advisorDependentPaths);
