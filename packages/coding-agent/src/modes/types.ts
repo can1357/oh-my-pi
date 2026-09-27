@@ -192,6 +192,10 @@ export interface InteractiveModeContext {
 	 * changes how links are drawn.
 	 */
 	syncExtensionLinks(): void;
+	/** Temporarily replace the empty composer hint after a prompt is stashed. */
+	notifyComposerStash(): void;
+	/** Cancel the temporary stash hint when the saved draft is restored. */
+	cancelComposerStashNotice(): void;
 
 	// Session access
 	session: AgentSession;
