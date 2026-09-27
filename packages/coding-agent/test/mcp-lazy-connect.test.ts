@@ -50,6 +50,20 @@ function fakeStorage(): AgentStorage {
 	} as unknown as AgentStorage;
 }
 
+/** Honors each entry's expiry against `Date.now()`, the way agent.db's cache table does. */
+function expiringStorage(): AgentStorage {
+	const store = new Map<string, { value: string; expiresAtSec: number }>();
+	return {
+		getCache: (key: string) => {
+			const entry = store.get(key);
+			return entry && entry.expiresAtSec > Date.now() / 1000 ? entry.value : null;
+		},
+		setCache: (key: string, value: string, expiresAtSec: number) => {
+			store.set(key, { value, expiresAtSec });
+		},
+	} as unknown as AgentStorage;
+}
+
 function lazyConfig(markerPath: string): MCPStdioServerConfig {
 	return {
 		type: "stdio",
@@ -270,6 +284,49 @@ describe("MCP lazy connect", () => {
 			expect(tools[0]).not.toBeInstanceOf(DeferredMCPTool);
 		} finally {
 			await manager.disconnectAll();
+		}
+	});
+
+	it("regression: a lazy server that starts dormant keeps its cached catalog past the cache TTL since its last connect", async () => {
+		// PR #9793 review (Codex, manager.ts:818): a lazy server's catalog
+		// was written only by a real connect, so one that sat dormant for
+		// longer than the 30-day cache TTL lost it and had no tool left to
+		// trigger the first-use connect.
+		const day = 24 * 60 * 60 * 1000;
+		const start = Date.now();
+		const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(expiringStorage());
+		const writes: Promise<void>[] = [];
+		const originalSet = cache.set.bind(cache);
+		const setSpy = vi.spyOn(cache, "set").mockImplementation((name, cfg, tools) => {
+			const write = originalSet(name, cfg, tools);
+			writes.push(write);
+			return write;
+		});
+
+		try {
+			await cache.set("lazyfixture", config, [TOOL_DEF]);
+
+			clock.mockReturnValue(start + 20 * day);
+			const dayTwenty = new MCPManager(workDir, cache);
+			await dayTwenty.connectServers({ lazyfixture: config }, {});
+			await Promise.all(writes);
+			await dayTwenty.disconnectAll();
+
+			clock.mockReturnValue(start + 40 * day);
+			const dayForty = new MCPManager(workDir, cache);
+			try {
+				const result = await dayForty.connectServers({ lazyfixture: config }, {});
+				expect(result.tools.filter(tool => tool.mcpServerName === "lazyfixture")).toHaveLength(1);
+				expect(await Bun.file(marker).exists()).toBe(false);
+			} finally {
+				await dayForty.disconnectAll();
+			}
+		} finally {
+			setSpy.mockRestore();
+			clock.mockRestore();
 		}
 	});
 

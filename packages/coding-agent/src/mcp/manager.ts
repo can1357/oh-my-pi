@@ -944,6 +944,11 @@ export class MCPManager {
 							reconnect,
 						),
 					);
+					// Only a real connect writes the cache, and a lazy server may go
+					// without one for longer than the cache's expiry. Rewrite the entry
+					// on every dormant startup so it outlives a quiet month; this also
+					// moves an entry found under a legacy identity hash to the current one.
+					void this.toolCache?.set(name, config, cached);
 				}),
 			);
 		}
