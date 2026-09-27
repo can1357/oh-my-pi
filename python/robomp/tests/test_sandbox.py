@@ -2802,3 +2802,76 @@ def test_ensure_workspace_resume_skips_rebase_for_merge_history(
     ).stdout.strip()
     assert merge_count == "1"
     assert (ws.repo_dir / "side.txt").read_text() == "side change\n"
+
+
+def test_ensure_workspace_resume_aborts_stale_rebase_state(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=46,
+        title="stale rebase state",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    _commit_agent_work(ws.repo_dir, "feature.txt", "agent work")
+    gitdir = subprocess.run(
+        ["git", "rev-parse", "--git-path", "rebase-merge"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    state = Path(gitdir)
+    if not state.is_absolute():
+        state = ws.repo_dir / state
+    state.mkdir()
+    # Minimal interrupted-rebase state: `git rebase --abort` restores the
+    # branch tip from these three files; a bare directory alone is not enough
+    # for git to consider a rebase in progress.
+    (state / "head-name").write_text(f"refs/heads/{ws.branch}\n", encoding="utf-8")
+    head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    (state / "orig-head").write_text(f"{head}\n", encoding="utf-8")
+    (state / "onto").write_text(f"{head}\n", encoding="utf-8")
+    remote_head = _advance_upstream_main(tmp_path)
+
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=46,
+        title="stale rebase state",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    assert not state.exists(), "stale rebase state must be aborted before reconciling"
+    merge_base = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert merge_base == remote_head
+    subjects = (
+        subprocess.run(
+            ["git", "log", "--format=%s", "origin/main..HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
+    assert subjects == ["agent work"]

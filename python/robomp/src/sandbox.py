@@ -1039,6 +1039,61 @@ class SandboxManager:
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
+    @staticmethod
+    def _abort_stale_rebase_state(
+        *,
+        repo: str,
+        number: int,
+        repo_dir: Path,
+        env: dict[str, str] | None,
+        slot_kwargs: dict[str, Any],
+    ) -> None:
+        """Abort leftover in-progress rebase state before reconciling.
+
+        A previous session can die mid-rebase (the slot's shell git cannot
+        fetch blobs, so its own rebase attempt dies with rebase state left
+        behind). Git refuses to start a new rebase while that state exists,
+        burning a retry, and the in-progress state can also leave the worktree
+        looking conflicted. Aborting restores the branch to the tip the rebase
+        was started from, so nothing the agent committed is lost.
+        """
+        for state in ("rebase-merge", "rebase-apply"):
+            probe = _safe_run(
+                ["git", "rev-parse", "--git-path", state],
+                cwd=repo_dir,
+                env=env,
+                **slot_kwargs,
+            )
+            if probe.returncode != 0:
+                continue
+            state_path = Path(probe.stdout.strip())
+            if not state_path.is_absolute():
+                state_path = repo_dir / state_path
+            if not state_path.exists():
+                continue
+            abort = _safe_run(
+                ["git", "rebase", "--abort"],
+                cwd=repo_dir,
+                env=env,
+                **slot_kwargs,
+            )
+            if abort.returncode != 0:
+                log.error(
+                    "stale rebase state could not be aborted; failing the task to the maintainer",
+                    extra={"repo": repo, "issue": number, "state": state},
+                )
+                raise GitCommandError(
+                    ["git", "rebase", "--abort"],
+                    abort.returncode,
+                    abort.stdout,
+                    abort.stderr,
+                )
+            log.warning(
+                "aborted stale in-progress rebase left by a previous session",
+                extra={"repo": repo, "issue": number, "state": state},
+            )
+            return
+
     def _reconcile_stale_workspace_branch(
         self,
         *,
@@ -1074,6 +1129,13 @@ class SandboxManager:
         """
         if detached:
             return
+        self._abort_stale_rebase_state(
+            repo=repo,
+            number=number,
+            repo_dir=repo_dir,
+            env=env,
+            slot_kwargs=slot_kwargs,
+        )
         status = _safe_run(["git", "status", "--porcelain"], cwd=repo_dir, env=env, **slot_kwargs)
         if status.returncode != 0 or status.stdout.strip():
             return
