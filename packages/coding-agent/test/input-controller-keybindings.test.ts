@@ -9,6 +9,7 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
@@ -29,6 +30,7 @@ type FakeEditor = {
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
 	onRetry?: () => void;
+	onDequeue?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
@@ -98,6 +100,8 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const notifyComposerStash = vi.fn();
+	const cancelComposerStashNotice = vi.fn();
 	let focused: unknown;
 	let focusedAgentId: string | undefined;
 	let overlayVisible = false;
@@ -279,6 +283,8 @@ async function createContext() {
 		showError,
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
+		notifyComposerStash,
+		cancelComposerStashNotice,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -322,6 +328,8 @@ async function createContext() {
 			handleBtwFollowUpKey,
 			showError,
 			isGuidedGoalInterviewActive,
+			notifyComposerStash,
+			cancelComposerStashNotice,
 		},
 	};
 }
@@ -1404,6 +1412,130 @@ describe("Ctrl+S prompt stash", () => {
 		expect(editor.pendingImages).toEqual([image]);
 		finishTurn();
 		await submission;
+	});
+	it("keeps a single-Ctrl+S stash separate from a queued steering edit", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("saved draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		expect(spies.notifyComposerStash).toHaveBeenCalledTimes(1);
+
+		const queued: RestoredQueuedMessage[] = [];
+		const session = ctx.session as InteractiveModeContext["session"] & {
+			popLastQueuedMessage: () => RestoredQueuedMessage | undefined;
+		};
+		Object.assign(session, { popLastQueuedMessage: () => queued.pop() });
+		let acceptFirstPrompt: (() => void) | undefined;
+		let finishFirstTurn!: () => void;
+		const firstTurn = new Promise<void>(resolve => {
+			finishFirstTurn = resolve;
+		});
+		spies.prompt.mockImplementation(async (text, options) => {
+			if (text === "first prompt") {
+				acceptFirstPrompt = () => options?.onAccepted?.();
+				await firstTurn;
+				return true;
+			}
+			queued.push({ text });
+			options?.onAccepted?.();
+			return true;
+		});
+
+		editor.setText("first prompt");
+		editor.clearDraft(); // The editor clears before calling onSubmit.
+		const firstSubmission = editor.onSubmit?.("first prompt");
+		if (!firstSubmission) throw new Error("Expected the first prompt to start");
+		await Promise.resolve();
+		expect(acceptFirstPrompt).toBeDefined();
+		expect(editor.getText()).toBe("");
+
+		// The first turn is running while its acceptance callback is still pending.
+		// Submit steering before that callback can consume the only stashed draft.
+		Object.assign(session, { isStreaming: true });
+		editor.setText("steering prompt");
+		editor.clearDraft();
+		await editor.onSubmit?.("steering prompt");
+		expect(queued).toEqual([{ text: "steering prompt" }]);
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+
+		expect(spies.notifyComposerStash).toHaveBeenCalledTimes(1);
+
+		// Alt+Up recalls the steering prompt alone. Accepting its edit restores
+		// the parked stash instead of folding it into the submitted prompt.
+		expect(editor.onDequeue).toBeDefined();
+		editor.onDequeue?.();
+		expect(editor.getText()).toBe("steering prompt");
+		expect(editor.pendingImages).toEqual([]);
+		editor.setText("steering prompt revised");
+		editor.clearDraft();
+		// The delayed first-prompt acceptance cannot consume the fresh stash parked by Alt+Up.
+		acceptFirstPrompt?.();
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+		await editor.onSubmit?.("steering prompt revised");
+		expect(queued).toEqual([{ text: "steering prompt revised" }]);
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+
+		finishFirstTurn();
+		await firstSubmission;
+	});
+
+	it("keeps a rich stash separate when Esc restores all queued messages", async () => {
+		const { ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		controller.setupEditorSubmitHandler();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("saved draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+
+		editor.setText("first prompt");
+		editor.clearDraft();
+		await editor.onSubmit?.("first prompt");
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+
+		const session = ctx.session as InteractiveModeContext["session"] & {
+			clearQueue: () => { steering: RestoredQueuedMessage[]; followUp: RestoredQueuedMessage[] };
+		};
+		const clearQueue = vi.fn(() => ({ steering: [{ text: "queued prompt" }], followUp: [] }));
+		Object.assign(session, { clearQueue });
+		Object.assign(ctx, {
+			compactionQueuedMessages: [],
+			mcpTestEscapeHandlers: new Set(),
+			hasActiveOmfg: () => false,
+			hasActiveCleanse: () => false,
+			loadingAnimation: {},
+			cancelPendingSubmission: vi.fn(() => false),
+		});
+		editor.onEscape?.();
+		expect(clearQueue).toHaveBeenCalledWith({ forInterrupt: true });
+		expect(editor.getText()).toBe("queued prompt");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+
+		Object.assign(session, { isStreaming: true });
+		editor.setText("queued prompt revised");
+		editor.clearDraft();
+		await editor.onSubmit?.("queued prompt revised");
+		expect(spies.prompt).toHaveBeenCalledWith("queued prompt revised", {
+			streamingBehavior: "steer",
+			images: undefined,
+			onAccepted: expect.any(Function),
+		});
+		expect(editor.getText()).toBe("saved draft [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
 	});
 
 	it("does not consume a newer stash when an older submission is accepted", async () => {

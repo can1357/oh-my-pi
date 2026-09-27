@@ -135,6 +135,10 @@ export interface InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
+	/** Temporarily replace the empty composer hint after a prompt is stashed. */
+	notifyComposerStash(): void;
+	/** Cancel the temporary stash hint when the saved draft is restored. */
+	cancelComposerStashNotice(): void;
 
 	// Session access
 	session: AgentSession;
