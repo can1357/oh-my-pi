@@ -69,11 +69,13 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 			},
 		),
 		getSource: vi.fn(() => undefined),
+		getAllServerNames: vi.fn((): string[] => []),
 	};
+	const presentCommandOutput = vi.fn();
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
-		presentCommandOutput: vi.fn(),
+		presentCommandOutput,
 		ui: { requestRender: vi.fn() },
 		editor: {},
 		showError: vi.fn(),
@@ -91,7 +93,7 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		},
 		mcpManager,
 	} as never);
-	return { controller, mcpManager, refreshMCPTools };
+	return { controller, mcpManager, refreshMCPTools, presentCommandOutput };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -280,5 +282,55 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 
 		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
 		expect(refreshMCPTools).toHaveBeenCalledWith([{ name: "fixture_tool", mcpServerName: "lazysrv" }]);
+	});
+});
+
+// PR #9793 review (Codex, manager.ts:644): a dormant lazy server keeps
+// connection status "disconnected" while its cached tools are registered and
+// usable, so `/mcp list` showed every healthy one as plain "not connected".
+describe("/mcp list distinguishes a dormant lazy server from an unreachable one", () => {
+	let projectDir = "";
+	let agentDir = "";
+
+	beforeAll(() => {
+		initTheme();
+	});
+
+	beforeEach(async () => {
+		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-list-project-"));
+		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-list-agent-"));
+		setProjectDir(projectDir);
+		setAgentDir(agentDir);
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		setProjectDir(originalProjectDir);
+		restoreAgentDir();
+		await removeWithRetries(projectDir);
+		await removeWithRetries(agentDir);
+	});
+
+	test("a disconnected server with registered tools lists as reachable on first use", async () => {
+		await writeProjectConfig(projectDir, {
+			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
+			downsrv: { type: "stdio", command: "down-cmd" },
+		});
+		const { controller, mcpManager, presentCommandOutput } = createController();
+		mcpManager.getTools.mockReturnValue([
+			{ name: "fixture_tool", mcpServerName: "lazysrv" },
+			{ name: "other_tool", mcpServerName: "lazysrv" },
+		]);
+
+		await controller.handle("/mcp list");
+
+		const block = presentCommandOutput.mock.calls[0]?.[0] as { render(width: number): string[] };
+		const lines = block.render(200).map(line => Bun.stripANSI(line).trim());
+		const lazyLine = lines.find(line => line.startsWith("lazysrv")) ?? "";
+		const downLine = lines.find(line => line.startsWith("downsrv")) ?? "";
+		expect(lazyLine).toContain("2 tools");
+		expect(lazyLine).toContain("connects on first use");
+		expect(downLine).toContain("not connected");
+		expect(downLine).not.toContain("connects on first use");
 	});
 });

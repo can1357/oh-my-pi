@@ -1525,18 +1525,7 @@ export class MCPCommandController {
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1548,18 +1537,7 @@ export class MCPCommandController {
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
-					const state =
-						config.enabled === false
-							? "inactive"
-							: (this.ctx.mcpManager?.getConnectionStatus(name) ?? "disconnected");
-					const status =
-						state === "inactive"
-							? theme.fg("warning", " ◌ inactive")
-							: state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+					const status = this.#formatListStatus(name, config.enabled === false);
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1570,13 +1548,7 @@ export class MCPCommandController {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
 					for (const { name } of entries) {
-						const state = this.ctx.mcpManager!.getConnectionStatus(name);
-						const status =
-							state === "connected"
-								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+						const status = this.#formatListStatus(name, false);
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
@@ -1596,6 +1568,25 @@ export class MCPCommandController {
 		} catch (error) {
 			this.ctx.showError(`Failed to list servers: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/** One server's `/mcp list` status badge. */
+	#formatListStatus(name: string, inactive: boolean): string {
+		if (inactive) return theme.fg("warning", " ◌ inactive");
+		const manager = this.ctx.mcpManager;
+		const state = manager?.getConnectionStatus(name) ?? "disconnected";
+		if (state === "connected") return theme.fg("success", " ● connected");
+		if (state === "connecting") return theme.fg("muted", " ◌ connecting");
+		// Registered tools without a connection are deferred entries (a lazy
+		// server's cached catalog): invoking one connects the server.
+		const toolCount = manager?.getTools().filter(tool => tool.mcpServerName === name).length ?? 0;
+		if (toolCount > 0) {
+			return theme.fg(
+				"muted",
+				` ○ not connected · ${toolCount} tool${toolCount === 1 ? "" : "s"}, connects on first use`,
+			);
+		}
+		return theme.fg("muted", " ○ not connected");
 	}
 
 	/**
