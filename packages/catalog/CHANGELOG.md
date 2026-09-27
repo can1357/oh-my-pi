@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the Devin CLI request identity to `3000.11.3`, the current released client.
+
 ### Removed
 
 - Removed Devin Fusion from the Devin model list: the `fusion` router, its lead/sidekick pairings, and the sidekick lanes. Fusion's sidekick runs inside Devin's own client, so each pairing in omp only duplicated its lead model; assign a Devin model to the `task` role for the same lead/sidekick split.
