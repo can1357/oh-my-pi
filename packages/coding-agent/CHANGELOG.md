@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP OAuth now rejects authorization callbacks whose RFC 9207 `iss` does not match the discovered issuer ([#11936](https://github.com/can1357/oh-my-pi/pull/11936) by [@bchap1n](https://github.com/bchap1n)).
+
 ## [18.3.4] - 2026-09-27
 
 ### Breaking Changes

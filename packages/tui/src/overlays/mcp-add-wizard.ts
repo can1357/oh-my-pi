@@ -56,6 +56,7 @@ interface MCPAddWizardOAuthEndpoints {
 	authorizationUrl: string;
 	tokenUrl: string;
 	issuerUrl?: string;
+	issParameterSupported?: boolean;
 	clientId?: string;
 	registrationUrl?: string;
 	scopes?: string;
@@ -123,6 +124,7 @@ interface MCPAddWizardOAuthOptions {
 	stripSameOriginResource?: boolean;
 	registrationUrl?: string;
 	issuerUrl?: string;
+	issParameterSupported?: boolean;
 	/**
 	 * External cancellation source. Aborting it tears down the in-flight OAuth
 	 * flow and surfaces a neutral cancellation error. The wizard wires its own
@@ -144,6 +146,7 @@ interface WizardState {
 	oauthTokenUrl: string;
 	oauthRegistrationUrl: string;
 	oauthIssuerUrl: string;
+	oauthIssParameterSupported: boolean;
 	oauthClientId: string;
 	oauthClientSecret: string;
 	oauthScopes: string;
@@ -202,6 +205,7 @@ export class MCPAddWizard extends OverlayPanel {
 		oauthTokenUrl: "",
 		oauthRegistrationUrl: "",
 		oauthIssuerUrl: "",
+		oauthIssParameterSupported: false,
 		oauthClientId: "",
 		oauthClientSecret: "",
 		oauthScopes: "",
@@ -780,6 +784,7 @@ export class MCPAddWizard extends OverlayPanel {
 				const authMethods: Array<"oauth" | "manual"> = ["oauth", "manual"];
 				this.#state.authMethod = authMethods[this.#selectedIndex];
 				if (this.#state.authMethod === "oauth") {
+					this.#clearDiscoveredIssuer();
 					this.#currentStep = "oauth-auth-url";
 				} else {
 					// manual
@@ -791,6 +796,9 @@ export class MCPAddWizard extends OverlayPanel {
 				if (this.#selectedIndex === 0) {
 					void this.#launchOAuthFlow();
 				} else {
+					// Editing the endpoints invalidates metadata discovered for
+					// the previous ones.
+					this.#clearDiscoveredIssuer();
 					this.#currentStep = "oauth-auth-url";
 				}
 				return;
@@ -851,6 +859,20 @@ export class MCPAddWizard extends OverlayPanel {
 		}
 	}
 
+	/**
+	 * Drop issuer metadata discovered for the previous endpoints.
+	 *
+	 * Called on every entry to the authorization-URL step: once the user can
+	 * change the endpoints, the previously discovered `issuerUrl` and
+	 * `issParameterSupported` no longer describe the server being configured,
+	 * so forwarding them would reject valid callbacks (or accept tampered
+	 * ones) once the OAuth flow starts.
+	 */
+	#clearDiscoveredIssuer(): void {
+		this.#state.oauthIssuerUrl = "";
+		this.#state.oauthIssParameterSupported = false;
+	}
+
 	#goBack(): void {
 		// Navigate to previous step
 		switch (this.#currentStep) {
@@ -902,6 +924,7 @@ export class MCPAddWizard extends OverlayPanel {
 			case "oauth-scopes":
 				// Go back through OAuth flow
 				if (this.#currentStep === "oauth-token-url") {
+					this.#clearDiscoveredIssuer();
 					this.#currentStep = "oauth-auth-url";
 				} else if (this.#currentStep === "oauth-client-id") {
 					this.#currentStep = "oauth-token-url";
@@ -925,6 +948,9 @@ export class MCPAddWizard extends OverlayPanel {
 				}
 				break;
 			case "oauth-error":
+				// Editing the endpoints (the only reason to go back here)
+				// invalidates metadata discovered for the previous ones.
+				this.#clearDiscoveredIssuer();
 				this.#currentStep = "oauth-auth-url";
 				break;
 			case "confirm":
@@ -1090,6 +1116,7 @@ export class MCPAddWizard extends OverlayPanel {
 					this.#state.oauthTokenUrl = oauth.tokenUrl;
 					this.#state.oauthRegistrationUrl = oauth.registrationUrl || "";
 					this.#state.oauthIssuerUrl = oauth.issuerUrl || "";
+					this.#state.oauthIssParameterSupported = oauth.issParameterSupported === true;
 					this.#state.oauthClientId = oauth.clientId || "";
 					this.#state.oauthScopes = oauth.scopes || "";
 					this.#state.oauthResource = oauth.resource || (this.#state.transport === "stdio" ? "" : this.#state.url);
@@ -1259,6 +1286,7 @@ export class MCPAddWizard extends OverlayPanel {
 					serverUrl: this.#state.url || undefined,
 					registrationUrl: this.#state.oauthRegistrationUrl || undefined,
 					issuerUrl: this.#state.oauthIssuerUrl || undefined,
+					issParameterSupported: this.#state.oauthIssParameterSupported || undefined,
 					resource: oauthResource || undefined,
 					stripSameOriginResource: oauthResourceIsFallback,
 					abortSignal: this.#oauthAbort.signal,
