@@ -53,6 +53,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** Persist the successful selection as a no-sibling-fallback session pin. */
+	strictAffinity?: boolean;
 };
 
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
@@ -543,6 +545,8 @@ export class CredentialSelector {
 			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		const strictCredentialIndex =
+			sessionCredential?.type === "oauth" && sessionCredential.strict === true ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
@@ -598,7 +602,7 @@ export class CredentialSelector {
 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
 			];
 		}
-		const candidates: OAuthCandidate[] = shouldRank
+		let candidates: OAuthCandidate[] = shouldRank
 			? await this.#rankOAuthSelections({
 					providerKey,
 					provider,
@@ -620,6 +624,9 @@ export class CredentialSelector {
 						usage: null,
 						usageChecked: false,
 					}));
+		if (strictCredentialIndex !== undefined) {
+			candidates = candidates.filter(candidate => candidate.selection.index === strictCredentialIndex);
+		}
 		const preflightFailures = new Set<OAuthCandidate>();
 
 		const sessionPreferredCandidate = candidates.findIndex(
@@ -800,12 +807,19 @@ export class CredentialSelector {
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
 			enforceAccounts: boolean;
-		}> = [
-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}> =
+			strictCredentialIndex === undefined
+				? [
+						{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
+						{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
+					]
+				: [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		if (strictCredentialIndex === undefined && enforcePlanRequirement) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		}
+		if (strictCredentialIndex === undefined && enforceAccounts) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {
@@ -824,6 +838,8 @@ export class CredentialSelector {
 					rankingContext,
 					blockScope,
 					blockScopes,
+					allowFallback: strictCredentialIndex === undefined,
+					strictAffinity: strictCredentialIndex !== undefined,
 				});
 				if (resolved) return resolved;
 			}
@@ -888,6 +904,7 @@ export class CredentialSelector {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			strictAffinity = false,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -1011,7 +1028,7 @@ export class CredentialSelector {
 				}
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
-			this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+			this.#deps.affinity.record(provider, sessionId, "oauth", selection.index, undefined, false, strictAffinity);
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);

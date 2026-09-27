@@ -66,10 +66,12 @@ export function recordCredentialPin(
 	sessionId: string,
 	provider: string,
 ): void {
+	const current = sessionManager.getCredentialPins().get(provider);
+	if (current?.mode === "automatic") return;
 	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
-	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
+	if (!hash || current?.hash === hash) return;
 	sessionManager.appendCredentialPin(provider, hash);
 }
 
@@ -82,12 +84,17 @@ export function recordCredentialPin(
  */
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
+		if (pin.mode === "automatic") {
+			authStorage.sessions.automatic(provider, sessionId);
+			continue;
+		}
 		const accounts = authStorage.oauth.accounts(provider, sessionId);
 		if (accounts.length === 0 || accounts.some(account => account.active)) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
 		if (!match) continue;
 		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
 			restoredAtMs: pin.lastUsedAt,
+			strict: pin.mode === "strict",
 		});
 	}
 }

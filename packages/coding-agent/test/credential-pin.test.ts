@@ -119,6 +119,20 @@ describe("credential pins", () => {
 		const active = storage.oauth.accounts("anthropic", sessionId).find(account => account.active);
 		expect(active?.accountId).toBe("account-b");
 	});
+	test("restores a persisted strict account lock", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const hash = credentialPinHash("anthropic", { accountId: "account-b", email: "b@example.com" });
+		if (!hash) throw new Error("expected a pin hash");
+		manager.appendCredentialPin("anthropic", hash, "strict");
+
+		seedCredentialPins(storage, manager, sessionId);
+
+		expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
+		expect(storage.oauth.accounts("anthropic", sessionId).find(account => account.active)?.accountId).toBe(
+			"account-b",
+		);
+	});
 
 	test("pins are org-scoped: the same account in two orgs re-pins the matching org credential", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));

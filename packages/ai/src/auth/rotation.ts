@@ -228,6 +228,9 @@ export class RateLimits implements LimitsApi {
 		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
+		const sticky = this.#deps.affinity.get(provider, sessionId);
+		const strict =
+			sticky?.strict === true && sticky.type === sessionCredential.type && sticky.index === sessionCredential.index;
 
 		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
@@ -286,6 +289,7 @@ export class RateLimits implements LimitsApi {
 		);
 		return {
 			...rotation,
+			...(strict ? { switched: false } : {}),
 			requestedBlockedUntilMs,
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};
@@ -409,6 +413,9 @@ export class RateLimits implements LimitsApi {
 			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
 		});
 		if (!sessionCredential) return false;
+		const sticky = this.#deps.affinity.get(provider, sessionId);
+		const strict =
+			sticky?.strict === true && sticky.type === sessionCredential.type && sticky.index === sessionCredential.index;
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
@@ -426,21 +433,22 @@ export class RateLimits implements LimitsApi {
 			);
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
 			routing.blockScope = modelPolicyScope;
-			const sticky = this.#deps.affinity.get(provider, sessionId);
 			if (
-				!sessionCredential.explicit ||
-				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+				!strict &&
+				(!sessionCredential.explicit ||
+					(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index))
 			) {
 				this.#deps.affinity.clear(provider, sessionId);
 			}
-			return this.#blockCredentialForRotation(
+			const rotation = this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,
 				sessionCredential.index,
 				Date.now() + DEFAULT_BLOCK_MS,
 				routing,
 				false,
-			).switched;
+			);
+			return strict ? false : rotation.switched;
 		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
@@ -455,10 +463,10 @@ export class RateLimits implements LimitsApi {
 					!this.#deps.blocks.isBlocked(provider, providerKey, index),
 			);
 		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
-		const sticky = this.#deps.affinity.get(provider, sessionId);
 		if (
-			!sessionCredential.explicit ||
-			(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+			!strict &&
+			(!sessionCredential.explicit ||
+				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index))
 		) {
 			this.#deps.affinity.clear(provider, sessionId);
 		}
@@ -474,7 +482,7 @@ export class RateLimits implements LimitsApi {
 					latestRows.map(row => ({ id: row.id, credential: row.credential })),
 				);
 			}
-			return deleted && hasSibling;
+			return !strict && deleted && hasSibling;
 		}
 
 		if (target) {
@@ -491,6 +499,6 @@ export class RateLimits implements LimitsApi {
 			);
 		}
 
-		return hasSibling;
+		return !strict && hasSibling;
 	}
 }

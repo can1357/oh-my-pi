@@ -173,7 +173,82 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
+async function handleAccountCommand(
+	arg: string,
+	session: AgentSession,
+	output: SlashCommandRuntime["output"],
+): Promise<void> {
+	const accountList = await session.listCurrentProviderOAuthAccounts();
+	if (!accountList) {
+		await output("Select a model before choosing a provider account.");
+		return;
+	}
+	const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
+	const providerName = provider?.name ?? accountList.provider;
+	const accounts = toSessionPinAccounts(accountList.accounts);
+	const selector = arg.trim();
+
+	if (!selector || selector.toLowerCase() === "status") {
+		const mode =
+			accountList.mode === "strict"
+				? "strict (no account fallback)"
+				: accountList.mode === "pinned"
+					? "pinned"
+					: "session affinity";
+		const lines = [`Account routing for ${providerName}: ${mode}`];
+		for (const account of accounts) {
+			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
+		}
+		lines.push("", "Use `/account <number|email|email local-part>` to switch accounts.");
+		await output(lines.join("\n"));
+		return;
+	}
+
+	const matches = matchSessionPinAccounts(accounts, selector);
+	if (matches.length === 0) {
+		await output(`No ${providerName} account matches "${selector}".`);
+		return;
+	}
+	if (matches.length > 1) {
+		await output(
+			`"${selector}" matches multiple ${providerName} accounts: ${matches
+				.map(account => `${account.position + 1}. ${account.label}`)
+				.join(", ")}. Use the account number.`,
+		);
+		return;
+	}
+	const account = matches[0]!;
+	if (!session.pinCurrentProviderOAuthAccount(account.credentialId, { strict: true })) {
+		await output(`${account.label} is no longer available to pin.`);
+		return;
+	}
+	await output(`Locked ${providerName} to ${account.label} for this session; sibling fallback is disabled.`);
+}
+
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "account",
+		description: "Show or strictly select the OAuth account for this session",
+		allowArgs: true,
+		inlineHint: "[status|number|email]",
+		handle: async (command, runtime) => {
+			try {
+				await handleAccountCommand(command.args, runtime.session, runtime.output);
+			} catch (error) {
+				return usage(`Account error: ${errorMessage(error)}`, runtime);
+			}
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			try {
+				await handleAccountCommand(command.args, runtime.ctx.session, text => runtime.ctx.showStatus(text));
+				refreshStatusLine(runtime.ctx);
+			} catch (error) {
+				runtime.ctx.showWarning(`Account error: ${errorMessage(error)}`);
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
 	{
 		name: "todo",
 		icon: "todo",

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback.
 - Added cross-engine prediction blending for SmolLM and N-gram completions in `omp predict`
 - Added auto-cleanup of legacy `model.safetensors` weight files during migration to GGUF
 - Added `omp skill list [dir] [--json]`, reporting the skills a session in that directory resolves (with discovery warnings in the JSON output), so tools can query skill listings without drift-prone reimplementations ([#12273](https://github.com/can1357/oh-my-pi/pull/12273) by [@andrebrait](https://github.com/andrebrait))

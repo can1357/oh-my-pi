@@ -480,6 +480,7 @@ export interface SessionStats {
 export interface SessionOAuthAccountList {
 	provider: string;
 	accounts: OAuthAccountSummary[];
+	mode: "automatic" | "strict" | "pinned" | "affinity";
 }
 
 /** IDs for a newly created session and the session it replaced. */
