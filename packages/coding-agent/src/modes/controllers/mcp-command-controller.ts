@@ -78,6 +78,8 @@ import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
+/** Upper bound on waiting for `/mcp test`'s own connection to close before the manager connects. */
+const MCP_TEST_CLOSE_BEFORE_SYNC_MS = 2_000;
 
 /**
  * Hint block for an in-flight `/mcp test`. It remains active until settlement
@@ -1772,15 +1774,26 @@ export class MCPCommandController {
 
 			lines.push("");
 			if (connection) {
-				// Close this temporary test connection before seeding through the
-				// manager: a server that permits only one active client (or holds
-				// a singleton lock) would otherwise see it still open while
-				// `#syncManagerConnection`'s reconnect competes for the same slot,
-				// and every retry in its ladder can fail — reporting success while
-				// leaving a cache-less lazy server tool-less.
 				const testConnection = connection;
 				connection = undefined;
-				await disconnectServer(testConnection);
+				const closing = disconnectServer(testConnection);
+				if (this.ctx.mcpManager?.getConnectionStatus(name) === "disconnected") {
+					// The manager is about to open its own connection (a lazy seed or
+					// an eager connect). Close this temporary one first: a server that
+					// permits only one active client (or holds a singleton lock) would
+					// otherwise see it still open while that connect competes for the
+					// same slot, and every retry in its ladder can fail. Session
+					// termination can hang (an HTTP server that never answers its
+					// DELETE, up to the configured timeout, or forever with
+					// `timeout: 0`), so the wait is bounded; the close carries on in
+					// the background.
+					await withTimeout(closing, MCP_TEST_CLOSE_BEFORE_SYNC_MS, "MCP test connection close timed out").catch(
+						() => {},
+					);
+				} else {
+					// Nothing will compete for the slot: never hold the result on it.
+					void closing.catch(() => {});
+				}
 			}
 			await this.#syncManagerConnection(name, config);
 			this.#showMessage(lines.join("\n"));

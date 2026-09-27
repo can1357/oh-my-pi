@@ -198,6 +198,68 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		expect(order).toEqual(["disconnect", "reconnect"]);
 	});
 
+	// PR #9793 review (Codex, mcp-command-controller.ts:1764): session
+	// termination can hang (an HTTP server that never answers its DELETE), so
+	// awaiting it must not hold `/mcp test`'s result. The close below never
+	// settles; a regression leaves `handle()` pending forever.
+	test("does not wait on the test connection's close when the manager already holds the server", async () => {
+		await writeProjectConfig(projectDir, {
+			eagersrv: { type: "stdio", command: "eager-cmd" },
+		});
+		const { controller, mcpManager } = createController();
+		mcpManager.getConnectionStatus.mockReturnValue("connected");
+		const closeCalled = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "disconnectServer").mockImplementation(() => {
+			closeCalled.resolve();
+			return new Promise<void>(() => {});
+		});
+
+		await controller.handle("/mcp test eagersrv");
+
+		await closeCalled.promise;
+	});
+
+	test("a close that never settles delays seeding by a bounded wait only", async () => {
+		await writeProjectConfig(projectDir, {
+			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
+		});
+		const { controller, mcpManager } = createController();
+		const order: string[] = [];
+		const closeCalled = Promise.withResolvers<void>();
+		const closeGate = Promise.withResolvers<void>();
+		vi.spyOn(mcpClient, "disconnectServer").mockImplementation(() => {
+			closeCalled.resolve();
+			return closeGate.promise;
+		});
+		mcpManager.reconnectServer.mockImplementation(async () => {
+			order.push("seed");
+			return {};
+		});
+
+		let handled: Promise<void>;
+		vi.useFakeTimers();
+		try {
+			handled = controller.handle("/mcp test lazysrv");
+			await closeCalled.promise;
+			expect(order).toEqual([]);
+			// Well past any close bound.
+			vi.advanceTimersByTime(60_000);
+		} finally {
+			vi.useRealTimers();
+		}
+		// Past the bound the seed proceeds on microtasks alone, ahead of this
+		// next event-loop turn. A regression that still awaits the close only
+		// seeds once this settles it, instead of hanging the test.
+		setImmediate(() => {
+			order.push("close settled");
+			closeGate.resolve();
+		});
+		await handled;
+
+		expect(order).toEqual(["seed"]);
+		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
+	});
+
 	// PR #9793 review (Codex, mcp-command-controller.ts:1330): a server whose
 	// automatic reconnects had already tripped the crash-burst breaker (see
 	// `#tripReconnectBreaker` in `manager.ts`) must still seed through an
