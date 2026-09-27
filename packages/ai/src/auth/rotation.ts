@@ -289,7 +289,7 @@ export class RateLimits implements LimitsApi {
 		);
 		return {
 			...rotation,
-			...(strict ? { switched: false } : {}),
+			...(strict ? { switched: false, retryAtMs: undefined } : {}),
 			requestedBlockedUntilMs,
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};

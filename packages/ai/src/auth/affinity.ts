@@ -75,7 +75,10 @@ export class SessionAffinity implements SessionsApi {
 			previous?.type === type &&
 			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
 		const isExplicit = explicit || strict || (sameCredential && previous?.explicit === true);
-		const isStrict = strict || (sameCredential && previous?.strict === true);
+		// A non-strict explicit pin must downgrade a previous strict lock on the
+		// same credential — otherwise `/session pin A` after `/account A` would
+		// silently remain strict.
+		const isStrict = strict || (sameCredential && previous?.strict === true && !explicit);
 		if (isExplicit) this.#automaticSessions.get(provider)?.delete(sessionId);
 		const sessionCredential: SessionCredential = {
 			type,
@@ -114,6 +117,10 @@ export class SessionAffinity implements SessionsApi {
 			const stored = this.#pool.entries(provider);
 			const actualIndex = stored.findIndex(entry => entry.id === live.credentialId);
 			if (actualIndex === -1 || stored[actualIndex]?.credential.type !== live.type) {
+				// A strict pin must survive credential deletion/disable — the session
+				// is locked to an account that no longer exists, and the correct
+				// behavior is to fail, not silently fall through to a sibling.
+				if (live.strict === true) return live;
 				sessionMap?.delete(sessionId);
 				return undefined;
 			}
@@ -130,6 +137,24 @@ export class SessionAffinity implements SessionsApi {
 					const stored = this.#pool.entries(provider);
 					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
 					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
+						// Preserve strict pins even when the credential is gone so
+						// callers can still see the lock and refuse fallback.
+						if (val.strict === true) {
+							const preserved: SessionCredential = {
+								type: val.type,
+								index: -1,
+								credentialId: val.credentialId,
+								lastUsedAtMs: val.lastUsedAtMs,
+								...(val.explicit === true ? { explicit: true } : {}),
+								strict: true,
+							};
+							if (!sessionMap) {
+								sessionMap = new Map();
+								this.#sessionLastCredential.set(provider, sessionMap);
+							}
+							sessionMap.set(sessionId, preserved);
+							return preserved;
+						}
 						this.#store.setCache(cacheKey, "", 0);
 						return undefined;
 					}
@@ -292,10 +317,14 @@ export class SessionAffinity implements SessionsApi {
 
 	/**
 	 * Release a session's sticky credential so its next `KeyCascade.get` call
-	 * uses native automatic routing.
+	 * uses native automatic routing. Returns false for strict pins — a strict
+	 * lock is the user's explicit no-fallback choice and must not be silently
+	 * erased by usage-aware preflight or internal retry logic.
 	 */
 	release(provider: string, sessionId: string): boolean {
-		const hadAffinity = this.get(provider, sessionId) !== undefined || this.isAutomatic(provider, sessionId);
+		const credential = this.get(provider, sessionId);
+		if (credential?.strict === true) return false;
+		const hadAffinity = credential !== undefined || this.isAutomatic(provider, sessionId);
 		this.automatic(provider, sessionId);
 		return hadAffinity;
 	}

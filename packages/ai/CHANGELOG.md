@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added strict per-session OAuth account pins: `SessionsApi.pin({ strict: true })` prevents all credential fallback (sibling OAuth accounts, login keys, env vars) when the pinned account is blocked or unavailable; strict pins survive credential deletion, `/fresh`, and subagent inheritance. Added `SessionsApi.mode()` and `SessionsApi.automatic()` for routing-mode introspection and explicit opt-out.
+
 ## [18.3.2] - 2026-09-25
 
 ### Fixed

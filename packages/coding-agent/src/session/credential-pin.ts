@@ -72,7 +72,10 @@ export function recordCredentialPin(
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
 	if (!hash || current?.hash === hash) return;
-	sessionManager.appendCredentialPin(provider, hash);
+	// Preserve the live strict mode so a subagent's journal entry restores as
+	// strict rather than as a legacy warm-affinity pin.
+	const liveMode = authStorage.sessions.mode(provider, sessionId);
+	sessionManager.appendCredentialPin(provider, hash, liveMode === "strict" ? "strict" : undefined);
 }
 
 /**

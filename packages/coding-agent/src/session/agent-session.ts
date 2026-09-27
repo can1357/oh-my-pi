@@ -4921,9 +4921,24 @@ export class AgentSession implements SettingsScope {
 		// Restore the session's recorded provider accounts before the first
 		// request routes: sticky rows are process-local under a remote auth
 		// broker, and losing them re-ranks onto a different account, cold-missing
-		// the account-scoped prompt cache. Skipped for fresh provider sessions —
-		// those explicitly want new routing identity.
-		if (!this.#freshProviderSessionId) {
+		// the account-scoped prompt cache. Fresh provider sessions skip the
+		// normal warm-affinity restore (they intentionally want new routing
+		// identity) but MUST still carry strict pins — the user explicitly locked
+		// an account, and `/fresh` does not constitute an account switch.
+		if (this.#freshProviderSessionId) {
+			// Fresh provider sessions: only restore strict pins, not warm affinity.
+			for (const [provider, pin] of this.sessionManager.getCredentialPins()) {
+				if (pin.mode !== "strict") continue;
+				const accounts = this.#modelRegistry.authStorage.oauth.accounts(provider, sid);
+				if (accounts.length === 0 || accounts.some(a => a.active)) continue;
+				const match = accounts.find(a => credentialPinHash(provider, a) === pin.hash);
+				if (!match) continue;
+				this.#modelRegistry.authStorage.sessions.pin(provider, sid, match.credentialId, {
+					restoredAtMs: pin.lastUsedAt,
+					strict: true,
+				});
+			}
+		} else {
 			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
 		}
 		this.#seedDefaultCredentialPins(sid);

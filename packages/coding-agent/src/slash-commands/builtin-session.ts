@@ -194,7 +194,9 @@ async function handleAccountCommand(
 				? "strict (no account fallback)"
 				: accountList.mode === "pinned"
 					? "pinned"
-					: "session affinity";
+					: accountList.mode === "automatic"
+						? "automatic"
+						: "session affinity";
 		const lines = [`Account routing for ${providerName}: ${mode}`];
 		for (const account of accounts) {
 			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
