@@ -1,12 +1,12 @@
 //! Personal word n-gram engine: the cheap, instantly available engine that
-//! serves `auto` until `SmolLM` has loaded (or when it cannot load).
+//! serves `auto`.
 //!
 //! A port of the text-prediction research winner (tracks `ngram` ×
 //! `adaptive`): an interpolated absolute-discounting word
 //! trigram model over the user's prose history, backed by an embedded Norvig
 //! web unigram/bigram prior (`web.rs`), ranked under the typed prefix with a
-//! finished-word-aware posterior, typed-past exclusion, a prompt-local cache,
-//! a session cache, and vocabulary hygiene.
+//! finished-word-aware posterior, a prompt-local cache, a session cache, and
+//! vocabulary hygiene.
 //!
 //! # Model
 //! - **Counts** (`model.rs`): prose words only (the editor's gates,
@@ -20,62 +20,40 @@
 //! - **Confidence**: posterior of the best word among *every* word under the
 //!   prefix, including the prefix itself (`the|re` shows only when *there*
 //!   clearly beats stopping at *the*), mixed with the prompt-local and session
-//!   caches, renormalized without the words typed past at shorter prefixes.
+//!   caches. Typing more letters of the shown word keeps it the pick: ghosts do
+//!   not change under the user's fingers.
 //! - **Hygiene**: words outside the web vocabulary and the dictionary need
 //!   [`Params::min_count`] typed occurrences; rare misspellings fold into an
 //!   edit-distance-1 real word at learn time (not across apostrophes, not at
 //!   the first or last letter); habitual slips of a word the user also types
 //!   are never offered; pastes never make a word suggestible.
 //!
-//! # Operating points
+//! # Operating point
 //! Prefixes may be a single letter (`figure o|ut`); the rest of the word is
 //! ranked with the same model, where left context does most of the work.
-//! The show thresholds are the tuned *balanced* points (≤ 70 wrong ghosts per
-//! 100 words on the research harness, `dev` split):
-//! - τ1 = 0.30 ([`Params::show_threshold_k1`]) at a single letter;
-//! - τ = 0.27 ([`Params::show_threshold_k2_after_k1`]) for 2+ letters when
-//!   the client asks from the first letter, since single-letter ghosts spend
-//!   part of the budget;
-//! - τ = 0.17 ([`Params::show_threshold`]) for 2+ letters when the client's
-//!   gate starts at two letters.
+//! One show threshold τ = 0.45 ([`Params::show_threshold`]) gates every
+//! prefix length; [`crate::Config::show_threshold`] replaces it.
 //!
-//! The engine infers the client's gate from the shortest prefix it was asked
-//! about for the current word. Typed-past exclusion replays the prefixes
-//! from that length on, each at its own threshold, so a word shown at one
-//! letter and typed past is ruled out at two. A dev check found no gain from
-//! requiring bigram/trigram evidence at one letter. Typed-past exclusion
-//! always assumes these thresholds, and τ1 also floors
-//! [`crate::Config::show_threshold`]; otherwise the override changes gating
-//! only.
+//! Replay of the last 400 single-line typed history.db prompts (trained on
+//! the ~58k before them, learning online; a wrong ghost counts once per word
+//! however long it stays up). KSR % (net keystrokes saved) for a typist who
+//! Tabs every right ghost / notices one half the time, and wrong ghosts per
+//! 100 words:
 //!
-//! # Parity (research harness, `test` split, 5,038 prompts)
-//! A simulated typist replays held-out history.db prompts through N-API and
-//! accepts the first exactly right ghost with Tab; KSR % (net keystrokes
-//! saved) at the quiet / balanced / parity budgets (≤ 30 / 70 / 140 wrong
-//! ghosts per 100 words).
+//! | τ    | KSR           | wrong / 100 w |
+//! |------|---------------|---------------|
+//! | 0.27*| 17.22 / 11.38 | 56.8          |
+//! | 0.35 | 16.31 / 10.69 | 43.8          |
+//! | 0.45 | 14.90 / 9.78  | 30.1          |
+//! | 0.55 | 13.25 / 8.77  | 20.5          |
 //!
-//! Two-letter gate (ceiling 30.74 %):
+//! \* The former research point: 0.30 at one letter, 0.27 after.
 //!
-//! | mode   | rust-ngram            | ngram@tp30            | adaptive@default      |
-//! |--------|-----------------------|-----------------------|-----------------------|
-//! | static | 13.88 / 20.35 / 20.76 | 13.47 / 20.05 / 20.47 | 12.96 / 19.81 / 20.40 |
-//! | online | 14.93 / 21.07 / 21.37 | 14.47 / 20.76 / 21.07 | 13.90 / 20.55 / 21.01 |
-//! | cold   | 13.00 / 19.40 / 19.96 | 12.52 / 18.93 / 19.49 | 12.33 / 19.04 / 19.74 |
+//! τ = 0.45 holds wrong ghosts near 30 per 100 words. On the same replay,
+//! `NSSpellChecker` (the `apple` engine) saves 6.95 / 4.54 % at 36.6 wrong
+//! ghosts.
 //!
-//! Single-letter gate (ceiling 44.35 %). "Two letters only" is this engine
-//! never showing single-letter ghosts on the same queries. The product point
-//! gates at (τ1, τ) = (0.30, 0.27):
-//!
-//! | mode   | rust-ngram            | two letters only      | product point   |
-//! |--------|-----------------------|-----------------------|-----------------|
-//! | static | 13.35 / 23.36 / 24.30 | 14.14 / 20.44 / 20.76 | 23.30 @ 67.5 w  |
-//! | online | 14.62 / 24.45 / 25.30 | 15.45 / 21.18 / 21.37 | 24.34 @ 67.1 w  |
-//! | cold   | 12.87 / 22.15 / 23.39 | 13.27 / 19.52 / 19.96 | 22.17 @ 69.6 w  |
-//!
-//! At the quiet budget single letters cost 0.4–0.9 KSR: the thresholds
-//! target the balanced budget, and typed-past exclusion assumes them.
-//!
-//! Engine-side costs (replay bench over the same prompts, M4 Max, 52,950
+//! Engine-side costs (research replay bench, M4 Max, 52,950
 //! bootstrap rows): `complete` p50 3.6–4.0 µs, p99 14–17
 //! µs with a two-letter gate; with single letters p50 4.7–5.1 µs, p99 23–39
 //! µs overall and p50 5.8–7.6 µs, p99 28–59 µs at one letter;
@@ -87,7 +65,7 @@
 //!
 //! The calibrated per-(prefix, word) feedback bias from the adaptive track
 //! was measured on `dev` and not adopted: +0.03 (online) and +0.06 (cold)
-//! balanced KSR, within noise, once typed-past exclusion is on.
+//! balanced KSR, within noise.
 //!
 //! # Persistence
 //! [`Predictor::persist`] writes a versioned zstd snapshot
@@ -121,7 +99,8 @@ const SNAPSHOT_FILE: &str = "ngram.snapshot";
 pub struct NgramPredictor {
 	model:     model::Model,
 	query:     query::QueryState,
-	/// Caller override of the show thresholds (see [`Config::show_threshold`]).
+	/// Caller override of [`Params::show_threshold`] (see
+	/// [`Config::show_threshold`]).
 	gate:      Option<f32>,
 	state_dir: PathBuf,
 }
@@ -188,19 +167,11 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
 
 impl Predictor for NgramPredictor {
 	fn complete(&mut self, query: &Query<'_>) -> Option<Suggestion> {
-		let (suffix, confidence, threshold) =
-			self
-				.query
-				.complete(&self.model, query.before, query.prefix)?;
+		let (suffix, confidence) = self
+			.query
+			.complete(&self.model, query.before, query.prefix)?;
 		let confidence = confidence as f32;
-		// Single letters keep their floor under an override: like typed-past
-		// exclusion, it is part of the engine's policy.
-		let single = query.prefix.chars().nth(1).is_none();
-		let gate = match self.gate {
-			Some(gate) if single => gate.max(threshold),
-			Some(gate) => gate,
-			None => threshold,
-		};
+		let gate = self.gate.unwrap_or(self.model.params.show_threshold);
 		(confidence >= gate).then_some(Suggestion { suffix, confidence })
 	}
 
@@ -209,9 +180,8 @@ impl Predictor for NgramPredictor {
 	}
 
 	fn feedback(&mut self, _query: &Query<'_>, _suggestion: &str, _accepted: bool) {
-		// Accepted words are learned when the prompt is submitted, and in-word
-		// rejections are already modeled by typed-past exclusion. A calibrated
-		// per-(prefix, word) feedback bias measured no gain on top of it.
+		// Accepted words are learned when the prompt is submitted. A calibrated
+		// per-(prefix, word) feedback bias measured no gain.
 	}
 
 	fn persist(&mut self) -> anyhow::Result<()> {

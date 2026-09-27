@@ -1,5 +1,6 @@
 //! macOS spelling (typo ranges, replacement guesses) and autocorrection
-//! services. Word completion lives in `pi_predict::apple` behind `TextPredictor`.
+//! services. Word completion lives in `pi_predict::apple` behind
+//! `TextPredictor`.
 //!
 //! `AppleSpell` exposes UTF-16 ranges through [`NSSpellChecker`]. JavaScript
 //! strings use the same indexing unit, so ranges cross N-API without remapping.

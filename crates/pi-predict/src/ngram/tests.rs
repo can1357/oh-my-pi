@@ -46,14 +46,15 @@ fn finished_word_holds_its_own_mass() {
 }
 
 #[test]
-fn typed_past_word_is_not_offered_again() {
-	let dir = StateDir::new("typed-past");
+fn ghost_stays_while_typing_through_it() {
+	let dir = StateDir::new("typed-through");
 	let mut engine = dir.open().unwrap();
 	observe_times(engine.as_mut(), "can you refactor the parser module", 20);
 	observe_times(engine.as_mut(), "the refactoring went well overall", 8);
 	assert_eq!(suffix(engine.as_mut(), "can you ", "re").as_deref(), Some("factor"));
-	// Having typed past `refactor` at `re`, the user wants something else.
-	assert_eq!(suffix(engine.as_mut(), "can you ", "ref").as_deref(), Some("actoring"));
+	// Typing the next letter of the shown word must not swap it for a rival.
+	assert_eq!(suffix(engine.as_mut(), "can you ", "ref").as_deref(), Some("actor"));
+	assert_eq!(suffix(engine.as_mut(), "can you ", "refa").as_deref(), Some("ctor"));
 }
 
 #[test]
@@ -126,8 +127,6 @@ fn single_letters_complete_from_context_but_finished_words_stay_bare() {
 	observe_times(engine.as_mut(), "can you help me figure out why the build fails", 3);
 	observe_times(engine.as_mut(), "I need to figure out the release notes", 2);
 	assert_eq!(suffix(engine.as_mut(), "Can you help me figure ", "o").as_deref(), Some("ut"));
-	// Typing on past the single-letter ghost rules `out` out.
-	assert_ne!(suffix(engine.as_mut(), "Can you help me figure ", "ou").as_deref(), Some("t"));
 	// `a` is a word of its own: no ghost after the single letter.
 	assert_eq!(suffix(engine.as_mut(), "can you give me ", "a"), None);
 	assert_eq!(suffix(engine.as_mut(), "", "I"), None);

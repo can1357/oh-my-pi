@@ -30,100 +30,76 @@ use crate::prose;
 #[derive(Clone, Debug)]
 pub struct Params {
 	/// Weight of prompts that don't look typed (pastes, logs, long dumps).
-	pub paste_weight: f32,
+	pub paste_weight:        f32,
 	/// Dirichlet strength of the web unigram prior (in history tokens).
-	pub mu1: f64,
+	pub mu1:                 f64,
 	/// Bigram discount.
-	pub d2: f64,
+	pub d2:                  f64,
 	/// Bigram floor.
-	pub mu2: f64,
+	pub mu2:                 f64,
 	/// Trigram discount.
-	pub d3: f64,
+	pub d3:                  f64,
 	/// Trigram floor.
-	pub mu3: f64,
+	pub mu3:                 f64,
 	/// Weight of the web bigram prior (0 disables it).
-	pub web_bigram: f64,
+	pub web_bigram:          f64,
 	/// Unigram candidates pulled from the range top-k tree.
-	pub top_k: usize,
+	pub top_k:               usize,
 	/// Occurrences in typed prompts before a word outside the web vocabulary
 	/// and the dictionary is suggested.
-	pub min_count: u32,
+	pub min_count:           u32,
 	/// Fold rare misspellings into a real edit-distance-1 neighbour.
-	pub canonicalize: bool,
+	pub canonicalize:        bool,
 	/// Below this many occurrences a misspelling may fold into a web word.
-	pub canon_max_count: u32,
+	pub canon_max_count:     u32,
 	/// A personal neighbour must be typed this many times as often to absorb a
 	/// spelling.
-	pub canon_ratio: u32,
+	pub canon_ratio:         u32,
 	/// Prior that a word is typed with plain (lowercase) casing.
-	pub case_prior: f64,
+	pub case_prior:          f64,
 	/// Pseudo-count of the case prior.
-	pub case_strength: f64,
+	pub case_strength:       f64,
 	/// Prompt-local cache weight λ (0 disables it).
-	pub cache_weight: f64,
+	pub cache_weight:        f64,
 	/// Distance (bytes) at which a prompt-local occurrence weighs 1/e.
-	pub cache_decay: f64,
+	pub cache_decay:         f64,
 	/// Extra cache weight (×(1 + boost)) after the same previous word.
 	pub cache_context_boost: f64,
 	/// Bytes of the text before the cursor the prompt-local cache scans.
-	pub cache_window: usize,
+	pub cache_window:        usize,
 	/// Session cache weight σ per occurrence (0 disables it).
-	pub session_weight: f64,
+	pub session_weight:      f64,
 	/// Recent prompts in the session cache.
-	pub session_prompts: usize,
-	/// Show threshold τ for prefixes of 2+ letters when the client asks from
-	/// the second letter on. Gates suggestions and drives typed-past
-	/// exclusion.
-	pub show_threshold: f32,
-	/// Show threshold τ1 for single-letter prefixes. Wrong ghosts after one
-	/// letter are frequent, so it also floors a caller's gate override.
-	pub show_threshold_k1: f32,
-	/// Show threshold for prefixes of 2+ letters when the client also asks
-	/// at one letter: single-letter ghosts spend part of the annoyance
-	/// budget, so later ones must be surer.
-	pub show_threshold_k2_after_k1: f32,
-}
-
-impl Params {
-	/// Show threshold for a prefix of `k` characters when the client's
-	/// first query for the word was at `first_asked` characters.
-	pub const fn threshold_at(&self, k: usize, first_asked: usize) -> f32 {
-		if k == 1 {
-			self.show_threshold_k1
-		} else if first_asked == 1 {
-			self.show_threshold_k2_after_k1
-		} else {
-			self.show_threshold
-		}
-	}
+	pub session_prompts:     usize,
+	/// Show threshold τ: the minimum confidence of a ghost, at every prefix
+	/// length.
+	pub show_threshold:      f32,
 }
 
 impl Default for Params {
 	fn default() -> Self {
 		Self {
-			paste_weight: 0.25,
-			mu1: 10_000.0,
-			d2: 0.9,
-			mu2: 2.0,
-			d3: 0.9,
-			mu3: 2.0,
-			web_bigram: 1.0,
-			top_k: 6,
-			min_count: 2,
-			canonicalize: true,
-			canon_max_count: 3,
-			canon_ratio: 3,
-			case_prior: 0.97,
-			case_strength: 2.0,
-			cache_weight: 0.5,
-			cache_decay: 500.0,
+			paste_weight:        0.25,
+			mu1:                 10_000.0,
+			d2:                  0.9,
+			mu2:                 2.0,
+			d3:                  0.9,
+			mu3:                 2.0,
+			web_bigram:          1.0,
+			top_k:               6,
+			min_count:           2,
+			canonicalize:        true,
+			canon_max_count:     3,
+			canon_ratio:         3,
+			case_prior:          0.97,
+			case_strength:       2.0,
+			cache_weight:        0.5,
+			cache_decay:         500.0,
 			cache_context_boost: 4.0,
-			cache_window: 4000,
-			session_weight: 0.02,
-			session_prompts: 20,
-			show_threshold: 0.17,
-			show_threshold_k1: 0.3,
-			show_threshold_k2_after_k1: 0.27,
+			cache_window:        4000,
+			session_weight:      0.02,
+			session_prompts:     20,
+			show_threshold:      0.45,
 		}
 	}
 }

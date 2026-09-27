@@ -299,7 +299,7 @@ impl Libei {
 				}
 			},
 			EiEvent::DeviceRemoved(event) => {
-				self.devices.retain(|device| device.device != event.device)
+				self.devices.retain(|device| device.device != event.device);
 			},
 			EiEvent::SeatRemoved(event) => self
 				.devices
@@ -504,7 +504,7 @@ impl Libei {
 		};
 		match event {
 			PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => {
-				move_to(x, y, &mut time)
+				move_to(x, y, &mut time);
 			},
 			PointerEvent::Click { x, y, count, .. } => {
 				move_to(x, y, &mut time);

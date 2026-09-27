@@ -81,7 +81,7 @@ class Lane {
 		this.provider.onUpdate = repaint;
 	}
 
-	/** Setting name, plus the engine that answered when it differs (`auto → smollm`). */
+	/** Setting name, plus the engine that answered when it differs (`auto → ngram`). */
 	get label(): string {
 		const engine = this.answer?.engine;
 		return engine && engine !== this.#setting ? `${this.#setting} → ${engine}` : this.#setting;

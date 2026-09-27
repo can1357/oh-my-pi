@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added automated ingestion of existing Claude Code and Codex prompt histories to bootstrap predictive engine vocabularies for new installs
 - Added a centralized download and installation progress HUD to surface background tool and model fetches
 - Added support for SmolLM2-135M word-completion model weights with background prefetching
 - Added unified predictive text engine with pluggable N-gram, SmolLM2, and macOS native providers
@@ -18,6 +19,9 @@
 
 ### Changed
 
+- Unified `auto` completion mode to use the N-gram engine exclusively across all platforms, removing Apple dictionary integration for standard auto-completion
+- Updated word-completion engine to persist ghost text through manual keystrokes by disabling typed-past exclusion
+- Restricted SmolLM model weight prefetching to explicit model activation
 - Updated /play command help description to show space pauses, q quits
 - Changed read tool group summary to display "2 more lines" instead of a Ctrl+O hint
 - Granted wait tool to subagents when explicitly requested

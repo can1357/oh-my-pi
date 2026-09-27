@@ -937,7 +937,9 @@ export class ToolExecutionComponent extends Container {
 		const benignSkip = this.#isBenignSkip();
 		const stateBgKey =
 			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
-		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
+		// bgFill, not bg: rows carry nested full resets (e.g. truncateToWidth's
+		// `\x1b[0m` before its ellipsis) that would otherwise punch holes in the tint.
+		const stateBgFn = (t: string) => theme.bgFill(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
 		// so bypass any bespoke error frame and draw the neutral generic card —

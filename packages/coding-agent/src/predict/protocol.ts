@@ -23,15 +23,8 @@ export const TEXT_PREDICT_AGENT_DIR_ENV = "OMP_TEXT_PREDICT_AGENT_DIR";
 /** Broker readiness regex matched against {@link textPredictReadyBanner}. */
 export const TEXT_PREDICT_READY_PATTERN = String.raw`omp text-predict listening on \S+`;
 
-/** Engines the daemon can open (`TextPredictor` methods). */
+/** Engines the daemon can open (`TextPredictor` methods); clients resolve `auto` before asking. */
 export type TextPredictMethod = "ngram" | "smollm" | "apple";
-
-/**
- * What a request asks for: one engine, or `auto`, which the daemon serves with
- * SmolLM once it has loaded and with ngram before that (weights still
- * downloading) or when SmolLM cannot load.
- */
-export type TextPredictTarget = TextPredictMethod | "auto";
 
 /** Banner printed on stdout once the daemon accepts connections. */
 export function textPredictReadyBanner(endpoint: string): string {
@@ -55,11 +48,11 @@ export function textPredictDaemon(runtimeDir: string, agentDir: string): { name:
 /** Client → daemon request. */
 export type TextPredictRequest =
 	| { id: number; op: "ping" }
-	| { id: number; op: "complete"; method: TextPredictTarget; before: string; prefix: string }
+	| { id: number; op: "complete"; method: TextPredictMethod; before: string; prefix: string }
 	| {
 			id: number;
 			op: "feedback";
-			method: TextPredictTarget;
+			method: TextPredictMethod;
 			before: string;
 			prefix: string;
 			suggestion: string;
@@ -73,8 +66,7 @@ export type TextPredictRequest =
 /** Daemon → client response. */
 export type TextPredictResponse =
 	| { id: number; ok: true; op: "ping"; version: string; pid: number; engines: TextPredictMethod[] }
-	/** `engine` is the engine that answered (what `auto` resolved to). */
-	| { id: number; ok: true; op: "complete"; engine: TextPredictMethod; suggestion: PredictedWord | null }
+	| { id: number; ok: true; op: "complete"; suggestion: PredictedWord | null }
 	| { id: number; ok: true; op: "feedback" | "shutdown" }
 	| { id: number; ok: true; op: "sync"; ingested: number }
 	| { id: number; ok: false; error: string };

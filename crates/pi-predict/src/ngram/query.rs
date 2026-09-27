@@ -1,5 +1,5 @@
 //! Completion: prefix-constrained ranking with the prompt-local and session
-//! caches, the finished-word-aware posterior, and typed-past exclusion.
+//! caches and the finished-word-aware posterior.
 //!
 //! For prefix `p` after context `(u, v)`, with `s(w) = p3(w|u,v)·P(case|w)`
 //! and `M = Σ_{x ⊒ p} s(x)` (every word under the prefix, **including the
@@ -13,10 +13,12 @@
 //! `cache(w)` sums `exp(−distance/D)` over occurrences of `w` earlier in the
 //! prompt (×(1 + b) after the same previous word) and `session(w)` counts
 //! `w` in the last prompts; `C`/`S` are their totals under the prefix. The
-//! confidence of the best word is `final(best) / (1 − Σ final(excluded))`,
-//! where the excluded words are those shown at a shorter prefix of this word
-//! (confidence ≥ that length's show threshold, from the shortest prefix the
-//! client asked about) and typed past.
+//! confidence of the best word is `final(best)`.
+//!
+//! Every score is a ratio over the words under the prefix, so typing another
+//! letter of the shown word (in the same case) removes competitors but never
+//! reorders the ones that remain: a ghost stays put while the user types
+//! through it.
 
 #![allow(clippy::suboptimal_flops, reason = "`mul_add` is a slow libm call on x86-64 without FMA")]
 
@@ -68,58 +70,48 @@ pub enum Pick {
 /// Query-local state reused across the prefixes of one word.
 pub struct QueryState {
 	/// `before` the memo was built for.
-	before:      String,
-	version:     u64,
-	/// Lowercase prefix the `shown` chain belongs to.
-	key:         String,
-	/// Word shown at each shorter prefix length (index = characters), lowercase.
-	shown:       Vec<Option<String>>,
-	/// Shortest prefix length asked about for this `before`: the client
-	/// never saw a ghost at shorter prefixes (its gate starts there).
-	first_asked: usize,
+	before:    String,
+	version:   u64,
 	/// Lowercased tail of `before` scanned by the prompt-local cache;
 	/// byte offsets match `before[window_at..]`.
-	window:      String,
-	window_at:   usize,
-	u:           String,
-	v:           String,
-	context:     Context,
+	window:    String,
+	window_at: usize,
+	u:         String,
+	v:         String,
+	context:   Context,
 	// Scratch.
-	cands:       Vec<Candidate>,
-	stamp:       Vec<u32>,
-	slot:        Vec<u32>,
-	epoch:       u32,
-	heap:        Vec<u32>,
-	top:         Vec<u32>,
-	tail:        String,
-	key_buf:     String,
-	cu:          String,
-	cv:          String,
+	cands:     Vec<Candidate>,
+	stamp:     Vec<u32>,
+	slot:      Vec<u32>,
+	epoch:     u32,
+	heap:      Vec<u32>,
+	top:       Vec<u32>,
+	tail:      String,
+	key_buf:   String,
+	cu:        String,
+	cv:        String,
 }
 
 impl Default for QueryState {
 	fn default() -> Self {
 		Self {
-			before:      String::new(),
-			version:     u64::MAX,
-			key:         String::new(),
-			shown:       Vec::new(),
-			first_asked: usize::MAX,
-			window:      String::new(),
-			window_at:   0,
-			u:           String::new(),
-			v:           String::new(),
-			context:     Context { u: Slot::None, v: Slot::None },
-			cands:       Vec::new(),
-			stamp:       Vec::new(),
-			slot:        Vec::new(),
-			epoch:       0,
-			heap:        Vec::new(),
-			top:         Vec::new(),
-			tail:        String::new(),
-			key_buf:     String::new(),
-			cu:          String::new(),
-			cv:          String::new(),
+			before:    String::new(),
+			version:   u64::MAX,
+			window:    String::new(),
+			window_at: 0,
+			u:         String::new(),
+			v:         String::new(),
+			context:   Context { u: Slot::None, v: Slot::None },
+			cands:     Vec::new(),
+			stamp:     Vec::new(),
+			slot:      Vec::new(),
+			epoch:     0,
+			heap:      Vec::new(),
+			top:       Vec::new(),
+			tail:      String::new(),
+			key_buf:   String::new(),
+			cu:        String::new(),
+			cv:        String::new(),
 		}
 	}
 }
@@ -142,12 +134,6 @@ fn is_word_code(c: char) -> bool {
 	c == '\'' || is_letter(c)
 }
 
-/// Byte offset of the `k`-th character of `text` (its length when shorter).
-#[inline]
-fn char_offset(text: &str, k: usize) -> usize {
-	text.char_indices().nth(k).map_or(text.len(), |(at, _)| at)
-}
-
 impl QueryState {
 	/// Heap bytes held by the query scratch.
 	pub const fn heap_bytes(&self) -> usize {
@@ -167,9 +153,6 @@ impl QueryState {
 		self.before.clear();
 		self.before.push_str(before);
 		self.version = model.version;
-		self.key.clear();
-		self.shown.clear();
-		self.first_asked = usize::MAX;
 		self.context = context_before(before, before.len(), &mut self.u, &mut self.v);
 		let mut at = before.len().saturating_sub(model.params.cache_window);
 		while !before.is_char_boundary(at) {
@@ -187,14 +170,8 @@ impl QueryState {
 		}
 	}
 
-	/// Best completion of `prefix` after `before`, with its confidence and
-	/// the show threshold that applies to it.
-	pub fn complete(
-		&mut self,
-		model: &Model,
-		before: &str,
-		prefix: &str,
-	) -> Option<(String, f64, f32)> {
+	/// Best completion of `prefix` after `before`, with its confidence.
+	pub fn complete(&mut self, model: &Model, before: &str, prefix: &str) -> Option<(String, f64)> {
 		lowercase_into(prefix, &mut self.key_buf);
 		let k_total = prefix.chars().count();
 		if k_total == 0 || self.key_buf.chars().count() != k_total {
@@ -202,51 +179,13 @@ impl QueryState {
 		}
 		self.load(model, before);
 		let key = std::mem::take(&mut self.key_buf);
-		// Typed-past exclusion: replay the shorter prefixes of this word that
-		// the client asked about. A word shown there (confidence ≥ its show
-		// threshold) that still matches was typed past.
-		self.first_asked = self.first_asked.min(k_total);
-		let common = self
-			.key
-			.chars()
-			.zip(key.chars())
-			.take_while(|(a, b)| a == b)
-			.count();
-		self.shown.truncate((common + 1).min(k_total));
-		if self.shown.is_empty() {
-			// Index 0 (the empty prefix) is never shown.
-			self.shown.push(None);
-		}
-		for k in self.shown.len()..k_total {
-			if k < self.first_asked {
-				self.shown.push(None);
-				continue;
-			}
-			let (key_end, typed_end) = (char_offset(&key, k), char_offset(prefix, k));
-			let tau = f64::from(model.params.threshold_at(k, self.first_asked));
-			let shown = self
-				.rank(model, &key[..key_end], &prefix[..typed_end], k)
-				.filter(|&(_, confidence)| confidence >= tau)
-				.map(|(pick, _)| self.pick_word(model, pick).to_owned());
-			self.shown.push(shown);
-		}
-		self.key.clear();
-		self.key.push_str(&key);
-		let ranked = self.rank(model, &key, prefix, k_total);
-		let threshold = model.params.threshold_at(k_total, self.first_asked);
+		let ranked = self.rank(model, &key, prefix);
 		let out = ranked.and_then(|(pick, confidence)| {
 			let suffix = self.suffix(model, pick, prefix, &key);
-			(!suffix.is_empty()).then_some((suffix, confidence, threshold))
+			(!suffix.is_empty()).then_some((suffix, confidence))
 		});
 		self.key_buf = key;
 		out
-	}
-
-	fn pick_word<'a>(&'a self, model: &'a Model, pick: Pick) -> &'a str {
-		match pick {
-			Pick::Word(id) => model.vocab.word(id),
-			Pick::Local(start, end) => &self.window[start as usize..end as usize],
-		}
 	}
 
 	fn suffix(&mut self, model: &Model, pick: Pick, typed: &str, key: &str) -> String {
@@ -353,9 +292,9 @@ impl QueryState {
 		self.cands.clear();
 	}
 
-	/// Rank the completions of lowercase `key` (typed as `typed`), excluding
-	/// the words in `self.shown[..k]`. Returns the pick and its confidence.
-	fn rank(&mut self, model: &Model, key: &str, typed: &str, k: usize) -> Option<(Pick, f64)> {
+	/// Rank the completions of lowercase `key` (typed as `typed`). Returns the
+	/// pick and its confidence.
+	fn rank(&mut self, model: &Model, key: &str, typed: &str) -> Option<(Pick, f64)> {
 		let p = &model.params;
 		self.next_epoch();
 		let ctx = self.context_stats(model);
@@ -475,7 +414,6 @@ impl QueryState {
 		let case_mass = case_mass.max(score_sum);
 		let norm = 1.0 + p.cache_weight * cache_mass + p.session_weight * session_mass;
 		let mut best: Option<(&Candidate, f64)> = None;
-		let mut excluded = 0.0f64;
 		for cand in &self.cands {
 			let post = if case_mass > 0.0 {
 				cand.score / case_mass
@@ -488,14 +426,6 @@ impl QueryState {
 				id => model.vocab.word(id),
 			};
 			if word.len() == key.len() {
-				continue;
-			}
-			if self.shown[..k.min(self.shown.len())]
-				.iter()
-				.flatten()
-				.any(|shown| shown == word)
-			{
-				excluded += value;
 				continue;
 			}
 			// Hygiene: misspellings and one-off junk are never offered unless
@@ -513,7 +443,7 @@ impl QueryState {
 		} else {
 			Pick::Word(cand.id)
 		};
-		Some((pick, value / (1.0 - excluded).max(0.05)))
+		Some((pick, value))
 	}
 
 	/// Prompt-local cache: words in the window that extend `key` (or equal
