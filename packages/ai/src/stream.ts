@@ -85,6 +85,21 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 }
 
 /**
+ * Effective Anthropic endpoint for {@link model}, mirroring
+ * `resolveAnthropicBaseUrl`: Foundry redirects an empty baseUrl to
+ * `FOUNDRY_BASE_URL`; otherwise an explicit non-official `model.baseUrl` wins,
+ * then the `ANTHROPIC_BASE_URL` gateway fallback, then the official default.
+ */
+function resolveEffectiveAnthropicBaseUrl(model: Model<Api>): string | undefined {
+	if (isFoundryEnabled()) {
+		const foundry = $env.FOUNDRY_BASE_URL?.trim();
+		if (foundry) return foundry;
+	}
+	if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return model.baseUrl;
+	return $env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl;
+}
+
+/**
  * Whether {@link model} is an official first-party endpoint whose stream needs
  * no leaked-thinking healing — the official Anthropic API and the official
  * OpenAI / OpenAI-Codex endpoints return structured thinking blocks and never
@@ -101,18 +116,8 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
  */
 function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
 	switch (model.provider) {
-		case "anthropic": {
-			// Mirror resolveAnthropicBaseUrl's effective endpoint: Foundry redirects
-			// an empty baseUrl to FOUNDRY_BASE_URL; otherwise an explicit non-official
-			// model.baseUrl wins, then the ANTHROPIC_BASE_URL gateway fallback, then
-			// the official default. Exempt only when the effective endpoint is official.
-			if (isFoundryEnabled()) {
-				const foundry = $env.FOUNDRY_BASE_URL?.trim();
-				if (foundry) return isOfficialAnthropicApiUrl(foundry);
-			}
-			if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
-			return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
-		}
+		case "anthropic":
+			return isOfficialAnthropicApiUrl(resolveEffectiveAnthropicBaseUrl(model));
 		case "openai":
 			return isOfficialOpenAIApiUrl(model.baseUrl);
 		case "openai-codex":
@@ -120,6 +125,31 @@ function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
 		default:
 			return false;
 	}
+}
+
+/** `host[:port]` of a URL or bare host entry, lower-cased; undefined when unparseable. */
+function urlHost(value: string): string | undefined {
+	try {
+		return new URL(value.includes("://") ? value : `https://${value}`).host.toLowerCase();
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether the effective Anthropic endpoint honors a `max_tokens: 0` replay as a
+ * pure prompt-cache read. The official API always does; a proxy opts in through
+ * `ANTHROPIC_CACHE_REFRESH_HOSTS` (comma-separated hosts or URLs), since a
+ * gateway that rewrites `max_tokens` would turn every keep-alive into a full
+ * completion.
+ */
+function isAnthropicCacheRefreshEndpoint(model: Model<Api>): boolean {
+	const baseUrl = resolveEffectiveAnthropicBaseUrl(model);
+	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
+	const allowed = $env.ANTHROPIC_CACHE_REFRESH_HOSTS?.trim();
+	if (!allowed || !baseUrl) return false;
+	const host = urlHost(baseUrl);
+	return host !== undefined && allowed.split(",").some(entry => urlHost(entry.trim()) === host);
 }
 
 /** Strict official-OpenAI endpoint check; missing baseUrl defaults to `api.openai.com`. */
@@ -1294,7 +1324,7 @@ function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): bo
 		model.api === "anthropic-messages" &&
 		model.provider === "anthropic" &&
 		model.transport !== "pi-native" &&
-		isLeakedThinkingHealExempt(model)
+		isAnthropicCacheRefreshEndpoint(model)
 	);
 }
 

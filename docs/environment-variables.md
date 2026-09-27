@@ -337,11 +337,12 @@ therefore completes through the paste-code path.
 | `DEBUG_CURSOR`     | Enables provider debug logs; `2`/`verbose` for detailed payload snippets |
 | `DEBUG_CURSOR_LOG` | Optional file path for JSONL debug log output                            |
 
-### Prompt cache compatibility switch
+### Prompt cache compatibility switches
 
-| Variable             | Behavior                                                                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PI_CACHE_RETENTION` | Cache-retention override where supported (`anthropic`, `openai-responses`, Bedrock). Accepts `long`, `short`, or `none`; other values are ignored |
+| Variable                        | Behavior                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_CACHE_RETENTION`            | Cache-retention override where supported (`anthropic`, `openai-responses`, Bedrock). Accepts `long`, `short`, or `none`; other values are ignored                                                                                                                                                                                            |
+| `ANTHROPIC_CACHE_REFRESH_HOSTS` | Comma-separated hosts (or URLs) of Anthropic-protocol gateways that honor a `max_tokens: 0` replay as a prompt-cache read. The idle keep-alive refresh runs only against the official API by default; listing the effective endpoint (`ANTHROPIC_BASE_URL`, `FOUNDRY_BASE_URL`, or a `models.yml` `baseUrl`) here enables it for that gateway |
 
 ---
 
