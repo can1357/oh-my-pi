@@ -9,15 +9,15 @@ The Hub also discovers parked subagents from the current session's persisted art
 | Input          | Behavior                                                                                       |
 | -------------- | ---------------------------------------------------------------------------------------------- |
 | `Alt+A`        | Open or close Agent Hub through `app.agents.hub`. This opens the roster even when it is empty. |
-| `Ctrl+S`       | Open or close the same Hub through the legacy `app.session.observe` action.                    |
 | Double-tap `←` | Open the Hub from an empty main-session editor when the current session has an agent to show.  |
 
-Run `/hotkeys` to see the active chords. Remap either action in `~/.omp/agent/keybindings.yml`:
+Run `/hotkeys` to see the active chords. Remap the Hub action in `~/.omp/agent/keybindings.yml`:
 
 ```yaml
 app.agents.hub: Alt+A
-app.session.observe: Ctrl+S
 ```
+
+`Ctrl+S` defaults to stashing or restoring the prompt draft, not opening the Hub. An explicit Hub remap to `Ctrl+S` takes precedence over the stash default; bind `app.editor.stash` to another chord if you want both. Inside the session selector, `Ctrl+S` still changes sort order.
 
 The double-`←` gesture is not a keybinding action. While focused on a subagent, double-`←` returns to the main session instead of opening the Hub.
 

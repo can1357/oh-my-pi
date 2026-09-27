@@ -39,7 +39,7 @@ describe("/guided-goal slash command", () => {
 		harness.clearDraft.mockClear();
 
 		resolve(true);
-		expect(await dispatched).toBe(true);
+		expect(await dispatched).toEqual({ pending: true });
 		expect(harness.clearDraft).not.toHaveBeenCalled();
 		expect(harness.handleGuidedGoalCommand).toHaveBeenCalledWith("ship the release", input);
 	});
@@ -49,7 +49,7 @@ describe("/guided-goal slash command", () => {
 
 		const handled = await executeBuiltinSlashCommand("/guided-goal   ", harness.runtime);
 
-		expect(handled).toBe(true);
+		expect(handled).toEqual({ pending: true });
 		expect(harness.handleGuidedGoalCommand).toHaveBeenCalledWith(undefined, undefined);
 	});
 });
