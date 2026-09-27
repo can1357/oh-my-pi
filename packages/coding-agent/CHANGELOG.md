@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added cross-engine prediction blending for SmolLM and N-gram completions in `omp predict`
+- Added auto-cleanup of legacy `model.safetensors` weight files during migration to GGUF
 - Added `omp skill list [dir] [--json]`, reporting the skills a session in that directory resolves (with discovery warnings in the JSON output), so tools can query skill listings without drift-prone reimplementations ([#12273](https://github.com/can1357/oh-my-pi/pull/12273) by [@andrebrait](https://github.com/andrebrait))
 - Added automated ingestion of existing Claude Code and Codex prompt histories to bootstrap predictive engine vocabularies for new installs
 - Added a centralized download and installation progress HUD to surface background tool and model fetches
@@ -20,6 +22,9 @@
 
 ### Changed
 
+- Unified completion mode to use blended N-gram and SmolLM confidence scores
+- Updated SmolLM weight download target to 145MB GGUF (Q8_0) format
+- Lowered N-gram auto-completion show threshold from 0.45 to 0.15
 - Unified `auto` completion mode to use the N-gram engine exclusively across all platforms, removing Apple dictionary integration for standard auto-completion
 - Updated word-completion engine to persist ghost text through manual keystrokes by disabling typed-past exclusion
 - Restricted SmolLM model weight prefetching to explicit model activation

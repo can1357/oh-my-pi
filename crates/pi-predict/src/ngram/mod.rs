@@ -31,27 +31,26 @@
 //! # Operating point
 //! Prefixes may be a single letter (`figure o|ut`); the rest of the word is
 //! ranked with the same model, where left context does most of the work.
-//! One show threshold τ = 0.45 ([`Params::show_threshold`]) gates every
-//! prefix length; [`crate::Config::show_threshold`] replaces it.
+//! One show threshold τ = 0.15 ([`Params::show_threshold`]) gates every
+//! prefix length; [`crate::Config::show_threshold`] replaces it. The point
+//! favours recall: a wrong ghost costs a glance, a missing right one costs
+//! the keystrokes.
 //!
 //! Replay of the last 400 single-line typed history.db prompts (trained on
 //! the ~58k before them, learning online; a wrong ghost counts once per word
-//! however long it stays up). KSR % (net keystrokes saved) for a typist who
-//! Tabs every right ghost / notices one half the time, and wrong ghosts per
-//! 100 words:
+//! however long it stays up; Tab accepts with the trailing space). KSR %
+//! (net keystrokes saved) for a typist who Tabs every right ghost / notices
+//! one half the time, and wrong ghosts per 100 words:
 //!
 //! | τ    | KSR           | wrong / 100 w |
 //! |------|---------------|---------------|
-//! | 0.27*| 17.22 / 11.38 | 56.8          |
-//! | 0.35 | 16.31 / 10.69 | 43.8          |
-//! | 0.45 | 14.90 / 9.78  | 30.1          |
-//! | 0.55 | 13.25 / 8.77  | 20.5          |
+//! | 0    | 33.10 / 22.65 | 103.4         |
+//! | 0.15 | 32.36 / 22.12 | 88.3          |
+//! | 0.30 | 30.31 / 20.59 | 54.5          |
+//! | 0.45 | 27.04 / 18.29 | 30.0          |
 //!
-//! \* The former research point: 0.30 at one letter, 0.27 after.
-//!
-//! τ = 0.45 holds wrong ghosts near 30 per 100 words. On the same replay,
-//! `NSSpellChecker` (the `apple` engine) saves 6.95 / 4.54 % at 36.6 wrong
-//! ghosts.
+//! On the same replay, `NSSpellChecker` (the `apple` engine) saves
+//! 13.72 / 9.06 % at 36.5 wrong ghosts.
 //!
 //! Engine-side costs (research replay bench, M4 Max, 52,950
 //! bootstrap rows): `complete` p50 3.6–4.0 µs, p99 14–17

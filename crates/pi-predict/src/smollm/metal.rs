@@ -1,17 +1,26 @@
-//! Metal decoder (macOS) on candle: GGML `Q8_0` weights, f32 activations.
+//! Metal decoder (macOS) on candle: the file's GGML `Q8_0` weights uploaded
+//! as they are, f32 activations.
 //!
 //! Batch-1 GPU decoding is bound by kernel dispatch, and candle's quantized
 //! mat-vec kernels beat its dense f16 GEMM path by ~2.5× there (1.8 vs
 //! 4.7 ms per token for SmolLM2-135M on an M4 Max), at near-f32 accuracy.
 
+use std::{
+	borrow::Cow,
+	io::{Read, Seek},
+};
+
 use anyhow::ensure;
 use candle_core::{
 	D, DType, Device, Module, Tensor,
-	quantized::{GgmlDType, QMatMul, QTensor},
+	quantized::{GgmlDType, QMatMul, QStorage, QTensor},
 };
 use candle_nn::ops::rms_norm;
 
-use super::config::{Decoder, KvRow, LlamaConfig, TensorSource};
+use super::{
+	config::{Decoder, KvRow, LlamaConfig, LlamaWeights, Proj},
+	gguf::Q8Blocks,
+};
 
 /// Rows at or below this count go through the quantized mat-vec kernel once
 /// per row; candle's quantized mat-mat kernel only pays off for real batches
@@ -70,52 +79,49 @@ pub struct MetalLlama {
 }
 
 impl MetalLlama {
-	/// Upload and quantize the weights from `source` onto `device`.
+	/// Upload `weights` onto `device`.
 	///
 	/// # Errors
-	/// Fails for missing or mis-shaped tensors and device errors.
+	/// Fails for missing, mistyped, or mis-shaped tensors and device errors.
 	pub fn load(
-		config: LlamaConfig,
-		source: &mut impl TensorSource,
+		mut weights: LlamaWeights<impl Read + Seek>,
 		device: &Device,
 	) -> anyhow::Result<Self> {
-		config.validate()?;
 		ensure!(device.is_metal(), "the Metal decoder needs a Metal device");
+		let config = weights.config().clone();
 		let c = &config;
-		let (h, inter) = (c.hidden_size, c.intermediate_size);
-		let kv = c.num_key_value_heads * c.head_dim();
+		let h = c.hidden_size;
 		let dense = |values: Vec<f32>, shape: &[usize]| -> anyhow::Result<Tensor> {
 			Ok(Tensor::from_vec(values, shape, device)?)
 		};
-		let project = |values: Vec<f32>, rows: usize, cols: usize| -> anyhow::Result<QMatMul> {
-			Ok(QMatMul::from_qtensor(QTensor::quantize(
-				&dense(values, &[rows, cols])?,
-				GgmlDType::Q8_0,
-			)?)?)
+		let upload = |matrix: Q8Blocks| -> anyhow::Result<QTensor> {
+			// candle views the bytes as its `BlockQ8_0` (f16 scale first) and
+			// copies them into a device buffer. Borrowed on purpose: candle 0.9
+			// drops an owned `Cow` before that copy.
+			ensure!(matrix.bytes.as_ptr().align_offset(2) == 0, "misaligned Q8_0 buffer");
+			let storage = QStorage::from_data(Cow::Borrowed(&matrix.bytes), device, GgmlDType::Q8_0)?;
+			Ok(QTensor::new(storage, (matrix.rows, matrix.cols))?)
 		};
-		let embed = source.expect("model.embed_tokens.weight", &[c.vocab_size, h])?;
-		let lookup = Tensor::from_slice(&embed, (c.vocab_size, h), device)?.to_dtype(DType::F16)?;
-		let head = project(embed, c.vocab_size, h)?;
+		let embed = upload(weights.embedding()?)?;
+		// Lookups read f16 rows; the tied LM head stays quantized.
+		let lookup = embed.dequantize_f16(device)?;
+		let head = QMatMul::from_qtensor(embed)?;
 		let mut layers = Vec::with_capacity(c.num_hidden_layers);
 		for i in 0..c.num_hidden_layers {
-			let p = format!("model.layers.{i}");
-			let mut w =
-				|name: &str, shape: &[usize]| source.expect(&format!("{p}.{name}.weight"), shape);
-			let mut qkv = w("self_attn.q_proj", &[h, h])?;
-			qkv.extend(w("self_attn.k_proj", &[kv, h])?);
-			qkv.extend(w("self_attn.v_proj", &[kv, h])?);
-			let mut gate_up = w("mlp.gate_proj", &[inter, h])?;
-			gate_up.extend(w("mlp.up_proj", &[inter, h])?);
+			let (attn_norm, mlp_norm) = weights.norms(i)?;
+			let mut project = |parts: &[Proj]| -> anyhow::Result<QMatMul> {
+				Ok(QMatMul::from_qtensor(upload(weights.stacked(i, parts)?)?)?)
+			};
 			layers.push(Layer {
-				attn_norm: dense(w("input_layernorm", &[h])?, &[h])?,
-				qkv:       project(qkv, h + 2 * kv, h)?,
-				out:       project(w("self_attn.o_proj", &[h, h])?, h, h)?,
-				mlp_norm:  dense(w("post_attention_layernorm", &[h])?, &[h])?,
-				gate_up:   project(gate_up, 2 * inter, h)?,
-				down:      project(w("mlp.down_proj", &[h, inter])?, h, inter)?,
+				attn_norm: dense(attn_norm, &[h])?,
+				qkv:       project(&[Proj::Q, Proj::K, Proj::V])?,
+				out:       project(&[Proj::Out])?,
+				mlp_norm:  dense(mlp_norm, &[h])?,
+				gate_up:   project(&[Proj::Gate, Proj::Up])?,
+				down:      project(&[Proj::Down])?,
 			});
 		}
-		let norm = dense(source.expect("model.norm.weight", &[h])?, &[h])?;
+		let norm = dense(weights.output_norm()?, &[h])?;
 		let (cos, sin) = c.rope_tables();
 		let half = c.head_dim() / 2;
 		let positions = c.max_position_embeddings;
@@ -356,7 +362,7 @@ impl KvCache {
 mod tests {
 	use super::{
 		super::{
-			config::tests::{RandomWeights, tiny_config},
+			config::tests::{random_weights, tiny_config},
 			cpu::tests::random,
 		},
 		*,
@@ -369,9 +375,7 @@ mod tests {
 		};
 		let config = tiny_config(12);
 		let load = || -> Box<dyn Decoder> {
-			let mut model =
-				MetalLlama::load(config.clone(), &mut RandomWeights::new(&config, 3), &device)
-					.expect("load");
+			let mut model = MetalLlama::load(random_weights(&config, 3), &device).expect("load");
 			model.cache = KvCache::new(&config, &device, 2).expect("cache");
 			Box::new(model)
 		};
@@ -385,20 +389,18 @@ mod tests {
 		};
 		let vocab = 40;
 		let config = tiny_config(vocab);
-		let mut metal =
-			MetalLlama::load(config.clone(), &mut RandomWeights::new(&config, 5), &device)
-				.expect("load");
+		let mut metal = MetalLlama::load(random_weights(&config, 5), &device).expect("load");
 		// Small capacity so the test also covers growth.
 		metal.cache = KvCache::new(&config, &device, 2).expect("cache");
 		let mut cpu = random(vocab, 5);
 		// 12 tokens take the masked full-attention kernel, shorter ones the
 		// per-query vector kernel.
 		let tokens = [1u32, 7, 3, 9, 4, 4, 2, 30, 8, 8, 19, 21];
-		// The backends quantize differently (and Metal looks embeddings up in
-		// f16), which leaves ~0.01 of noise; layout bugs (RoPE halves,
-		// KV-head mapping, masks) cost far more.
+		// Both run the same Q8_0 blocks; Metal's f16 embedding lookups and
+		// kernel rounding leave ~0.001 of noise, while layout bugs (RoPE
+		// halves, KV-head mapping, masks, block decoding) cost far more.
 		let close = |a: &[f32], b: &[f32]| {
-			a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.05)
+			a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.005)
 		};
 		assert!(close(
 			&metal.forward(&tokens, 0).expect("metal"),

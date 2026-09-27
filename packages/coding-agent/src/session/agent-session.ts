@@ -1682,7 +1682,7 @@ export class AgentSession implements SettingsScope {
 			const rewindReport = this.#extractRewindReport(messages);
 			if (rewindReport) {
 				this.#pendingRewindReport = undefined;
-				await this.#applyRewind(rewindReport, messages);
+				await this.#applyRewind(rewindReport, messages, context);
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
@@ -9341,7 +9341,7 @@ export class AgentSession implements SettingsScope {
 		return undefined;
 	}
 
-	async #applyRewind(report: string, activeMessages?: AgentMessage[]): Promise<void> {
+	async #applyRewind(report: string, activeMessages?: AgentMessage[], turn?: AgentTurnEndContext): Promise<void> {
 		const checkpointState = this.#checkpointState;
 		if (!checkpointState) {
 			return;
@@ -9368,6 +9368,29 @@ export class AgentSession implements SettingsScope {
 			details,
 			"agent",
 		);
+		// Rewind cuts the exploration branch, but sibling calls in this tool batch
+		// have already run. Reparent their calls and results together so the next
+		// provider turn (and a resumed session) can see their completed work.
+		if (turn?.message.role === "assistant") {
+			const siblingResults = turn.toolResults.filter(
+				result => semanticToolResult(result.toolName, result)?.toolName !== "rewind",
+			);
+			if (siblingResults.length > 0) {
+				const siblingIds = new Set(siblingResults.map(result => result.toolCallId));
+				const calls = turn.message.content.filter(
+					(block): block is ToolCall => block.type === "toolCall" && siblingIds.has(block.id),
+				);
+				if (calls.length > 0) {
+					const callIds = new Set(calls.map(call => call.id));
+					this.sessionManager.appendMessage(
+						sanitizeAssistantForReparentedHistory({ ...turn.message, content: calls }),
+					);
+					for (const result of siblingResults) {
+						if (callIds.has(result.toolCallId)) this.sessionManager.appendMessage(result);
+					}
+				}
+			}
+		}
 		this.#lastCompletedRewind = { report, startedAt: checkpointState.startedAt, rewoundAt };
 
 		if (activeMessages) {
