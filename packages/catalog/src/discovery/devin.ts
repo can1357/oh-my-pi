@@ -464,8 +464,12 @@ function normalizeDevinModels(
 			continue;
 		}
 		seen.add(uid);
-		// A router (`adaptive`) is a dispatch slot, not a chat uid: `AssignModel`
-		// resolves it into a concrete model for each turn.
+		// A router is a dispatch slot, not a chat uid: `AssignModel` resolves it
+		// into a concrete model for each turn. That holds for harness-backed
+		// routers too (non-empty `harnessUids`): at the current CLI identity the
+		// backend assigns them, while sending their uid straight to
+		// `GetChatMessage` fails with `permission_denied: no API providers are
+		// available`. Older identities got 404 from `AssignModel` on those uids.
 		const isRouter = displayOption === DisplayOption.MODEL_ROUTER || config.modelInfo?.isModelRouter === true;
 		const spec = devinModelSpec(config, uid, baseUrl, isRouter);
 		specs.push(spec);

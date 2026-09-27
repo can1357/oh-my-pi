@@ -39,6 +39,8 @@ interface ConfigInit {
 	disabled?: boolean;
 	displayOption?: DisplayOption;
 	isModelRouter?: boolean;
+	/** `ModelInfo.harnessUids`; non-empty marks a harness-backed router. */
+	harnessUids?: string[];
 	/** `ClientModelConfig.maxTokens` — the context window. */
 	contextWindow?: number;
 	maxOutputTokens?: number;
@@ -149,6 +151,7 @@ function config(init: ConfigInit): ClientModelConfig {
 						displayOption: init.displayOption ?? DisplayOption.UNSPECIFIED,
 						maxOutputTokens: init.maxOutputTokens ?? 64_000,
 						isModelRouter: init.isModelRouter ?? false,
+						harnessUids: init.harnessUids ?? [],
 						...(init.features !== undefined ? { modelFeatures: create(ModelFeaturesSchema, init.features) } : {}),
 					}),
 				}),
@@ -488,6 +491,31 @@ describe("devin native display filtering", () => {
 
 	it("excludes Devin Fusion: the router, lead/sidekick pairings, and sidekick lanes", () => {
 		expect(models.filter(entry => entry.id === "fusion" || entry.id.startsWith("fusion-"))).toEqual([]);
+	});
+
+	it("routes harness-backed routers through AssignModel, not as direct chat uids", async () => {
+		// The backend rejects a harness-backed router's own uid on GetChatMessage
+		// (`no API providers are available`) and assigns it at the CLI identity.
+		const payload = toBinary(
+			GetCliModelConfigsResponseSchema,
+			create(GetCliModelConfigsResponseSchema, {
+				clientModelConfigs: [
+					config({ uid: "swe-1-6" }),
+					config({ uid: "swe-1-6-fast" }),
+					config({
+						uid: "future-harness-router",
+						displayOption: DisplayOption.MODEL_ROUTER,
+						isModelRouter: true,
+						harnessUids: ["future-harness"],
+					}),
+				],
+			}),
+		);
+		const fetched = await fetchDevinModels({
+			apiKey: "fixture-token",
+			fetch: async () => new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+		});
+		expect(fetched?.find(entry => entry.id === "future-harness-router")?.compat?.modelRouter).toBe(true);
 	});
 });
 
