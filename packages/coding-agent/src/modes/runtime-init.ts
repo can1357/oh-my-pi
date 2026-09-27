@@ -226,12 +226,16 @@ export function createExtensionAgentActions(
 					shouldContinue: ownsCurrentTranscript,
 				});
 			}
-			// Revalidate after the scan: even a scan the predicate above cut
-			// short can leave `scanEligible` true while this scope no longer owns
-			// `parentSessionFile`. Resolving or reviving against it here would
-			// use the NOW-current session's cwd, settings, and artifact manager
-			// (the scoped reviver reads live context, not a snapshot) to reopen
-			// an agent that belongs to the transcript this scope just left.
+			// Revalidate after the scan: a scan the predicate above cut short can
+			// leave `scanEligible` true while this scope no longer owns
+			// `parentSessionFile`. Refuse rather than resolve against that
+			// transcript: the scoped reviver reads live context, not a snapshot,
+			// so reviving here would reopen an agent the caller asked for by the
+			// transcript this scope just left under the NOW-current session's
+			// cwd, settings, and artifact manager. This is the last check before
+			// the revive; a transition that completes while the revive itself is
+			// awaiting is not caught, and reopens an agent that is still in this
+			// scope's family under the new context, as a later call may anyway.
 			if (scanEligible && !ownsCurrentTranscript()) {
 				throw new Error(`Agent "${id}" is not visible to this session.`);
 			}

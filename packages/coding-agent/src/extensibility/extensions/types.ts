@@ -1266,9 +1266,10 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 /** An agent registry entry visible to an extension. */
 export interface ExtensionAgentInfo {
 	/**
-	 * Registry id. Usually the agent's name; when another session in the same
-	 * process already holds that name, the agent is registered under a
-	 * session-qualified id (`<owner>/<name>`) instead.
+	 * Registry id. Usually the agent's name; when that name is already
+	 * registered to another agent (another session's in this process, or this
+	 * session's own from an earlier transcript), the agent is registered under
+	 * a qualified id (`<parent id>/<name>`) instead.
 	 */
 	id: string;
 	status: "running" | "idle" | "parked" | "aborted";
@@ -1288,22 +1289,21 @@ export interface ExtensionAgentsApi {
 	list(): ExtensionAgentInfo[];
 	/**
 	 * Look up a visible agent by registry id or by name. A name resolves to
-	 * this session's own agent even when it is registered under a
-	 * session-qualified id, preferring the one backed by the session's current
-	 * transcript over a same-named agent from an earlier transcript. Returns
-	 * `undefined` when no visible agent matches.
+	 * this session's own agent even when it is registered under a qualified
+	 * id, preferring the one backed by the session's current transcript over a
+	 * same-named agent from an earlier transcript. Returns `undefined` when no
+	 * visible agent matches.
 	 */
 	get(id: string): ExtensionAgentInfo | undefined;
 	/**
 	 * Revive a parked/idle agent to a live session, resolving `id` as {@link get}
 	 * does (preferring agents under `parentSessionFile` when that is this
-	 * session's own transcript). When `parentSessionFile` is
-	 * this session's own current transcript and `id` resolves to no visible
-	 * agent, or only to one from an earlier transcript, first rescan the
-	 * persisted subagent transcripts under it. Another session's transcript is
-	 * never scanned. Resolves when the agent is live; rejects when the agent is
-	 * not visible to this session, or with the underlying error if no ref or
-	 * reviver exists.
+	 * session's own transcript). When `parentSessionFile` is this session's own
+	 * current transcript and `id` resolves to no visible agent, or only to one
+	 * from an earlier transcript, first rescan the persisted subagent
+	 * transcripts under it. Another session's transcript is never scanned.
+	 * Resolves when the agent is live; rejects when the agent is not visible to
+	 * this session, or with the underlying error if no ref or reviver exists.
 	 */
 	ensureLive(id: string, options?: { parentSessionFile?: string }): Promise<ExtensionAgentInfo>;
 	/**
