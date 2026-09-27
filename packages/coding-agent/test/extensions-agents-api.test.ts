@@ -546,7 +546,7 @@ describe("ExtensionAPI agents", () => {
 		expect(AgentRegistry.global().get(newRevived.id)?.sessionFile).toBe(newChildFile);
 	});
 
-	it("get and prompt resolve to the current-transcript agent, not a stale same-named sibling", async () => {
+	it("get, prompt, and option-less ensureLive resolve to the current-transcript agent, not a stale same-named sibling", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-get-prompt-current-");
 		const cwd = tempDir.path();
 		const oldSessionFile = path.join(cwd, "before.jsonl");
@@ -626,6 +626,11 @@ describe("ExtensionAPI agents", () => {
 		await agents.prompt("Worker", "hello current transcript");
 		expect(prompts.new).toEqual(["hello current transcript"]);
 		expect(prompts.old).toEqual([]);
+
+		// `ensureLive` without `parentSessionFile` has no transcript to rescan
+		// under, but it must still pick the same current-transcript agent `get`
+		// and `prompt` do rather than the stale bare id.
+		expect(await agents.ensureLive("Worker")).toMatchObject({ id: newRevived.id, sessionFile: newChildFile });
 	});
 
 	it("ACP-safe reviver cold-revives a genuinely parked agent through a session-scoped persisted reviver", async () => {

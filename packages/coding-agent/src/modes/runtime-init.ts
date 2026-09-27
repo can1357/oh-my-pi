@@ -233,11 +233,17 @@ export function createExtensionAgentActions(
 				throw new Error(`Agent "${id}" is not visible to this session.`);
 			}
 			// Re-resolve preferring a match still backed by the CURRENT transcript
-			// over a stale same-family sibling; fall back to the prior resolution
-			// (possibly still that stale ref, e.g. when the current transcript has
-			// no same-named child at all) so an id unique to this session keeps
-			// resolving exactly as before.
-			const resolvedId = scanEligible ? resolveCurrent(id, parentSessionFile ?? null) : priorMatch;
+			// over a stale same-family sibling: the rescanned `parentSessionFile`
+			// when there was one, otherwise this scope's own live transcript —
+			// the same preference `get` and `prompt` apply, so an option-less
+			// call never revives a superseded generation they would not return.
+			// Falls back to the plain in-scope resolution (possibly still that
+			// stale ref, e.g. when the current transcript has no same-named child
+			// at all) so an id unique to this session keeps resolving as before.
+			const resolvedId = resolveCurrent(
+				id,
+				scanEligible ? (parentSessionFile ?? null) : (getScopeSessionFile?.() ?? null),
+			);
 			if (!inScope(resolvedId)) throw new Error(`Agent "${id}" is not visible to this session.`);
 			await AgentLifecycleManager.global().ensureLive(resolvedId, coldRevive);
 			const ref = registry.get(resolvedId);
