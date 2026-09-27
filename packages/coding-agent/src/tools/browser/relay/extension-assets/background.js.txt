@@ -79,7 +79,8 @@ async function groupTabs(tabIds, title, color) {
   }
   const grouped = {};
   for (const [windowId, ids] of byWindow) {
-    const existing = await chrome.tabGroups.query({ title, windowId });
+    const wanted = ompGroupTitles(title);
+    const existing = (await chrome.tabGroups.query({ windowId })).filter((group) => group.title !== undefined && wanted[group.title]);
     let groupId;
     if (existing[0]) {
       groupId = existing[0].id;
@@ -90,10 +91,11 @@ async function groupTabs(tabIds, title, color) {
           await chrome.tabs.group({ tabIds: dupeIds, groupId });
       }
       await chrome.tabs.group({ tabIds: ids, groupId });
+      await chrome.tabGroups.update(groupId, { color });
     } else {
       groupId = await chrome.tabs.group({ tabIds: ids });
+      await chrome.tabGroups.update(groupId, { title, color });
     }
-    await chrome.tabGroups.update(groupId, { title, color });
     for (const id of ids)
       grouped[String(id)] = groupId;
   }
@@ -102,23 +104,12 @@ async function groupTabs(tabIds, title, color) {
 function ompGroupTitles(title) {
   return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
 }
-async function restoreGroups() {
+async function ensureOmpGroupTitle() {
   if (!ompGroupTitle) {
     const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
     ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
   }
-  if (!ompGroupTitle)
-    return;
-  const allGroups = await chrome.tabGroups.query({}).catch(() => []);
-  const title = ompGroupTitle;
-  const wanted = ompGroupTitles(title);
-  const groups = allGroups.filter((group) => group.title !== undefined && wanted[group.title]);
-  for (const group of groups) {
-    const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
-    const ids = tabs.map((tab) => tab.id).filter((id) => id !== undefined);
-    if (ids.length > 0)
-      await chrome.tabs.ungroup(ids).catch(() => {});
-  }
+  return ompGroupTitle;
 }
 async function setGroupBusy(tabId, busy) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -145,10 +136,11 @@ async function setGroupBusy(tabId, busy) {
   }
 }
 async function updateGroupBusyTitle(groupId, busy) {
-  if (!ompGroupTitle)
+  const title = await ensureOmpGroupTitle();
+  if (!title)
     return;
   try {
-    await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
+    await chrome.tabGroups.update(groupId, { title: busy ? `⏳${title}` : `✅${title}` });
   } catch {}
 }
 function post(msg) {
@@ -198,7 +190,9 @@ async function runRpc(msg) {
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
-      const tab = await chrome.tabs.create({ url: msg.url });
+      const tab = await chrome.tabs.create({ url: msg.url, active: false });
+      if (tab.id !== undefined)
+        await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
       if (msg.group && tab.id !== undefined) {
         await enqueueGroupOp(() => groupTabs([tab.id], msg.group.title, msg.group.color)).catch(() => {});
         const fresh = await chrome.tabs.get(tab.id).catch(() => null);
@@ -277,7 +271,6 @@ async function connect() {
       pingTimer = null;
     }
     setBadge(false);
-    restoreGroups();
     scheduleReconnect();
   };
   socket.onerror = () => {
