@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `omp skill list [dir] [--json]`, reporting the skills a session in that directory resolves (with discovery warnings in the JSON output), so tools can query skill listings without drift-prone reimplementations ([#12273](https://github.com/can1357/oh-my-pi/pull/12273) by [@andrebrait](https://github.com/andrebrait))
 - Added automated ingestion of existing Claude Code and Codex prompt histories to bootstrap predictive engine vocabularies for new installs
 - Added a centralized download and installation progress HUD to surface background tool and model fetches
 - Added support for SmolLM2-135M word-completion model weights with background prefetching
@@ -15,7 +16,7 @@
 - Added the `wait` tool automatically to agents that use `task` or `bash` to improve background process coordination
 - Added a context-aware hint system for empty composers that displays suggestions based on agent activity and effort
 - Added an optional `scope` to the `retain` and `learn` tools, offered when `mnemopi.scoping` is `global` or `per-project-tagged`: `scope: "global"` stores a memory or lesson in the Mnemopi bank every project recalls instead of the current project's bank ([#13324](https://github.com/can1357/oh-my-pi/pull/13324) by [@alphastorm](https://github.com/alphastorm)).
-- Added `/btw` to the commands available from a focused subagent view; it asks about the focused agent's transcript instead of the main session's, and its answers can be copied or followed up but not branched into the main session ([#13412](https://github.com/can1357/oh-my-pi/pull/13412) by [@H4vC](https://github.com/H4vC))
+- Added `/btw` to the commands available from a focused subagent view; it asks about the focused agent's transcript instead of the main session's, keeps its side-conversation history separate from main and other agents, keeps streaming an answer after you leave the view, and its answers can be copied or followed up but not branched into the main session ([#13412](https://github.com/can1357/oh-my-pi/pull/13412), [#13431](https://github.com/can1357/oh-my-pi/pull/13431) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 

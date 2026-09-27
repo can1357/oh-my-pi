@@ -341,6 +341,36 @@ describe("BtwHistoryStore", () => {
 		expect(await fs.readdir(directory)).toEqual([]);
 	});
 
+	it("keeps unsafe scope ids inside the scoped history root and isolated from main and siblings", async () => {
+		// Unhashed, these would resolve to the sibling `worker` scope and outside the artifacts directory.
+		const unsafeScopes = ["../sessions/worker", "../../escape"];
+		for (const scope of unsafeScopes) {
+			const store = await BtwHistoryStore.open(artifactsDir, scope);
+			await store.upsert(record(`topic-${unsafeScopes.indexOf(scope)}`));
+			await store.flush();
+		}
+		const sibling = await BtwHistoryStore.open(artifactsDir, "worker");
+		await sibling.upsert(record("sibling"));
+		await sibling.flush();
+
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([]);
+		expect((await BtwHistoryStore.open(artifactsDir, "worker")).getRecords()).toEqual([record("sibling")]);
+		expect((await BtwHistoryStore.open(artifactsDir, unsafeScopes[0])).getRecords()).toEqual([record("topic-0")]);
+		expect((await BtwHistoryStore.open(artifactsDir, unsafeScopes[1])).getRecords()).toEqual([record("topic-1")]);
+
+		const scopedRoot = path.join(artifactsDir, "btw-history", "sessions");
+		const files = (await fs.readdir(directory, { recursive: true, withFileTypes: true }))
+			.filter(entry => entry.isFile())
+			.map(entry => path.relative(scopedRoot, path.join(entry.parentPath, entry.name)));
+		// One entry per scope, each in its own directory directly under the scoped root.
+		expect(files).toHaveLength(3);
+		for (const file of files) {
+			expect(file.startsWith("..") || path.isAbsolute(file)).toBe(false);
+			expect(file.split(path.sep)).toHaveLength(2);
+		}
+		expect(new Set(files.map(file => path.dirname(file))).size).toBe(3);
+	});
+
 	it("retains write failures through flush and refuses to overwrite later corruption", async () => {
 		const store = await BtwHistoryStore.open(artifactsDir);
 		const saved = record("saved", { status: "running" });

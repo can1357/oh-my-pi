@@ -3,6 +3,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
+	atCompletionMatches,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
@@ -53,9 +54,21 @@ import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectL
 
 const PASSTHROUGH_COLOR = (text: string): string => text;
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
+const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
+};
+
+/**
+ * `@` file lists are narrowed in place (`setFilter(liveToken)`) while a fresh
+ * search runs, so a slow walk never leaves entries that contradict the typed
+ * token on screen. An emptied list means the refresh is still pending.
+ */
+const AT_FILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
+	...AUTOCOMPLETE_SELECT_LIST_LAYOUT,
+	filterItems: (items, token) => items.filter(item => atCompletionMatches(token, item.value)),
+	noMatchText: "Searching…",
 };
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -1756,7 +1769,9 @@ export class Editor implements Component, Focusable {
 					// Check for stale autocomplete state due to buffer edits since last refresh.
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
+					// A narrowed `@` list can be empty while its refresh is pending; Enter
+					// then submits instead of waiting on the search.
+					if (!selected || !this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
 						// Autocomplete is stale - cancel and fall through to normal submission
 						this.#cancelAutocomplete();
 					} else {
@@ -4075,7 +4090,11 @@ export class Editor implements Component, Focusable {
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : AUTOCOMPLETE_SELECT_LIST_LAYOUT;
+		const layout = prefix.startsWith("/")
+			? SLASH_COMMAND_SELECT_LIST_LAYOUT
+			: prefix.startsWith("@")
+				? AT_FILE_SELECT_LIST_LAYOUT
+				: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
 		return new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
 	}
 
@@ -4256,6 +4275,13 @@ export class Editor implements Component, Focusable {
 		const lines = [...this.#state.lines];
 		const cursorLine = this.#state.cursorLine;
 		const cursorCol = this.#state.cursorCol;
+		const isCurrent = () =>
+			!signal.aborted &&
+			requestId === this.#autocompleteRequestId &&
+			cursorLine === this.#state.cursorLine &&
+			cursorCol === this.#state.cursorCol &&
+			lines.length === this.#state.lines.length &&
+			lines.every((line, index) => line === this.#state.lines[index]);
 		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
 		try {
 			if (request.kind === "force") {
@@ -4263,7 +4289,9 @@ export class Editor implements Component, Focusable {
 				if (!getForceFileSuggestions) return;
 				suggestions = await getForceFileSuggestions.call(provider, lines, cursorLine, cursorCol, signal);
 			} else {
-				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal);
+				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal, partial => {
+					if (partial.items.length > 0 && isCurrent()) this.#showAutocompleteSuggestions(partial, "regular");
+				});
 			}
 		} catch (error) {
 			if (!signal.aborted && requestId === this.#autocompleteRequestId) {
@@ -4273,26 +4301,32 @@ export class Editor implements Component, Focusable {
 			}
 			return;
 		}
-		if (
-			signal.aborted ||
-			requestId !== this.#autocompleteRequestId ||
-			cursorLine !== this.#state.cursorLine ||
-			cursorCol !== this.#state.cursorCol ||
-			lines.length !== this.#state.lines.length ||
-			lines.some((line, index) => line !== this.#state.lines[index])
-		) {
-			return;
-		}
+		if (!isCurrent()) return;
 
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
-			this.onAutocompleteUpdate?.();
+			this.#showAutocompleteSuggestions(suggestions, request.kind === "force" ? "force" : "regular");
 			return;
 		}
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
+	}
+
+	#showAutocompleteSuggestions(
+		suggestions: { items: AutocompleteItem[]; prefix: string },
+		state: "regular" | "force",
+	): void {
+		this.#autocompletePrefix = suggestions.prefix;
+		this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
+		this.#autocompleteState = state;
+		this.onAutocompleteUpdate?.();
+	}
+
+	/** Filter a shown `@` file list to the live `@` token until the debounced refresh replaces it. */
+	#narrowAtFileList(): void {
+		if (!this.#autocompleteList || !this.#autocompletePrefix.startsWith("@")) return;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const token = AT_TOKEN_RE.exec(currentLine.slice(0, this.#state.cursorCol))?.[1];
+		if (token !== undefined) this.#autocompleteList.setFilter(token);
 	}
 
 	#invalidateAutocompleteRequests(): void {
@@ -4304,6 +4338,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	#debouncedUpdateAutocomplete(): void {
+		if (this.#autocompleteState !== "assist") this.#narrowAtFileList();
 		if (this.#autocompleteTimeout) {
 			clearTimeout(this.#autocompleteTimeout);
 		}
