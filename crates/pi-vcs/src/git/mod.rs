@@ -292,7 +292,8 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 	let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 	let mut in_core = false;
 	let mut worktree = None;
-	for raw in content.lines() {
+	let mut lines = content.lines();
+	while let Some(raw) = lines.next() {
 		let line = raw.trim();
 		if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
 			continue;
@@ -316,7 +317,7 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 		if !key.trim().eq_ignore_ascii_case("worktree") {
 			continue;
 		}
-		let value = decode_config_value(value.trim());
+		let value = decode_config_value(value.trim(), &mut lines);
 		worktree = if value.is_empty() { None } else { Some(value) };
 	}
 	worktree
@@ -327,15 +328,21 @@ fn parse_core_worktree(content: &str) -> Option<String> {
 /// whitespace and `#`/`;` literally, and — inside or outside quotes — a
 /// backslash escapes the following character: `\"` and `\\` for the quote
 /// and backslash themselves, `\n`/`\t`/`\b` for the named control
-/// characters, and any other `\x` drops the backslash and keeps `x`
-/// literally, matching git's own parser. Git 2.43 writes a submodule's
-/// `core.worktree` unquoted with the quote character backslash-escaped
-/// (`worktree = ../../../sub\"quote`) whenever the path only needs that one
-/// escape, so escape decoding cannot be gated on the value being quoted.
-/// An unescaped `#`/`;` outside quotes starts a trailing comment; unquoted
-/// trailing whitespace before it (or before end of value) is trimmed, same
-/// as git, while whitespace inside quotes is kept.
-fn decode_config_value(value: &str) -> String {
+/// characters. Any other `\x` keeps `x`; git itself rejects such a file as
+/// a bad config line, so no value git accepts depends on it. Git 2.43
+/// writes a submodule's `core.worktree` unquoted with the quote character
+/// backslash-escaped (`worktree = ../../../sub\"quote`) whenever the path
+/// only needs that one escape, so escape decoding cannot be gated on the
+/// value being quoted. A backslash ending a line continues the value on the
+/// next line of `continuation`, which is consumed so the caller does not
+/// parse it as a line of its own. An unescaped `#`/`;` outside quotes
+/// starts a trailing comment; unquoted trailing whitespace before it (or
+/// before end of value) is trimmed, same as git, while whitespace inside
+/// quotes is kept.
+fn decode_config_value<'a>(
+	value: &'a str,
+	continuation: &mut impl Iterator<Item = &'a str>,
+) -> String {
 	let mut out = String::with_capacity(value.len());
 	let mut chars = value.chars();
 	let mut quoted = false;
@@ -353,7 +360,10 @@ fn decode_config_value(value: &str) -> String {
 					Some('t') => out.push('\t'),
 					Some('b') => out.push('\u{8}'),
 					Some(escaped) => out.push(escaped),
-					None => {},
+					None => match continuation.next() {
+						Some(next) => chars = next.chars(),
+						None => break,
+					},
 				}
 			},
 			'#' | ';' if !quoted => break,
@@ -650,6 +660,23 @@ mod tests {
 		assert_eq!(
 			parse_core_worktree("\u{feff}[core]\n\tworktree = /main\n"),
 			Some("/main".to_owned())
+		);
+	}
+
+	#[test]
+	fn core_worktree_joins_backslash_continued_lines() {
+		// A backslash at the end of a line continues the value on the next
+		// line, inside or outside quotes. Git 2.43's `git config --file
+		// <config> --get core.worktree` returns `/path/main` for both texts; a
+		// truncated `/path/ma` would point `primary_root()` at a path that
+		// does not exist.
+		assert_eq!(
+			parse_core_worktree("[core]\n\tworktree = /path/ma\\\nin\n"),
+			Some("/path/main".to_owned())
+		);
+		assert_eq!(
+			parse_core_worktree("[core]\n\tworktree = \"/path/ma\\\nin\" # note\n"),
+			Some("/path/main".to_owned())
 		);
 	}
 }
