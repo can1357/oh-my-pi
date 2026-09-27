@@ -199,6 +199,7 @@ interface ReviveOwnerOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	rootAgentId?: string;
+	mcpManager?: () => MCPManager | undefined;
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
@@ -233,6 +234,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 		settings: owner.settings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
+		...(owner.mcpManager ? { mcpManager: owner.mcpManager } : undefined),
 	});
 }
 
@@ -526,6 +528,45 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+
+	it("binds a session-owned MCP manager instead of the process-global one and never discovers workspace MCP config", async () => {
+		const cwd = makeTempDir("@pi-owned-mcp-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		// A host that owns MCP per session (ACP: servers come from the client,
+		// never from `.mcp.json`) must not have a revived agent fall back to
+		// whatever manager the process holds globally, or to file discovery
+		// when it holds none.
+		MCPManager.setInstance({
+			getTools: () => [{ name: "mcp__global_read", label: "global/read" }],
+		} as unknown as MCPManager);
+		const capturedOptions: CreateAgentSessionOptions[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options) capturedOptions.push(options);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		// Read live on every revive: the host connects its servers after the
+		// reviver factory already exists.
+		const owner: { mcp?: MCPManager } = {};
+		const factory = createFactory(cwd, undefined, { mcpManager: () => owner.mcp });
+		const ref = createRef(sessionFile);
+
+		const withoutServers = await factory(ref);
+		if (!withoutServers) throw new Error("Expected a persisted reviver");
+		await withoutServers(ref);
+		expect(capturedOptions[0]?.enableMCP).toBe(false);
+		expect(capturedOptions[0]?.mcpManager).toBeUndefined();
+		expect(capturedOptions[0]?.customTools).toBeUndefined();
+
+		owner.mcp = {
+			getTools: () => [{ name: "mcp__client_read", label: "client/read" }],
+		} as unknown as MCPManager;
+		const withServers = await factory(ref);
+		if (!withServers) throw new Error("Expected a persisted reviver");
+		await withServers(ref);
+		expect(capturedOptions[1]?.enableMCP).toBe(false);
+		expect(capturedOptions[1]?.mcpManager).toBe(owner.mcp);
+		expect(capturedOptions[1]?.customTools?.map(tool => tool.name)).toEqual(["mcp__client_read"]);
 	});
 
 	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {

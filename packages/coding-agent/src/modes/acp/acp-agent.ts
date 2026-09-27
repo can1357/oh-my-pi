@@ -2584,6 +2584,9 @@ export class AcpAgent implements Agent {
 			modelRegistry: record.session.modelRegistry,
 			settings: record.session.settings,
 			enableLsp: cfgTaskEnableLsp.get(record.session.settings) !== false,
+			// MCP servers here belong to the ACP client (`#configureMcpServers`,
+			// which may run after this point), never to workspace `.mcp.json`.
+			mcpManager: () => record.mcpManager,
 		});
 		const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(record.session.settings)) || 0);
 
