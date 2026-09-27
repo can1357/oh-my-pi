@@ -2,17 +2,11 @@
 
 ## [Unreleased]
 
+## [18.3.3] - 2026-09-27
+
 ### Added
 
-- Added live steering mechanism allowing models to ingest steering messages mid-stream
-
-### Changed
-
-- Renamed live steering callback to onLiveSteeringTaken and invoke it when messages are taken
-
-### Fixed
-
-- Fixed lost steering input during stream aborts by requeueing unrecorded live-steered messages
+- Added live steering support, allowing models to receive and act on user steering messages during an active stream.
 
 ## [18.3.2] - 2026-09-25
 

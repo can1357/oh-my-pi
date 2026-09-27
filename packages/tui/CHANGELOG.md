@@ -2,32 +2,27 @@
 
 ## [Unreleased]
 
+## [18.3.3] - 2026-09-27
+
 ### Added
 
-- Enabled providers to report interim autocomplete suggestions via `onPartial` callback for improved responsiveness during high-latency file discovery
-- Added `WordCompletionProvider` for ghost-text completion with pluggable backend routing
-- Added prose-gating logic to filter completion suggestions by context
-- Added `wordCompletionFeedback` provider hook for improved ghost-text tracking
-- Added provisional space handling for Tab completions to support seamless punctuation attachment
+- Added responsive ghost-text word completion with pluggable backend providers, context-aware prose filtering, and feedback support.
+- Improved autocomplete responsiveness for high-latency file discovery by showing interim suggestions and a searching state while results are refreshed.
 
 ### Changed
 
-- Introduced client-side filtering for `@` file completion lists, allowing the TUI to narrow stale lists in-place while awaiting asynchronous search results
-- Configured the TUI to show a 'Searching…' placeholder when `@` completions are being refreshed if no current matches exist
-- Refined word-completion persistence to maintain suggestions when users type through existing ghost text
-- Updated ps top UI to show scope kind "(target)" or "(current + global)" in scope label
-- Updated TUI task interfaces to reflect the new `complexity` field requirement
-- Refined right-arrow acceptance behavior to skip forced trailing spaces
-- Replaced all static keyboard labels across overlays, apps, and status lines with dynamic, platform-aware key formatting
-
-### Removed
-
-- Removed legacy `TinyTitleDownloadProgress` overlay in favor of the new centralized agent HUD
+- Improved word-completion acceptance and persistence when typing through existing ghost text, including more natural handling of trailing spaces and punctuation.
+- Made keyboard labels across the TUI platform-aware so shortcuts are displayed using the appropriate key names for the user's operating system.
+- Updated the process monitor to distinguish target scope from current and global scope in its labels.
 
 ### Fixed
 
-- Fixed submission behavior to respect active autocomplete state, ensuring Enter correctly commits current input if the list is still pending
-- Fixed missing background tint on truncated skip lines
+- Fixed autocomplete submission so Enter commits the current input correctly while suggestions are still loading.
+- Fixed the background tint for truncated skip lines.
+
+### Removed
+
+- Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
 
 ## [18.3.1] - 2026-09-25
 

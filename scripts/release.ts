@@ -100,7 +100,7 @@ const CI_ANCESTOR_LIMIT = 30;
 
 async function listCIRuns(sha: string): Promise<CIRun[]> {
 	const out =
-		await $`gh run list --commit ${sha} --workflow CI --json databaseId,status,conclusion,event,headBranch`.text();
+		await $`gh run list --commit ${sha} --workflow ci.yml --json databaseId,status,conclusion,event,headBranch`.text();
 	return JSON.parse(out) as CIRun[];
 }
 
@@ -130,12 +130,22 @@ async function waitForRun(runId: number): Promise<boolean> {
 async function checkCIGreen(): Promise<void> {
 	await git(["fetch", "origin", "main"]).quiet();
 	const head = (await git(["rev-parse", "HEAD"]).text()).trim();
-	const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
-	if (head !== remote) {
-		console.error(`Error: HEAD (${head.slice(0, 8)}) != origin/main (${remote.slice(0, 8)}). Pull/push first.`);
+	// Local-only commits are fine: the release push sends them along with the
+	// release commit. Behind or diverged is not: that push would be rejected.
+	const behind = await git(["merge-base", "--is-ancestor", "origin/main", "HEAD"]).quiet().nothrow();
+	if (behind.exitCode !== 0) {
+		const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
+		console.error(
+			`Error: HEAD (${head.slice(0, 8)}) is behind or diverged from origin/main (${remote.slice(0, 8)}). Pull first.`,
+		);
 		process.exit(1);
 	}
-	console.log("  HEAD matches origin/main");
+	const ahead = Number((await git(["rev-list", "--count", "origin/main..HEAD"]).text()).trim());
+	console.log(
+		ahead > 0
+			? `  HEAD is ${ahead} unpushed commit(s) ahead of origin/main (pushed with the release)`
+			: "  HEAD matches origin/main",
+	);
 
 	const shas = (await git(["rev-list", "--first-parent", "-n", String(CI_ANCESTOR_LIMIT), "HEAD"]).text())
 		.trim()

@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## [18.3.3] - 2026-09-27
+
 ### Fixed
 
-- Fixed recall matching query words inside unrelated words (`1Password` matched memories about `pass` or `word`), which crowded exact matches out of the results ([#13322](https://github.com/can1357/oh-my-pi/pull/13322) by [@alphastorm](https://github.com/alphastorm)).
-- Fixed sleep summaries corrupting words that merely contain a shortened term, such as `incomplete` → `inDONE`, `completed` → `DONEd` and `Networking` → `NetOK` ([#13320](https://github.com/can1357/oh-my-pi/pull/13320) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed recall search matching query terms inside unrelated words, improving result relevance and ensuring exact matches are prioritized.
+- Fixed sleep summaries replacing shortened terms within larger words, preventing unintended word corruption.
 
 ## [18.2.5] - 2026-09-17
 

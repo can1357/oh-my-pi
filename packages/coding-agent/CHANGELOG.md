@@ -2,53 +2,39 @@
 
 ## [Unreleased]
 
+## [18.3.3] - 2026-09-27
+
 ### Added
 
-- Added cross-engine prediction blending for SmolLM and N-gram completions in `omp predict`
-- Added auto-cleanup of legacy `model.safetensors` weight files during migration to GGUF
-- Added `omp skill list [dir] [--json]`, reporting the skills a session in that directory resolves (with discovery warnings in the JSON output), so tools can query skill listings without drift-prone reimplementations ([#12273](https://github.com/can1357/oh-my-pi/pull/12273) by [@andrebrait](https://github.com/andrebrait))
-- Added automated ingestion of existing Claude Code and Codex prompt histories to bootstrap predictive engine vocabularies for new installs
-- Added a centralized download and installation progress HUD to surface background tool and model fetches
-- Added support for SmolLM2-135M word-completion model weights with background prefetching
-- Added unified predictive text engine with pluggable N-gram, SmolLM2, and macOS native providers
-- Added `omp predict` CLI command for evaluating completion engine performance
-- Added cross-process prediction daemon for managing state, history ingestion, and engine fallbacks
-- Added support for dynamic eval prelude guidance via hidden session notices
-- Added a required `complexity` rationale field to the `task` tool for improved auto-thinking depth classification
-- Added the `wait` tool automatically to agents that use `task` or `bash` to improve background process coordination
-- Added a context-aware hint system for empty composers that displays suggestions based on agent activity and effort
-- Added an optional `scope` to the `retain` and `learn` tools, offered when `mnemopi.scoping` is `global` or `per-project-tagged`: `scope: "global"` stores a memory or lesson in the Mnemopi bank every project recalls instead of the current project's bank ([#13324](https://github.com/can1357/oh-my-pi/pull/13324) by [@alphastorm](https://github.com/alphastorm)).
-- Added `/btw` to the commands available from a focused subagent view; it asks about the focused agent's transcript instead of the main session's, keeps its side-conversation history separate from main and other agents, keeps streaming an answer after you leave the view, and its answers can be copied or followed up but not branched into the main session ([#13412](https://github.com/can1357/oh-my-pi/pull/13412), [#13431](https://github.com/can1357/oh-my-pi/pull/13431) by [@H4vC](https://github.com/H4vC))
+- Added a unified predictive text engine with N-gram, SmolLM2, and macOS native providers, including cross-engine blending, background model downloads, and a cross-process prediction daemon.
+- Added the `omp predict` command for evaluating completion performance and support for ingesting existing Claude Code and Codex prompt histories to bootstrap predictions on new installations.
+- Added `omp skill list [dir] [--json]` to report skills resolved for a session directory, including discovery warnings in JSON output.
+- Added a centralized progress display for background tool and model downloads, including support for downloading the SmolLM2-135M word-completion model.
+- Added dynamic evaluation guidance through hidden session notices.
+- Added a required `complexity` rationale to the `task` tool to improve automatic thinking-depth selection.
+- Agents using `task` or `bash` now receive the `wait` tool for background-process coordination, and subagents can receive it when explicitly requested.
+- Added context-aware suggestions to empty composers based on agent activity and effort.
+- Added optional global or per-project memory scopes to the `retain` and `learn` tools when Mnemopi scoping is enabled.
+- Added `/btw` to focused subagent views for asking questions about that agent's transcript with separate side-conversation history.
 
 ### Changed
 
-- Unified completion mode to use blended N-gram and SmolLM confidence scores
-- Updated SmolLM weight download target to 145MB GGUF (Q8_0) format
-- Lowered N-gram auto-completion show threshold from 0.45 to 0.15
-- Unified `auto` completion mode to use the N-gram engine exclusively across all platforms, removing Apple dictionary integration for standard auto-completion
-- Updated word-completion engine to persist ghost text through manual keystrokes by disabling typed-past exclusion
-- Restricted SmolLM model weight prefetching to explicit model activation
-- Updated /play command help description to show space pauses, q quits
-- Changed read tool group summary to display "2 more lines" instead of a Ctrl+O hint
-- Granted wait tool to subagents when explicitly requested
-- Updated empty-submit interrupt policy to account for live-steered messages alongside queued input
-- Updated UI chip display to surface live-steered messages pending transcript recording
-- Updated ps command to list exited global services with --all and show live globals by default
-- Migrated all internal download progress UI to a unified activity registry, replacing legacy per-model overlay logic
-- Updated `omp tiny-models download` to support downloading the word-completion model
-- Updated window input policy to default to background actions and replaced the `delivery` option with a `takeover` boolean flag for opt-in activation
-- Updated `spelling.autocomplete` to an enum-based configuration for engine selection
-- Optimized mid-session `/computer` toggles to bypass full system-prompt rebuilds
-- Updated window input policy to default to background-only delivery, requiring explicit `takeover` for foreground escalation, and clarified cross-platform coordinate and activation semantics
-- Aligned orchestrator task documentation and prompts to a Target/Change/Acceptance format
-- Migrated all hardcoded keyboard and slash-command shortcut labels to dynamic, platform-aware UI hints
-- Centralized usage tracking for slash commands and hints to a persistent, namespaced storage system
+- Completion behavior now uses the N-gram engine for standard `auto` completion across platforms, with blended N-gram and SmolLM confidence scoring where applicable; the SmolLM2 model uses a 145 MB GGUF (Q8_0) download and is prefetched only when explicitly activated.
+- Updated `spelling.autocomplete` to use an enum-based engine configuration.
+- Completion ghost text is now preserved through manual keystrokes.
+- Window input actions now default to background execution; set `takeover: true` to opt into foreground activation, with clarified cross-platform coordinate and activation behavior.
+- `omp tiny-models download` can now download the word-completion model.
+- Updated `/play` help, read-tool summaries, platform-aware shortcut labels, and other UI hints for clearer interaction guidance.
+- Updated the empty-submit behavior to account for live-steered messages and surface pending live-steering status in the UI.
+- `ps --all` now includes exited global services, while the default view shows live global services.
+- Orchestrator task documentation now follows a Target/Change/Acceptance format.
+- Slash-command and hint usage tracking is now persistent and namespaced.
 
 ### Fixed
 
-- Preserved MCP `structuredContent` in live tool result `details`, allowing eval callers to consume server data without parsing the model-facing JSON rendering; spilled results omit the duplicate structured payload from session persistence while retaining the artifact reference ([#13397](https://github.com/can1357/oh-my-pi/issues/13397), [#13398](https://github.com/can1357/oh-my-pi/pull/13398) by [@shawnkoh](https://github.com/shawnkoh)).
-- Fixed a Collab host ending with `a host is already connected for this room` after a brief network drop: when the relay still holds the dropped connection, the host now retries every few seconds for up to 150 s and reclaims its room, and a refused retry no longer resets the guest list or drops queued updates ([#12514](https://github.com/can1357/oh-my-pi/issues/12514), [#13355](https://github.com/can1357/oh-my-pi/pull/13355) by [@alphastorm](https://github.com/alphastorm))
-- Fixed a one-shot command that stopped before completing (for example `omp config set` on a fresh Windows profile) exiting 0 with no output; it now exits 1 with a stderr line naming the command and pointing at `PI_DEBUG_STARTUP` ([#13373](https://github.com/can1357/oh-my-pi/pull/13373) by [@alphastorm](https://github.com/alphastorm))
+- Preserved MCP `structuredContent` in live tool-result details so evaluation callers can consume server data without reparsing model-facing JSON; spilled results continue to retain an artifact reference without duplicating the payload in session history.
+- Fixed Collab hosts becoming unable to reclaim a room after a brief network interruption; hosts now retry room recovery without losing guests or queued updates.
+- Fixed one-shot commands that stopped before completing, such as `omp config set` on a fresh Windows profile, incorrectly exiting successfully without output; they now report failure with diagnostic guidance.
 
 ## [18.3.2] - 2026-09-25
 
