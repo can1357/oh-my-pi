@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.3.5] - 2026-09-27
+
 ### Added
 
 - Added an "OpenAI API" option to the setup wizard's web-search step; the existing ChatGPT-OAuth option is now labeled "OpenAI Codex" ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
