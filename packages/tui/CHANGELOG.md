@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `telegram-prompt` custom message type: prompts relayed from Telegram render as the sender's prompt "via Telegram" in live and rebuilt transcripts ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
+
+### Changed
+
+- Renamed `CollabPromptMessageComponent` (`chat/collab-prompt-message`) to `RemotePromptMessageComponent` (`chat/remote-prompt-message`); it now renders collab and Telegram prompts and strips control sequences from the sender name ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
+
 ## [18.3.5] - 2026-09-27
 
 ### Added

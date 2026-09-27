@@ -14,6 +14,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	TELEGRAM_PROMPT_MESSAGE_TYPE,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -28,6 +29,7 @@ export {
 	type NormalizedCustomMessagePayload,
 	type BackgroundTanDispatchDetails,
 	type SkillPromptDetails,
+	type TelegramPromptDetails,
 	SILENT_ABORT_MARKER,
 	isSilentAbort,
 	USER_INTERRUPT_LABEL,
@@ -44,6 +46,7 @@ export {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
+	TELEGRAM_PROMPT_MESSAGE_TYPE,
 } from "@oh-my-pi/pi-tui/chat/messages";
 import {
 	invalidateMessageCache,
@@ -591,14 +594,16 @@ export function stripInternalDetailsFields<T>(details: T | undefined): T | undef
 type SteeringUserMessage =
 	| (UserMessage & { steering: true })
 	| (CustomMessage & {
-			customType: typeof COLLAB_PROMPT_MESSAGE_TYPE;
+			customType: typeof COLLAB_PROMPT_MESSAGE_TYPE | typeof TELEGRAM_PROMPT_MESSAGE_TYPE;
 			attribution: "user";
 	  });
 
 function isSteeringUserMessage(message: AgentMessage | undefined): message is SteeringUserMessage {
 	if (message?.role === "user") return message.steering === true;
 	return (
-		message?.role === "custom" && message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user"
+		message?.role === "custom" &&
+		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE || message.customType === TELEGRAM_PROMPT_MESSAGE_TYPE) &&
+		message.attribution === "user"
 	);
 }
 
