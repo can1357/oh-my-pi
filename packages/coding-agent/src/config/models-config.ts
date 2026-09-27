@@ -87,8 +87,10 @@ export function validateProviderConfiguration(
 	}
 
 	// Runners dispatch on `api`, so an explicit `kind` must be the kind its api serves
-	// (chat for chat transports). An omitted `kind` follows the api.
+	// (chat for chat transports). An omitted `kind` follows the api. `local-inference`
+	// hosts several kinds, so it accepts any `kind`.
 	const checkKind = (subject: string, kind: ModelKind, api: Api) => {
+		if (api === "local-inference") return;
 		const apiKind = runnerApiKind(api) ?? "chat";
 		if (kind !== apiKind) {
 			throw new Error(

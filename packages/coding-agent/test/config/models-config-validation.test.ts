@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OmpErrors } from "@oh-my-pi/omptype";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
-import { validateProviderConfiguration } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import {
+	type ProviderValidationConfig,
+	validateProviderConfiguration,
+} from "@oh-my-pi/pi-coding-agent/config/models-config";
 import { type ModelsConfig, ModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 
 const models = [{ id: "grok-4", api: "openai-completions" as const }];
@@ -104,7 +107,7 @@ describe("models.yml compat.stripImageInput (#11697)", () => {
 });
 
 describe("model kind must match its api", () => {
-	const validate = (config: Omit<Parameters<typeof validateProviderConfiguration>[1], "baseUrl">) => () =>
+	const validate = (config: Omit<ProviderValidationConfig, "baseUrl">) => () =>
 		validateProviderConfiguration("gateway", { baseUrl, apiKey: "key", ...config }, "models-config");
 
 	test("rejects a model kind its api cannot serve", () => {
@@ -128,5 +131,15 @@ describe("model kind must match its api", () => {
 		expect(validate({ models: [], modelOverrides: { "gpt-image-2": { kind: "image" } } })).toThrow(
 			/modelOverrides\.gpt-image-2: "kind" requires "api"/,
 		);
+	});
+
+	test("multi-kind local-inference accepts any kind", () => {
+		expect(() =>
+			validateProviderConfiguration(
+				"local-rt",
+				{ baseUrl, apiKey: "key", models: [{ id: "whisper", api: "local-inference", kind: "stt" }] },
+				"runtime-register",
+			),
+		).not.toThrow();
 	});
 });

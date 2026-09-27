@@ -74,9 +74,11 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"openai-transcriptions": "stt",
 };
 
+const RUNNER_API_KIND_BY_API: ReadonlyMap<Api, ModelKind> = new Map(Object.entries(RUNNER_API_KINDS));
+
 /** Kind a runner API serves; `undefined` for chat transports and multi-kind `local-inference`. */
 export function runnerApiKind(api: Api): ModelKind | undefined {
-	return Object.hasOwn(RUNNER_API_KINDS, api) ? RUNNER_API_KINDS[api as keyof typeof RUNNER_API_KINDS] : undefined;
+	return RUNNER_API_KIND_BY_API.get(api);
 }
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
