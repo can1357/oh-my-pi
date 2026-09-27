@@ -256,6 +256,7 @@ export class ChainJudge implements Judge {
 				model: model.id,
 				baseUrl: model.baseUrl,
 				headers,
+				judgment: model.judgment,
 			});
 			return usageReportingTypeSafeJudge(judge, model, this.#deps.onUsage);
 		}

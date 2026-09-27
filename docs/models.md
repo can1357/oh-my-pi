@@ -120,6 +120,59 @@ selecting the extended window.
 
 `typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
 
+### Judgment endpoint overrides
+
+`judgment` (provider level, per model, or `modelOverrides`) retargets a
+`typesafe`-family model at a System One–compatible endpoint without a new
+`api` value. Provider-level settings are the baseline; per-model keys
+override them (`typeMap`, `valueMap`, and `usageMap` merge key-wise).
+Supported keys:
+
+- `route` — path appended to `baseUrl` (must start with `/`), e.g. `/v1/evaluate`.
+- `typeField` — answer discriminator field name (default `type`).
+- `typeMap` — canonical question type → wire type (canonical vocab:
+  `noul` | `choice` | `score`), e.g. `{noul: boolean}`. Requests send
+  the wire type; answers map the discriminator back before validation.
+- `valueMap` — canonical answer value key → wire value key, e.g.
+  `{noul: probability}`. Applied explicitly only: when the canonical key is
+  absent and the configured wire key is present, its value is copied over.
+- `usageMap` — renames usage fields: `input` (default `input_tokens`),
+  `output` (default `output_tokens`), `cost` (default `cost`). Missing
+  counts read as 0; a missing cost stays unset so ChainJudge reprices from the
+  catalog. Endpoints that report cost outside the usage object (e.g. Vercel's
+  `providerMetadata.gateway.*`) are out of scope — cost then reprices from
+  the catalog as usual.
+
+Vercel AI Gateway worked example (boolean judgments on `/v1/evaluate`):
+
+```yaml
+providers:
+  vercel-ai-gateway:
+    baseUrl: https://ai-gateway.vercel.sh
+    apiKey: VERCEL_API_KEY
+    api: typesafe
+    judgment:
+      route: /v1/evaluate
+      typeMap:
+        noul: boolean
+      valueMap:
+        noul: probability
+      usageMap:
+        input: inputTokens
+        output: outputTokens
+    models:
+      - id: eval-model
+        name: Eval Model
+```
+
+The model posts to `https://ai-gateway.vercel.sh/v1/evaluate` with `boolean` question types;
+`{type: boolean, probability: 0.9}` answers normalize to
+`{type: noul, noul: 0.9}`, and camelCase usage is read from `inputTokens` /
+`outputTokens`. A Bifrost-style endpoint that renames the discriminator
+(`type` → `kind`) is covered the same way with `typeField: kind`,
+`valueMap: {noul: value, choice: value, score: value}`, and
+`usageMap: {input: prompt_tokens, output: completion_tokens}`.
+
 ### Allowed auth/discovery values
 
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
@@ -152,6 +205,7 @@ Must define at least one of:
 - `modelOverrides`
 - `discovery`
 - `remoteCompaction`
+- `judgment`
 
 ### Discovery
 
@@ -160,7 +214,7 @@ Must define at least one of:
 
 ### Remote compaction
 
-`remoteCompaction` is independently sufficient for an override-only provider.
+`remoteCompaction` and `judgment` are each independently sufficient for an override-only provider.
 It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 `v2Endpoint`, and `streamingEndpoint`.
 
@@ -223,12 +277,13 @@ and transcripts record the concrete provider/model that executed the turn.
 
 Provider defaults vs per-model overrides:
 
-- Provider `headers`, `compat`, and `remoteCompaction` are baselines.
+- Provider `headers`, `compat`, `remoteCompaction`, and `judgment` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `imageInputDecoder`,
   `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`, `maxContextWindow`, `maxTokens`,
   `omitMaxOutputTokens`, `headers`, `compat`, `contextPromotionTarget`, `compactionModel`, and
-  `remoteCompaction`).
+  `remoteCompaction`, and
+  `judgment`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
   `extraBody`, and `whenThinking`).
 

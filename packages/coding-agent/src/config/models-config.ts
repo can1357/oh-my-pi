@@ -27,6 +27,7 @@ export interface ProviderValidationConfig {
 	discovery?: ProviderDiscovery;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: unknown;
+	judgment?: unknown;
 	disableStrictTools?: boolean;
 	guardrailIdentifier?: string;
 	requestMetadata?: Record<string, string>;
@@ -55,11 +56,12 @@ export function validateProviderConfiguration(
 				!config.guardrailIdentifier &&
 				!config.requestMetadata &&
 				!config.remoteCompaction &&
+				!config.judgment &&
 				!hasModelOverrides &&
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "judgment", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -124,6 +126,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 				discovery: providerConfig.discovery as ProviderDiscovery | undefined,
 				compat: providerConfig.compat,
 				remoteCompaction: providerConfig.remoteCompaction,
+				judgment: providerConfig.judgment,
 				disableStrictTools: providerConfig.disableStrictTools,
 				guardrailIdentifier: providerConfig.guardrailIdentifier,
 				requestMetadata: providerConfig.requestMetadata,

@@ -943,6 +943,63 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("judgment overrides merge provider baseline with per-model keys", () => {
+			const registry = readonlyRegistry({
+				providers: {
+					"judge-proxy": {
+						baseUrl: "https://judge-proxy.example/v1",
+						apiKey: "JUDGE_KEY",
+						api: "typesafe",
+						judgment: {
+							route: "/v1/evaluate",
+							typeMap: { noul: "boolean", choice: "select" },
+							usageMap: { input: "inputTokens" },
+						},
+						models: [
+							{
+								id: "judge-model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 4096,
+								judgment: {
+									valueMap: { noul: "probability" },
+									usageMap: { output: "outputTokens" },
+								},
+							},
+						],
+					},
+				},
+			});
+			expect(registry.find("judge-proxy", "judge-model")?.judgment).toEqual({
+				route: "/v1/evaluate",
+				typeMap: { noul: "boolean", choice: "select" },
+				valueMap: { noul: "probability" },
+				usageMap: { input: "inputTokens", output: "outputTokens" },
+			});
+		});
+
+		test("modelOverrides carry judgment onto bundled models", () => {
+			const bundled = sharedBuiltin.find("anthropic", "claude-sonnet-4-6");
+			if (!bundled) throw new Error("Expected bundled anthropic model");
+			const registry = readonlyRegistry({
+				providers: {
+					anthropic: {
+						modelOverrides: {
+							"claude-sonnet-4-6": {
+								judgment: { route: "/v1/evaluate", typeMap: { noul: "boolean" } },
+							},
+						},
+					},
+				},
+			});
+			expect(registry.find("anthropic", "claude-sonnet-4-6")?.judgment).toEqual({
+				route: "/v1/evaluate",
+				typeMap: { noul: "boolean" },
+			});
+		});
+
 		test("model-level compat overrides provider-level compat for custom models", () => {
 			const model = customModelCompat.find("demo", "demo-model");
 			const compat = getOpenAICompat(model);

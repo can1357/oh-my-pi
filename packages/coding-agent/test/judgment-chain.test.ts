@@ -319,6 +319,51 @@ describe("ChainJudge", () => {
 		expect(attempted).toEqual([ONLINE.id, ONLINE.id, ONLINE.id, ONLINE_BACKUP.id]);
 	});
 
+	it("forwards judgment overrides to native judgment models", async () => {
+		const urls: string[] = [];
+		const bodies: { questions: Record<string, { type: string }> }[] = [];
+		const nativeModel = {
+			...JEV_PREVIEW,
+			id: "jev-custom-route",
+			provider: "custom-judge",
+			baseUrl: "https://custom.example",
+			judgment: {
+				route: "/v1/evaluate",
+				typeMap: { noul: "boolean" },
+				valueMap: { noul: "probability" },
+				usageMap: { input: "inputTokens", output: "outputTokens" },
+			},
+		} as Model<Api>;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "custom-judge/jev-custom-route" },
+		});
+		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((_url, init) => {
+				urls.push(String(_url));
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({
+					model: "jev-custom-route",
+					answers: { urgent: { type: "boolean", probability: 0.9 } },
+					usage: { inputTokens: 12, outputTokens: 3 },
+				});
+			}),
+		);
+
+		const result = await new ChainJudge({ settings, registry }).judge({
+			state: "mechanical task",
+			questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
+		});
+
+		expect(urls).toEqual(["https://custom.example/v1/evaluate"]);
+		expect(bodies[0]?.questions.urgent.type).toBe("boolean");
+		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+		expect(result.usage.input).toBe(12);
+		expect(result.usage.totalTokens).toBe(15);
+	});
+
 	it("resolves and forwards configured headers to native judgment models", async () => {
 		const recordedHeaders: Record<string, string>[] = [];
 		const nativeModel = {

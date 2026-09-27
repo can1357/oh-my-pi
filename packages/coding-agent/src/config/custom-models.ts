@@ -1,4 +1,4 @@
-import type { Api, Model, ModelSpec, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+import type { Api, JudgmentConfig, Model, ModelSpec, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getVariantAliasSources, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
@@ -8,7 +8,7 @@ import {
 } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
-import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
+import { type ModelPatch, mergeCompat, mergeJudgmentConfig, mergeRemoteCompactionConfig } from "./model-patch";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { ModelOverride, ProviderAuthMode } from "./models-config-schema";
 export interface CustomModelDefinitionLike extends ModelPatch {
@@ -72,6 +72,7 @@ export function buildCustomModelOverlay(
 	providerCompat: ModelSpec<Api>["compat"] | undefined,
 	providerAuth: ProviderAuthMode | undefined,
 	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
+	providerJudgment: JudgmentConfig | undefined,
 	modelDef: CustomModelDefinitionLike,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
@@ -100,6 +101,7 @@ export function buildCustomModelOverlay(
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
+		judgment: mergeJudgmentConfig(providerJudgment, modelDef.judgment),
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -147,6 +149,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,
 		compactionModel: resolvedModel.compactionModel,
 		remoteCompaction: resolvedModel.remoteCompaction,
+		judgment: resolvedModel.judgment,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);

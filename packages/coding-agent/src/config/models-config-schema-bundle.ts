@@ -188,6 +188,47 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	const JudgmentUsageMapSchema = type({
+		"input?": "string",
+		"output?": "string",
+		"cost?": "string",
+	}).narrow((value, ctx) => {
+		for (const key of ["input", "output", "cost"] as const) {
+			const v = (value as Record<string, unknown>)[key];
+			if (v !== undefined && (typeof v !== "string" || v.length === 0)) {
+				return ctx.mustBe(`judgment.usageMap.${key} a non-empty string`);
+			}
+		}
+		return true;
+	});
+
+	const JudgmentSchema = type({
+		"route?": "string",
+		"typeField?": "string",
+		"typeMap?": { "[string]": "string" },
+		"valueMap?": { "[string]": "string" },
+		"usageMap?": JudgmentUsageMapSchema,
+	}).narrow((value, ctx) => {
+		if (value.route !== undefined) {
+			if (typeof value.route !== "string" || value.route.length === 0 || !value.route.startsWith("/")) {
+				return ctx.mustBe("judgment.route a non-empty path starting with `/`");
+			}
+		}
+		if (value.typeField !== undefined && (typeof value.typeField !== "string" || value.typeField.length === 0)) {
+			return ctx.mustBe("judgment.typeField a non-empty string");
+		}
+		for (const mapKey of ["typeMap", "valueMap"] as const) {
+			const map = (value as Record<string, unknown>)[mapKey] as Record<string, unknown> | undefined;
+			if (map === undefined) continue;
+			for (const k of Object.keys(map)) {
+				if (k.length === 0 || typeof map[k] !== "string" || (map[k] as string).length === 0) {
+					return ctx.mustBe(`judgment.${mapKey} entries must be non-empty strings`);
+				}
+			}
+		}
+		return true;
+	});
+
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
@@ -220,6 +261,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
 		"remoteCompaction?": RemoteCompactionSchema,
+		"judgment?": JudgmentSchema,
 	}).narrow((value, ctx) => {
 		// Enforce id non-empty
 		if (typeof value.id === "string" && value.id.length === 0) {
@@ -277,6 +319,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
 		"remoteCompaction?": RemoteCompactionSchema,
+		"judgment?": JudgmentSchema,
 	}).narrow((value, ctx) => {
 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 			return ctx.mustBe("name a non-empty string");
@@ -331,6 +374,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
+		"judgment?": JudgmentSchema,
 		"authHeader?": "boolean",
 		"auth?": ProviderAuthSchema,
 		"discovery?": ProviderDiscoverySchema,
