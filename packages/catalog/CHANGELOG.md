@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Model.judgment` (`JudgmentConfig`: `route`, `typeField`, `typeMap`, `valueMap`, `usageMap`) declaring per-model System One judgment endpoint overrides, honored for custom providers and `modelOverrides` ([#13519](https://github.com/can1357/oh-my-pi/pull/13519) by [@szavadsky](https://github.com/szavadsky)).
+
 ## [18.3.5] - 2026-09-27
 
 ### Added

@@ -133,17 +133,21 @@ export class TypeSafeJudge implements Judge {
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
 		const judgment = this.#judgment;
 		const typeField = judgment?.typeField ?? "type";
-		const wireQuestions: Record<string, unknown> = {};
-		for (const id in request.questions) {
-			const question = request.questions[id] as unknown as Record<string, unknown> & { type: string };
-			const wireQuestion: Record<string, unknown> = {
-				...question,
-				[typeField]: judgment?.typeMap?.[question.type] ?? question.type,
-			};
-			if (typeField !== "type") delete wireQuestion.type;
-			wireQuestions[id] = wireQuestion;
+		let questions: unknown = request.questions;
+		if (judgment?.typeMap !== undefined || typeField !== "type") {
+			const wireQuestions: Record<string, unknown> = {};
+			for (const id in request.questions) {
+				const question = request.questions[id] as unknown as Record<string, unknown> & { type: string };
+				const wireQuestion: Record<string, unknown> = {
+					...question,
+					[typeField]: judgment?.typeMap?.[question.type] ?? question.type,
+				};
+				if (typeField !== "type") delete wireQuestion.type;
+				wireQuestions[id] = wireQuestion;
+			}
+			questions = wireQuestions;
 		}
-		const body = JSON.stringify({ state: request.state, model: this.model, questions: wireQuestions });
+		const body = JSON.stringify({ state: request.state, model: this.model, questions });
 		const route = judgment?.route ?? JUDGMENT_ROUTES[this.api];
 		const signal = options?.signal;
 		const response = await withAuth(this.#apiKey, key => this.#attempt<SystemOneResponse>(route, body, key, signal), {

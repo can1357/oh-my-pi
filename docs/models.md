@@ -161,8 +161,8 @@ providers:
         input: inputTokens
         output: outputTokens
     models:
-      - id: eval-model
-        name: Eval Model
+      - id: typesafe-ai/jev
+        name: Jev via Vercel
 ```
 
 The model posts to `https://ai-gateway.vercel.sh/v1/evaluate` with `boolean` question types;

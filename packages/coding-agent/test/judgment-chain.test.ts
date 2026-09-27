@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, AssistantMessage, ChoiceQuestion, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -362,6 +365,70 @@ describe("ChainJudge", () => {
 		expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
 		expect(result.usage.input).toBe(12);
 		expect(result.usage.totalTokens).toBe(15);
+	});
+
+	it("loads judgment overrides from real config through ChainJudge", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-judgment-chain-"));
+		try {
+			const configPath = path.join(dir, "models.json");
+			fs.writeFileSync(
+				configPath,
+				JSON.stringify({
+					providers: {
+						"judge-proxy": {
+							baseUrl: "https://judge-proxy.example",
+							apiKey: "JUDGE_KEY",
+							api: "typesafe",
+							judgment: {
+								route: "/v1/evaluate",
+								typeMap: { noul: "boolean" },
+								valueMap: { noul: "probability" },
+								usageMap: { input: "inputTokens", output: "outputTokens" },
+							},
+							models: [
+								{
+									id: "judge-model",
+									name: "Judge Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 128000,
+									maxTokens: 4096,
+								},
+							],
+						},
+					},
+				}),
+			);
+			const authStorage = createInMemoryAuthStorage();
+			const registry = new ModelRegistry(authStorage, configPath);
+			const urls: string[] = [];
+			const bodies: { questions: Record<string, { type: string }> }[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch((_url, init) => {
+					urls.push(String(_url));
+					bodies.push(JSON.parse(String(init?.body)));
+					return Response.json({
+						model: "judge-model",
+						answers: { urgent: { type: "boolean", probability: 0.9 } },
+						usage: { inputTokens: 12, outputTokens: 3 },
+					});
+				}),
+			);
+			const settings = Settings.isolated({ modelRoles: { judge: "judge-proxy/judge-model" } });
+			const result = await new ChainJudge({ settings, registry }).judge({
+				state: "mechanical task",
+				questions: { urgent: { type: "noul", instructions: "Does this convey urgency?" } },
+			});
+			expect(urls).toEqual(["https://judge-proxy.example/v1/evaluate"]);
+			expect(bodies[0]?.questions.urgent.type).toBe("boolean");
+			expect(result.answers.urgent).toMatchObject({ type: "noul", noul: 0.9 });
+			expect(result.usage.input).toBe(12);
+			expect(result.usage.totalTokens).toBe(15);
+			authStorage.close();
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("resolves and forwards configured headers to native judgment models", async () => {
