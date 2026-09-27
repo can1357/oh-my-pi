@@ -952,6 +952,15 @@ export function getTerminalSessionsDir(agentDir?: string): string {
 }
 
 /**
+ * Get the session presence directory (~/.omp/agent/session-presence): one
+ * JSON file per published top-level session, read by other omp processes to
+ * discover live sessions (mirrors, second-writer refusal).
+ */
+export function getSessionPresenceDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "session-presence", "state");
+}
+
+/**
  * Get the persistent registry of custom session files
  * (~/.omp/agent/custom-session-files). Each `--session-dir`/`--session`
  * transcript is recorded here as one marker file so storage GC can scan its

@@ -2147,6 +2147,10 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
+		// Presence is opt-in: only the interactive TUI publishes, read by other omp
+		// processes (mirrors, second-writer refusal). `omp -p`, ACP, RPC and SDK
+		// embedders stay out of the registry.
+		if (isInteractive) sessionOptions.presenceKind = "interactive";
 
 		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
 		// exporters when an endpoint is configured via env, then switch on the agent
