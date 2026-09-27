@@ -36,6 +36,12 @@ type StubEditor = {
 	getText: () => string;
 	getExpandedText: () => string;
 	clearDraft: (historyText?: string) => void;
+	captureComposerDraft: () => { editor: { text: string }; images: ImageContent[]; links: (string | undefined)[] };
+	restoreComposerDraft: (draft: {
+		editor: { text: string };
+		images: ImageContent[];
+		links: (string | undefined)[];
+	}) => void;
 	addToHistory: Mock<(...args: unknown[]) => unknown>;
 	onSubmit?: (text: string) => Promise<void>;
 	pendingImages: ImageContent[];
@@ -58,6 +64,7 @@ type PromptCustomMessage = Mock<
 			queueOnly?: boolean;
 			onPromptQueued?: (queued: readonly unknown[]) => void;
 			onPromptAdmitted?: () => void;
+			onAccepted?: () => void;
 		},
 	) => Promise<void>
 >;
@@ -89,6 +96,15 @@ function createStubInputControllerContext(opts: {
 		getExpandedText() {
 			return editorText;
 		},
+		captureComposerDraft() {
+			return { editor: { text: editorText }, images: [...this.pendingImages], links: [...this.pendingImageLinks] };
+		},
+		restoreComposerDraft(draft) {
+			this.pendingImages = [...draft.images];
+			this.pendingImageLinks = [...draft.links];
+			this.imageLinks = this.pendingImageLinks;
+			this.setText(draft.editor.text);
+		},
 		clearDraft(historyText?: string) {
 			if (historyText !== undefined) this.addToHistory(historyText);
 			this.setText("");
@@ -102,7 +118,7 @@ function createStubInputControllerContext(opts: {
 	};
 	const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {});
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
-	const handleGoalModeCommand = vi.fn(async (_rest?: string) => {});
+	const handleGoalModeCommand = vi.fn(async (_rest?: string) => true);
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
@@ -423,6 +439,31 @@ describe("InputController optimistic skill row (#8895)", () => {
 		expect(clearOptimisticSkillMessage).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledTimes(1);
 		expect(editor.getText()).toBe("/skill:test-skill go");
+	});
+
+	it("does not replace a restored rich stash when accepted skill dispatch later rejects", async () => {
+		const { ctx, editor, promptCustomMessage, showError } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+		});
+		const controller = new InputController(ctx);
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("stashed [Image #1]");
+		controller.handleStash();
+		promptCustomMessage.mockImplementation(async (_message, options) => {
+			options?.onAccepted?.();
+			throw new Error("post-prompt failure");
+		});
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill go");
+		await editor.onSubmit?.("/skill:test-skill go");
+
+		expect(showError).toHaveBeenCalledWith("post-prompt failure");
+		expect(editor.getText()).toBe("stashed [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
 	});
 });
 
@@ -822,6 +863,15 @@ function createStubInteractiveModeContextForUiHelpers(
 		},
 		getExpandedText() {
 			return editorText;
+		},
+		captureComposerDraft() {
+			return { editor: { text: editorText }, images: [...this.pendingImages], links: [...this.pendingImageLinks] };
+		},
+		restoreComposerDraft(draft) {
+			this.pendingImages = [...draft.images];
+			this.pendingImageLinks = [...draft.links];
+			this.imageLinks = this.pendingImageLinks;
+			this.setText(draft.editor.text);
 		},
 		clearDraft(historyText?: string) {
 			if (historyText !== undefined) this.addToHistory(historyText);

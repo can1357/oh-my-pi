@@ -202,6 +202,19 @@ describe("InteractiveMode vibe mode toggle", () => {
 		tempDir.removeSync();
 	});
 
+	it("restores a stashed draft after a local /vibe exit", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		mode.editor.setText("saved draft");
+		mode.editor.handleInput("\x13");
+		mode.editor.setText("/vibe exit");
+
+		await mode.editor.onSubmit?.("/vibe exit");
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(mode.editor.getText()).toBe("saved draft");
+	});
+
 	it("preserves the parent Todo tool and restores the exact pre-vibe toolset on exit", async () => {
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 		expect(session.getActiveToolNames()).toEqual([]);

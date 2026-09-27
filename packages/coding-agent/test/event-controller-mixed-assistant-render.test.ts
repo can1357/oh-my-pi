@@ -96,6 +96,28 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		resetSettingsForTest();
 	});
 
+	it("does not consume a stash when an older queued user message is delivered", async () => {
+		const { controller, ctx } = createFixture();
+		let stashedDraft = "rich draft";
+		Object.assign(ctx, {
+			restoreStashAfterSubmit: () => {
+				stashedDraft = "";
+			},
+		});
+		ctx.locallySubmittedUserSignatures.add("queued before stash\u00000");
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "queued before stash" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		expect(ctx.locallySubmittedUserSignatures.has("queued before stash\u00000")).toBe(false);
+		expect(stashedDraft).toBe("rich draft");
+	});
+
 	it("finalizes and removes an orphaned streaming component on the next message_start", async () => {
 		// Regression: a stream that died between message_start and message_end
 		// (transport drop, hook throw) left its component live in the transcript.
