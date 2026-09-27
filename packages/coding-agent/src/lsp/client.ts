@@ -1089,10 +1089,11 @@ export async function getOrCreateClient(
 			resolveProjectLoaded = resolve;
 		});
 		// Auto-resolve after timeout in case server doesn't use progress tokens
-		const projectLoadTimeout = setTimeout(resolveProjectLoaded, PROJECT_LOAD_TIMEOUT_MS);
+		const projectLoadTimeout = setTimeout(() => client.resolveProjectLoaded(), PROJECT_LOAD_TIMEOUT_MS);
 		const originalResolve = resolveProjectLoaded;
 		resolveProjectLoaded = () => {
 			clearTimeout(projectLoadTimeout);
+			client.projectLoadPending = false;
 			originalResolve();
 		};
 
@@ -1115,6 +1116,7 @@ export async function getOrCreateClient(
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
 			projectLoaded,
+			projectLoadPending: true,
 			resolveProjectLoaded,
 		};
 
