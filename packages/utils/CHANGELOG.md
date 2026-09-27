@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getSessionPresenceDir()` and `getTelegramDir()` helpers for the agent subdirectories holding published session presence records and the Telegram bridge state ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
+
 ## [18.3.1] - 2026-09-25
 
 ### Fixed

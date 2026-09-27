@@ -6,6 +6,7 @@ import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { RemoteDialogHosts } from "./remote-dialogs";
+import type { TelegramController } from "../telegram/controller";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { Settings } from "../config/settings";
 import type {
@@ -162,6 +163,8 @@ export interface InteractiveModeContext {
 	lspServers?: LspStartupServerInfo[];
 	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
 	collabController: CollabController;
+	/** The Telegram bridge for the interactive session (`/telegram`, auto-start). */
+	telegramController: TelegramController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;

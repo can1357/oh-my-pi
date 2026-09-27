@@ -960,6 +960,11 @@ export function getSessionPresenceDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "session-presence", "state");
 }
 
+/** Get the Telegram bridge state directory (~/.omp/agent/telegram). */
+export function getTelegramDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "telegram", "state");
+}
+
 /**
  * Get the persistent registry of custom session files
  * (~/.omp/agent/custom-session-files). Each `--session-dir`/`--session`

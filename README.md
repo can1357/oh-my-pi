@@ -186,6 +186,8 @@ _[Watch the capture ↗](https://omp.sh/clips/advisor.mp4)_
 
 _[Watch the capture ↗](https://omp.sh/clips/collab.mp4)_
 
+Prefer a chat client? The native Telegram bridge gives every session its own topic: `/telegram pair` binds your bot from the TUI, then messages in a topic drive that session — prompts, follow-ups, stop, photos, and agent questions answered with buttons — while `omp telegram` runs the same bridge headless. One bot, one host: a second writer refuses with the holder's pid. See [docs/telegram.md](docs/telegram.md).
+
 ### 08 · Read a pdf on arxiv, why not?
 
 web_search chains twenty-three ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.

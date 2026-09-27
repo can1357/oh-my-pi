@@ -58,6 +58,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Notifications",
 		"Speech",
 		"Collab",
+		"Telegram",
 		"Stream",
 		"Magic Keywords",
 		"Startup & Updates",
