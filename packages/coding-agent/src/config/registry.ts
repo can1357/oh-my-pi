@@ -94,6 +94,18 @@ interface DefinitionBase {
 	 */
 	credential?: true;
 	/**
+	 * Marks a setting bound to this machine or account (local servers, provider endpoints, billing
+	 * tiers, saved reset credits): saved profiles never capture or share it ({@link Setting.isMachineLocal}).
+	 */
+	machineLocal?: true;
+	/**
+	 * Marks a setting whose permissive value loosens tool approvals or secret redaction, hands over
+	 * the user's real browser or desktop, or automatically runs or installs project or third-party
+	 * code and services: profile imports and exports withhold it; the user's own saved profiles keep
+	 * it ({@link Setting.isSafetySensitive}).
+	 */
+	safetySensitive?: true;
+	/**
 	 * Array entries may be objects scoping values to working-directory prefixes
 	 * (`{ path(s)/pathPrefix(es), values | items | <valuesKey> }`, see `config/settings.ts`);
 	 * `valuesKey` names the domain-specific alias for the values list (e.g. `models`).
@@ -450,7 +462,8 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 
 /**
  * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * environment variable, runtime override, session setup (a loaded profile), `--config` overlay,
+ * project, global, then the default.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -510,6 +523,16 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.definition.credential === true || this.ui?.secret === true;
 	}
 
+	/** Whether the value is tied to this machine or account, so saved profiles never capture it. */
+	get isMachineLocal(): boolean {
+		return this.definition.machineLocal === true;
+	}
+
+	/** Whether profile imports and exports must withhold the value. */
+	get isSafetySensitive(): boolean {
+		return this.definition.safetySensitive === true;
+	}
+
 	/** Value supplied by the environment variable, or `undefined` when unset or unparseable. */
 	envValue(): T | undefined {
 		if (!this.envName || !this.#parseEnv) return undefined;
@@ -539,7 +562,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Value from the settings layers alone (runtime, `--config` overlay, project, global, default),
+	 * Value from the settings layers alone (runtime, setup, `--config` overlay, project, global, default),
 	 * ignoring the environment variable — what the settings panel shows and edits.
 	 */
 	layered(scope: ScopeLike): T {
@@ -737,10 +760,31 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Holds the default as a runtime override only while no persisted layer — global, project,
-	 * `--config` overlay — configures this setting; no-op when the environment or any layer already
-	 * configures it, and dropped by a {@link set}/{@link unset} of this setting or when a reload or
-	 * re-scope configures it (protocol-host defaults).
+	 * Persists one entry of this record setting to the global config; `undefined` removes the entry.
+	 * The record's other entries, persisted or supplied by another layer, stay as they are.
+	 *
+	 * @throws Error when this is not a record setting or the entry does not fit the definition.
+	 */
+	setEntry(scope: ScopeLike, key: string, value: RecordEntryOf<T> | undefined): void {
+		settingsOf(scope).writeEntry(this, key, value === undefined ? undefined : this.#normalizeEntry(key, value));
+	}
+
+	/**
+	 * Adds (`member`) or removes `item` in this list setting's persisted global value, leaving every
+	 * other item as it is.
+	 *
+	 * @throws Error when this is not a list setting or the resulting list does not fit the definition.
+	 */
+	setMember(scope: ScopeLike, item: string, member: boolean): void {
+		settingsOf(scope).writeMember(this, item, member);
+	}
+
+	/**
+	 * Holds the default as a runtime override only while no other layer — global, project, `--config`
+	 * overlay, session setup — configures this setting; no-op when the environment or any layer already
+	 * configures it, and dropped by a global write ({@link set}, {@link setEntry}, {@link setMember}) or
+	 * {@link unset} of this setting or when a reload, re-scope, or session setup configures it
+	 * (protocol-host defaults).
 	 */
 	pinDefault(scope: ScopeLike): void {
 		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
@@ -750,12 +794,18 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.definition.normalize ? this.definition.normalize(value) : value;
 	}
 
+	/** `value` as the `key` entry of this record, normalized like a whole-record write. */
+	#normalizeEntry(key: string, value: unknown): unknown {
+		const normalize = this.definition.normalize;
+		return normalize ? (normalize({ [key]: value }) as Record<string, unknown>)[key] : value;
+	}
+
 	/** Removes a runtime override, restoring the persisted/default value. */
 	clearOverride(scope: ScopeLike): void {
 		settingsOf(scope).clearOverrideValue(this);
 	}
 
-	/** Whether the environment or any settings layer (runtime, overlay, project, global) sets this value. */
+	/** Whether the environment or any settings layer (runtime, setup, overlay, project, global) sets this value. */
 	isConfigured(scope: ScopeLike): boolean {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
@@ -768,6 +818,8 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 /** Value type of a handle or derivation. */
 export type SettingValueOf<H> = H extends Derived<infer T> ? T : never;
+/** Entry value type of a record setting's value `T` (see {@link Setting.setEntry}). */
+export type RecordEntryOf<T> = T extends Readonly<Record<string, infer V>> ? V : never;
 /** Handle of any registered setting (runtime/string-keyed surfaces: UI, CLI, `cfg://`). */
 export type AnySetting = Setting<unknown>;
 

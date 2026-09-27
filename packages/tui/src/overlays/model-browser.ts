@@ -525,15 +525,15 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 }
 
 /** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
-function isFreeModel(model: Model): boolean {
+function isFreeModel(model: { cost?: { input: number; output: number } }): boolean {
 	const cost = model.cost;
 	return !cost || (cost.input === 0 && cost.output === 0);
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
-function formatCostPair(model: Model): string {
-	if (isFreeModel(model)) return "free";
+export function formatCostPair(model: { cost?: { input: number; output: number } }): string {
 	const cost = model.cost;
+	if (!cost || (cost.input === 0 && cost.output === 0)) return "free";
 
 	const fmt = (n: number): string => {
 		if (!Number.isFinite(n) || n < 0) return "?";
@@ -573,7 +573,7 @@ function formatDescription(description: string): string {
  * instead of drifting with the number's width. The ascii preset's `ctx:`
  * label is a prefix form — strip the colon for suffix placement.
  */
-function formatContext(model: Model): string {
+export function formatContext(model: { contextWindow?: number | null }): string {
 	const ctx = model.contextWindow ?? 0;
 	if (ctx <= 0) return "";
 	return `${formatNumber(ctx).toLowerCase()} ${theme.icon.context.replace(/:$/, "")}`;
@@ -586,7 +586,7 @@ function formatTps(tps: number): string {
 }
 
 /** Brain-icon intelligence score delivered with the model catalog. */
-function formatIntelligence(model: Model): string {
+export function formatIntelligence(model: { int?: number | null }): string {
 	if (model.int == null || !Number.isFinite(model.int)) return "";
 	return `${theme.symbol("icon.intelligence")} ${Math.round(model.int)}`;
 }
@@ -595,6 +595,22 @@ function formatIntelligence(model: Model): string {
 function formatTtft(ms: number): string {
 	const seconds = ms / 1000;
 	return seconds >= 10 ? `${Math.round(seconds)}s` : `${seconds.toFixed(1)}s`;
+}
+
+/** Measured TPS/TTFT, falling back to catalog TPS as an estimated `~118t/s`. */
+export function formatModelPerformance(
+	model: { tps?: number | null },
+	perf: ModelBrowserPerf | undefined,
+	mode: "off" | "tps" | "full" = "full",
+): string {
+	if (mode === "off") return "";
+	if (perf) {
+		const tps = formatTps(perf.tps);
+		if (mode === "full" && perf.ttftMs !== null) return `${formatTtft(perf.ttftMs)} ${tps}`;
+		return tps;
+	}
+	const tps = model.tps;
+	return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
 }
 
 /** Pad `text` on the left to `width` terminal columns (ANSI/emoji aware). */
@@ -1004,19 +1020,6 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
-	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
-	#perfCell(item: ModelBrowserItem, mode: PerfMode): string {
-		if (mode === "off") return "";
-		const perf = this.#perf.get(item.selector);
-		if (perf) {
-			const tps = formatTps(perf.tps);
-			if (mode === "full" && perf.ttftMs !== null) return `${formatTtft(perf.ttftMs)} ${tps}`;
-			return tps;
-		}
-		const tps = item.model.tps;
-		return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
-	}
-
 	#renderRow(
 		item: ModelBrowserItem,
 		width: number,
@@ -1054,7 +1057,9 @@ export class ModelBrowser implements Component {
 				? `${theme.fg("dim", padLeftVisible(formatIntelligence(item.model), intelligenceWidth))}  `
 				: "";
 		const perfCol =
-			perfWidth > 0 ? `${theme.fg("dim", padLeftVisible(this.#perfCell(item, perfMode), perfWidth))}  ` : "";
+			perfWidth > 0
+				? `${theme.fg("dim", padLeftVisible(formatModelPerformance(item.model, this.#perf.get(item.selector), perfMode), perfWidth))}  `
+				: "";
 		const meta = `${intelligenceCol}${perfCol}${theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth))}  ${theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth))}`;
 		const metaWidth =
 			ctxWidth +
@@ -1174,7 +1179,10 @@ export class ModelBrowser implements Component {
 				if (perfMode !== "off") {
 					intelligenceWidth = Math.max(intelligenceWidth, visibleWidth(formatIntelligence(item.model)));
 				}
-				perfWidth = Math.max(perfWidth, visibleWidth(this.#perfCell(item, perfMode)));
+				perfWidth = Math.max(
+					perfWidth,
+					visibleWidth(formatModelPerformance(item.model, this.#perf.get(item.selector), perfMode)),
+				);
 			}
 
 			const rows: string[] = [];

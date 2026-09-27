@@ -112,15 +112,15 @@ export function createAgentsHubDeps(
 			});
 			return selection ? (selection.model ?? "@advisor") : undefined;
 		},
-		setDisabledAgents: names => cfgTaskDisabledAgents.set(settings, names),
-		setOverrides: (property, overrides) => {
+		setAgentDisabled: (name, disabled) => cfgTaskDisabledAgents.setMember(settings, name, disabled),
+		setAgentOverride: (property, name, value) => {
 			const setting =
 				property === "model"
 					? cfgTaskAgentModelOverrides
 					: property === "prewalk"
 						? cfgTaskAgentPrewalk
 						: cfgTaskAgentAdvisor;
-			setting.set(settings, overrides);
+			setting.setEntry(settings, name, value);
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();

@@ -12,6 +12,7 @@ import { effect, register } from "../config/registry";
 // Secret handling
 export const cfgSecretsEnabled = register({
 	id: "secrets.enabled",
+	safetySensitive: true,
 	type: "boolean",
 	default: false,
 	ui: {

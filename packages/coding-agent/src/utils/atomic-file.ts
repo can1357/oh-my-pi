@@ -61,6 +61,23 @@ async function replaceAfterWindowsRenameFailure(
 }
 
 /**
+ * Create `targetPath` holding `content` without exposing a partial file or
+ * replacing an existing one: a staged sibling is hard-linked into place, so an
+ * existing destination fails with `EEXIST` and nothing is written over it.
+ */
+export async function createFileAtomically(targetPath: string, content: string): Promise<void> {
+	const staging = `${targetPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	await fs.promises.writeFile(staging, content, { flag: "wx" });
+	try {
+		await fs.promises.link(staging, targetPath);
+	} finally {
+		await fs.promises.unlink(staging).catch(error => {
+			if (!isEnoent(error)) logger.warn("Failed to remove staged file", { staging, error: toError(error).message });
+		});
+	}
+}
+
+/**
  * Move a live file across devices without exposing a partial destination.
  * The source remains authoritative while the copy is staged. Publication and
  * source removal are synchronous so in-process writers cannot land between them.

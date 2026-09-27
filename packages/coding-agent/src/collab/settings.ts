@@ -45,6 +45,7 @@ export const cfgCollabDisplayName = register({
 
 export const cfgCollabAutoStart = register({
 	id: "collab.autoStart",
+	safetySensitive: true,
 	type: "enum",
 	values: ["off", "view", "control"] as const,
 	default: "off",

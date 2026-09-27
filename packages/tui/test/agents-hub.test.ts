@@ -1,30 +1,43 @@
 /**
  * Contracts of the fullscreen /agents hub: frame geometry, scope sidebar
- * filtering, type-to-filter search, the Space enable/disable toggle, and the
+ * filtering, type-to-filter search, the Space enable/disable toggle, the
  * strip-driven configuration flows (property strips, pattern input, and the
- * model-browser pick) persisting to the per-agent settings records.
+ * model-browser pick) persisting one agent's entry at a time, and the host
+ * options (title, initial agent, no creation without creation deps).
  */
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { AgentsHubComponent, type HubAgent } from "../src/overlays/agents-hub";
+import { AgentsHubComponent, type AgentsHubOptions, type HubAgent } from "../src/overlays/agents-hub";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/index";
 
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-interface TestSettings {
-	get(key: string): string[] | Record<string, string> | undefined;
-	set(key: string, value: string[] | Record<string, string>): void;
-}
+const OVERRIDE_KEYS = {
+	model: "task.agentModelOverrides",
+	prewalk: "task.agentPrewalk",
+	advisor: "task.agentAdvisor",
+} as const;
 
-function createSettings(): TestSettings {
-	const values = new Map<string, string[] | Record<string, string>>();
-	return {
-		get: (key: string) => values.get(key),
-		set: (key: string, value: string[] | Record<string, string>) => {
-			values.set(key, value);
-		},
-	};
+/** Settings double with entry-level writers; `writes` records every entry the hub touched. */
+class TestSettings {
+	readonly lists = new Map<string, string[]>();
+	readonly records = new Map<string, Record<string, string>>();
+	readonly writes: string[] = [];
+
+	setMember(key: string, item: string, member: boolean): void {
+		const rest = (this.lists.get(key) ?? []).filter(entry => entry !== item);
+		this.lists.set(key, member ? [...rest, item] : rest);
+		this.writes.push(`${key}[${item}]`);
+	}
+
+	setEntry(key: string, name: string, value: string | undefined): void {
+		const record = { ...this.records.get(key) };
+		if (value === undefined) delete record[name];
+		else record[name] = value;
+		this.records.set(key, record);
+		this.writes.push(`${key}.${name}`);
+	}
 }
 
 // Narrow TUI stub: the hub only reads terminal rows and requests renders.
@@ -44,7 +57,10 @@ const sonnet = buildModel({
 	maxTokens: 8192,
 });
 
-async function createHub(settings: TestSettings): Promise<{
+async function createHub(
+	settings: TestSettings,
+	options: { creation?: boolean; hub?: AgentsHubOptions } = {},
+): Promise<{
 	hub: AgentsHubComponent;
 	strip: () => string;
 	type: (text: string) => void;
@@ -84,17 +100,10 @@ async function createHub(settings: TestSettings): Promise<{
 					},
 				];
 				for (const agent of agents) {
-					agent.disabled =
-						(settings.get("task.disabledAgents") as string[] | undefined)?.includes(agent.name) ?? false;
-					agent.overrideModel = (settings.get("task.agentModelOverrides") as Record<string, string> | undefined)?.[
-						agent.name
-					];
-					agent.prewalkOverride = (settings.get("task.agentPrewalk") as Record<string, string> | undefined)?.[
-						agent.name
-					];
-					agent.advisorOverride = (settings.get("task.agentAdvisor") as Record<string, string> | undefined)?.[
-						agent.name
-					];
+					agent.disabled = settings.lists.get("task.disabledAgents")?.includes(agent.name) ?? false;
+					agent.overrideModel = settings.records.get(OVERRIDE_KEYS.model)?.[agent.name];
+					agent.prewalkOverride = settings.records.get(OVERRIDE_KEYS.prewalk)?.[agent.name];
+					agent.advisorOverride = settings.records.get(OVERRIDE_KEYS.advisor)?.[agent.name];
 				}
 				return agents;
 			},
@@ -103,24 +112,21 @@ async function createHub(settings: TestSettings): Promise<{
 			resolvePatterns: () => undefined,
 			effectivePrewalkPattern: () => undefined,
 			effectiveAdvisorPattern: agent => (agent.advisorOverride === "on" ? "@advisor" : undefined),
-			setDisabledAgents: names => settings.set("task.disabledAgents", names),
-			setOverrides: (property, overrides) =>
-				settings.set(
-					property === "model"
-						? "task.agentModelOverrides"
-						: property === "prewalk"
-							? "task.agentPrewalk"
-							: "task.agentAdvisor",
-					overrides,
-				),
-			generateAgent: async () => {
-				throw new Error("Agent generation is not used by configuration tests");
-			},
-			saveAgent: async () => {
-				throw new Error("Agent creation is not used by configuration tests");
-			},
+			setAgentDisabled: (name, disabled) => settings.setMember("task.disabledAgents", name, disabled),
+			setAgentOverride: (property, name, value) => settings.setEntry(OVERRIDE_KEYS[property], name, value),
+			...(options.creation === false
+				? {}
+				: {
+						generateAgent: async () => {
+							throw new Error("Agent generation is not used by configuration tests");
+						},
+						saveAgent: async () => {
+							throw new Error("Agent creation is not used by configuration tests");
+						},
+					}),
 		},
 		{ onCancel: () => (cancelled = true) },
+		options.hub,
 	);
 	return {
 		hub,
@@ -138,7 +144,7 @@ beforeAll(async () => {
 
 describe("AgentsHub layout", () => {
 	test("renders the full-height split frame with sidebar scopes and agent rows", async () => {
-		const { hub, strip } = await createHub(createSettings());
+		const { hub, strip } = await createHub(new TestSettings());
 		const lines = hub.render(120);
 		// top border + content rows + divider + footer + bottom border = terminal rows.
 		expect(lines.length).toBe(30);
@@ -153,7 +159,7 @@ describe("AgentsHub layout", () => {
 	});
 
 	test("sidebar scope filters the rows to one source", async () => {
-		const { hub, strip } = await createHub(createSettings());
+		const { hub, strip } = await createHub(new TestSettings());
 		hub.handleInput("\x1b[D"); // left → scope focus
 		hub.handleInput("\x1b[B"); // down → Project
 		const rendered = strip();
@@ -163,7 +169,7 @@ describe("AgentsHub layout", () => {
 	});
 
 	test("type-to-filter narrows the list and Esc clears the query first", async () => {
-		const { hub, strip, type, cancelled } = await createHub(createSettings());
+		const { hub, strip, type, cancelled } = await createHub(new TestSettings());
 		type("sco");
 		let rendered = strip();
 		expect(rendered).toContain("scout");
@@ -175,20 +181,43 @@ describe("AgentsHub layout", () => {
 		hub.handleInput("\x1b");
 		expect(cancelled()).toBe(true);
 	});
+
+	test("the host title and initial agent apply on open", async () => {
+		const { strip } = await createHub(new TestSettings(), {
+			hub: { title: "Agents · profile draft", initialAgent: "task" },
+		});
+		const rendered = strip();
+		expect(rendered).toContain("Agents · profile draft");
+		// The detail block describes the selected agent.
+		expect(rendered).toContain("Generic task agent");
+		expect(rendered).not.toContain("Development agent");
+	});
+
+	test("offers no agent creation without generation and save deps", async () => {
+		const { hub, strip } = await createHub(new TestSettings(), { creation: false });
+		expect(strip()).not.toContain("New agent");
+		hub.handleInput("\x1b[A"); // up from the first row stays on an agent
+		for (let i = 0; i < 5; i++) hub.handleInput("\x1b[B"); // down past the last agent
+		hub.handleInput("\r");
+		expect(strip()).toContain("task →");
+	});
 });
 
 describe("AgentsHub configuration strips", () => {
-	test("Space toggles the selected agent's enabled state", async () => {
-		const settings = createSettings();
+	test("Space toggles only the selected agent's entry", async () => {
+		const settings = new TestSettings();
+		settings.lists.set("task.disabledAgents", ["scout"]);
 		const { hub } = await createHub(settings);
 		hub.handleInput(" ");
-		expect(settings.get("task.disabledAgents")).toEqual(["dev"]);
+		expect(settings.lists.get("task.disabledAgents")).toEqual(["scout", "dev"]);
 		hub.handleInput(" ");
-		expect(settings.get("task.disabledAgents")).toEqual([]);
+		expect(settings.lists.get("task.disabledAgents")).toEqual(["scout"]);
+		expect(settings.writes).toEqual(["task.disabledAgents[dev]", "task.disabledAgents[dev]"]);
 	});
 
-	test("Enter opens the property strip; advisor → on persists task.agentAdvisor", async () => {
-		const settings = createSettings();
+	test("Enter opens the property strip; advisor → on persists only that agent's entry", async () => {
+		const settings = new TestSettings();
+		settings.records.set("task.agentAdvisor", { scout: "off" });
 		const { hub, strip } = await createHub(settings);
 		hub.handleInput("\r"); // agent strip for `dev`
 		expect(strip()).toContain("dev →");
@@ -198,13 +227,14 @@ describe("AgentsHub configuration strips", () => {
 		expect(strip()).toContain("dev · advisor →");
 		hub.handleInput("\x1b[C"); // agent default → on
 		hub.handleInput("\r");
-		expect(settings.get("task.agentAdvisor")).toEqual({ dev: "on" });
+		expect(settings.records.get("task.agentAdvisor")).toEqual({ scout: "off", dev: "on" });
+		expect(settings.writes).toEqual(["task.agentAdvisor.dev"]);
 		expect(strip()).toContain("dev advisor: on (@advisor)");
 	});
 
 	test("pattern… commits a custom advisor pattern and empty submit clears it", async () => {
-		const settings = createSettings();
-		settings.set("task.agentAdvisor", { dev: "on" });
+		const settings = new TestSettings();
+		settings.records.set("task.agentAdvisor", { dev: "on" });
 		const { hub, type } = await createHub(settings);
 		hub.handleInput("\r");
 		hub.handleInput("\x1b[C");
@@ -216,11 +246,11 @@ describe("AgentsHub configuration strips", () => {
 		type("\x7f\x7f"); // clear the prefill
 		type("moonshot/k3:high");
 		hub.handleInput("\r");
-		expect(settings.get("task.agentAdvisor")).toEqual({ dev: "moonshot/k3:high" });
+		expect(settings.records.get("task.agentAdvisor")).toEqual({ dev: "moonshot/k3:high" });
 	});
 
 	test("pick model… dives into the model browser and persists the model override", async () => {
-		const settings = createSettings();
+		const settings = new TestSettings();
 		const { hub, strip } = await createHub(settings);
 		hub.handleInput("\r"); // agent strip (model chip preselected)
 		hub.handleInput("\r"); // model value strip → [pick model…] first
@@ -229,14 +259,14 @@ describe("AgentsHub configuration strips", () => {
 		expect(strip()).toContain("Picking model override for dev");
 		expect(strip()).toContain("claude-sonnet-4-5");
 		hub.handleInput("\r"); // pick the only model
-		expect(settings.get("task.agentModelOverrides")).toEqual({ dev: "anthropic/claude-sonnet-4-5" });
+		expect(settings.records.get("task.agentModelOverrides")).toEqual({ dev: "anthropic/claude-sonnet-4-5" });
 		// Back on the list with the override reflected.
 		expect(strip()).toContain("anthropic/claude-sonnet-4-5");
 	});
 
 	test("clear override chip removes an existing model override", async () => {
-		const settings = createSettings();
-		settings.set("task.agentModelOverrides", { dev: "anthropic/claude-sonnet-4-5" });
+		const settings = new TestSettings();
+		settings.records.set("task.agentModelOverrides", { dev: "anthropic/claude-sonnet-4-5" });
 		const { hub, strip } = await createHub(settings);
 		hub.handleInput("\r"); // agent strip
 		hub.handleInput("\r"); // model value strip
@@ -244,11 +274,11 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b[C"); // pick model… → pattern…
 		hub.handleInput("\x1b[C"); // pattern… → clear override
 		hub.handleInput("\r");
-		expect(settings.get("task.agentModelOverrides")).toEqual({});
+		expect(settings.records.get("task.agentModelOverrides")).toEqual({});
 	});
 
 	test("Esc steps back from a value strip to the agent strip before closing", async () => {
-		const settings = createSettings();
+		const settings = new TestSettings();
 		const { hub, strip, cancelled } = await createHub(settings);
 		hub.handleInput("\r"); // agent strip
 		hub.handleInput("\r"); // model value strip

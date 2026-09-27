@@ -35,11 +35,20 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
 }
+const PROFILE_SLASH_COMMAND: SlashCommandSpec = {
+	name: "profiles",
+	description: "Preview, save, and load reusable profiles (models, agents, and settings)",
+	handleTui: (_command, runtime) => {
+		void runtime.ctx.showSettingsSelector("profiles");
+		runtime.ctx.editor.setText("");
+	},
+};
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
 	...BUILTIN_SESSION_SLASH_COMMANDS,
+	PROFILE_SLASH_COMMAND,
 	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
 	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
 	...BUILTIN_SKILLS_SLASH_COMMANDS,

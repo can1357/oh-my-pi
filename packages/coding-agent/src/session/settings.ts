@@ -587,6 +587,7 @@ export const cfgTextVerbosity = register({
 
 export const cfgTierOpenai = register({
 	id: "tier.openai",
+	machineLocal: true,
 	type: "enum",
 	values: SERVICE_TIER_OPENAI_VALUES,
 	default: "none",
@@ -602,6 +603,7 @@ export const cfgTierOpenai = register({
 
 export const cfgTierAnthropic = register({
 	id: "tier.anthropic",
+	machineLocal: true,
 	type: "enum",
 	values: SERVICE_TIER_ANTHROPIC_VALUES,
 	default: "none",
@@ -617,6 +619,7 @@ export const cfgTierAnthropic = register({
 
 export const cfgTierGoogle = register({
 	id: "tier.google",
+	machineLocal: true,
 	type: "enum",
 	values: SERVICE_TIER_GOOGLE_VALUES,
 	default: "none",
@@ -632,6 +635,7 @@ export const cfgTierGoogle = register({
 
 export const cfgTierSubagent = register({
 	id: "tier.subagent",
+	machineLocal: true,
 	type: "enum",
 	values: SERVICE_TIER_INHERIT_SETTING_VALUES,
 	default: "inherit",
@@ -647,6 +651,7 @@ export const cfgTierSubagent = register({
 
 export const cfgTierAdvisor = register({
 	id: "tier.advisor",
+	machineLocal: true,
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
 	values: SERVICE_TIER_INHERIT_SETTING_VALUES,
@@ -901,6 +906,7 @@ export const cfgProvidersWebSearchTimeoutSeconds = register({
 
 export const cfgProvidersAntigravityEndpoint = register({
 	id: "providers.antigravityEndpoint",
+	machineLocal: true,
 	type: "enum",
 	values: ["auto", "production", "sandbox"] as const,
 	default: "auto",
@@ -931,6 +937,7 @@ export const cfgProvidersAntigravityEndpoint = register({
 
 export const cfgProvidersFireworksTier = register({
 	id: "providers.fireworksTier",
+	machineLocal: true,
 	type: "enum",
 	values: ["standard", "priority"] as const,
 	default: "standard",
@@ -1212,6 +1219,7 @@ export const cfgProvidersFetch = register({
 // Codex saved rate-limit resets (auto-redeem)
 export const cfgCodexResetsAutoRedeem = register({
 	id: "codexResets.autoRedeem",
+	machineLocal: true,
 	type: "enum",
 	values: ["unset", "yes", "no"] as const,
 	default: "unset" as const,
@@ -1235,6 +1243,7 @@ export const cfgCodexResetsAutoRedeem = register({
 
 export const cfgCodexResetsMinBlockedMinutes = register({
 	id: "codexResets.minBlockedMinutes",
+	machineLocal: true,
 	type: "number",
 	default: 60,
 	ui: {
@@ -1248,6 +1257,7 @@ export const cfgCodexResetsMinBlockedMinutes = register({
 
 export const cfgCodexResetsKeepCredits = register({
 	id: "codexResets.keepCredits",
+	machineLocal: true,
 	type: "number",
 	default: 0,
 	ui: {
@@ -1261,6 +1271,7 @@ export const cfgCodexResetsKeepCredits = register({
 
 export const cfgCodexResetsSalvageHorizonHours = register({
 	id: "codexResets.salvageHorizonHours",
+	machineLocal: true,
 	type: "number",
 	default: 12,
 	ui: {
@@ -1286,6 +1297,7 @@ export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem
 // Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
 export const cfgClaudeResetsAutoRedeem = register({
 	id: "claudeResets.autoRedeem",
+	machineLocal: true,
 	type: "enum",
 	values: ["unset", "yes", "no"] as const,
 	default: "unset" as const,
@@ -1309,6 +1321,7 @@ export const cfgClaudeResetsAutoRedeem = register({
 
 export const cfgClaudeResetsMinBlockedMinutes = register({
 	id: "claudeResets.minBlockedMinutes",
+	machineLocal: true,
 	type: "number",
 	default: 60,
 	ui: {
@@ -1322,6 +1335,7 @@ export const cfgClaudeResetsMinBlockedMinutes = register({
 
 export const cfgClaudeResetsKeepCredits = register({
 	id: "claudeResets.keepCredits",
+	machineLocal: true,
 	type: "number",
 	default: 0,
 	ui: {
@@ -1335,6 +1349,7 @@ export const cfgClaudeResetsKeepCredits = register({
 
 export const cfgClaudeResetsSalvageHorizonHours = register({
 	id: "claudeResets.salvageHorizonHours",
+	machineLocal: true,
 	type: "number",
 	default: 12,
 	ui: {
