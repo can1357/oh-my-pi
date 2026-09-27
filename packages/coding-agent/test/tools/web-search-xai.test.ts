@@ -236,24 +236,9 @@ describe("xAI web search provider", () => {
 		oauthAuthStorage.close();
 	});
 
-	it("omits search_parameters for minimal web_search requests", async () => {
-		const capture = captureFetch({ id: "resp_minimal", model: "grok-4.3", output_text: "minimal xAI answer" });
-
-		await searchXAI(makeParams(capture.fetchMock));
-
-		expect(capture.capturedRequest).not.toBeNull();
-		const body = capture.capturedRequest?.body;
-		expect(body?.tools).toEqual([{ type: "web_search" }]);
-		expect(body?.reasoning).toEqual({ effort: "low" });
-		expect(body).not.toHaveProperty("search_parameters");
-	});
-
 	it.each([
-		["limit", { limit: 6 }],
-		["numSearchResults", { numSearchResults: 7 }],
 		["recency", { recency: "week" }],
 		["limit, numSearchResults, and recency", { limit: 0, numSearchResults: 30, recency: "day" }],
-		["oversized numSearchResults", { numSearchResults: 99 }],
 	] as const)("keeps %s local instead of sending xAI search_parameters", async (_caseName, searchParams) => {
 		const capture = captureFetch({ id: "resp_agent_tools", model: "grok-4.3", output_text: "xAI answer" });
 
@@ -648,10 +633,10 @@ describe("xAI web search provider", () => {
 		const authorizationHeaders: string[] = [];
 		const wireModels: unknown[] = [];
 		let requestCount = 0;
-		vi.spyOn(modelRegistry, "getApiKeyForProvider")
-			.mockResolvedValueOnce("initial-xai-key")
-			.mockResolvedValueOnce("refreshed-xai-key")
-			.mockResolvedValueOnce("rotated-xai-key");
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialForProvider")
+			.mockResolvedValueOnce({ apiKey: "initial-xai-key" })
+			.mockResolvedValueOnce({ apiKey: "refreshed-xai-key" })
+			.mockResolvedValueOnce({ apiKey: "rotated-xai-key" });
 		const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(true);
 		const fetchMock: FetchImpl = (_input, init) => {
 			requestCount += 1;

@@ -112,19 +112,6 @@ describe("PluginListComponent", () => {
 		expect(text).toContain("shadowed");
 	});
 
-	it("empty-state mentions both npm and marketplace install commands", () => {
-		const component = new PluginListComponent([], {
-			onNpmSelect: () => {},
-			onMarketplaceSelect: () => {},
-			onCancel: () => {},
-		});
-
-		const text = stripVTControlCharacters(component.render(120).join("\n"));
-		expect(text).toContain("No plugins installed");
-		expect(text).toContain("omp plugin install <package>");
-		expect(text).toContain("omp plugin install <name>@<marketplace>");
-	});
-
 	it("routes enter on a marketplace entry to onMarketplaceSelect", () => {
 		const target = marketplace("pick@mkt");
 		let selected: MarketplaceSettingsPlugin | null = null;

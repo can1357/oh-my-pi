@@ -123,9 +123,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
 			const highlight = await invoke({
 				action: "run",
 				name: TAB_NAME,
-				code: `const pending = tab.highlight("#highlight", { duration: 100 });
-// This integration test must observe the real page timer while the helper remains pending.
-await Bun.sleep(20);
+				code: `const pending = tab.highlight("#highlight", { duration: 1000 });
+// The overlay is injected asynchronously and removed once the helper's
+// host-side hold elapses, so wait for the node instead of sampling the count.
+await tab.waitForSelector("[data-omp-highlight-overlay]", { timeout: 5000 });
 const during = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
 await pending;
 const after = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);

@@ -38,7 +38,20 @@ export interface ApiKeyResolveContext {
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
  */
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+export interface ResolvedApiKey {
+	apiKey: string;
+	/** Durable row id of the credential that supplied this bearer, when known. */
+	credentialId?: number;
+}
+
+export type ApiKeyResolution = string | ResolvedApiKey | undefined;
+
+export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<ApiKeyResolution> | ApiKeyResolution;
+
+/** Extract the bearer while preserving optional credential provenance for streaming callers. */
+export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undefined {
+	return (typeof resolved === "string" ? resolved : resolved?.apiKey) || undefined;
+}
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
@@ -55,22 +68,30 @@ export function isApiKeyResolver(key: ApiKey | undefined): key is ApiKeyResolver
  * Performs the initial resolve of an {@link ApiKey} (`error: undefined`,
  * `lastChance: false`). Static keys pass through unchanged.
  */
-export async function resolveApiKeyOnce(key: ApiKey | undefined, signal?: AbortSignal): Promise<string | undefined> {
+export async function resolveApiKeyOnce(
+	key: ApiKey | undefined,
+	signal?: AbortSignal,
+	onResolved?: (resolved: ApiKeyResolution) => void,
+): Promise<string | undefined> {
 	if (key === undefined) return undefined;
-	if (isApiKeyResolver(key)) return (await key({ lastChance: false, error: undefined, signal })) || undefined;
+	if (isApiKeyResolver(key)) {
+		const resolved = await key({ lastChance: false, error: undefined, signal });
+		onResolved?.(resolved);
+		return resolvedApiKeyBearer(resolved);
+	}
 	return key;
 }
 
 /**
- * Wraps a resolver with a bearer that was already selected for this request.
+ * Wraps a resolver with a credential already selected for this request.
  *
  * Callers that preflight credentials can pass the returned resolver to the
  * auth-retry driver without making the driver know about that preflight: the
- * first initial resolution reuses `seed`, and all later resolutions delegate to
- * `resolver`.
+ * first initial resolution reuses `seed` (including its credential identity),
+ * and all later resolutions delegate to `resolver`.
  */
-export function seedApiKeyResolver(seed: string | undefined, resolver: ApiKeyResolver): ApiKeyResolver {
-	let seedPending = seed !== undefined;
+export function seedApiKeyResolver(seed: ApiKeyResolution, resolver: ApiKeyResolver): ApiKeyResolver {
+	let seedPending = resolvedApiKeyBearer(seed) !== undefined;
 	return ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
@@ -115,10 +136,13 @@ export async function resolveRetryKey(
 	error: unknown,
 	signal?: AbortSignal,
 	previousKey?: string,
+	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		return (await resolver({ lastChance: rotateSibling, error, signal, previousKey })) || undefined;
+		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
+		onResolved?.(resolved);
+		return resolvedApiKeyBearer(resolved);
 	} catch {
 		return undefined;
 	}
@@ -164,13 +188,14 @@ export async function resolveNextAuthRetryKey(
 	resolver: ApiKeyResolver,
 	error: unknown,
 	signal?: AbortSignal,
+	onResolved?: (resolved: ApiKeyResolution) => void,
 ): Promise<string | undefined> {
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
-		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
 		return acceptRetryKey(state, refreshed, true);
@@ -179,7 +204,7 @@ export async function resolveNextAuthRetryKey(
 	if (!directRotation) {
 		if (state.legacyAuthSwitchUsed) return undefined;
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
@@ -190,7 +215,7 @@ export async function resolveNextAuthRetryKey(
 	}
 
 	if (signal?.aborted) return undefined;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey);
+	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, onResolved);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	const accepted = acceptRetryKey(state, rotated, !directRotation);
 	if (accepted !== undefined && !directRotation) state.legacyAuthSwitchUsed = true;

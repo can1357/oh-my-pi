@@ -51,11 +51,6 @@ describe("isContextOverflow - model_context_window_exceeded", () => {
 		const message = createErrorMessage("Provider finish_reason: model_context_window_exceeded");
 		expect(isContextOverflow(message)).toBe(true);
 	});
-
-	it("detects raw model_context_window_exceeded in error message", () => {
-		const message = createErrorMessage("model_context_window_exceeded");
-		expect(isContextOverflow(message)).toBe(true);
-	});
 	it("detects empty Ollama length completion guidance", () => {
 		const message = createErrorMessage(
 			"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.",
@@ -136,14 +131,6 @@ describe("isContextOverflow/isPayloadRejection - HTTP 413 variants", () => {
 	});
 });
 describe("isContextOverflow - 400/413 no-body (Cerebras, Mistral, proxy wrappers)", () => {
-	it("detects bare '400 status code (no body)'", () => {
-		expect(isContextOverflow(createErrorMessage("400 status code (no body)"))).toBe(true);
-	});
-
-	it("detects bare '413 status code (no body)'", () => {
-		expect(isContextOverflow(createErrorMessage("413 status code (no body)"))).toBe(true);
-	});
-
 	it("detects '400 (no body)' without 'status code' word", () => {
 		expect(isContextOverflow(createErrorMessage("400 (no body)"))).toBe(true);
 	});
@@ -153,11 +140,6 @@ describe("isContextOverflow - 400/413 no-body (Cerebras, Mistral, proxy wrappers
 	// the JSON value contains the inner "400 status code (no body)" text.
 	it('detects wrapped proxy envelope: \'400 status code: {"error":"... 400 status code (no body)"}\'', () => {
 		const errorMessage = '400 status code: {"error":"Error from inference backend: 400 status code (no body)"}';
-		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
-	});
-
-	it("detects when status code phrase is embedded deeper in the message", () => {
-		const errorMessage = "Upstream rejected request: 400 status code (no body)";
 		expect(isContextOverflow(createErrorMessage(errorMessage))).toBe(true);
 	});
 

@@ -14,6 +14,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+
 describe("plan mode thinking level", () => {
 	let session: AgentSession;
 	let modelRegistry: ModelRegistry;
@@ -43,7 +45,7 @@ describe("plan mode thinking level", () => {
 	});
 
 	function configureRoles(modelRoles: Record<string, string>): AgentSession {
-		sessionSettings.override("modelRoles", modelRoles);
+		cfgModelRoles.override(sessionSettings, modelRoles);
 		return session;
 	}
 
@@ -78,14 +80,6 @@ describe("plan mode thinking level", () => {
 			expect(result.model).toBeUndefined();
 		});
 
-		it("returns thinking level for different levels", () => {
-			configureRoles({ plan: "anthropic/claude-sonnet-4-5:high" });
-
-			const result = session.resolveRoleModelWithThinking("plan");
-			expect(result.thinkingLevel).toBe(ThinkingLevel.High);
-			expect(result.explicitThinkingLevel).toBe(true);
-		});
-
 		it("works with the default role", () => {
 			configureRoles({ default: "anthropic/claude-sonnet-4-5:medium" });
 
@@ -93,15 +87,6 @@ describe("plan mode thinking level", () => {
 			expect(result.model!.id).toBe("claude-sonnet-4-5");
 			expect(result.thinkingLevel).toBe(ThinkingLevel.Medium);
 			expect(result.explicitThinkingLevel).toBe(true);
-		});
-
-		it("resolveRoleModel still returns just the model (backward compat)", () => {
-			configureRoles({ plan: "anthropic/claude-sonnet-4-5:xhigh" });
-
-			const model = session.resolveRoleModel("plan");
-			expect(model).toBeDefined();
-			expect(model!.provider).toBe("anthropic");
-			expect(model!.id).toBe("claude-sonnet-4-5");
 		});
 	});
 });

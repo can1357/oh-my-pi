@@ -16,6 +16,8 @@ import { SecurityStore } from "../security/store";
 import type { ToolSession } from "./index";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
+import { cfgSecurityEnabled } from "./settings";
+
 const securityScanSchema = type({
 	action:
 		"'preflight' | 'start' | 'status' | 'cancel' | 'validate' | 'cloud_scans' | 'cloud_start' | 'cloud_status' | 'cloud_pull'",
@@ -119,7 +121,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 		params: SecurityScanParams,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<SecurityScanToolDetails>> {
-		if (!this.session.settings.get("security.enabled")) {
+		if (!cfgSecurityEnabled.get(this.session.settings)) {
 			throw new ToolError("Security is disabled. Enable security.enabled before using security_scan.");
 		}
 		const coordinatorForSession = () => {

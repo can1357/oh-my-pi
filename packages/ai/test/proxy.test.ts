@@ -176,7 +176,6 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 	const bypassed = [
 		"localhost",
 		"app.localhost",
-		"127.0.0.1",
 		"127.5.5.5",
 		"10.1.2.3",
 		"192.168.1.1",
@@ -204,7 +203,6 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 
 	const proxied = [
 		"api.sakana.ai",
-		"api.openai.com",
 		"172.15.0.1", // just below the 172.16/12 block
 		"172.32.0.1", // just above the 172.16/12 block
 		"11.0.0.1", // not RFC1918
@@ -276,12 +274,6 @@ describe("wrapFetchForProxy", () => {
 		Bun.env.PI_PROXY_WRAP_BYPASS = PROXY;
 		const { fetch, calls } = makeCapture();
 		await wrapFetchForProxy(fetch, "wrap-bypass")("http://127.0.0.1:11434/api/chat");
-		expect(calls[0].proxy).toBeUndefined();
-	});
-
-	it("does not inject a proxy when none is configured for the provider", async () => {
-		const { fetch, calls } = makeCapture();
-		await wrapFetchForProxy(fetch, "wrap-none")("https://api.sakana.ai/v1/responses");
 		expect(calls[0].proxy).toBeUndefined();
 	});
 

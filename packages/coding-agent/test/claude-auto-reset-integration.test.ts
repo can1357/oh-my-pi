@@ -15,6 +15,8 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
+import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -243,6 +245,6 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
-		expect(session.settings.get("claudeResets.autoRedeem")).toBe("unset");
+		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
 	});
 });

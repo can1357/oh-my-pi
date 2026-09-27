@@ -29,6 +29,8 @@ import {
 	salvageAttemptKey,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 
+import { cfgCodexResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+
 // Epoch ms divisible by 60_000 so minute-boundary reset/expiry times let the
 // debounce-jitter cases reason about bucket crossings precisely.
 const NOW = 1_700_000_040_000;
@@ -750,7 +752,7 @@ describe("codexResets policy plumbing", () => {
 	});
 
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
-		expect(Settings.isolated({ "codexResets.autoRedeem": true }).get("codexResets.autoRedeem")).toBe("yes");
-		expect(Settings.isolated({ "codexResets.autoRedeem": false }).get("codexResets.autoRedeem")).toBe("no");
+		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": true }))).toBe("yes");
+		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": false }))).toBe("no");
 	});
 });

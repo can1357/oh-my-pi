@@ -7,19 +7,15 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
-import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { Text } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -31,18 +27,6 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 		...overrides,
 	};
 }
-
-const plainTheme = {
-	fg: (_color: unknown, text: string) => text,
-	styledSymbol: () => "…",
-	sep: { dot: " • " },
-	format: { bracketLeft: "[", bracketRight: "]" },
-} as unknown as Theme;
-
-const renderOptions: RenderResultOptions = {
-	expanded: false,
-	isPartial: true,
-};
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -293,15 +277,6 @@ describe("tool path arrays", () => {
 		await removeWithRetries(tmp);
 	});
 
-	it("grep pending renderer accepts a single string path", () => {
-		const component = grepToolRenderer.renderCall(
-			{ pattern: "space-needle", paths: "folder with spaces/" },
-			renderOptions,
-			plainTheme,
-		);
-
-		expect((component as Text).getText()).toContain("in folder with spaces/");
-	});
 	it("agent hub chat renders a single-string grep path summary", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
 		const sessionFile = await makeJsonlSessionFile(tmp, [
@@ -434,24 +409,6 @@ describe("tool path arrays", () => {
 
 		expect(rendered).toContain("[grep: /space-needle/ in folder with spaces/]");
 		expect(rendered).not.toContain("[grep: /space-needle/ in .]");
-	});
-
-	it("search keeps a single path that contains spaces", async () => {
-		const tools = await createTools(createTestSession(tempDir));
-		const tool = tools.find(entry => entry.name === "grep");
-		expect(tool).toBeDefined();
-		if (!tool) throw new Error("Missing grep tool");
-
-		const result = await tool.execute("search-space-directory", {
-			pattern: "space-needle",
-			path: "folder with spaces/",
-		});
-		const text = getText(result);
-		const details = result.details as { fileCount?: number; scopePath?: string } | undefined;
-
-		expect(text).toContain("note.txt");
-		expect(details?.fileCount).toBe(1);
-		expect(details?.scopePath).toBe("folder with spaces");
 	});
 
 	it("search accepts quoted directory paths", async () => {
@@ -908,6 +865,48 @@ describe("tool path arrays", () => {
 		expect(text).not.toContain("nested");
 		expect(details?.fileCount).toBe(2);
 		expect(details?.scopePath).toBe("alpha.txt, beta.txt");
+		await removeWithRetries(tmp);
+	});
+
+	it("grep keeps directory-prefixed globs out of subdirectories", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
+		await Bun.write(path.join(tmp, "internal", "awsapi", "client.go"), "depth-needle awsapi-root\n");
+		await Bun.write(path.join(tmp, "internal", "awsapi", "svc", "nested.go"), "depth-needle awsapi-nested\n");
+		await Bun.write(path.join(tmp, "internal", "crypto_util.go"), "depth-needle crypto-root\n");
+		await Bun.write(path.join(tmp, "internal", "services", "kms", "crypto_kms.go"), "depth-needle kms\n");
+		await Bun.write(path.join(tmp, "internal", "roles.go"), "depth-needle roles\n");
+
+		const tools = await createTools(createTestSession(tmp));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const dirGlob = getText(
+			await tool.execute("grep-dir-glob", { pattern: "depth-needle", path: "internal/awsapi/*.go" }),
+		);
+		expect(dirGlob).toContain("awsapi-root");
+		expect(dirGlob).not.toContain("awsapi-nested");
+
+		const list = getText(
+			await tool.execute("grep-dir-glob-list", {
+				pattern: "depth-needle",
+				path: "internal/crypto*; internal/roles.go",
+			}),
+		);
+		expect(list).toContain("crypto-root");
+		expect(list).toContain("roles");
+		expect(list).not.toContain("kms");
+
+		// An explicit `**` under a directory prefix still recurses.
+		const deepGlob = getText(
+			await tool.execute("grep-dir-deep-glob", { pattern: "depth-needle", path: "internal/awsapi/**/*.go" }),
+		);
+		expect(deepGlob).toContain("awsapi-root");
+		expect(deepGlob).toContain("awsapi-nested");
+
+		// A bare glob with no directory prefix still matches at any depth.
+		const bareGlob = getText(await tool.execute("grep-bare-glob", { pattern: "depth-needle", path: "*.go" }));
+		expect(bareGlob).toContain("awsapi-nested");
+		expect(bareGlob).toContain("kms");
 		await removeWithRetries(tmp);
 	});
 

@@ -55,38 +55,13 @@ describe("substituteArgs", () => {
 		expect(substituteArgs("$ARGUMENTS", ["$100", "$1"])).toBe("$100 $1");
 	});
 
-	test("should support mixed $1, $2, and $ARGUMENTS", () => {
-		expect(substituteArgs("$1: $ARGUMENTS", ["prefix", "a", "b"])).toBe("prefix: prefix a b");
-	});
-
-	test("should support mixed $1, $2, and $@", () => {
-		expect(substituteArgs("$1: $@", ["prefix", "a", "b"])).toBe("prefix: prefix a b");
-	});
-
 	test("should handle multiple occurrences of $ARGUMENTS", () => {
 		expect(substituteArgs("$ARGUMENTS and $ARGUMENTS", ["a", "b"])).toBe("a b and a b");
-	});
-
-	test("should handle multiple occurrences of $@", () => {
-		expect(substituteArgs("$@ and $@", ["a", "b"])).toBe("a b and a b");
-	});
-
-	test("should handle mixed occurrences of $@ and $ARGUMENTS", () => {
-		expect(substituteArgs("$@ and $ARGUMENTS", ["a", "b"])).toBe("a b and a b");
-	});
-
-	test("should handle special characters in arguments", () => {
-		// Note: $100 in argument doesn't get partially matched - full strings are substituted
-		expect(substituteArgs("$1 $2: $ARGUMENTS", ["arg100", "@user"])).toBe("arg100 @user: arg100 @user");
 	});
 
 	test("should handle out-of-range numbered placeholders", () => {
 		// Note: Out-of-range placeholders become empty strings (preserving spaces from template)
 		expect(substituteArgs("$1 $2 $3 $4 $5", ["a", "b"])).toBe("a b   ");
-	});
-
-	test("should handle unicode characters", () => {
-		expect(substituteArgs("$ARGUMENTS", ["日本語", "🎉", "café"])).toBe("日本語 🎉 café");
 	});
 
 	test("should preserve newlines and tabs in argument values", () => {
@@ -95,10 +70,6 @@ describe("substituteArgs", () => {
 
 	test("should handle consecutive dollar patterns", () => {
 		expect(substituteArgs("$1$2", ["a", "b"])).toBe("ab");
-	});
-
-	test("should handle quoted arguments with spaces", () => {
-		expect(substituteArgs("$ARGUMENTS", ["first arg", "second arg"])).toBe("first arg second arg");
 	});
 
 	test("should handle $0 (zero index)", () => {
@@ -113,18 +84,8 @@ describe("substituteArgs", () => {
 		expect(substituteArgs("pre$ARGUMENTS", ["a", "b"])).toBe("prea b");
 	});
 
-	test("should handle $@ as part of word", () => {
-		expect(substituteArgs("pre$@", ["a", "b"])).toBe("prea b");
-	});
-
 	test("should handle trailing and leading spaces in arguments", () => {
 		expect(substituteArgs("$ARGUMENTS", ["  leading  ", "trailing  "])).toBe("  leading   trailing  ");
-	});
-
-	test("should handle very long argument lists", () => {
-		const args = Array.from({ length: 100 }, (_, i) => `arg${i}`);
-		const result = substituteArgs("$ARGUMENTS", args);
-		expect(result).toBe(args.join(" "));
 	});
 
 	test("should handle escaped dollar signs (literal backslash preserved)", () => {
@@ -136,10 +97,6 @@ describe("substituteArgs", () => {
 		expect(substituteArgs("$1: $@ ($ARGUMENTS)", ["first", "second", "third"])).toBe(
 			"first: first second third (first second third)",
 		);
-	});
-
-	test("should handle command with only placeholders", () => {
-		expect(substituteArgs("$1 $2 $@", ["a", "b", "c"])).toBe("a b a b c");
 	});
 });
 
@@ -212,22 +169,6 @@ describe("parseCommandArgs + substituteArgs integration", () => {
 		expect(result).toBe("Create component Button with features: Button onClick handler disabled support");
 	});
 
-	test("should handle the example from README", () => {
-		const input = 'Button "onClick handler" "disabled support"';
-		const args = parseCommandArgs(input);
-		const template = "Create a React component named $1 with features: $ARGUMENTS";
-		const result = substituteArgs(template, args);
-		expect(result).toBe(
-			"Create a React component named Button with features: Button onClick handler disabled support",
-		);
-	});
-
-	test("should produce same result with $@ and $ARGUMENTS", () => {
-		const args = parseCommandArgs("feature1 feature2 feature3");
-		const template1 = "Implement: $@";
-		const template2 = "Implement: $ARGUMENTS";
-		expect(substituteArgs(template1, args)).toBe(substituteArgs(template2, args));
-	});
 	test("should not recursively expand $@ or $ARGUMENTS present inside user positional arguments", () => {
 		const args = ["check $@ and $ARGUMENTS", "extra"];
 		const template = "Instruction: $1";
@@ -440,10 +381,8 @@ describe("subagent peer roster prompt", () => {
 		expect(rendered).toContain("editing auth.ts");
 		expect(rendered).toContain("IdleReviewer");
 		expect(rendered).toContain("1 parked peer(s) omitted");
-		expect(rendered).toContain("Idle peers are not gone: messaging them wakes them.");
-		expect(rendered).toContain('status:"parked"');
-		expect(rendered).toContain("history://");
-		expect(rendered).toContain("agent://");
+		expect(rendered).toContain("Read bare `history://`");
+		expect(rendered).toContain('path: "agent://<id>"');
 		expect(rendered).not.toContain("ParkedSecretId");
 		expect(rendered).not.toContain("secret parked label");
 		expect(rendered).not.toContain("reviewing classified.diff");

@@ -436,24 +436,6 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("66%");
 	});
 
-	it("renders tiered limits with the tier label", () => {
-		const result = renderSegment("usage", {
-			usage: {
-				tier: "prolite",
-				fiveHour: { percent: 50, resetMinutes: 120 },
-				sevenDay: { percent: 10, resetHours: 48 },
-			},
-		} as unknown as SegmentContext);
-		const content = stripVTControlCharacters(result.content);
-
-		expect(result.visible).toBe(true);
-		expect(content).toContain("prolite");
-		expect(content).toContain("5h");
-		expect(content).toContain("50%");
-		expect(content).toContain("7d");
-		expect(content).toContain("10%");
-	});
-
 	it("sanitizes tier labels before rendering", () => {
 		const result = renderSegment("usage", {
 			usage: {

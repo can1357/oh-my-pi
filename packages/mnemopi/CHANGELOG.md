@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
-### Changed
+## [18.3.3] - 2026-09-27
 
-- Migrated all hashing operations from `node:crypto` to `Bun.SHA256`
+### Fixed
+
+- Fixed recall search matching query terms inside unrelated words, improving result relevance and ensuring exact matches are prioritized.
+- Fixed sleep summaries replacing shortened terms within larger words, preventing unintended word corruption.
 
 ## [18.2.5] - 2026-09-17
 

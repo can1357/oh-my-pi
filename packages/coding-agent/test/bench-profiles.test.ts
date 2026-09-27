@@ -26,9 +26,23 @@ const model: Model<Api> = buildModel({
 	contextWindow: 128_000,
 });
 
+// ~4K-token window, like Apple's on-device model.
+const tinyModel: Model<Api> = buildModel({
+	provider: "acme",
+	id: "tiny-model",
+	name: "tiny-model",
+	api: "openai-completions",
+	baseUrl: "https://example.test/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 1024,
+	contextWindow: 4096,
+});
+
 const registry: BenchModelRegistry = {
-	getAll: () => [model],
-	getAvailable: () => [model],
+	getAll: () => [model, tinyModel],
+	getAvailable: () => [model, tinyModel],
 	getApiKey: async () => "sk-test",
 	resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
 };
@@ -188,5 +202,119 @@ describe("bench challenge mix", () => {
 
 	it("rejects --prompt when challenges are mixed", async () => {
 		await expect(runProfiled({ profile: "mix", prompt: "hello" })).rejects.toThrow("--prompt");
+	});
+
+	it("caps the default prefill input to fit a small context window, unless --prefill-bytes is explicit", async () => {
+		const prefillText = async (flags: Record<string, unknown>) => {
+			const captured: Context[] = [];
+			await runBenchCommand(
+				{ models: ["acme/tiny-model"], flags: { json: true, profile: "prefill", runs: 1, par: 1, ...flags } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, context) => {
+						captured.push(context);
+						return streamOf(message({}));
+					},
+				},
+			);
+			const body = captured[0].messages[0];
+			return typeof body.content === "string" ? body.content : "";
+		};
+		// 4096-token window → 6 KiB of filler, not the 32 KiB default.
+		const capped = await prefillText({});
+		expect(capped.length).toBeGreaterThan(6000);
+		expect(capped.length).toBeLessThan(6500);
+		expect((await prefillText({ prefillBytes: 16_384 })).length).toBeGreaterThan(16_000);
+	});
+});
+
+describe("bench --detailed", () => {
+	/**
+	 * Every request takes 100ms on a shared fake clock. A concurrent wave opens
+	 * all its streams before any finishes, so it completes in 100ms total.
+	 */
+	async function runDetailed(flags: Record<string, unknown>) {
+		let clock = 0;
+		let inFlight = 0;
+		const peaks: number[] = [];
+		const kinds: string[] = [];
+		let session = 0;
+		const summary = await runBenchCommand(
+			{ models: ["acme/bench-model"], flags: { json: true, detailed: true, ...flags } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+				randomSessionId: () => `sess-${session++}`,
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, context) => {
+					const first = context.messages[0];
+					kinds.push(
+						typeof first.content === "string" && first.content.startsWith("Benchmark run") ? "prefill" : "chat",
+					);
+					inFlight++;
+					peaks.push(inFlight);
+					const done = clock + 100;
+					const msg = message({ output: 20 });
+					const iterator = (async function* () {
+						yield { type: "text_delta", delta: "hi" } as unknown as AssistantMessageEvent;
+						clock = Math.max(clock, done);
+						inFlight--;
+						yield { type: "done", message: msg } as unknown as AssistantMessageEvent;
+					})();
+					return Object.assign(iterator, { result: async () => msg }) as unknown as AssistantMessageEventStream;
+				},
+				now: () => clock,
+				random: () => 0,
+				stdoutIsTTY: false,
+			},
+		);
+		return { summary, peaks, kinds };
+	}
+
+	it("runs single-user, parallel, then prefill phases at their own concurrency", async () => {
+		const { summary, peaks, kinds } = await runDetailed({ runs: 3, par: 2 });
+		const report = summary.models[0];
+		// Parallel rounds up to whole --par waves: 3 → 4.
+		expect(report.results.map(run => run.phase)).toEqual([
+			"single",
+			"single",
+			"single",
+			"parallel",
+			"parallel",
+			"parallel",
+			"parallel",
+			"prefill",
+			"prefill",
+			"prefill",
+		]);
+		expect(kinds).toEqual(["chat", "chat", "chat", "chat", "chat", "chat", "chat", "prefill", "prefill", "prefill"]);
+		expect(Math.max(...peaks.slice(0, 3))).toBe(1);
+		expect(Math.max(...peaks.slice(3, 7))).toBe(2);
+		expect(Math.max(...peaks.slice(7))).toBe(1);
+		expect(summary.runs).toBe(10);
+		expect(summary.detailed).toEqual({ runsPerPhase: 3, par: 2 });
+		expect(summary.profile).toBeUndefined();
+	});
+
+	it("reports aggregate throughput over each phase's wall time", async () => {
+		const { summary } = await runDetailed({ runs: 2, par: 2 });
+		const { single, parallel, prefill } = summary.models[0].phases;
+		// Single: 2 × 20 tokens back to back over 200ms.
+		expect(single?.wallMs).toBe(200);
+		expect(single?.aggregateTps).toBeCloseTo(200, 5);
+		// Parallel: both requests overlap in one 100ms wave → twice the rate.
+		expect(parallel?.concurrency).toBe(2);
+		expect(parallel?.wallMs).toBe(100);
+		expect(parallel?.aggregateTps).toBeCloseTo(400, 5);
+		expect(prefill?.stats?.prefillTps.p50).toBeGreaterThan(0);
+	});
+
+	it("rejects combinations that would replace or collapse its phases", async () => {
+		await expect(runDetailed({ profile: "chat" })).rejects.toThrow("--profile");
+		await expect(runDetailed({ par: 1 })).rejects.toThrow("--par");
 	});
 });

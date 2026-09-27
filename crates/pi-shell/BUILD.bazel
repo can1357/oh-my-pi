@@ -30,6 +30,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + [
         ":build_script",
         "//crates/pi-builtins",
+        "//crates/pi-vfs",
         "//crates/vendor/brush-core",
     ],
 )
@@ -40,6 +41,18 @@ rust_test(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "vfs_test",
+    srcs = ["tests/vfs.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal = True) + all_crate_deps(normal_dev = True) + [
+        "//crates/pi-builtins",
+        "//crates/pi-vfs",
+        "//crates/vendor/brush-core",
+    ],
 )
 
 rust_test(

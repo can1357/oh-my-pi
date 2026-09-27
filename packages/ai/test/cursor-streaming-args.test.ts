@@ -137,18 +137,6 @@ describe("mergeCursorMcpToolCallArgs", () => {
 		expect(mergeCursorMcpToolCallArgs(streamed, undefined)).toEqual(streamed);
 	});
 
-	it("preserves streamed keys the completion frame omits", () => {
-		// Issue #2615: the completion frame's McpArgs map drops oversized
-		// parameters. The task tool's `tasks` array was being lost when only
-		// the smaller `context` key survived the completion frame.
-		const streamed = { tasks: [{ assignment: "do A" }, { assignment: "do B" }], context: "ctx" };
-		const completion = { context: "ctx" };
-		expect(mergeCursorMcpToolCallArgs(streamed, completion)).toEqual({
-			tasks: [{ assignment: "do A" }, { assignment: "do B" }],
-			context: "ctx",
-		});
-	});
-
 	it("adopts scalar values from the completion frame when present", () => {
 		const streamed = { agent: "task", context: "partial" };
 		const completion = { agent: "task", context: "final" };

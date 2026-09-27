@@ -873,6 +873,23 @@ fn repair_landings(
 				outward = Some((landing, crossed));
 			}
 		}
+		// The shift is an indentation guess. Veto it only when the shift itself
+		// breaks the parse: the batch as written parses, the shifted one does
+		// not (a shallower `case`, `} else {`, or member belongs before the
+		// closer). Unrelated broken edits in the batch leave the shift alone.
+		if let (Some((landing, _)), Some(path)) = (outward, path) {
+			let mut trial = out.clone();
+			for &index in &group.members {
+				if let Edit::Insert { cursor, .. } = &mut trial[index] {
+					*cursor = Cursor::AfterAnchor(Anchor { line: landing });
+				}
+			}
+			if parses_cleanly(Some(path), &materialize(lines, &out).0)
+				&& !parses_cleanly(Some(path), &materialize(lines, &trial).0)
+			{
+				outward = None;
+			}
+		}
 		if let Some((landing, crossed)) = outward {
 			for &index in &group.members {
 				if let Edit::Insert { cursor, .. } = &mut out[index] {

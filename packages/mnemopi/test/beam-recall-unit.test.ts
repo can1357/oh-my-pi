@@ -86,6 +86,101 @@ function insertEpisodic(
 }
 
 describe("beam recall free functions", () => {
+	it("does not crowd an older shared identifier out with recent substring-only project hits", async () => {
+		const shared = makeBeam();
+		const project = makeBeam();
+		insertWorking(shared, "account-rule", "Use the personal 1Password account for credentials.", {
+			timestamp: "2026-05-23T12:00:00.000Z",
+			importance: 0.75,
+		});
+		shared.db.run("UPDATE working_memory SET veracity = 'tool' WHERE id = 'account-rule'");
+		insertWorking(project, "gate-status", "The qualification gates pass with green checks.", { importance: 0.75 });
+		insertWorking(project, "word-choice", "Keep the word concise in the summary.", { importance: 0.75 });
+		for (const [beam, ids] of [
+			[shared, ["account-rule"]],
+			[project, ["gate-status", "word-choice"]],
+		] as const) {
+			for (const id of ids) {
+				beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'fixture')", [
+					id,
+					JSON.stringify([0.5, Math.sqrt(0.75)]),
+				]);
+			}
+		}
+		const options = { queryEmbedding: [1, 0], queryTime: "2026-05-30T12:00:00.000Z", updateRecallCounts: false };
+		const sharedHits = await recallEnhanced(shared, "1Password", 2, options);
+		const projectHits = await recallEnhanced(project, "1Password", 2, options);
+		const merged = [...sharedHits, ...projectHits].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 2);
+		expect(merged.map(result => result.id)).toEqual(["account-rule"]);
+	});
+
+	it("rejects substring-only lexical matches in either direction and across phrase boundaries", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "substring", "A predisposition to word games about bobcat dogma.");
+		for (const query of ["redis", "password", "cat dog"]) {
+			expect(await recall(beam, query, 5, { queryEmbedding: null })).toEqual([]);
+		}
+		beam.db.run(
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('noise', 's1', 'entity', 'fact', 'A predisposition to word games.', 1)",
+		);
+		expect(factRecall(beam, "redis", 5)).toEqual([]);
+	});
+
+	it("keeps compound synonym aliases and queried identifiers intact", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "generic-data", "Raw data is retained for the audit.");
+		insertWorking(beam, "generic-build", "The build succeeded.");
+		expect(await recall(beam, "database", 5, { queryEmbedding: null })).toEqual([]);
+		expect(await recall(beam, "build_id", 5, { queryEmbedding: null })).toEqual([]);
+		insertWorking(beam, "compound-alias", "The data_store persists records.");
+		insertWorking(beam, "compound-id", "The build_id is recorded.");
+		expect((await recall(beam, "database", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"compound-alias",
+		]);
+		expect((await recall(beam, "build_id", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"compound-id",
+		]);
+	});
+
+	it("matches other forms of a query word but not longer words that merely start with it", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "backups", "Nightly backups run at 03:00.");
+		insertWorking(beam, "deployment", "The deployment finished yesterday.");
+		insertWorking(beam, "cache", "Clear the cache before the benchmark.");
+		insertWorking(beam, "story", "The story covers the login flow.");
+		insertWorking(beam, "fact", "One fact about the nightly job.");
+		insertWorking(beam, "fragments", "We will be back tomorrow; the gates pass; redistribution is paused.");
+		const ids = async (query: string) =>
+			(await recall(beam, query, 5, { queryEmbedding: null })).map(result => result.id);
+		expect(await ids("backup")).toEqual(["backups"]);
+		expect(await ids("deploy")).toEqual(["deployment"]);
+		expect(await ids("caching")).toEqual(["cache"]);
+		expect(await ids("stories")).toEqual(["story"]);
+		expect(await ids("facts")).toEqual(["fact"]);
+		for (const query of ["passwords", "passport", "redis", "background"]) {
+			expect(await ids(query)).toEqual([]);
+		}
+	});
+
+	it("preserves synonym and semantic-only recall without substring lexical evidence", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "synonym", "The datastore retains customer records.");
+		expect((await recall(beam, "database", 5, { queryEmbedding: null })).map(result => result.id)).toContain(
+			"synonym",
+		);
+		insertWorking(beam, "identifier", "telemetry_api_latency_ms stays below the threshold.");
+		expect((await recall(beam, "telemetry latency", 5, { queryEmbedding: null })).map(result => result.id)).toEqual([
+			"identifier",
+		]);
+		insertWorking(beam, "semantic", "The vault selects the personal login.");
+		beam.db.run(
+			"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES ('semantic', '[1,0]', 'fixture')",
+		);
+		expect((await recall(beam, "1Password", 5, { queryEmbedding: [1, 0] })).map(result => result.id)).toEqual([
+			"semantic",
+		]);
+	});
+
 	it("orders deterministic FTS-only working-memory hits by lexical strength", async () => {
 		const beam = makeBeam();
 		insertWorking(beam, "wm-weak", "banana appears once beside unrelated notes");
@@ -200,6 +295,22 @@ describe("beam recall free functions", () => {
 
 		expect(results[0]?.id).toBe("wm-cjk");
 		expect(results.map(result => result.id)).not.toContain("wm-other");
+	});
+
+	it("preserves lexical-strength ordering for repeated spaceless CJK words", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "cjk-once", "数据库密码已轮换");
+		insertWorking(beam, "cjk-repeat", "数据库数据库数据库数据库密码");
+		const results = await recall(beam, "数据库", 5, {
+			queryEmbedding: null,
+			queryTime: "2026-05-30T12:00:00.000Z",
+			vecWeight: 1,
+			ftsWeight: 0,
+			importanceWeight: 0,
+		});
+		expect(results.find(result => result.id === "cjk-repeat")?.score ?? 0).toBeGreaterThan(
+			results.find(result => result.id === "cjk-once")?.score ?? 1,
+		);
 	});
 
 	it("does not retry scoped recall without the session filter when only another session matches", async () => {

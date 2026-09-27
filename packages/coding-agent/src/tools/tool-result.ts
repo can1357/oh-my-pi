@@ -65,6 +65,12 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
+	/** Mark the result as a bounded page of a file its source re-reads with line selectors. */
+	pagedSource(): this {
+		this.#meta.pagedSource();
+		return this;
+	}
+
 	diagnostics(summary: string, messages: string[]): this {
 		this.#meta.diagnostics(summary, messages);
 		return this;

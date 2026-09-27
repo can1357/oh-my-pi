@@ -3,9 +3,10 @@ import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { JUDGED_CONTENT_MAX_TOKENS, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 
 function judgedRule(name: string, fields: Partial<Rule>): Rule {
 	return {
@@ -33,6 +34,16 @@ function fakeJudge(verdicts: Record<string, number>, gate?: Promise<void>) {
 		},
 	} as unknown as Judge;
 	return { judge, requests };
+}
+
+/** `content` field of a judged `{ output, content }` state. */
+function sentContent(request: JudgmentRequest): string {
+	const { state } = request;
+	if (typeof state === "object" && "content" in state) {
+		const { content } = state;
+		if (typeof content === "string") return content;
+	}
+	throw new Error("judgment state has no string `content`");
 }
 
 function setup(rules: Rule[], judge: Judge) {
@@ -145,5 +156,25 @@ describe("TTSR judged rules", () => {
 
 		expect(requests).toHaveLength(1);
 		expect(warnings).toHaveLength(0);
+	});
+
+	it("sends as much output as fits Jev's state budget, measured in Jev tokens", async () => {
+		const { judge, requests } = fakeJudge({});
+		const { coordinator } = setup([judgedRule("no-todo", { question: HAS_TODO, scope: ["text"] })], judge);
+		// One Jev token per character: 60k characters would overflow the ~33k-token branch limit.
+		const chinese = "人人生而自由，在尊严和权利上一律平等。他们赋有理性和良心，并应以兄弟关系的精神相对待。".repeat(
+			1_500,
+		);
+		// ~20k tokens in 96k characters: fits whole despite its length.
+		const english = "The quick brown fox jumps over the lazy dog while the tests keep passing. ".repeat(1_300);
+		for (const text of [chinese, english]) coordinator.onAssistantMessageEnd(assistant([{ type: "text", text }]));
+		await coordinator.settleJudgments();
+
+		const sent = requests.map(sentContent);
+		expect(chinese.startsWith(sent[0])).toBe(true);
+		const tokens = countTokens(sent[0], Encoding.Jev);
+		expect(tokens).toBeLessThanOrEqual(JUDGED_CONTENT_MAX_TOKENS);
+		expect(tokens).toBeGreaterThan(JUDGED_CONTENT_MAX_TOKENS - 50);
+		expect(sent[1]).toBe(english);
 	});
 });

@@ -4,12 +4,13 @@ use std::{
 	borrow::Cow,
 	collections::HashMap,
 	fmt,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf, Prefix},
 	sync::{Arc, LazyLock},
 	time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
+use pi_vfs::BlockingFs;
 use rayon::{ThreadPool, prelude::*};
 
 use crate::{CollectedEntries, CollectedEntry, FileType, WalkError, WalkOptions};
@@ -263,19 +264,30 @@ fn cache_key(root: &Path, mut options: WalkOptions) -> CacheKey {
 	CacheKey { root: root.to_path_buf(), options }
 }
 
+/// Normalize a filesystem path to a forward-slash string on Windows.
+///
+/// Verbatim (`\\?\`) and device (`\\.\`) paths are returned unchanged: Windows
+/// only honors those prefixes with backslash separators.
+pub fn normalize_path(path: &Path) -> Cow<'_, str> {
+	let text = path.to_string_lossy();
+	if cfg!(windows) && text.contains('\\') && !has_literal_prefix(path) {
+		Cow::Owned(text.replace('\\', "/"))
+	} else {
+		text
+	}
+}
+
+fn has_literal_prefix(path: &Path) -> bool {
+	matches!(
+		path.components().next(),
+		Some(Component::Prefix(prefix))
+			if prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+	)
+}
+
 /// Normalize a filesystem path to a forward-slash relative string.
 pub fn normalize_relative_path<'a>(root: &Path, path: &'a Path) -> Cow<'a, str> {
-	let relative = path.strip_prefix(root).unwrap_or(path);
-	if cfg!(windows) {
-		let relative = relative.to_string_lossy();
-		if relative.contains('\\') {
-			Cow::Owned(relative.replace('\\', "/"))
-		} else {
-			relative
-		}
-	} else {
-		relative.to_string_lossy()
-	}
+	normalize_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Return whether a path contains the exact component name.
@@ -395,6 +407,7 @@ impl Drop for ScanSeamGuard {
 }
 
 fn collect_entries_uncached<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	mut options: WalkOptions,
 	heartbeat: &H,
@@ -405,12 +418,13 @@ where
 {
 	options.cache = false;
 	let scan =
-		crate::collect_entries_native(root, options, || heartbeat().map_err(|err| err.to_string()))?;
+		crate::scan_entries(fs, root, options, || heartbeat().map_err(|err| err.to_string()))?;
 	scan_seam();
 	Ok(scan)
 }
 
 fn get_or_scan<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: &H,
@@ -420,7 +434,7 @@ where
 	E: fmt::Display,
 {
 	if *CACHE_TTL_MS == 0 || *MAX_CACHE_ENTRIES == 0 || *MAX_CACHE_BYTES == 0 {
-		return collect_entries_uncached(root, options, heartbeat);
+		return collect_entries_uncached(fs, root, options, heartbeat);
 	}
 
 	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
@@ -439,7 +453,7 @@ where
 		});
 	}
 
-	let scan = collect_entries_uncached(root, options, heartbeat)?;
+	let scan = collect_entries_uncached(fs, root, options, heartbeat)?;
 	let bytes = entry_bytes(&scan.entries, scan.entries.capacity());
 	if bytes > *MAX_CACHE_BYTES {
 		return Ok(scan);
@@ -456,7 +470,21 @@ where
 	Ok(CollectedEntries { entries, cache_age_ms: 0 })
 }
 
-pub fn collect_entries<H, E>(
+/// Return whether a scan of `root` through `fs` may use the shared cache.
+///
+/// Cached results are keyed by host path and options alone, yet a scan also
+/// reads ancestor repository markers, ancestor and global ignore files, and
+/// symlink targets outside `root`. Only a filesystem without a provider sees
+/// all of those exactly as the host does, so any provider disables sharing
+/// even when it serves `root` natively.
+pub(crate) fn shares_scan_cache(fs: &BlockingFs, root: &Path) -> bool {
+	fs.is_native() && fs.is_native_local(root)
+}
+
+/// Collect entries from `fs`, consulting the shared scan cache only when
+/// `options.cache` is set and [`shares_scan_cache`] allows it.
+pub fn collect_entries_in<H, E>(
+	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: H,
@@ -465,10 +493,10 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
-	if options.cache {
-		get_or_scan(root, options, &heartbeat)
+	if options.cache && shares_scan_cache(fs, root) {
+		get_or_scan(fs, root, options, &heartbeat)
 	} else {
-		collect_entries_uncached(root, options, &heartbeat)
+		collect_entries_uncached(fs, root, options, &heartbeat)
 	}
 }
 
@@ -530,7 +558,12 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			let path = std::env::temp_dir().join(format!("pi-fs-cache-test-{timestamp}-{counter}"));
+			// nextest runs each test in its own process, so the counter restarts at 0
+			// and macOS clocks tick in microseconds: without the pid, two tests
+			// starting together share a directory and one's Drop deletes the other's.
+			let pid = std::process::id();
+			let path =
+				std::env::temp_dir().join(format!("pi-fs-cache-test-{pid}-{timestamp}-{counter}"));
 			fs::create_dir_all(&path).expect("create temp test directory");
 			Self(path)
 		}
@@ -696,7 +729,7 @@ mod tests {
 					paused.wait();
 					resume.wait();
 				});
-				super::collect_entries(&root, options, ok_heartbeat)
+				crate::collect_entries(&root, options, ok_heartbeat)
 			})
 		};
 
@@ -709,7 +742,7 @@ mod tests {
 		assert_eq!(inflight.cache_age_ms, 0);
 		assert_eq!(sorted_paths(&inflight.entries), ["before.txt"]);
 
-		let refreshed = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let refreshed = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		assert_eq!(
 			sorted_paths(&refreshed.entries),
 			["after.txt", "before.txt"],
@@ -717,7 +750,7 @@ mod tests {
 		);
 
 		std::thread::sleep(Duration::from_millis(2));
-		let repopulated = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let repopulated = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		assert!(repopulated.cache_age_ms > 0, "scans after invalidation must cache again");
 		super::invalidate_path(root.path());
 	}
@@ -767,18 +800,18 @@ mod tests {
 			cache: true,
 			..scan_options(true, false, crate::WalkDetail::Minimal)
 		};
-		let mut first = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let mut first = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		first.entries[0].path = "changed-by-caller".to_owned();
 		std::thread::sleep(Duration::from_millis(2));
-		let second = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let second = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		assert!(second.cache_age_ms > 0, "second collection must use the cached snapshot");
 		assert_eq!(second.entries[0].path, "real.txt");
-		let cancelled = super::collect_entries(root.path(), options, || Err("cancelled"));
+		let cancelled = crate::collect_entries(root.path(), options, || Err("cancelled"));
 		assert!(
 			matches!(cancelled, Err(crate::WalkError::Interrupted(error)) if error == "cancelled")
 		);
 		let heartbeat_calls = AtomicU64::new(0);
-		let cancelled_after_copy = super::collect_entries(root.path(), options, || {
+		let cancelled_after_copy = crate::collect_entries(root.path(), options, || {
 			if heartbeat_calls.fetch_add(1, Ordering::Relaxed) == 0 {
 				Ok(())
 			} else {
@@ -850,7 +883,7 @@ mod tests {
 		fs::write(root.path().join("node_modules/pkg/index.js"), "nm").unwrap();
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -876,7 +909,7 @@ mod tests {
 		let mut options = scan_options(true, false, crate::WalkDetail::Minimal);
 		options.follow_links = crate::FollowLinks::Always;
 
-		let entries = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		let entries = crate::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		let paths: Vec<&str> = entries
 			.entries
 			.iter()
@@ -896,7 +929,7 @@ mod tests {
 		fs::write(root.path().join("ignored.txt"), "ignored").unwrap();
 		fs::write(root.path().join("kept.txt"), "keep").unwrap();
 
-		let collected = super::collect_entries(
+		let collected = crate::collect_entries(
 			root.path(),
 			scan_options(true, true, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -919,7 +952,7 @@ mod tests {
 		fs::write(root.path().join(".hidden-file"), "secret").unwrap();
 		fs::write(root.path().join("visible.txt"), "visible").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(false, false, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -952,7 +985,7 @@ mod tests {
 		fs::write(root.path().join(".hidden-file"), "secret").unwrap();
 		fs::write(root.path().join(".ignored-hidden"), "ignored").unwrap();
 
-		let entries = super::collect_entries(
+		let entries = crate::collect_entries(
 			root.path(),
 			scan_options(true, true, crate::WalkDetail::Full),
 			ok_heartbeat,
@@ -975,7 +1008,7 @@ mod tests {
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
 		std::thread::sleep(Duration::from_millis(1));
-		let result = super::collect_entries(
+		let result = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Minimal),
 			|| Err("Timeout".to_string()),
@@ -995,7 +1028,7 @@ mod tests {
 		let root = TempDirGuard::new();
 		fs::write(root.path().join("real.txt"), "ok").unwrap();
 
-		let minimal = super::collect_entries(
+		let minimal = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Minimal),
 			ok_heartbeat,
@@ -1009,7 +1042,7 @@ mod tests {
 		assert_eq!(minimal_file.mtime, None);
 		assert_eq!(minimal_file.size, None);
 
-		let full = super::collect_entries(
+		let full = crate::collect_entries(
 			root.path(),
 			scan_options(true, false, crate::WalkDetail::Full),
 			ok_heartbeat,

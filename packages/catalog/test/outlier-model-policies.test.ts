@@ -3,9 +3,9 @@ import { buildModel } from "../src/build";
 import { seedModels } from "../src/compat/providers";
 import type { Api, ModelSpec } from "../src/types";
 
-function chatSpec(provider: string, api: Api): ModelSpec<Api> {
+function chatSpec(provider: string, api: Api, id = "policy-probe"): ModelSpec<Api> {
 	return {
-		id: "policy-probe",
+		id,
 		name: "Policy Probe",
 		api,
 		provider,
@@ -59,5 +59,10 @@ describe("outlier catalog policies", () => {
 		for (const [provider, api, grounding] of cases) {
 			expect(buildModel(chatSpec(provider, api)).webSearch).toBe(grounding);
 		}
+	});
+
+	test("OpenAI grounding excludes Realtime-only models from Responses web search", () => {
+		expect(buildModel(chatSpec("openai", "openai-responses", "gpt-6-luna")).webSearch).toBe("openai");
+		expect(buildModel(chatSpec("openai", "openai-responses", "gpt-realtime-2.1")).webSearch).toBeUndefined();
 	});
 });

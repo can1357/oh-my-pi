@@ -151,6 +151,11 @@ export class UsageService implements UsageApi {
 		});
 		this.#deps.cache.invalidateForProvider(provider);
 	}
+	/** Carry runtime usage provider overrides over from the service this one replaces (store swap). */
+	adoptRuntimeProviders(previous: UsageService): void {
+		this.#runtimeUsageProviderOverrides = previous.#runtimeUsageProviderOverrides;
+	}
+
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
 	removeProvider(provider: Provider): void {
 		if (!this.#runtimeUsageProviderOverrides.has(provider)) return;

@@ -1,5 +1,7 @@
 //! Brush-based shell execution exported via N-API.
 
+pub mod vfs;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use napi::{
@@ -15,7 +17,40 @@ use pi_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
+use self::vfs::ShellFilesystem;
 use crate::task;
+
+/// Expand Windows 8.3 components without resolving symlinks or junctions.
+#[napi]
+pub fn expand_windows_long_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::expand_to_long_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
+
+/// Get the existing Windows 8.3 spelling; preserve the input when unavailable.
+#[napi]
+pub fn get_windows_short_path(path: String) -> String {
+	#[cfg(windows)]
+	{
+		pi_shell::get_short_path(std::path::Path::new(&path))
+			.into_os_string()
+			.into_string()
+			.unwrap_or(path)
+	}
+	#[cfg(not(windows))]
+	{
+		path
+	}
+}
 
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
@@ -64,7 +99,7 @@ impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 }
 
 /// Options for configuring a persistent shell session.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellOptions {
 	/// Environment variables to apply once per session.
 	pub session_env:   Option<HashMap<String, String>>,
@@ -72,6 +107,8 @@ pub struct ShellOptions {
 	pub snapshot_path: Option<String>,
 	/// Optional per-command output minimizer configuration.
 	pub minimizer:     Option<MinimizerOptions>,
+	/// Filesystem backing every run of this session (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
@@ -80,12 +117,16 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
+			filesystem:    value
+				.filesystem
+				.map(ShellFilesystem::into_fs)
+				.unwrap_or_default(),
 		}
 	}
 }
 
 /// Options for running a shell command.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:    String,
@@ -97,10 +138,13 @@ pub struct ShellRunOptions<'env> {
 	pub timeout_ms: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:     Option<Unknown<'env>>,
+	/// Filesystem for this run only, replacing the session's; the session's
+	/// filesystem applies again to later runs.
+	pub filesystem: Option<ShellFilesystem>,
 }
 
 /// Options for executing a shell command via brush-core.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:       String,
@@ -118,6 +162,8 @@ pub struct ShellExecuteOptions<'env> {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
 	pub signal:        Option<Unknown<'env>>,
+	/// Filesystem backing the command (native when absent).
+	pub filesystem:    Option<ShellFilesystem>,
 }
 
 /// Telemetry for a single minimization.
@@ -223,6 +269,7 @@ impl Shell {
 			cwd:        options.cwd,
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
+			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -276,6 +323,10 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
+		filesystem:    options
+			.filesystem
+			.map(ShellFilesystem::into_fs)
+			.unwrap_or_default(),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -673,6 +724,7 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -720,6 +772,7 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
+						filesystem: None,
 					},
 					None,
 					cancel,
@@ -755,6 +808,7 @@ mod tests {
 					cwd:        None,
 					env:        None,
 					timeout_ms: Some(TIMEOUT_MS),
+					filesystem: None,
 				},
 				Some(tx),
 				CancelToken::new(Some(TIMEOUT_MS)),

@@ -5,6 +5,7 @@ import {
 	expandContentTokens,
 	formatConflictWarning,
 	parseConflictUri,
+	recoverConflictUriPrefix,
 	scanConflictLines,
 	spliceConflict,
 } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
@@ -222,25 +223,24 @@ describe("parseConflictUri", () => {
 		expect(() => parseConflictUri("conflict://1/extra")).toThrow(ToolError);
 	});
 
-	it("recovers an erroneous `<file>:` prefix and surfaces it as `recoveredPrefix`", () => {
-		expect(parseConflictUri("src/foo.ts:conflict://3")).toEqual({
-			id: 3,
-			recoveredPrefix: "src/foo.ts",
+	it("does not parse a `<file>:`-prefixed conflict URI", () => {
+		expect(parseConflictUri("src/foo.ts:conflict://3")).toBeNull();
+	});
+});
+
+describe("recoverConflictUriPrefix", () => {
+	it("strips an erroneous `<file>:` prefix and explains it", () => {
+		expect(recoverConflictUriPrefix("src/foo.ts:conflict://3")).toEqual({
+			path: "conflict://3",
+			note: "Note: stripped erroneous 'src/foo.ts:' prefix from path; conflict URIs are global (use `conflict://3`, not `<file>:conflict://3`).",
 		});
-		expect(parseConflictUri("packages/coding-agent/src/x.ts:conflict://*")).toEqual({
-			id: "*",
-			recoveredPrefix: "packages/coding-agent/src/x.ts",
-		});
-		expect(parseConflictUri("a.ts:conflict://2/theirs")).toEqual({
-			id: 2,
-			scope: "theirs",
-			recoveredPrefix: "a.ts",
-		});
+		expect(recoverConflictUriPrefix("packages/coding-agent/src/x.ts:conflict://*").path).toBe("conflict://*");
+		expect(recoverConflictUriPrefix("a.ts:conflict://2/theirs").path).toBe("conflict://2/theirs");
 	});
 
-	it("does not set `recoveredPrefix` on clean URIs", () => {
-		expect(parseConflictUri("conflict://1")).not.toHaveProperty("recoveredPrefix");
-		expect(parseConflictUri("conflict://*")).not.toHaveProperty("recoveredPrefix");
+	it("passes clean URIs and plain paths through without a note", () => {
+		expect(recoverConflictUriPrefix("conflict://1")).toEqual({ path: "conflict://1" });
+		expect(recoverConflictUriPrefix("src/foo.ts:12")).toEqual({ path: "src/foo.ts:12" });
 	});
 });
 

@@ -209,4 +209,45 @@ describe("AgentSession title generation disposal", () => {
 		await setSessionName.mock.results[0]?.value;
 		expect(session.sessionName).toBe("replacement session");
 	});
+
+	it("retitles from the assistant reply when the title model declines an ambiguous first message", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({
+				responses: [{ content: ["The screenshot shows a TypeError thrown by the tokenizer."] }],
+			}).stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const titleInputs: string[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+			const content = context.messages[0]?.content;
+			titleInputs.push(typeof content === "string" ? content : "");
+			return createAssistantMessage(titleInputs.length === 1 ? "<title/>" : "<title>Tokenizer TypeError</title>");
+		});
+		const named = Promise.withResolvers<void>();
+		session.sessionManager.onSessionNameChanged(() => named.resolve());
+
+		session.maybeStartTitleGeneration("help");
+		await session.prompt("help");
+		await named.promise;
+
+		expect(session.sessionName).toBe("Tokenizer TypeError");
+		expect(titleInputs).toHaveLength(2);
+		expect(titleInputs[1]).toContain("TypeError thrown by the tokenizer");
+	});
 });

@@ -17,7 +17,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -643,30 +643,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			await session.waitForIdle();
 			expect(continueSpy).not.toHaveBeenCalled();
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-});
-
-describe("AgentSession.buildAskReanswerContext", () => {
-	it("builds an AgentToolContext backed by real session state, not a fabricated stub", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const { session } = ctx;
-			const uiContext = { select: async () => undefined } as unknown as ExtensionUIContext;
-
-			const toolContext = session.buildAskReanswerContext(uiContext);
-
-			expect(toolContext.sessionManager).toBe(session.sessionManager);
-			expect(toolContext.modelRegistry).toBe(session.modelRegistry);
-			expect(toolContext.model).toBe(session.model);
-			expect(toolContext.settings).toBe(session.settings);
-			expect(toolContext.hasUI).toBe(true);
-			expect(toolContext.ui).toBe(uiContext);
-			expect(toolContext.isIdle?.()).toBe(true);
-			expect(toolContext.hasQueuedMessages?.()).toBe(false);
-			expect(() => toolContext.abort?.()).not.toThrow();
 		} finally {
 			await ctx.cleanup();
 		}

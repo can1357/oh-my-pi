@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { defaultGhHost, parseRepoRef } from "./gh-common";
+import { cfgGithubCacheEnabled, cfgGithubCacheHardTtlSec, cfgGithubCacheSoftTtlSec } from "./settings";
 import { ToolAbortError } from "./tool-errors";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -56,9 +57,6 @@ interface Row {
 	rendered: string;
 	source_url: string | null;
 }
-
-const DEFAULT_SOFT_TTL_SEC = 300; // 5 minutes
-const DEFAULT_HARD_TTL_SEC = 60 * 60 * 24 * 7; // 7 days
 
 let cachedDb: Database | null = null;
 let openAttempted = false;
@@ -128,7 +126,7 @@ export function openDb(): Database | null {
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
-		// No eviction on open: the default `DEFAULT_HARD_TTL_SEC` is a coarse
+		// No eviction on open: the default hard TTL is a coarse
 		// backstop that runs before user settings load, so applying it here
 		// would nuke rows still valid under a stricter-or-laxer configured
 		// `github.cache.hardTtlSec`. The per-lookup `sweepIfDue()` in
@@ -470,29 +468,6 @@ export interface CacheLookupResult<T> {
 	fetchedAt: number;
 }
 
-function readNumberSetting(settings: Settings | undefined, key: string, fallback: number): number {
-	if (!settings) return fallback;
-	try {
-		const value = (settings as unknown as { get(k: string): unknown }).get(key);
-		if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
-	} catch {
-		// Unknown setting paths fall through to default; settings may be a
-		// stripped test stub that doesn't expose every key.
-	}
-	return fallback;
-}
-
-function readBooleanSetting(settings: Settings | undefined, key: string, fallback: boolean): boolean {
-	if (!settings) return fallback;
-	try {
-		const value = (settings as unknown as { get(k: string): unknown }).get(key);
-		if (typeof value === "boolean") return value;
-	} catch {
-		// Same fallback rationale as readNumberSetting.
-	}
-	return fallback;
-}
-
 export interface CacheTtl {
 	softMs: number;
 	hardMs: number;
@@ -500,13 +475,17 @@ export interface CacheTtl {
 }
 
 export function resolveCacheTtl(settings?: Settings): CacheTtl {
-	const softSec = readNumberSetting(settings, "github.cache.softTtlSec", DEFAULT_SOFT_TTL_SEC);
-	const hardSec = readNumberSetting(settings, "github.cache.hardTtlSec", DEFAULT_HARD_TTL_SEC);
-	const enabled = readBooleanSetting(settings, "github.cache.enabled", true);
+	if (!settings) {
+		return {
+			softMs: cfgGithubCacheSoftTtlSec.default * 1000,
+			hardMs: cfgGithubCacheHardTtlSec.default * 1000,
+			enabled: cfgGithubCacheEnabled.default,
+		};
+	}
 	return {
-		softMs: Math.max(0, softSec) * 1000,
-		hardMs: Math.max(0, hardSec) * 1000,
-		enabled,
+		softMs: Math.max(0, cfgGithubCacheSoftTtlSec.get(settings)) * 1000,
+		hardMs: Math.max(0, cfgGithubCacheHardTtlSec.get(settings)) * 1000,
+		enabled: cfgGithubCacheEnabled.get(settings),
 	};
 }
 

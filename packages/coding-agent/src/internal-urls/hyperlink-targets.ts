@@ -3,16 +3,7 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { getMarkdownLinkUrls, TERMINAL } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
-import {
-	extractUriScheme,
-	InternalUrlRouter,
-	LocalProtocolHandler,
-	memoryRootsFromRegistry,
-	parseInternalUrl,
-	type ResolveContext,
-	resolveLocalUrlToPath,
-	resolveMemoryUrlToPath,
-} from "./index";
+import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
 
 /**
@@ -30,12 +21,9 @@ export async function resolveMarkdownLinkTargets(
 		for (const href of getMarkdownLinkUrls(text)) {
 			if (!href || /[\x00-\x1f\x7f]/.test(href) || /^(?:#|\?|\/\/)/.test(href)) continue;
 			const scheme = extractUriScheme(href);
-			// Rendering must not fetch remote resources or materialize secrets.
-			if (
-				!scheme ||
-				scheme === "file" ||
-				(/^(?:agent|artifact|history|local|memory|omp|rule|skill):\/\//i.test(href) && router.canHandle(href))
-			) {
+			// Rendering must not fetch remote resources or materialize secrets:
+			// only linkable schemes locate locally and cheaply.
+			if (!scheme || scheme === "file" || (router.spec(scheme)?.linkable && router.canHandle(href))) {
 				urls.add(href);
 			}
 		}
@@ -46,9 +34,9 @@ export async function resolveMarkdownLinkTargets(
 				let sourcePath: string;
 				let suffix: string;
 				if (router.canHandle(href)) {
-					const resource = await router.resolve(href, { ...context, pathOnly: true, skipDirectoryListing: true });
-					if (!resource.sourcePath) return;
-					sourcePath = resource.sourcePath;
+					const located = await router.locate(href, context);
+					if (located === null) return;
+					sourcePath = located;
 					suffix = parseInternalUrl(href).hash;
 				} else {
 					const suffixIndex = href.search(/[?#]/);
@@ -67,43 +55,4 @@ export async function resolveMarkdownLinkTargets(
 		}),
 	);
 	return targets;
-}
-
-/**
- * Synchronously resolve a filesystem-backed internal URL (e.g. `local://foo.md`,
- * `memory://root/notes.md`) to its absolute filesystem path. Returns `undefined`
- * for inputs that aren't fs-backed, aren't resolvable in the current session
- * registry, or fail to parse.
- *
- * Used by renderers to wrap fs-backed internal URLs in OSC 8 hyperlinks even
- * when the resolved path isn't yet available from tool result details (e.g.
- * during the call/streaming phase before a result lands).
- *
- * Async-resolved schemes (`artifact://`, `agent://`, `skill://`, `rule://`,
- * `omp://`) are not handled here — those rely on `details.resolvedPath` set
- * by the read tool's router resolution.
- */
-export function tryResolveInternalUrlSync(input: string): string | undefined {
-	try {
-		if (input.startsWith("local://")) {
-			const opts = LocalProtocolHandler.resolveOptions();
-			if (!opts) return undefined;
-			return resolveLocalUrlToPath(input, opts);
-		}
-		if (input.startsWith("memory://")) {
-			const url = parseInternalUrl(input);
-			const roots = memoryRootsFromRegistry();
-			for (const root of roots) {
-				try {
-					return resolveMemoryUrlToPath(url, root);
-				} catch {
-					// Try the next root; some sessions may not have this namespace mounted.
-				}
-			}
-			return undefined;
-		}
-	} catch {
-		return undefined;
-	}
-	return undefined;
 }

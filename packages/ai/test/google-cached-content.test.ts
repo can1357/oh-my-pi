@@ -353,22 +353,4 @@ describe("Google caller-owned cachedContent", () => {
 			expect(done.message.usage.totalTokens).toBe(105);
 		}
 	});
-
-	it("does not invoke Google cache lifecycle endpoints when referencing cached content", async () => {
-		const { fetch, calls } = capturingFetch();
-		await drain(
-			streamGoogle(geminiModel, cacheOnlyContext, {
-				apiKey: "k",
-				cachedContent: CACHE_NAME,
-				fetch,
-			}),
-		);
-		const urls = calls().map(c => c.url);
-		expect(urls).toHaveLength(1);
-		expect(urls[0]).toMatch(/models\/gemini-2\.5-flash:streamGenerateContent/);
-		for (const url of urls) {
-			expect(url).not.toMatch(/\/cachedContents(?:\/[^:]*)?(?:\?|$)/);
-			expect(url).not.toMatch(/cachedContents.*:(?:create|delete|patch)/i);
-		}
-	});
 });

@@ -627,7 +627,6 @@ mod chunks {
 	
 	use std::{
 		collections::VecDeque,
-		fs::File,
 		io::{self, BufRead, Read, Seek, SeekFrom, Write},
 	};
 	
@@ -648,9 +647,9 @@ mod chunks {
 	/// Each chunk is a [`Vec`]<[`u8`]> of size [`BLOCK_SIZE`] (except
 	/// possibly the last chunk, which might be smaller). Each call to
 	/// [`ReverseChunks::next`] will seek backwards through the given file.
-	pub struct ReverseChunks<'a> {
+	pub struct ReverseChunks<'a, R> {
 		/// The file to iterate over, by blocks, from the end to the beginning.
-		file: &'a File,
+		file: &'a mut R,
 	
 		/// The total number of bytes in the file.
 		size: u64,
@@ -662,8 +661,8 @@ mod chunks {
 		block_idx: usize,
 	}
 	
-	impl<'a> ReverseChunks<'a> {
-		pub fn new(file: &'a mut File) -> Self {
+	impl<'a, R: Read + Seek> ReverseChunks<'a, R> {
+		pub fn new(file: &'a mut R) -> Self {
 			let current = if cfg!(unix) {
 				file.stream_position().unwrap()
 			} else {
@@ -676,7 +675,7 @@ mod chunks {
 		}
 	}
 	
-	impl Iterator for ReverseChunks<'_> {
+	impl<R: Read + Seek> Iterator for ReverseChunks<'_, R> {
 		type Item = Vec<u8>;
 	
 		fn next(&mut self) -> Option<Self::Item> {
@@ -1329,10 +1328,11 @@ mod follow {
 		//! File handle management for `tail --follow`.
 		use std::{
 			collections::{HashMap, hash_map::Keys},
-			fs::{File, Metadata},
-			io::{BufRead, BufReader, Write},
+			io::{BufReader, Write},
 			path::{Path, PathBuf},
 		};
+		
+		use pi_vfs::{BlockingFs, File, Metadata};
 		
 		use crate::tail::{
 			TailResult,
@@ -1346,55 +1346,47 @@ mod follow {
 		/// `last` always holds the path/key of the last file that was printed from.
 		/// The keys of the [`HashMap`] can point to an existing file path (normal
 		/// case), or stdin ("-"), or to a non-existing path (--retry).
-		/// For existing files, all keys in the [`HashMap`] are absolute Paths.
+		/// Keys are operands already resolved against the shell working
+		/// directory: absolute host paths or virtual `scheme://` paths.
 		pub struct FileHandling {
+			fs:             BlockingFs,
 			map:            HashMap<PathBuf, PathData>,
 			last:           Option<PathBuf>,
 			header_printer: HeaderPrinter,
 		}
 		
 		impl FileHandling {
-			pub fn from(settings: &Settings) -> Self {
+			pub fn from(settings: &Settings, fs: BlockingFs) -> Self {
 				Self {
+					fs,
 					map:            HashMap::with_capacity(settings.inputs.len()),
 					last:           None,
 					header_printer: HeaderPrinter::new(settings.verbose, false),
 				}
 			}
 		
-			/// Wrapper for [`HashMap::insert`] using [`Path::canonicalize`]
+			/// Filesystem every followed path is opened and inspected through.
+			pub fn fs(&self) -> &BlockingFs {
+				&self.fs
+			}
+		
 			pub fn insert(&mut self, k: &Path, v: PathData, update_last: bool) {
-				let k = Self::canonicalize_path(k);
 				if update_last {
-					self.last = Some(k.clone());
+					self.last = Some(k.to_owned());
 				}
-				let _ = self.map.insert(k, v);
+				let _ = self.map.insert(k.to_owned(), v);
 			}
 		
-			/// Wrapper for [`HashMap::remove`] using [`Path::canonicalize`]
 			pub fn remove(&mut self, k: &Path) -> PathData {
-				self.map.remove(&Self::canonicalize_path(k)).unwrap()
+				self.map.remove(k).unwrap()
 			}
 		
-			/// Wrapper for [`HashMap::get`] using [`Path::canonicalize`]
 			pub fn get(&self, k: &Path) -> &PathData {
-				self.map.get(&Self::canonicalize_path(k)).unwrap()
+				self.map.get(k).unwrap()
 			}
 		
-			/// Wrapper for [`HashMap::get_mut`] using [`Path::canonicalize`]
 			pub fn get_mut(&mut self, k: &Path) -> &mut PathData {
-				self.map.get_mut(&Self::canonicalize_path(k)).unwrap()
-			}
-		
-			/// Canonicalize `path` if it is not already an absolute path
-			fn canonicalize_path(path: &Path) -> PathBuf {
-				if path.is_relative()
-					&& !path.is_stdin()
-					&& let Ok(p) = path.canonicalize()
-				{
-					return p;
-				}
-				path.to_owned()
+				self.map.get_mut(k).unwrap()
 			}
 		
 			pub fn get_mut_metadata(&mut self, path: &Path) -> Option<&Metadata> {
@@ -1421,7 +1413,7 @@ mod follow {
 			/// Return true if there is at least one "tailable" path (or stdin) remaining
 			pub fn files_remaining(&self) -> bool {
 				for path in self.map.keys() {
-					if path.is_tailable() || path.is_stdin() {
+					if path.is_tailable(&self.fs) || path.is_stdin() {
 						return true;
 					}
 				}
@@ -1443,24 +1435,29 @@ mod follow {
 			pub fn update_reader(&mut self, path: &Path) -> TailResult<()> {
 				/*
 				BUG: If it's not necessary to reopen a file, GNU's tail calls seek to offset 0.
-				However, we can't call seek here because `BufRead` does not implement `Seek`.
 				As a workaround, we always reopen the file even though this might not always
 				be necessary.
 				*/
-				self
-					.get_mut(path)
-					.reader
-					.replace(Box::new(BufReader::new(File::open(path)?)));
+				let file = self.fs.open(path)?;
+				self.set_reader(path, file);
 				Ok(())
+			}
+		
+			/// Follow `path` through `file` from the handle's current position.
+			pub fn set_reader(&mut self, path: &Path, file: File) {
+				let data = self.get_mut(path);
+				data.reader = Some(BufReader::new(file));
+				data.unchanged_stats = 0;
 			}
 		
 			/// Reload metadata from `path`, or `metadata`
 			pub fn update_metadata(&mut self, path: &Path, metadata: Option<Metadata>) {
-				self.get_mut(path).metadata = if metadata.is_some() {
+				let metadata = if metadata.is_some() {
 					metadata
 				} else {
-					path.metadata().ok()
+					self.fs.metadata(path).ok()
 				};
+				self.get_mut(path).metadata = metadata;
 			}
 		
 			/// Read new data from `path` and print it to stdout
@@ -1509,35 +1506,39 @@ mod follow {
 		/// Data structure to keep a handle on the [`BufReader`], [`Metadata`]
 		/// and the `display_name` (`header_name`) of files that are being followed.
 		pub struct PathData {
-			pub reader:       Option<Box<dyn BufRead>>,
-			pub metadata:     Option<Metadata>,
-			pub display_name: String,
+			pub reader:          Option<BufReader<File>>,
+			pub metadata:        Option<Metadata>,
+			pub display_name:    String,
+			/// Consecutive provider polls that read nothing from `reader`; with
+			/// `--follow=name` the name is rechecked once this reaches
+			/// `--max-unchanged-stats`.
+			pub unchanged_stats: u32,
 		}
 		
 		impl PathData {
 			pub fn new(
-				reader: Option<Box<dyn BufRead>>,
+				reader: Option<BufReader<File>>,
 				metadata: Option<Metadata>,
 				display_name: &str,
 			) -> Self {
-				Self { reader, metadata, display_name: display_name.to_owned() }
+				Self { reader, metadata, display_name: display_name.to_owned(), unchanged_stats: 0 }
 			}
 		
-			pub fn from_other_with_path(data: Self, path: &Path) -> Self {
+			pub fn from_other_with_path(data: Self, path: &Path, fs: &BlockingFs) -> Self {
 				// Remove old reader
 				let old_reader = data.reader;
 				let reader = if old_reader.is_some() {
 					// Use old reader with the same file descriptor if there is one
 					old_reader
-				} else if let Ok(file) = File::open(path) {
+				} else if let Ok(file) = fs.open(path) {
 					// Open new file tail from start
-					Some(Box::new(BufReader::new(file)) as Box<dyn BufRead>)
+					Some(BufReader::new(file))
 				} else {
 					// Probably file was renamed/moved or removed again
 					None
 				};
 		
-				Self::new(reader, path.metadata().ok(), data.display_name.as_str())
+				Self::new(reader, fs.metadata(path).ok(), data.display_name.as_str())
 			}
 		}
 	}
@@ -1546,14 +1547,14 @@ mod follow {
 	mod watch {
 		//! Notification and polling follow loop.
 		use std::{
-			io::{BufRead, Write},
+			io::{BufReader, ErrorKind, Seek, SeekFrom, Write},
 			path::{Path, PathBuf},
 			sync::{
 				Arc,
 				atomic::{AtomicBool, Ordering},
 				mpsc::{self, Receiver, channel},
 			},
-			time::Duration,
+			time::{Duration, Instant},
 		};
 		
 		use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
@@ -1562,6 +1563,7 @@ mod follow {
 		use uucore::display::Quotable;
 		
 		use brush_core::openfiles::OpenFile;
+		use pi_vfs::{BlockingFs, File, parent_path};
 		
 		use crate::{
 			host::{Host, StreamWriter},
@@ -1590,10 +1592,10 @@ mod follow {
 		
 			/// Wrapper for `notify::Watcher::watch` to also add the parent directory of
 			/// `path` if necessary.
-			fn watch_with_parent(&mut self, path: &Path) -> TailResult<()> {
+			fn watch_with_parent(&mut self, path: &Path, fs: &BlockingFs) -> TailResult<()> {
 				let mut path = path.to_owned();
 				#[cfg(target_os = "linux")]
-				if path.is_file() {
+				if fs.is_file(&path) {
 					/*
 					NOTE: Using the parent directory instead of the file is a workaround.
 					This workaround follows the recommendation of the notify crate authors:
@@ -1603,8 +1605,8 @@ mod follow {
 					NOTE: Adding both: file and parent results in duplicate/wrong events.
 					Tested for notify::InotifyWatcher and for notify::PollWatcher.
 					*/
-					if let Some(parent) = path.parent() {
-						if parent.is_dir() {
+					if let Some(parent) = parent_path(&path) {
+						if fs.is_dir(parent) {
 							path = parent.to_owned();
 						} else {
 							path = PathBuf::from(".");
@@ -1614,7 +1616,7 @@ mod follow {
 					}
 				}
 				if path.is_relative() {
-					path = path.canonicalize()?;
+					path = fs.canonicalize(&path)?;
 				}
 		
 				// for syscalls: 2x "inotify_add_watch" ("filename" and ".") and 1x
@@ -1693,6 +1695,7 @@ mod follow {
 		
 			pub fn from(
 				settings: &Settings,
+				fs: BlockingFs,
 				stdout: StreamWriter,
 				stderr: OpenFile,
 				cancel: Arc<AtomicBool>,
@@ -1701,7 +1704,7 @@ mod follow {
 					settings.retry,
 					settings.follow,
 					settings.use_polling,
-					FileHandling::from(settings),
+					FileHandling::from(settings, fs),
 					settings.pid,
 					stdout,
 					stderr,
@@ -1713,19 +1716,14 @@ mod follow {
 				&mut self,
 				path: &Path,
 				display_name: &str,
-				reader: Option<Box<dyn BufRead>>,
+				reader: Option<BufReader<File>>,
 				update_last: bool,
 			) -> TailResult<()> {
 				if self.follow.is_some() {
-					let path = if path.is_relative() {
-						std::env::current_dir()?.join(path)
-					} else {
-						path.to_owned()
-					};
-					let metadata = path.metadata().ok();
+					let metadata = self.files.fs().metadata(path).ok();
 					self
 						.files
-						.insert(&path, PathData::new(reader, metadata, display_name), update_last);
+						.insert(path, PathData::new(reader, metadata, display_name), update_last);
 				}
 		
 				Ok(())
@@ -1746,6 +1744,18 @@ mod follow {
 		
 			pub fn start(&mut self, settings: &Settings, host: &mut Host) -> TailResult<()> {
 				if settings.follow.is_none() {
+					return Ok(());
+				}
+		
+				// notify's watchers, its PollWatcher included, observe host paths
+				// directly. Use them only when the filesystem declares every operand
+				// native; otherwise poll every operand through the provider.
+				let native = settings.inputs.iter().all(|input| match input.kind() {
+					InputKind::Stdin => true,
+					InputKind::File(path) => self.files.fs().is_native_local(path),
+				});
+				if !native {
+					self.use_polling = true;
 					return Ok(());
 				}
 		
@@ -1826,29 +1836,27 @@ mod follow {
 				self.follow_name() && self.retry
 			}
 		
-			fn init_files(&mut self, inputs: &Vec<Input>) -> TailResult<()> {
+			fn init_files(&mut self, inputs: &[Input]) -> TailResult<()> {
+				let fs = self.files.fs();
 				if let Some(watcher_rx) = &mut self.watcher_rx {
 					for input in inputs {
 						match input.kind() {
 							InputKind::Stdin => (),
 							InputKind::File(path) => {
 								#[cfg(all(unix, not(target_os = "linux")))]
-								if !path.is_file() {
+								if !fs.is_file(path) {
 									continue;
 								}
-								let mut path = path.clone();
-								if path.is_relative() {
-									path = std::env::current_dir()?.join(path);
-								}
+								let path = path.clone();
 		
-								if path.is_tailable() {
+								if path.is_tailable(fs) {
 									// Add existing regular files to `Watcher` (InotifyWatcher).
-									watcher_rx.watch_with_parent(&path)?;
-								} else if !path.is_orphan() {
+									watcher_rx.watch_with_parent(&path, fs)?;
+								} else if !path.is_orphan(fs) {
 									// If `path` is not a tailable file, add its parent to `Watcher`.
-									watcher_rx.watch(path.parent().unwrap(), RecursiveMode::NonRecursive)?;
+									watcher_rx.watch(parent_path(&path).unwrap(), RecursiveMode::NonRecursive)?;
 									// Add symlinks to orphans for retry polling (target may not exist)
-									if path.is_symlink() {
+									if fs.is_symlink(&path) {
 										self.orphans.push(path);
 									}
 								} else {
@@ -1875,7 +1883,7 @@ mod follow {
 				match event.kind {
 		            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any | MetadataKind::WriteTime) | ModifyKind::Data(DataChange::Any) | ModifyKind::Name(RenameMode::To)) |
 		            EventKind::Create(CreateKind::File | CreateKind::Folder | CreateKind::Any) => {
-		                if let Ok(new_md) = event_path.metadata() {
+		                if let Ok(new_md) = self.files.fs().metadata(event_path) {
 		                    let is_tailable = new_md.is_tailable();
 		                    let pd = self.files.get(event_path);
 		                    if let Some(old_md) = &pd.metadata {
@@ -1898,7 +1906,7 @@ mod follow {
 		                                );
 		                                self.files.update_reader(event_path)?;
 		                            } else if event.kind == EventKind::Modify(ModifyKind::Name(RenameMode::To))
-		                            || (self.use_polling && !old_md.file_id_eq(&new_md)) {
+		                            || (self.use_polling && !old_md.same_file(&new_md)) {
 		                                let _ = writeln!(
 		                                    self.stderr,
 		                                    "tail: {} has been replaced;  following new file",
@@ -1954,7 +1962,7 @@ mod follow {
 		                        }
 		                    }
 		                    self.files.update_metadata(event_path, Some(new_md));
-		                } else if event_path.is_symlink() && settings.retry {
+		                } else if self.files.fs().is_symlink(event_path) && settings.retry {
 		                    self.files.reset_reader(event_path);
 		                    self.orphans.push(event_path.clone());
 		                }
@@ -1973,7 +1981,7 @@ mod follow {
 		                                    display_name.quote()
 		                                );
 		                            }
-		                        if event_path.is_orphan() && !self.orphans.contains(event_path) {
+		                        if event_path.is_orphan(self.files.fs()) && !self.orphans.contains(event_path) {
 		                            let _ = writeln!(
 		                                self.stderr,
 		                                "tail: directory containing watched file was removed"
@@ -2006,12 +2014,8 @@ mod follow {
 		                    /*
 		                    BUG: The watched file was removed. Since we're using Polling, this
 		                    could be a rename. We can't tell because `notify::PollWatcher` doesn't
-		                    recognize renames properly.
-		                    Ideally we want to call seek to offset 0 on the file handle.
-		                    But because we only have access to `PathData::reader` as `BufRead`,
-		                    we cannot seek to 0 with `BufReader::seek_relative`.
-		                    Also because we don't have the new name, we cannot work around this
-		                    by simply reopening the file.
+		                    recognize renames properly, and without the new name we cannot
+		                    work around this by simply reopening the file.
 		                    */
 		                }
 		            }
@@ -2037,7 +2041,7 @@ mod follow {
 		                    let new_path = event.paths.last().unwrap();
 		                    paths.push(new_path.clone());
 		
-		                    let new_data = PathData::from_other_with_path(self.files.remove(event_path), new_path);
+		                    let new_data = PathData::from_other_with_path(self.files.remove(event_path), new_path, self.files.fs());
 		                    self.files.insert(
 		                        new_path,
 		                        new_data,
@@ -2046,11 +2050,222 @@ mod follow {
 		
 		                    // Unwatch old path and watch new path
 		                    let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
-		                    self.watcher_rx.as_mut().unwrap().watch_with_parent(new_path)?;
+		                    self.watcher_rx.as_mut().unwrap().watch_with_parent(new_path, self.files.fs())?;
 		                }
 		            _ => {}
 		        }
 				Ok(paths)
+			}
+		
+			/// One provider polling pass, GNU `tail_forever` without kernel
+			/// notification: each followed operand is checked through the
+			/// injected filesystem and new data is read from its handle.
+			/// Returns whether anything was printed.
+			fn poll_provider(&mut self, settings: &Settings) -> TailResult<bool> {
+				let mut read_some = false;
+				// Operand order, like GNU; without kernel events no key is renamed.
+				for input in &settings.inputs {
+					let InputKind::File(path) = input.kind() else {
+						continue;
+					};
+					if !self.files.contains_key(path) {
+						continue;
+					}
+					if self.files.get(path).reader.is_none() {
+						self.recheck_provider_name(path, settings)?;
+					} else {
+						self.check_handle_truncation(path)?;
+					}
+					if !self.has_reader(path) {
+						continue;
+					}
+					if self.files.tail_file(path, settings.verbose, &mut self.stdout)? {
+						self.files.get_mut(path).unchanged_stats = 0;
+						read_some = true;
+						continue;
+					}
+					if !self.follow_name() {
+						continue;
+					}
+					// `--max-unchanged-stats`: a name that stayed idle is rechecked
+					// to catch rotation (rename, then a new file under the name).
+					let data = self.files.get_mut(path);
+					if data.unchanged_stats < settings.max_unchanged_stats {
+						data.unchanged_stats += 1;
+						continue;
+					}
+					data.unchanged_stats = 0;
+					self.recheck_provider_name(path, settings)?;
+					if self.has_reader(path) {
+						read_some |= self.files.tail_file(path, settings.verbose, &mut self.stdout)?;
+					}
+				}
+				Ok(read_some)
+			}
+		
+			fn has_reader(&self, path: &Path) -> bool {
+				self.files.contains_key(path) && self.files.get(path).reader.is_some()
+			}
+		
+			/// A regular file whose handle reports fewer bytes than were already
+			/// read was truncated in place: resume reading from its start.
+			fn check_handle_truncation(&mut self, path: &Path) -> TailResult<()> {
+				let data = self.files.get_mut(path);
+				let Some(reader) = data.reader.as_mut() else {
+					return Ok(());
+				};
+				// A handle without metadata or a position (pipes, providers that
+				// lack them) cannot shrink observably; reading simply continues.
+				let (Ok(metadata), Ok(position)) = (reader.get_ref().metadata(), reader.stream_position())
+				else {
+					return Ok(());
+				};
+				if metadata.is_file() && metadata.len() < position {
+					let _ = writeln!(self.stderr, "tail: {}: file truncated", data.display_name);
+					reader.seek(SeekFrom::Start(0))?;
+				}
+				Ok(())
+			}
+		
+			/// GNU `recheck` through the provider: opens a followed name once it
+			/// appears or becomes accessible, reopens it when the name now refers
+			/// to a different or shorter file, and reports names that vanished or
+			/// became untailable.
+			fn recheck_provider_name(&mut self, path: &Path, settings: &Settings) -> TailResult<()> {
+				let display_name = self.files.get(path).display_name.clone();
+				let metadata = match self.files.fs().metadata(path) {
+					Ok(metadata) => metadata,
+					Err(error) => {
+						let data = self.files.get(path);
+						if data.reader.is_none() {
+							// Still missing; reported when it went away.
+							return Ok(());
+						}
+						let reason = inaccessible_reason(&error);
+						if settings.retry {
+							if data.metadata.as_ref().is_some_and(MetadataExtTail::is_tailable) {
+								let _ = writeln!(
+									self.stderr,
+									"tail: {} has become inaccessible: {reason}",
+									display_name.quote()
+								);
+							}
+						} else {
+							let _ = writeln!(self.stderr, "tail: {display_name}: {reason}");
+							if !self.files.files_remaining() {
+								return Err(TailError::message("no files remaining".to_string()));
+							}
+						}
+						self.files.reset_reader(path);
+						return Ok(());
+					},
+				};
+		
+				let data = self.files.get(path);
+				if !metadata.is_tailable() {
+					let was_tailable = data.reader.is_some()
+						|| data.metadata.as_ref().is_none_or(MetadataExtTail::is_tailable);
+					let give_up = !(settings.retry && self.follow_name());
+					if was_tailable {
+						let _ = writeln!(
+							self.stderr,
+							"tail: {} has been replaced with an untailable file{}",
+							display_name.quote(),
+							if give_up { "; giving up on this name" } else { "" }
+						);
+					}
+					if give_up {
+						self.files.remove(path);
+						if self.files.no_files_remaining(settings) {
+							return Err(TailError::message("no files remaining".to_string()));
+						}
+					} else {
+						self.files.reset_reader(path);
+						self.files.update_metadata(path, Some(metadata));
+					}
+					return Ok(());
+				}
+		
+				let was_untailable = data.metadata.as_ref().is_some_and(|old| !old.is_tailable());
+				let handle = self.files.get_mut(path).reader.as_mut().map(|reader| {
+					// Unknown handle identity keeps following the open handle.
+					let same_file = reader
+						.get_ref()
+						.metadata()
+						.map_or(true, |handle| !handle.identity_differs(&metadata));
+					(same_file, reader.stream_position().ok())
+				});
+				match handle {
+					None => match self.files.fs().open(path) {
+						Ok(file) => {
+							let event = if was_untailable {
+								"has become accessible"
+							} else {
+								"has appeared;  following new file"
+							};
+							let _ = writeln!(self.stderr, "tail: {} {event}", display_name.quote());
+							self.files.set_reader(path, file);
+						},
+						// Still unreadable: the failed open was already reported.
+						Err(_) => {},
+					},
+					Some((same_file, position)) => {
+						let shrunk =
+							metadata.is_file() && position.is_some_and(|position| metadata.len() < position);
+						if !same_file || shrunk {
+							if same_file {
+								let _ = writeln!(self.stderr, "tail: {display_name}: file truncated");
+							} else {
+								let _ = writeln!(
+									self.stderr,
+									"tail: {} has been replaced;  following new file",
+									display_name.quote()
+								);
+							}
+							match self.files.fs().open(path) {
+								Ok(file) => self.files.set_reader(path, file),
+								Err(error) => {
+									let _ = writeln!(
+										self.stderr,
+										"tail: {} has become inaccessible: {}",
+										display_name.quote(),
+										inaccessible_reason(&error)
+									);
+									self.files.reset_reader(path);
+								},
+							}
+						}
+					},
+				}
+				self.files.update_metadata(path, Some(metadata));
+				Ok(())
+			}
+		}
+		
+		fn inaccessible_reason(error: &std::io::Error) -> String {
+			if error.kind() == ErrorKind::NotFound {
+				"No such file or directory".to_owned()
+			} else {
+				error.to_string()
+			}
+		}
+		
+		/// Sleeps one `--sleep-interval` in short slices so cancellation stays
+		/// responsive. Returns false once cancelled.
+		fn sleep_interval(cancel: &AtomicBool, interval: Duration) -> bool {
+			const SLICE: Duration = Duration::from_millis(100);
+			let deadline = Instant::now().checked_add(interval);
+			loop {
+				if cancel.load(Ordering::Relaxed) {
+					return false;
+				}
+				let remaining = deadline.map_or(SLICE, |deadline| {
+					deadline.saturating_duration_since(Instant::now())
+				});
+				if remaining.is_zero() {
+					return true;
+				}
+				std::thread::sleep(remaining.min(SLICE));
 			}
 		}
 		
@@ -2084,9 +2299,8 @@ mod follow {
 				// here paths will not be removed from orphans if the path becomes available.
 				if observer.follow_name_retry() {
 					for new_path in &observer.orphans {
-						if new_path.exists() {
+						if let Ok(md) = observer.files.fs().metadata(new_path) {
 							let pd = observer.files.get(new_path);
-							let md = new_path.metadata().unwrap();
 							if md.is_tailable() && pd.reader.is_none() {
 								let _ = writeln!(
 									observer.stderr,
@@ -2097,14 +2311,23 @@ mod follow {
 								observer.files.update_reader(new_path)?;
 								_read_some =
 									observer.files.tail_file(new_path, settings.verbose, &mut observer.stdout)?;
-								observer
-									.watcher_rx
-									.as_mut()
-									.unwrap()
-									.watch_with_parent(new_path)?;
+								if let Some(watcher_rx) = observer.watcher_rx.as_mut() {
+									watcher_rx.watch_with_parent(new_path, observer.files.fs())?;
+								}
 							}
 						}
 					}
+				}
+		
+				if observer.watcher_rx.is_none() {
+					// No kernel watcher observes these operands: inspect them
+					// through the provider, sleeping only after an idle pass.
+					if !observer.poll_provider(settings)?
+						&& !sleep_interval(&observer.cancel, settings.sleep_sec)
+					{
+						break;
+					}
+					continue;
 				}
 		
 				// With  -f, sleep for approximately N seconds (default 1.0) between iterations;
@@ -2232,7 +2455,9 @@ mod follow {
 	// Provide minimal stubs matching the real Observer API so tail compiles.
 	#[cfg(target_os = "wasi")]
 	mod wasi_stubs {
-		use std::{io::BufRead, path::Path};
+		use std::{io::BufReader, path::Path};
+	
+		use pi_vfs::File;
 	
 		use crate::tail::{TailError, TailResult, args::Settings};
 	
@@ -2255,7 +2480,7 @@ mod follow {
 				&mut self,
 				_path: &Path,
 				_display_name: &str,
-				_reader: Option<Box<dyn BufRead>>,
+				_reader: Option<BufReader<File>>,
 				_update_last: bool,
 			) -> TailResult<()> {
 				Ok(())
@@ -2414,15 +2639,15 @@ mod parse {
 
 mod paths {
 	//! Path and metadata helpers for `tail`.
-	#[cfg(unix)]
-	use std::os::unix::fs::{FileTypeExt, MetadataExt};
 	use std::{
 		ffi::OsStr,
-		fs::{File, Metadata},
 		io::{Seek, SeekFrom, Write},
 		path::{Path, PathBuf},
 	};
 	
+	use brush_core::openfiles::{DescriptorPath, OpenFiles};
+	use pi_vfs::{BlockingFs, File, Metadata};
+
 	use crate::{host::Host, tail::{TailResult, text}};
 	
 	#[derive(Debug, Clone)]
@@ -2473,10 +2698,20 @@ mod paths {
 		}
 	
 		/// Resolves a file operand against the shell working directory.
+		///
+		/// Every spelling of the shell's fd 0 (`/dev/stdin`, `/dev/fd/0`,
+		/// `/proc/self/fd/0`, ...) becomes the literal `/dev/stdin`: like `-`,
+		/// tail reads it through `host.stdin`, which observes cancellation.
 		pub fn resolve_path(&mut self, host: &Host) {
-			if let InputKind::File(path) = &mut self.kind {
-				*path = host.resolve(&*path);
-			}
+			let InputKind::File(path) = &mut self.kind else {
+				return;
+			};
+			let absolute = pi_vfs::absolute_path(host.cwd(), path);
+			*path = if DescriptorPath::parse(&absolute) == Some(DescriptorPath::Fd(OpenFiles::STDIN_FD)) {
+				PathBuf::from(text::DEV_STDIN)
+			} else {
+				host.resolve(&*path)
+			};
 		}
 	
 		pub fn kind(&self) -> &InputKind {
@@ -2487,35 +2722,6 @@ mod paths {
 			match self.kind {
 				InputKind::File(_) => false,
 				InputKind::Stdin => true,
-			}
-		}
-	
-		pub fn resolve(&self) -> Option<PathBuf> {
-			match &self.kind {
-				InputKind::File(path) if path != &PathBuf::from(text::DEV_STDIN) => {
-					path.canonicalize().ok()
-				},
-				InputKind::File(_) | InputKind::Stdin => {
-					// on macOS, /dev/fd isn't backed by /proc and canonicalize()
-					// on dev/fd/0 (or /dev/stdin) will fail (NotFound),
-					// so we treat stdin as a pipe here
-					// https://github.com/rust-lang/rust/issues/95239
-					#[cfg(target_os = "macos")]
-					{
-						None
-					}
-					#[cfg(not(target_os = "macos"))]
-					{
-						PathBuf::from(text::FD0).canonicalize().ok()
-					}
-				},
-			}
-		}
-	
-		pub fn is_tailable(&self) -> bool {
-			match &self.kind {
-				InputKind::File(path) => path_is_tailable(path),
-				InputKind::Stdin => self.resolve().is_some_and(|path| path_is_tailable(&path)),
 			}
 		}
 	}
@@ -2572,20 +2778,13 @@ mod paths {
 		#[cfg(not(target_os = "wasi"))]
 		fn got_truncated(&self, other: &Metadata) -> TailResult<bool>;
 		#[cfg(not(target_os = "wasi"))]
-		fn file_id_eq(&self, other: &Metadata) -> bool;
+		fn identity_differs(&self, other: &Metadata) -> bool;
 	}
 	
 	impl MetadataExtTail for Metadata {
 		fn is_tailable(&self) -> bool {
 			let ft = self.file_type();
-			#[cfg(unix)]
-			{
-				ft.is_file() || ft.is_char_device() || ft.is_fifo()
-			}
-			#[cfg(not(unix))]
-			{
-				ft.is_file()
-			}
+			ft.is_file() || ft.is_char_device() || ft.is_fifo()
 		}
 	
 		/// Return true if the file was modified and is now shorter
@@ -2594,33 +2793,20 @@ mod paths {
 			Ok(other.len() < self.len() && other.modified()? != self.modified()?)
 		}
 	
+		/// True only when both sides report a file identity and the
+		/// identities differ; unknown identity is never treated as a
+		/// replacement.
 		#[cfg(not(target_os = "wasi"))]
-		fn file_id_eq(&self, #[cfg(unix)] other: &Metadata, #[cfg(not(unix))] _: &Metadata) -> bool {
-			#[cfg(unix)]
-			{
-				self.ino().eq(&other.ino())
-			}
-			#[cfg(windows)]
-			{
-				// TODO: `file_index` requires unstable library feature `windows_by_handle`
-				// use std::os::windows::prelude::*;
-				// if let Some(self_id) = self.file_index() {
-				//     if let Some(other_id) = other.file_index() {
-				//     // TODO: not sure this is the equivalent of comparing inode numbers
-				//
-				//         return self_id.eq(&other_id);
-				//     }
-				// }
-				false
-			}
+		fn identity_differs(&self, other: &Metadata) -> bool {
+			matches!((self.file_id(), other.file_id()), (Some(this), Some(other)) if this != other)
 		}
 	}
 	
 	#[cfg(not(target_os = "wasi"))]
 	pub trait PathExtTail {
 		fn is_stdin(&self) -> bool;
-		fn is_orphan(&self) -> bool;
-		fn is_tailable(&self) -> bool;
+		fn is_orphan(&self, fs: &BlockingFs) -> bool;
+		fn is_tailable(&self, fs: &BlockingFs) -> bool;
 	}
 	
 	#[cfg(not(target_os = "wasi"))]
@@ -2632,18 +2818,18 @@ mod paths {
 		}
 	
 		/// Return true if `path` does not have an existing parent directory
-		fn is_orphan(&self) -> bool {
-			!matches!(self.parent(), Some(parent) if parent.is_dir())
+		fn is_orphan(&self, fs: &BlockingFs) -> bool {
+			!matches!(pi_vfs::parent_path(self), Some(parent) if fs.is_dir(parent))
 		}
 	
 		/// Return true if `path` is is a file type that can be tailed
-		fn is_tailable(&self) -> bool {
-			path_is_tailable(self)
+		fn is_tailable(&self, fs: &BlockingFs) -> bool {
+			path_is_tailable(fs, self)
 		}
 	}
 	
-	pub fn path_is_tailable(path: &Path) -> bool {
-		path.is_file() || path.exists() && path.metadata().is_ok_and(|meta| meta.is_tailable())
+	pub fn path_is_tailable(fs: &BlockingFs, path: &Path) -> bool {
+		fs.metadata(path).is_ok_and(|meta| meta.is_tailable())
 	}
 }
 
@@ -2789,8 +2975,6 @@ mod text {
 	// Non-localized constants (system paths and technical identifiers)
 	pub const DASH: &str = "-";
 	pub const DEV_STDIN: &str = "/dev/stdin";
-	#[cfg(not(target_os = "macos"))]
-	pub const FD0: &str = "/dev/fd/0";
 	
 	#[cfg(target_os = "linux")]
 	pub const BACKEND: &str = "inotify";
@@ -2805,7 +2989,6 @@ mod text {
 use std::{
 	cmp::Ordering,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
 	path::{Path, PathBuf},
 };
@@ -3063,7 +3246,7 @@ fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailRe
 		};
 		let mut data = Vec::new();
 		if let Some(path) = path {
-			if path.is_dir() {
+			if host.fs().is_dir(path) {
 				host.fail(1);
 				printer.print_input(input, &mut stdout);
 				let _ = writeln!(
@@ -3073,7 +3256,7 @@ fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailRe
 				);
 				continue;
 			}
-			match File::open(path) {
+			match host.fs().open(path) {
 				Ok(mut file) => {
 					printer.print_input(input, &mut stdout);
 					file.read_to_end(&mut data)?;
@@ -3170,6 +3353,7 @@ fn uu_tail(settings: &Settings, host: &mut Host) -> TailResult<()> {
 	let mut printer = HeaderPrinter::new(settings.verbose, true);
 	let mut observer = Observer::from(
 		settings,
+		host.fs().clone(),
 		host.stdout_writer(),
 		host.stderr_clone(),
 		host.cancel_flag(),
@@ -3224,8 +3408,8 @@ fn tail_file(
 	offset: u64,
 	host: &mut Host,
 ) -> TailResult<()> {
-	let fs_path = path;
-	let md = fs_path.metadata();
+	let fs = host.fs().clone();
+	let md = fs.metadata(path);
 	if let Err(ref e) = md
 		&& e.kind() == ErrorKind::NotFound
 	{
@@ -3239,7 +3423,7 @@ fn tail_file(
 		return Ok(());
 	}
 
-	if fs_path.is_dir() {
+	if md.as_ref().is_ok_and(pi_vfs::Metadata::is_dir) {
 		host.fail(1);
 
 		header_printer.print_input(input, &mut observer.stdout);
@@ -3268,14 +3452,19 @@ fn tail_file(
 		observer.add_bad_path(path, input.display_name.as_str(), false)?;
 	} else {
 		#[cfg(unix)]
-		let open_result = open_file(&fs_path, settings.pid != 0);
+		let open_result = open_file(
+			&fs,
+			path,
+			settings.pid != 0 && md.as_ref().is_ok_and(|m| m.file_type().is_fifo()),
+		);
 		#[cfg(not(unix))]
-		let open_result = File::open(&fs_path);
+		let open_result = fs.open(path);
 
 		match open_result {
 			Ok(mut file) => {
 				let st = file.metadata()?;
-				let blksize_limit = uucore::fs::sane_blksize::sane_blksize_from_metadata(&st);
+				let blksize_limit =
+					uucore::fs::sane_blksize::sane_blksize(st.blksize().unwrap_or_default());
 				header_printer.print_input(input, &mut observer.stdout);
 				let mut reader;
 				if !settings.presume_input_pipe
@@ -3288,13 +3477,8 @@ fn tail_file(
 					reader = BufReader::new(file);
 					unbounded_tail(&mut reader, settings, &mut observer.stdout)?;
 				}
-				if input.is_tailable() {
-					observer.add_path(
-						path,
-						input.display_name.as_str(),
-						Some(Box::new(reader)),
-						true,
-					)?;
+				if paths::path_is_tailable(&fs, path) {
+					observer.add_path(path, input.display_name.as_str(), Some(reader), true)?;
 				} else {
 					observer.add_bad_path(path, input.display_name.as_str(), false)?;
 				}
@@ -3318,8 +3502,8 @@ fn tail_file(
 	Ok(())
 }
 
-/// Opens a file, using non-blocking mode for FIFOs when `use_nonblock_for_fifo`
-/// is true.
+/// Opens a file, using non-blocking mode when `nonblocking_fifo` says the
+/// path is a FIFO opened under `--pid`.
 ///
 /// When opening a FIFO with `--pid`, we need to use O_NONBLOCK so that:
 /// 1. The open() call doesn't block waiting for a writer
@@ -3327,38 +3511,37 @@ fn tail_file(
 ///
 /// After opening, we clear O_NONBLOCK so subsequent reads block normally.
 /// Without `--pid`, FIFOs block on open() until a writer connects (GNU
-/// behavior).
+/// behavior). Descriptor flags exist only on native handles, so FIFOs the
+/// filesystem does not declare native open through the provider unchanged.
 #[cfg(unix)]
-fn open_file(path: &Path, use_nonblock_for_fifo: bool) -> io::Result<File> {
-	use std::{
-		fs::OpenOptions,
-		os::{
-			fd::AsFd,
-			unix::fs::{FileTypeExt, OpenOptionsExt},
-		},
-	};
+fn open_file(
+	fs: &pi_vfs::BlockingFs,
+	path: &Path,
+	nonblocking_fifo: bool,
+) -> io::Result<pi_vfs::File> {
+	use std::os::fd::AsFd;
 
 	use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 
-	let is_fifo = path
-		.metadata()
-		.ok()
-		.is_some_and(|m| m.file_type().is_fifo());
-
-	if is_fifo && use_nonblock_for_fifo {
-		let file = OpenOptions::new()
-			.read(true)
-			.custom_flags(libc::O_NONBLOCK)
-			.open(path)?;
+	if nonblocking_fifo && fs.is_native_local(path) {
+		let file = fs.open_with(
+			path,
+			pi_vfs::OpenOptions::new()
+				.read(true)
+				.custom_flags(libc::O_NONBLOCK),
+		)?;
+		let Some(native) = file.native() else {
+			return Err(pi_vfs::unsupported("clearing O_NONBLOCK on a non-native FIFO handle"));
+		};
 
 		// Clear O_NONBLOCK so reads block normally
-		let flags = fcntl_getfl(file.as_fd())?;
+		let flags = fcntl_getfl(native.as_fd())?;
 		let new_flags = flags & !OFlags::NONBLOCK;
-		fcntl_setfl(file.as_fd(), new_flags)?;
+		fcntl_setfl(native.as_fd(), new_flags)?;
 
 		Ok(file)
 	} else {
-		File::open(path)
+		fs.open(path)
 	}
 }
 
@@ -3463,7 +3646,7 @@ fn forwards_thru_file(
 /// Iterate over bytes in the file, in reverse, until we find the
 /// `num_delimiters` instance of `delimiter`. The `file` is left seek'd to the
 /// position just after that delimiter.
-fn backwards_thru_file(file: &mut File, num_delimiters: u64, delimiter: u8) {
+fn backwards_thru_file(file: &mut (impl Read + Seek), num_delimiters: u64, delimiter: u8) {
 	if num_delimiters == 0 {
 		file.seek(SeekFrom::End(0)).unwrap();
 		return;
@@ -3511,7 +3694,11 @@ fn backwards_thru_file(file: &mut File, num_delimiters: u64, delimiter: u8) {
 /// end of the file, and then read the file "backwards" in blocks of size
 /// `BLOCK_SIZE` until we find the location of the first line/byte. This ends up
 /// being a nice performance win for very large files.
-fn bounded_tail(file: &mut File, settings: &Settings, writer: &mut impl Write) -> io::Result<()> {
+fn bounded_tail(
+	file: &mut (impl Read + Seek),
+	settings: &Settings,
+	writer: &mut impl Write,
+) -> io::Result<()> {
 	debug_assert!(!settings.presume_input_pipe);
 	let mut limit = None;
 

@@ -9,6 +9,8 @@ import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "../render/render-utils";
 import { getSelectListTheme, theme } from "../theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys, interruptKey } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { TextFormField, type FormFieldTheme } from "../components/form";
 import { SelectList } from "../components/select-list";
@@ -161,6 +163,16 @@ const MAX_DISPLAY_WIDTH = 120;
 /** Sanitize a string for TUI display: replace tabs and truncate */
 function sanitize(text: string): string {
 	return truncateToWidth(replaceTabs(text), MAX_DISPLAY_WIDTH);
+}
+
+/** Footer for text steps; the field submits on `tui.input.submit` and cancels on `tui.select.cancel`. */
+function inputHint(escapeAction: string): string {
+	return `[${editorKey("tui.input.submit")} to continue, ${editorKey("tui.select.cancel")} to ${escapeAction}]`;
+}
+
+/** Footer for choice steps; the wizard routes navigation, Enter, and Escape itself. */
+function choiceHint(escapeAction: string): string {
+	return `[${editorKeys("tui.select.up", "tui.select.down")} to navigate, ${formatKeyHint("enter")} to select, ${interruptKey()} to ${escapeAction}]`;
 }
 
 const mcpFormTheme: FormFieldTheme = {
@@ -451,7 +463,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step 1: Server Name",
 			prompt: "Enter a unique name for this server:",
 			initial: this.#state.name,
-			hint: "[Only letters, numbers, dash, underscore, dot, colon]\n[Enter to continue, Esc to cancel]",
+			hint: `[Only letters, numbers, dash, underscore, dot, colon]\n${inputHint("cancel")}`,
 			optional: false,
 			error: this.#validationError,
 		});
@@ -466,7 +478,7 @@ export class MCPAddWizard extends OverlayPanel {
 				{ label: "http (HTTP server)" },
 				{ label: "sse (Server-Sent Events)" },
 			],
-			hint: "[↑↓ to navigate, Enter to select, Esc to cancel]",
+			hint: choiceHint("cancel"),
 		});
 	}
 
@@ -475,7 +487,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step 3: Command",
 			prompt: "Enter the command to run:",
 			initial: this.#state.command,
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -485,7 +497,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step 4: Arguments (Optional)",
 			prompt: "Enter command arguments (space-separated):",
 			initial: this.#state.args,
-			hint: "[Press Enter to skip or continue]",
+			hint: `[Press ${editorKey("tui.input.submit")} to skip or continue]`,
 			optional: true,
 		});
 	}
@@ -495,7 +507,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step 3: Server URL",
 			prompt: "Enter the server URL:",
 			initial: this.#state.url,
-			hint: "[Must start with http:// or https://]\n[Enter to continue, Esc to go back]",
+			hint: `[Must start with http:// or https://]\n${inputHint("go back")}`,
 			optional: false,
 			error: this.#validationError,
 		});
@@ -505,7 +517,7 @@ export class MCPAddWizard extends OverlayPanel {
 		this.#choiceStep({
 			heading: "Step: How to provide the key?",
 			choices: [{ label: "Environment variable" }, { label: "HTTP header" }],
-			hint: "[↑↓ to navigate, Enter to select, Esc to go back]",
+			hint: choiceHint("go back"),
 		});
 	}
 
@@ -514,7 +526,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step: Environment Variable Name",
 			prompt: "Enter the environment variable name:",
 			initial: this.#state.envVarName,
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -524,7 +536,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Step: HTTP Header Name",
 			prompt: "Enter the HTTP header name:",
 			initial: this.#state.headerName,
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -536,7 +548,7 @@ export class MCPAddWizard extends OverlayPanel {
 		this.#choiceStep({
 			heading: "Step: Configuration Scope",
 			choices: [{ label: `User level (${userPathLabel})` }, { label: `Project level (${projectPathLabel})` }],
-			hint: "[↑↓ to navigate, Enter to select, Esc to go back]",
+			hint: choiceHint("go back"),
 		});
 	}
 
@@ -576,7 +588,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "Review Configuration",
 			intro: summary,
 			choices: [{ label: "Yes" }, { label: "No" }],
-			hint: "[↑↓ to navigate, Enter to select, Esc to go back]",
+			hint: choiceHint("go back"),
 			kind: "confirm",
 		});
 	}
@@ -931,7 +943,7 @@ export class MCPAddWizard extends OverlayPanel {
 				{ label: "OAuth flow (web-based)", description: "(opens browser)" },
 				{ label: "Manual API key/token", description: "(paste or use shell command)" },
 			],
-			hint: "[↑↓ to navigate, Enter to select, Esc to go back]",
+			hint: choiceHint("go back"),
 		});
 	}
 
@@ -941,7 +953,7 @@ export class MCPAddWizard extends OverlayPanel {
 			prompt: "Enter the OAuth authorization endpoint:",
 			initial: this.#state.oauthAuthUrl,
 			details: ["e.g., https://auth.example.com/oauth/authorize"],
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -952,7 +964,7 @@ export class MCPAddWizard extends OverlayPanel {
 			prompt: "Enter the OAuth token endpoint:",
 			initial: this.#state.oauthTokenUrl,
 			details: ["e.g., https://auth.example.com/oauth/token"],
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -962,7 +974,7 @@ export class MCPAddWizard extends OverlayPanel {
 			heading: "OAuth: Client ID",
 			prompt: "Enter your OAuth client ID:",
 			initial: this.#state.oauthClientId,
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -973,7 +985,7 @@ export class MCPAddWizard extends OverlayPanel {
 			prompt: "Enter your OAuth client secret:",
 			initial: this.#state.oauthClientSecret,
 			details: ["(Leave empty for PKCE-only flows)"],
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: true,
 		});
 	}
@@ -984,7 +996,7 @@ export class MCPAddWizard extends OverlayPanel {
 			prompt: "Enter OAuth scopes (space-separated):",
 			initial: this.#state.oauthScopes,
 			details: ["e.g., read write"],
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: true,
 		});
 	}
@@ -1002,7 +1014,7 @@ export class MCPAddWizard extends OverlayPanel {
 			headingTone: this.#oauthErrorHeading?.tone ?? "error",
 			intro,
 			choices: [{ label: "Retry OAuth authentication" }, { label: "Edit OAuth settings" }],
-			hint: "[↑↓ to navigate, Enter to select, Esc to go back]",
+			hint: choiceHint("go back"),
 		});
 	}
 
@@ -1012,7 +1024,7 @@ export class MCPAddWizard extends OverlayPanel {
 			prompt: "Enter your API key or token:",
 			initial: this.#state.apiKey,
 			details: ["(Supports !command for password manager)"],
-			hint: "[Enter to continue, Esc to go back]",
+			hint: inputHint("go back"),
 			optional: false,
 		});
 	}
@@ -1210,7 +1222,7 @@ export class MCPAddWizard extends OverlayPanel {
 				"OAuth configuration incomplete",
 				"error",
 				incompleteBody,
-				new Text(theme.fg("muted", "[Press Esc to go back]"), 0, 0),
+				new Text(theme.fg("muted", `[Press ${interruptKey()} to go back]`), 0, 0),
 			);
 			this.#requestRender();
 			return;
@@ -1226,7 +1238,7 @@ export class MCPAddWizard extends OverlayPanel {
 			"OAuth Authentication",
 			"accent",
 			authBody,
-			new Text(theme.fg("muted", "(Press Esc to cancel)"), 0, 0),
+			new Text(theme.fg("muted", `(Press ${interruptKey()} to cancel)`), 0, 0),
 		);
 		this.#requestRender();
 

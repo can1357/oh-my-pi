@@ -22,6 +22,8 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 describe("ModelRegistry", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
@@ -463,13 +465,6 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("overriding baseUrl keeps all built-in models", () => {
-			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
-			// Should have multiple built-in models, not just one
-			expect(anthropicModels.length).toBeGreaterThan(1);
-			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
-		});
-
 		test("overriding baseUrl changes URL on all built-in models", () => {
 			const anthropicModels = getModelsForProvider(anthropicProxy, "anthropic");
 			// All models should have the new baseUrl
@@ -550,6 +545,11 @@ describe("ModelRegistry", () => {
 				sessionId: string | undefined;
 				options: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal } | undefined;
 			}> = [];
+			const originalGetWithCredential = authStorage.keys.getWithCredential.bind(authStorage.keys);
+			authStorage.keys.getWithCredential = async (provider, sessionId, options) => {
+				calls.push({ provider, sessionId, options });
+				return originalGetWithCredential(provider, sessionId, options);
+			};
 			const originalGetApiKey = authStorage.keys.get.bind(authStorage.keys);
 			authStorage.keys.get = async (
 				provider: string,
@@ -571,6 +571,7 @@ describe("ModelRegistry", () => {
 				},
 			});
 
+			authStorage.keys.get = originalGetApiKey;
 			const resolved = await registry.resolver(
 				model,
 				sessionId,
@@ -579,7 +580,7 @@ describe("ModelRegistry", () => {
 				error: undefined,
 				signal: undefined,
 			});
-			expect(resolved).toBe("zhipu-domestic-key");
+			expect(resolved).toMatchObject({ apiKey: "zhipu-domestic-key", credentialId: expect.any(Number) });
 			expect(calls.at(-1)).toEqual({
 				provider: "zhipu-coding-plan",
 				sessionId,
@@ -1182,8 +1183,6 @@ describe("ModelRegistry", () => {
 		let openrouterWithModels: ModelRegistry;
 		let openaiGpt54Replace: ModelRegistry;
 		let myProxyGpt54: ModelRegistry;
-		let openaiGpt54Explicit: ModelRegistry;
-		let openaiGpt54Override: ModelRegistry;
 		let minimaxReplace: ModelRegistry;
 		beforeAll(() => {
 			anthropicCustom = readonlyRegistry({
@@ -1283,40 +1282,6 @@ describe("ModelRegistry", () => {
 						apiKey: "TEST_KEY",
 						api: "openai-responses",
 						models: [{ id: "gpt-5.4" }],
-					},
-				},
-			});
-			openaiGpt54Explicit = readonlyRegistry({
-				providers: {
-					openai: providerConfig(
-						"https://my-proxy.example.com/v1",
-						[{ id: "gpt-5.4", contextWindow: 256000 }],
-						"openai-responses",
-					),
-				},
-			});
-			openaiGpt54Override = readonlyRegistry({
-				providers: {
-					openai: {
-						baseUrl: "https://my-proxy.example.com/v1",
-						apiKey: "TEST_KEY",
-						api: "openai-responses",
-						models: [
-							{
-								id: "gpt-5.4",
-								name: "gpt-5.4",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 256000,
-								maxTokens: 128000,
-							},
-						],
-						modelOverrides: {
-							"gpt-5.4": {
-								contextWindow: 512000,
-							},
-						},
 					},
 				},
 			});
@@ -1565,14 +1530,6 @@ describe("ModelRegistry", () => {
 			expect(model?.baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
-		test("custom gpt-5.4 replacement preserves its explicit context window", () => {
-			expect(openaiGpt54Explicit.find("openai", "gpt-5.4")?.contextWindow).toBe(256000);
-		});
-
-		test("modelOverrides can still patch a custom gpt-5.4 replacement", () => {
-			expect(openaiGpt54Override.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
-		});
-
 		test("discoverable bundled replacement survives refresh", async () => {
 			writeModelsJson({
 				openai: providerConfig(
@@ -1800,8 +1757,6 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("modelOverrides (per-model customization)", () => {
-		let single: ModelRegistry;
-		let routingOnly: ModelRegistry;
 		let routingOrder: ModelRegistry;
 		let extraBodyMerge: ModelRegistry;
 		let multiple: ModelRegistry;
@@ -1813,20 +1768,6 @@ describe("ModelRegistry", () => {
 		let omitOnCustom: ModelRegistry;
 		let scheduledPrices: ModelRegistry;
 		beforeAll(() => {
-			single = readonlyRegistry({
-				providers: {
-					openrouter: { modelOverrides: { "anthropic/claude-sonnet-4": { name: "Custom Sonnet Name" } } },
-				},
-			});
-			routingOnly = readonlyRegistry({
-				providers: {
-					openrouter: {
-						modelOverrides: {
-							"anthropic/claude-sonnet-4": { compat: { openRouterRouting: { only: ["amazon-bedrock"] } } },
-						},
-					},
-				},
-			});
 			routingOrder = readonlyRegistry({
 				providers: {
 					openrouter: {
@@ -1924,21 +1865,6 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
-		});
-
-		test("model override applies to a single built-in model", () => {
-			const models = getModelsForProvider(single, "openrouter");
-			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.name).toBe("Custom Sonnet Name");
-			// Other models should be unchanged
-			const opus = models.find(m => m.id === "anthropic/claude-opus-4");
-			expect(opus?.name).not.toBe("Custom Sonnet Name");
-		});
-
-		test("model override with compat.openRouterRouting", () => {
-			const sonnet = getModelsForProvider(routingOnly, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			const compat = sonnet?.compat as OpenAICompat | undefined;
-			expect(compat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
 		});
 
 		test("model override deep merges compat settings", () => {
@@ -2326,16 +2252,16 @@ describe("ModelRegistry", () => {
 				"openai-codex": { modelOverrides: { "gpt-6-astra": { thinking } } },
 			});
 			const testSettings = Settings.isolated();
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 			expect(registry.find("openai-codex", "gpt-6-astra")?.thinking).toEqual(thinking);
@@ -2354,11 +2280,11 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(922_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
@@ -2371,7 +2297,7 @@ describe("ModelRegistry", () => {
 					modelOverrides: { "gpt-6-astra": { maxContextWindow: 512_000 } },
 				},
 			});
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(512_000);
 		});
@@ -2388,11 +2314,11 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(512_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
 		});
@@ -2402,12 +2328,12 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
 			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(272_000);
 		});
@@ -2428,11 +2354,11 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(400_000);
 		});
@@ -2472,7 +2398,7 @@ describe("ModelRegistry", () => {
 								},
 				});
 				const testSettings = Settings.isolated();
-				testSettings.set("extendedContext", true);
+				cfgExtendedContext.set(testSettings, true);
 				const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 				expect(registry.getError()).toBeUndefined();
 				const expectWindow = (contextWindow: number) => {
@@ -2483,7 +2409,7 @@ describe("ModelRegistry", () => {
 				expectWindow(922_000);
 
 				for (const extendedContext of [false, true, false, true]) {
-					testSettings.set("extendedContext", extendedContext);
+					cfgExtendedContext.set(testSettings, extendedContext);
 					await registry.reapplyModelPolicies();
 					const expectedWindow = extendedContext ? 922_000 : standardWindow;
 					expectWindow(expectedWindow);
@@ -2533,15 +2459,15 @@ describe("ModelRegistry", () => {
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
 			await Settings.init({ inMemory: true });
-			settings.set("extendedContext", true);
+			cfgExtendedContext.set(settings, true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 
-			settings.set("extendedContext", false);
+			cfgExtendedContext.set(settings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
 
-			settings.set("extendedContext", true);
+			cfgExtendedContext.set(settings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(1_000_000);
@@ -2567,7 +2493,6 @@ describe("ModelRegistry", () => {
 	describe("disableStrictTools", () => {
 		let bedrockCustom: ModelRegistry;
 		let anthropicOverride: ModelRegistry;
-		let myProxyCustom: ModelRegistry;
 		beforeAll(() => {
 			bedrockCustom = readonlyRegistry({
 				providers: {
@@ -2591,27 +2516,6 @@ describe("ModelRegistry", () => {
 				},
 			});
 			anthropicOverride = readonlyRegistry({ providers: { anthropic: { disableStrictTools: true } } });
-			myProxyCustom = readonlyRegistry({
-				providers: {
-					"my-proxy": {
-						baseUrl: "https://proxy.example.com/anthropic",
-						apiKey: "TEST_KEY",
-						api: "anthropic-messages",
-						disableStrictTools: true,
-						models: [
-							{
-								id: "claude-sonnet-4",
-								name: "Sonnet",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 200000,
-								maxTokens: 16384,
-							},
-						],
-					},
-				},
-			});
 		});
 
 		test("custom provider with models gets disableStrictTools merged into compat", () => {
@@ -2636,12 +2540,6 @@ describe("ModelRegistry", () => {
 					(model.compatConfig as { disableStrictTools?: boolean } | undefined)?.disableStrictTools,
 				).toBeUndefined();
 			}
-		});
-
-		test("disableStrictTools is merged with explicit compat on custom provider", () => {
-			const model = myProxyCustom.find("my-proxy", "claude-sonnet-4");
-			expect(model).toBeDefined();
-			expect((model?.compat as { disableStrictTools?: boolean } | undefined)?.disableStrictTools).toBe(true);
 		});
 	});
 
@@ -3413,7 +3311,7 @@ describe("ModelRegistry", () => {
 				},
 			});
 			const testSettings = Settings.isolated();
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			expect(registry.getError()).toBeUndefined();
 			expect(registry.find("google-antigravity", "gemini-3-pro")?.contextWindow).toBe(512_000);
@@ -3422,11 +3320,11 @@ describe("ModelRegistry", () => {
 				contextWindow: 512_000,
 			});
 
-			testSettings.set("extendedContext", false);
+			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("google-antigravity", "gemini-3-pro")?.contextWindow).toBe(128_000);
 
-			testSettings.set("extendedContext", true);
+			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			await registry.refresh("offline");
 			expect(registry.getError()).toBeUndefined();

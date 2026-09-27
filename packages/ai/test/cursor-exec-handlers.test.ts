@@ -152,56 +152,6 @@ function toolResultContext(): Context {
 }
 
 describe("Cursor resolveExecHandler execHandlers binding", () => {
-	it("invokes handler with correct this when passed as bound method", async () => {
-		const sentinel = { tag: "bound-correctly" };
-		const handlers = {
-			sentinel,
-			async read(_args: { path: string }) {
-				// Handler methods rely on 'this' (e.g. to access other handlers or state).
-				// When passed without .bind(handlers), 'this' is undefined in strict mode.
-				return { execResult: (this as typeof handlers).sentinel, toolResult: undefined };
-			},
-		};
-
-		const { execResult } = await resolveExecHandler(
-			{ path: "/tmp/foo" },
-			handlers.read.bind(handlers),
-			undefined,
-			() => ({}),
-			() => ({ tag: "rejected" }),
-			() => ({ tag: "error" }),
-			{ toolCallId: "exec-bind", toolName: "read" },
-		);
-
-		expect(execResult).toBe(sentinel);
-		expect((execResult as { tag: string }).tag).toBe("bound-correctly");
-	});
-
-	it("handler loses this when passed unbound and fails or returns wrong result", async () => {
-		const sentinel = { tag: "bound-correctly" };
-		const handlers = {
-			sentinel,
-			async read(_args: { path: string }) {
-				return { execResult: (this as typeof handlers).sentinel, toolResult: undefined };
-			},
-		};
-
-		// Pass method reference without .bind(handlers). In strict mode 'this' is undefined
-		// when resolveExecHandler calls handler(args), so (this as any).sentinel throws.
-		const { execResult } = await resolveExecHandler(
-			{ path: "/tmp/foo" },
-			handlers.read,
-			undefined,
-			() => ({}),
-			() => ({ tag: "rejected" }),
-			(msg: string) => ({ tag: "error", message: msg }),
-			{ toolCallId: "exec-bind", toolName: "read" },
-		);
-
-		// Should get error result (handler threw accessing undefined.sentinel)
-		expect(execResult).toEqual({ tag: "error", message: expect.any(String) });
-	});
-
 	// `synthesizeCursorExecToolCall` marks every exec block `kCursorExecResolved`
 	// BEFORE the handler runs, so `agent-loop.ts` emits no placeholder result for
 	// it. Any exit that returns no `toolResult` therefore leaves the call

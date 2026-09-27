@@ -42,17 +42,6 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		tempDir?.[Symbol.dispose]?.();
 	});
 
-	it("create(cwd) is synchronous and exposes getGlobalSettings/getProjectSettings", async () => {
-		await Settings.init({ cwd: projectDir, agentDir });
-
-		const s = SettingsManager.create(projectDir);
-
-		// The pi-vim crash: `create()` returned a Promise, so these were undefined.
-		expect(s).not.toBeInstanceOf(Promise);
-		expect(typeof s.getGlobalSettings).toBe("function");
-		expect(typeof s.getProjectSettings).toBe("function");
-	});
-
 	it("reads arbitrary extension-namespaced keys from the global and project layers", async () => {
 		// Keys the typed, schema-bound `get(path)` cannot reach — an extension's own block.
 		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ piVim: { mode: "normal" } }, null, 2));

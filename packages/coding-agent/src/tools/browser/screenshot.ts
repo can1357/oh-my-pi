@@ -373,7 +373,25 @@ function rgbaAt(image: DecodedPng, x: number, y: number): readonly [number, numb
 	return [image.pixels[index]!, image.pixels[index + 1]!, image.pixels[index + 2]!, image.pixels[index + 3]!];
 }
 
-/** Calculate the fraction of pixels that differ between two PNG images. */
+/**
+ * Largest per-channel delta treated as unchanged. Chromium re-rasterizes
+ * anti-aliased edges of a static page with ±1 channel jitter between captures
+ * (observed at the default 1.25 device scale), which exact comparison reports
+ * as a change.
+ */
+const PIXEL_CHANNEL_TOLERANCE = 2;
+
+/** Whether the pixel at (x, y) differs beyond rasterizer noise; out-of-bounds pixels read as transparent. */
+function pixelChanged(before: DecodedPng, after: DecodedPng, x: number, y: number): boolean {
+	const a = rgbaAt(before, x, y);
+	const b = rgbaAt(after, x, y);
+	for (let channel = 0; channel < 4; channel++) {
+		if (Math.abs(a[channel]! - b[channel]!) > PIXEL_CHANNEL_TOLERANCE) return true;
+	}
+	return false;
+}
+
+/** Calculate the fraction of pixels that differ beyond rasterizer noise between two PNG images. */
 export function pngPixelChangeRatio(previous: Uint8Array, current: Uint8Array): number {
 	const before = decodePng(previous);
 	const after = decodePng(current);
@@ -382,9 +400,7 @@ export function pngPixelChangeRatio(previous: Uint8Array, current: Uint8Array): 
 	let changed = 0;
 	for (let y = 0; y < height; y++) {
 		for (let x = 0; x < width; x++) {
-			const a = rgbaAt(before, x, y);
-			const b = rgbaAt(after, x, y);
-			if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2] || a[3] !== b[3]) changed++;
+			if (pixelChanged(before, after, x, y)) changed++;
 		}
 	}
 	return width * height === 0 ? 0 : changed / (width * height);
@@ -400,14 +416,12 @@ export function createPngDiff(baseline: Uint8Array, current: Uint8Array): { png:
 	let changed = 0;
 	for (let y = 0; y < height; y++) {
 		for (let x = 0; x < width; x++) {
-			const a = rgbaAt(before, x, y);
-			const b = rgbaAt(after, x, y);
-			const different = a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2] || a[3] !== b[3];
 			const index = (y * width + x) * 4;
-			if (different) {
+			if (pixelChanged(before, after, x, y)) {
 				changed++;
 				pixels.set([255, 0, 180, 255], index);
 			} else {
+				const b = rgbaAt(after, x, y);
 				const gray = Math.round((b[0] + b[1] + b[2]) / 3);
 				pixels.set([gray, gray, gray, 128], index);
 			}

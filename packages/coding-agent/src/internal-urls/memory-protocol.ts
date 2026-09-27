@@ -3,13 +3,28 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
+import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
-import { buildDirectoryResource } from "./filesystem-resource";
-import { parseInternalUrl } from "./parse";
-import { validateRelativePath } from "./skill-protocol";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+import {
+	buildDirectoryResource,
+	containedRealPath,
+	contentTypeForPath,
+	ensureCreatableWithinRoot,
+	validateRelativePath,
+} from "./filesystem-resource";
+import type {
+	InternalResource,
+	InternalUrl,
+	LocateOptions,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeHost,
+	SchemeSpec,
+	UrlCompletion,
+} from "./types";
+
+import { cfgMemoryBackend } from "../memory-backend/settings";
 
 const DEFAULT_MEMORY_FILE = "memory_summary.md";
 const MEMORY_NAMESPACE = "root";
@@ -29,7 +44,7 @@ const HINDSIGHT_UNADDRESSABLE =
  * Each session has its own cwd (possibly a worktree), so subagents and main
  * may see different roots.
  */
-export function memoryRootsFromRegistry(): string[] {
+function memoryRootsFromRegistry(): string[] {
 	const agentDir = getAgentDir();
 	const roots: string[] = [];
 	for (const ref of AgentRegistry.global().list()) {
@@ -53,88 +68,10 @@ function memoryRootsForContext(context: ResolveContext | undefined, caller: Agen
 	return memoryRootsFromRegistry();
 }
 
-function ensureWithinRoot(targetPath: string, rootPath: string): void {
-	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
-		throw new Error("memory:// URL escapes memory root");
-	}
-}
-
-function toMemoryValidationError(error: unknown): Error {
-	const message = error instanceof Error ? error.message : String(error);
-	return new Error(message.replace("skill://", "memory://"));
-}
-
-export interface MemoryGlobPattern {
-	baseUrl: string;
-	globPattern: string;
-}
-
-/**
- * Decode percent-escapes in a raw glob-suffix segment, bracket-escaping any
- * glob metacharacter that was percent-encoded so it stays a literal filename
- * character instead of becoming glob syntax.
- */
-function decodeGlobSuffixSegment(rawSegment: string): string {
-	// Escape runs are decoded together so multi-byte UTF-8 sequences survive.
-	return rawSegment.replace(/(?:%[0-9a-f]{2})+/gi, run => decodeURIComponent(run).replace(/[*?[{]/g, "[$&]"));
-}
-
-/**
- * Split a memory:// glob at its first wildcard after validating the complete
- * decoded path. The suffix is validated before filesystem globbing so `..`
- * cannot escape a safely resolved base directory.
- */
-export function splitMemoryGlobPattern(input: string): MemoryGlobPattern {
-	const urlMatch = input.match(/^([a-z][a-z0-9+.-]*:\/\/[^/?#]*)(\/.*)?$/i);
-	if (!urlMatch) {
-		throw new Error(`Invalid memory glob URL: ${input}`);
-	}
-
-	// Parse only the scheme and authority. A literal `?` in the path is glob
-	// syntax, not a query delimiter, and must survive unchanged.
-	const url = parseInternalUrl(urlMatch[1]);
-	const namespace = url.rawHost || url.hostname;
-	if (url.protocol !== "memory:" || namespace !== MEMORY_NAMESPACE) {
-		throw new Error(
-			`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace (e.g. memory://${MEMORY_NAMESPACE}/**); got: ${input}`,
-		);
-	}
-
-	const rawPathname = urlMatch[2] ?? "";
-	if (/%(?:2f|5c)/i.test(rawPathname)) {
-		throw new Error(`Encoded path separators are not allowed in memory:// glob patterns: ${input}`);
-	}
-
-	let relativePath: string;
-	try {
-		relativePath = decodeURIComponent(rawPathname.replace(/^\//, ""));
-	} catch {
-		throw new Error(`Invalid URL encoding in memory:// path: ${input}`);
-	}
-
-	try {
-		validateRelativePath(relativePath);
-	} catch (error) {
-		throw toMemoryValidationError(error);
-	}
-
-	const rawSegments = rawPathname.replace(/^\//, "").split("/");
-	const firstGlobIndex = rawSegments.findIndex(segment => ["*", "?", "[", "{"].some(char => segment.includes(char)));
-	if (firstGlobIndex === -1) {
-		throw new Error(`memory:// URL does not contain a glob pattern: ${input}`);
-	}
-
-	const rawBasePath = rawSegments.slice(0, firstGlobIndex).join("/") || ".";
-	return {
-		baseUrl: `memory://${namespace}/${rawBasePath}`,
-		globPattern: rawSegments.slice(firstGlobIndex).map(decodeGlobSuffixSegment).join("/"),
-	};
-}
-
 /**
  * Resolve a memory:// URL to an absolute filesystem path under memory root.
  */
-export function resolveMemoryUrlToPath(url: InternalUrl, memoryRoot: string): string {
+function resolveMemoryUrlToPath(url: InternalUrl, memoryRoot: string): string {
 	const namespace = url.rawHost || url.hostname;
 	if (!namespace) {
 		throw new Error("memory:// URL requires a namespace: memory://root");
@@ -155,47 +92,42 @@ export function resolveMemoryUrlToPath(url: InternalUrl, memoryRoot: string): st
 		throw new Error(`Invalid URL encoding in memory:// path: ${url.href}`);
 	}
 
-	try {
-		validateRelativePath(relativePath);
-	} catch (error) {
-		throw toMemoryValidationError(error);
-	}
+	validateRelativePath(relativePath, "memory");
 
 	return path.resolve(memoryRoot, relativePath);
 }
 
-async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<InternalResource | undefined> {
-	const resolved = path.resolve(memoryRoot);
+/**
+ * Contained location of a `memory://root` URL under one memory root: `real` is
+ * the realpath of an existing target, `target` the would-be path under the
+ * realpathed `root`. A bare `memory://root` addresses the summary file, or the
+ * root itself when `directory` is set. Undefined when the root does not exist.
+ */
+async function locateInRoot(
+	url: InternalUrl,
+	memoryRoot: string,
+	directory: boolean,
+): Promise<{ root: string; target: string; real: string | undefined } | undefined> {
 	let resolvedRoot: string;
 	try {
-		resolvedRoot = await fs.realpath(resolved);
+		resolvedRoot = await fs.realpath(path.resolve(memoryRoot));
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
 		throw error;
 	}
+	const target = directory && isBareMemoryUrl(url) ? resolvedRoot : resolveMemoryUrlToPath(url, resolvedRoot);
+	return { root: resolvedRoot, target, real: await containedRealPath(target, resolvedRoot, "memory", url.href) };
+}
 
-	const targetPath = resolveMemoryUrlToPath(url, resolvedRoot);
-	ensureWithinRoot(targetPath, resolvedRoot);
+/** True for `memory://root` with no path, which reads the default summary file. */
+function isBareMemoryUrl(url: InternalUrl): boolean {
+	const rawPathname = url.rawPathname ?? url.pathname;
+	return !rawPathname || rawPathname === "/";
+}
 
-	if (targetPath !== resolvedRoot) {
-		const parentDir = path.dirname(targetPath);
-		try {
-			const realParent = await fs.realpath(parentDir);
-			ensureWithinRoot(realParent, resolvedRoot);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-	}
-
-	let realTargetPath: string;
-	try {
-		realTargetPath = await fs.realpath(targetPath);
-	} catch (error) {
-		if (isEnoent(error)) return undefined;
-		throw error;
-	}
-
-	ensureWithinRoot(realTargetPath, resolvedRoot);
+async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<InternalResource | undefined> {
+	const realTargetPath = (await locateInRoot(url, memoryRoot, false))?.real;
+	if (realTargetPath === undefined) return undefined;
 
 	const stat = await fs.stat(realTargetPath);
 	if (stat.isDirectory()) {
@@ -206,12 +138,11 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
 	}
 
 	const content = await Bun.file(realTargetPath).text();
-	const contentType: InternalResource["contentType"] = isMarkdownPath(realTargetPath) ? "text/markdown" : "text/plain";
 
 	return {
 		url: url.href,
 		content,
-		contentType,
+		contentType: contentTypeForPath(realTargetPath),
 		size: Buffer.byteLength(content, "utf-8"),
 		sourcePath: realTargetPath,
 		notes: [],
@@ -243,15 +174,7 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 }
 
 function memoryBackendFromContext(context?: ResolveContext): string | undefined {
-	if (!context?.settings || typeof context.settings !== "object") return undefined;
-	try {
-		const get = Reflect.get(context.settings, "get");
-		if (typeof get !== "function") return undefined;
-		const backend = Reflect.apply(get, context.settings, ["memory.backend"]);
-		return typeof backend === "string" ? backend : undefined;
-	} catch {
-		return undefined;
-	}
+	return context?.settings ? cfgMemoryBackend.get(context.settings) : undefined;
 }
 
 /**
@@ -296,7 +219,7 @@ function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
 	const session = findCallerSession(context);
 	// The caller's own session owns the backend decision: not every tool threads
 	// its settings blob, and a same-cwd peer's backend is not an answer.
-	if (session) return { session, backend: session.settings.get("memory.backend"), legacy: false };
+	if (session) return { session, backend: cfgMemoryBackend.get(session.settings), legacy: false };
 	if (context.sessionFile !== undefined || context.sessionId !== undefined) {
 		// The named caller is gone; a surviving peer may not answer for it.
 		return { session: undefined, backend: "off", legacy: false };
@@ -400,7 +323,62 @@ function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): Int
  */
 export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "memory";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: true,
+		linkable: true,
+	};
+
+	/** Advertised only when the session's memory backend owns the file-backed `memory://root` namespace. */
+	promptDoc(host: SchemeHost): string | undefined {
+		return host.memoryBackend === "local" ? memoryDoc.trim() : undefined;
+	}
+
+	/**
+	 * File backing `memory://root[/<path>]` for a local-backend caller; null for
+	 * mnemopi ids, non-local backends, and missing entries without `create`.
+	 */
+	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
+		const caller = resolveMemoryCaller(context);
+		if (caller.backend === "off") return null;
+		const namespace = url.rawHost || url.hostname;
+		if (!namespace) {
+			throw new Error("memory:// URL requires a namespace: memory://root or memory://<memory-id>");
+		}
+		if (namespace !== MEMORY_NAMESPACE) return null;
+		if (caller.backend !== undefined && caller.backend !== "local") return null;
+
+		const directory = options?.directory === true;
+		let wouldBe: { root: string; target: string } | undefined;
+		for (const root of memoryRootsForContext(context, caller.session)) {
+			const located = await locateInRoot(url, root, directory);
+			if (located?.real !== undefined) return located.real;
+			wouldBe ??= located ?? {
+				root: path.resolve(root),
+				target:
+					directory && isBareMemoryUrl(url) ? path.resolve(root) : resolveMemoryUrlToPath(url, path.resolve(root)),
+			};
+		}
+		if (!options?.create || !wouldBe) return null;
+		await ensureCreatableWithinRoot(wouldBe.target, wouldBe.root, "memory", url.href);
+		return wouldBe.target;
+	}
+
+	locateSync(url: InternalUrl): string | undefined {
+		try {
+			for (const root of memoryRootsFromRegistry()) {
+				try {
+					return resolveMemoryUrlToPath(url, root);
+				} catch {
+					// Try the next root; some sessions may not have this namespace mounted.
+				}
+			}
+		} catch {
+			return undefined;
+		}
+		return undefined;
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const caller = resolveMemoryCaller(context);
