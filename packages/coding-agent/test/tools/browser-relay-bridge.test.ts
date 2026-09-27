@@ -131,9 +131,24 @@ function nack(bridge: RelayBridge, socket: FakeExtSocket, op: RelayRpcRequest["o
 	}
 }
 
-/** Drain chained extension RPC, auto-attach, and response continuations without timers. */
+/** Attach attempts `#ensureAttached` makes before giving up. */
+const ATTACH_ATTEMPTS = 3;
+
+/**
+ * Fail every pending attach, including the retries `#ensureAttached` issues.
+ * Bridges under test are built with `attachRetryDelayMs: 0`, so the whole retry
+ * chain runs on microtasks and {@link flush} drains it.
+ */
+async function failAttach(bridge: RelayBridge, socket: FakeExtSocket, error: string): Promise<void> {
+	for (let round = 0; round < ATTACH_ATTEMPTS + 1; round++) {
+		nack(bridge, socket, "attach", error);
+		await flush();
+	}
+}
+
+/** Drain chained extension RPC, auto-attach, and response continuations without timers; deep enough for the attach retry loop. */
 async function flush(): Promise<void> {
-	for (let i = 0; i < 12; i++) await Promise.resolve();
+	for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
 let msgSeq = 100;
@@ -882,8 +897,44 @@ describe("RelayBridge attachment release", () => {
 		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
-	it("retracts held sessions when reconnect reattachment fails", async () => {
+	it("keeps held sessions when Chrome drops the attachment but the tab stays open", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Chrome reports `target_closed` for detaches that leave the tab alive
+		// (renderer swaps, a service worker dropping its attachments). Tearing the
+		// client's target down here is what turned those into permanently dead
+		// puppeteer Pages ("Attempted to use detached Frame") for a live tab.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		expect(
+			cdp.messages.some(
+				message => message.method === "Target.detachedFromTarget" || message.method === "Target.targetDestroyed",
+			),
+		).toBe(false);
+
+		// The next command re-attaches lazily and succeeds.
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, sessionId, method: "Runtime.evaluate", params: { expression: "1" } }),
+		);
+		await flush();
+		expect(ext.pending("attach")).toHaveLength(1);
+		ack(bridge, ext, "attach");
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.find(message => message.id === commandId)?.result).toBeDefined();
+	});
+
+	it("reports a refused attach on the command instead of retracting the live session", async () => {
+		// attachRetryDelayMs: 0 keeps the retry chain on microtasks (no test timers).
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" }, attachRetryDelayMs: 0 });
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
@@ -893,18 +944,58 @@ describe("RelayBridge attachment release", () => {
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1 })]);
 		expect(replacement.pending("attach")).toHaveLength(1);
-		nack(bridge, replacement, "attach", "debugger unavailable");
-		await flush();
+		await failAttach(bridge, replacement, "Cannot access a chrome-extension:// URL of different extension");
 
-		const detached = cdp.messages.find(
-			message =>
-				message.method === "Target.detachedFromTarget" &&
-				message.params !== null &&
-				typeof message.params === "object" &&
-				"sessionId" in message.params &&
-				message.params.sessionId === sessionId,
+		// The reattach failed, but the client keeps its target: the tab is still
+		// open and Chrome may accept attaches again a moment later.
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(false);
+
+		// The refusal is surfaced on the command that needed the debugger, with
+		// Chrome's own wording preserved so the cause is diagnosable.
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, sessionId, method: "Runtime.evaluate", params: { expression: "1" } }),
 		);
-		expect(detached).toBeDefined();
+		await failAttach(bridge, replacement, "Cannot access a chrome-extension:// URL of different extension");
+		const reply = cdp.messages.find(message => message.id === commandId);
+		expect(JSON.stringify(reply)).toContain("Cannot access a chrome-extension:// URL of different extension");
+
+		// A transient refusal must not ban the tab: once Chrome attaches again,
+		// the very next command works.
+		const retryId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: retryId, sessionId, method: "Runtime.evaluate", params: { expression: "1" } }),
+		);
+		await flush();
+		expect(replacement.pending("attach")).toHaveLength(1);
+		ack(bridge, replacement, "attach");
+		await flush();
+		ack(bridge, replacement, "send");
+		await flush();
+		expect(cdp.messages.find(message => message.id === retryId)?.result).toBeDefined();
+	});
+
+	it("still retracts a user-cancelled tab", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		await flush();
+		expect(
+			cdp.messages.some(
+				message =>
+					message.method === "Target.detachedFromTarget" &&
+					message.params !== null &&
+					typeof message.params === "object" &&
+					"sessionId" in message.params &&
+					message.params.sessionId === sessionId,
+			),
+		).toBe(true);
 	});
 
 	it("reconciles a delayed detach after replacement hello still reports the old attachment", async () => {

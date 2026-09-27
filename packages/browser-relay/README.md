@@ -6,7 +6,7 @@ The companion relay server lives in the omp CLI (`omp browser-relay`, see `packa
 
 ## Setup
 
-1. `omp browser-relay install` — writes the bundled extension to `~/.omp/browser-relay/extension`, then load it via `chrome://extensions` → Developer mode → *Load unpacked*. (Or grab `omp-browser-relay-extension.zip` from GitHub releases.)
+1. `omp browser-relay install` — writes the bundled extension to `~/.omp/browser-relay/extension`, then load it via `chrome://extensions` → Developer mode → _Load unpacked_. (Or grab `omp-browser-relay-extension.zip` from GitHub releases.)
 2. Opt in, one of two ways:
    - **Per call** — pass `app: { relay: true }` to `browser.open(...)` in Eval. Works without any setting and persists nothing: the configured default for every other call and session stays whatever it already was.
    - **As the default** — `omp config set browser.relay true` makes the relay the default for **every session using this profile, in every project** (project-level settings, `PI_BROWSER_RELAY`, and an explicit `app` choice still take precedence). Any session's ordinary `browser.open(...)` call will then drive your real browser — including background sessions you aren't watching; without `app.target` such a call adopts the currently visible tab, and if it carries a `url` it navigates that tab away from what you were reading.
@@ -25,4 +25,4 @@ That's it: the relay server auto-starts under omp's profile-independent global d
 - `chrome://`, DevTools, Web Store, and other-extension pages are not attachable and are hidden from the agent.
 - Chrome shows its "is debugging this browser" infobar while any tab is attached; dismissing it detaches that tab until it navigates again.
 - A tab with DevTools open can't be attached (one debugger per tab — the constraint the relay multiplexes around for its own clients).
-- Anything that can reach the relay port can drive your logged-in browser. The relay binds loopback only; use `omp browser-relay --token <secret>` (mirrored in the extension options) if untrusted local processes are a concern.
+- Chrome sometimes refuses `chrome.debugger.attach` for a tab it previously detached — it reports "Cannot access a chrome-extension:// URL of different extension" even for ordinary pages. Another debugger (DevTools, or a devtools-style extension such as React/Redux DevTools, Selenium, uBlock, password managers) competing for that tab is the usual cause, and a dedicated Chrome profile with only this extension is the reliable fix. OMP retries the attach and reports Chrome's wording on the failing command, and a refused tab is never banned or torn down — it recovers as soon as Chrome accepts attaches again.
