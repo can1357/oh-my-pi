@@ -113,6 +113,7 @@ import {
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
+import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -2140,11 +2141,16 @@ export async function runRootCommand(
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
 
-		// OTEL: register global OTLP exporters when an endpoint is configured via
-		// env, then switch on the agent loop's telemetry hooks so traces, run-level
-		// metrics, and structured logs have source events to export. Content capture
-		// remains governed by OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
-		await logger.time("initTelemetryExport", initTelemetryExport);
+		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
+		// exporters when an endpoint is configured via env, then switch on the agent
+		// loop's telemetry hooks so traces, run-level metrics, and structured logs
+		// have source events to export. Content capture remains governed by
+		// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
+		await logger.time(
+			"initTelemetryExport",
+			initTelemetryExport,
+			cfgTelemetryOtlpExportEnabled.get(settingsInstance),
+		);
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
