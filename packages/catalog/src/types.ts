@@ -59,6 +59,25 @@ export const RUNNER_APIS = [
 	"openrouter-video",
 	"openai-transcriptions",
 ] as const;
+/** Kind each single-purpose runner API serves; `local-inference` hosts several kinds. */
+export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "local-inference">, ModelKind> = {
+	"web-search": "search",
+	typesafe: "judge",
+	"openrouter-decisions": "judge",
+	"openai-images": "image",
+	"openrouter-images": "image",
+	"xai-tts": "tts",
+	"openai-speech": "tts",
+	"openai-embeddings": "embedding",
+	"openrouter-rerank": "rerank",
+	"openrouter-video": "video",
+	"openai-transcriptions": "stt",
+};
+
+/** Kind a runner API serves; `undefined` for chat transports and multi-kind `local-inference`. */
+export function runnerApiKind(api: Api): ModelKind | undefined {
+	return Object.hasOwn(RUNNER_API_KINDS, api) ? RUNNER_API_KINDS[api as keyof typeof RUNNER_API_KINDS] : undefined;
+}
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
 export function modelKind(model: Pick<Model, "kind">): ModelKind {

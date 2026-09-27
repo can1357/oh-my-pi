@@ -102,3 +102,31 @@ describe("models.yml compat.stripImageInput (#11697)", () => {
 		}
 	});
 });
+
+describe("model kind must match its api", () => {
+	const validate = (config: Omit<Parameters<typeof validateProviderConfiguration>[1], "baseUrl">) => () =>
+		validateProviderConfiguration("gateway", { baseUrl, apiKey: "key", ...config }, "models-config");
+
+	test("rejects a model kind its api cannot serve", () => {
+		expect(validate({ models: [{ id: "img", api: "openai-completions", kind: "image" }] })).toThrow(
+			/model img: kind "image" does not match api "openai-completions", which serves kind "chat"/,
+		);
+		expect(validate({ models: [{ id: "img", api: "openai-images", kind: "chat" }] })).toThrow(
+			/model img: kind "chat" does not match api "openai-images", which serves kind "image"/,
+		);
+		expect(validate({ models: [{ id: "img", api: "openai-images", kind: "image" }] })).not.toThrow();
+	});
+
+	test("checks an override kind against the api it resolves to", () => {
+		const provider = { api: "openai-responses" as const, models: [] };
+		expect(validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "image" } } })).toThrow(
+			/modelOverrides\.gpt-image-2: kind "image" does not match api "openai-responses"/,
+		);
+		expect(
+			validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "image", api: "openai-images" } } }),
+		).not.toThrow();
+		expect(validate({ models: [], modelOverrides: { "gpt-image-2": { kind: "image" } } })).toThrow(
+			/modelOverrides\.gpt-image-2: "kind" requires "api"/,
+		);
+	});
+});

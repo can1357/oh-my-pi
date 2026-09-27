@@ -1,4 +1,5 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
+import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 
 function validateMaxContextWindow(
@@ -106,6 +107,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
 	);
 
+	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
+	// checks that `kind` matches the api's kind.
+	const ModelApiSchema = ApiSchema.or(
+		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
+	);
+	const ModelKindSchema = type.enumerated(...MODEL_KINDS);
+
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
 	const ThinkingControlModeSchema = type(
@@ -191,7 +199,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
-		"api?": ApiSchema,
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
@@ -250,6 +259,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelOverrideSchema = type({
 		"name?": "string",
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
