@@ -904,6 +904,12 @@ export class MCPManager {
 			await Promise.all(
 				lazyServers.map(async ({ name, config }) => {
 					const cached = await this.toolCache?.get(name, config);
+					// A first use (a deferred tool's reconnect fallback, or
+					// `/mcp reconnect`) can connect the server while the lookup above
+					// is in flight. Its live catalog supersedes whatever the cache
+					// says, hit or miss: installing the snapshot would replace live
+					// tools with stale deferred ones, and a miss would clear them.
+					if (this.#connections.has(name)) return;
 					if (!cached) {
 						// Cache miss with tools still registered under this name means
 						// the server's connection identity changed (edited command/URL)

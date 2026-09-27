@@ -202,6 +202,77 @@ describe("MCP lazy connect", () => {
 		}
 	});
 
+	it("regression: a reconnect completing during the lazy cache lookup keeps its live tools on a cache hit", async () => {
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache);
+
+		const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
+		const originalGet = cache.get.bind(cache);
+		const getSpy = vi.spyOn(cache, "get").mockImplementation(async (name, cfg) => {
+			await gate;
+			return originalGet(name, cfg);
+		});
+
+		try {
+			const connectPromise = manager.connectServers({ lazyfixture: config }, {});
+			// A first use connects the server while the startup lookup is still
+			// pending; the older cache snapshot must not replace its live catalog.
+			await manager.reconnectServer("lazyfixture");
+			expect(manager.getConnectionStatus("lazyfixture")).toBe("connected");
+			releaseGate();
+			await connectPromise;
+
+			const tools = manager.getTools().filter(tool => tool.mcpServerName === "lazyfixture");
+			expect(tools).toHaveLength(1);
+			expect(tools[0]).not.toBeInstanceOf(DeferredMCPTool);
+		} finally {
+			getSpy.mockRestore();
+			await manager.disconnectAll();
+		}
+	});
+
+	it("regression: a reconnect completing during the lazy cache lookup keeps its live tools on a cache miss", async () => {
+		const marker = path.join(workDir, "spawned.marker");
+		const config = lazyConfig(marker);
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache);
+
+		try {
+			// Cache hit installs the deferred catalog.
+			await manager.connectServers({ lazyfixture: config }, {});
+
+			const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
+			const originalGet = cache.get.bind(cache);
+			const getSpy = vi.spyOn(cache, "get").mockImplementation(async (name, cfg) => {
+				await gate;
+				return originalGet(name, cfg);
+			});
+			try {
+				// An identity edit misses the cache; while that lookup is pending,
+				// a first use connects the edited server and installs its live
+				// catalog, which the miss must not clear.
+				const editedConfig: MCPStdioServerConfig = { ...config, args: [FIXTURE_PATH, "--edited"] };
+				const connectPromise = manager.connectServers({ lazyfixture: editedConfig }, {});
+				await manager.reconnectServer("lazyfixture");
+				expect(manager.getConnectionStatus("lazyfixture")).toBe("connected");
+				releaseGate();
+				await connectPromise;
+			} finally {
+				getSpy.mockRestore();
+			}
+
+			const tools = manager.getTools().filter(tool => tool.mcpServerName === "lazyfixture");
+			expect(tools).toHaveLength(1);
+			expect(tools[0]).not.toBeInstanceOf(DeferredMCPTool);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
 	it("reports a startup failure for an invalid lazy config even with no eager servers", async () => {
 		const config: MCPStdioServerConfig = { type: "stdio", command: "", lazy: true };
 		const manager = new MCPManager(workDir, new MCPToolCache(fakeStorage()));
