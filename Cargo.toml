@@ -373,10 +373,13 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 tinyvec = "=1.13.3"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
+# Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
+# compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
+# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms).
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
-   "regex-fancy",
+   "regex-onig",
    "yaml-load",
 ] }
 
