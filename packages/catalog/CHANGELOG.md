@@ -4,12 +4,12 @@
 
 ### Changed
 
-- Updated the Devin CLI request identity to `3000.11.3`, the current released client.
-- Changed the Devin default model from SWE-1.6 to SWE-2 (default effort High), matching Devin's own account default, and the `devin/swe` shorthand now selects SWE-2. SWE-2 is free during Devin's current promotion; OMP prices it at the published rate until discovery reports otherwise.
+- Updated the Devin CLI request identity to `3000.11.3`, the current released client ([#13527](https://github.com/can1357/oh-my-pi/pull/13527) by [@will-bogusz](https://github.com/will-bogusz)).
+- Changed the Devin default model from SWE-1.6 to SWE-2 (default effort High), matching Devin's own account default, and the `devin/swe` shorthand now selects SWE-2. SWE-2 is free during Devin's current promotion; OMP prices it at the published rate until discovery reports otherwise ([#13527](https://github.com/can1357/oh-my-pi/pull/13527) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ### Removed
 
-- Removed Devin Fusion from the Devin model list: the `fusion` router, its lead/sidekick pairings, and the sidekick lanes. Fusion's sidekick runs inside Devin's own client, so each pairing in omp only duplicated its lead model; assign a Devin model to the `task` role for the same lead/sidekick split.
+- Removed Devin Fusion from the Devin model list: the `fusion` router, its lead/sidekick pairings, and the sidekick lanes. Fusion's sidekick runs inside Devin's own client, so each pairing in omp only duplicated its lead model; assign a Devin model to the `task` role for the same lead/sidekick split ([#13527](https://github.com/can1357/oh-my-pi/pull/13527) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.3.5] - 2026-09-27
 
