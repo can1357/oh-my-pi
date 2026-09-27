@@ -454,6 +454,17 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow(/"@default"/);
 	});
 
+	it("rejects an ambiguous per-call selector carrying a thinking suffix", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		for (const model of ["default:high", "DEFAULT:high", "inherit:low"]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/"@default"/,
+			);
+		}
+	});
+
 	it("fails a per-call selector that expands to nothing rather than silently demoting it", async () => {
 		mockDiscovery({ ...AGENT, model: ["@definition"] });
 		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });

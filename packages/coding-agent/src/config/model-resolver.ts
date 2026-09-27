@@ -1089,7 +1089,7 @@ export function resolveExplicitModelRole(
  * non-alias patterns fall back to the legacy prefix length, which is what the
  * role expansion below already does.
  */
-function splitRoleAliasThinkingSuffix(value: string): { base: string; level?: ConfiguredThinkingLevel } {
+export function splitRoleAliasThinkingSuffix(value: string): { base: string; level?: ConfiguredThinkingLevel } {
 	return splitThinkingSuffix(
 		value,
 		modelRoleAliasPrefixLength(value) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,

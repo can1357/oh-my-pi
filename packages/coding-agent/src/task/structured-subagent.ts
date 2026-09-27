@@ -15,6 +15,7 @@ import {
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
+	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
 import {
 	type CompactionThresholdPair,
@@ -293,10 +294,11 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 
 /**
  * Reason a per-spawn `model` selector cannot mean anything useful, or
- * `undefined` when it is usable. The literal `"default"` is singled out
- * because it reads as "leave the agent's model alone" while resolving as the
- * `default` role — the ambiguity that got the previous per-call override
- * removed (#6438). `@default` states the inherit intent explicitly.
+ * `undefined` when it is usable. The literal `"default"` (with or without a
+ * `:level` suffix) is singled out because it reads as "leave the agent's
+ * model alone" while resolving as the `default` role — the ambiguity that got
+ * the previous per-call override removed (#6438). `@default` states the
+ * inherit intent explicitly.
  * Shared so task, eval `agent()` and `workpool()` reject malformed input
  * identically before dispatch.
  */
@@ -312,7 +314,11 @@ export function invalidModelSelectorReason(model: unknown, label: string): strin
 		patterns.push(...normalized);
 	}
 	if (patterns.length === 0) return invalid;
-	if (patterns.some(pattern => ["default", "inherit"].includes(pattern.toLowerCase()))) {
+	if (
+		patterns.some(pattern =>
+			["default", "inherit"].includes(splitRoleAliasThinkingSuffix(pattern).base.toLowerCase()),
+		)
+	) {
 		return `${label} has an ambiguous \`model\` value ${JSON.stringify(model)}. Use "@default" to inherit the parent session's model, or name a model explicitly.`;
 	}
 	return undefined;
