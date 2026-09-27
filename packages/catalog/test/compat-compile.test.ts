@@ -408,7 +408,7 @@ describe("provider catalog grammar", () => {
 			].join("\n");
 		const text = provider("p", [
 			'\tdefault-model "local"',
-			'\tkind-apis {\n\t\timage "openai-responses"\n\t\ttts "xai-tts"\n\t\tstt "openai-speech"\n\t}',
+			'\tkind-apis {\n\t\timage "openai-responses"\n\t\ttts "xai-tts"\n\t\tstt "openai-transcriptions"\n\t}',
 			[
 				'\tseed api="local-inference" base-url="local://inference" {',
 				model("local", "Local"),
@@ -421,7 +421,7 @@ describe("provider catalog grammar", () => {
 		expect(p.kindApis).toEqual({
 			image: "openai-responses",
 			tts: "xai-tts",
-			stt: "openai-speech",
+			stt: "openai-transcriptions",
 		});
 		expect(p.seed?.models.map(entry => [entry.id, entry.api])).toEqual([
 			["local", "local-inference"],
@@ -442,6 +442,9 @@ describe("provider catalog grammar", () => {
 			/directive `image` has a malformed value/,
 		);
 		expect(() => compileKindApis('\t\timage "not-an-api"')).toThrow(/unknown api `not-an-api`/);
+		expect(() => compileKindApis('\t\ttts "openai-images"')).toThrow(
+			/kind-apis `tts` names api `openai-images`, which serves kind `image`/,
+		);
 		expect(() =>
 			compileProviders(
 				src(
