@@ -284,10 +284,12 @@ fn configured_worktree(git_dir: &Path) -> Option<PathBuf> {
 /// Parse `core.worktree` out of git-config text. Sections and keys compare
 /// case-insensitively; subsections (`[core "x"]`) never match; git's
 /// backslash escapes decode regardless of whether the value is quoted, and
-/// an unquoted `#`/`;` starts a trailing comment. Scans the whole file and
-/// keeps the last assignment seen — git's own precedence for a repeated
-/// scalar key — rather than stopping at the first match.
+/// an unquoted `#`/`;` starts a trailing comment. A leading UTF-8 BOM is
+/// skipped, as git does. Scans the whole file and keeps the last assignment
+/// seen — git's own precedence for a repeated scalar key — rather than
+/// stopping at the first match.
 fn parse_core_worktree(content: &str) -> Option<String> {
+	let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 	let mut in_core = false;
 	let mut worktree = None;
 	for raw in content.lines() {
@@ -636,6 +638,18 @@ mod tests {
 		assert_eq!(
 			parse_core_worktree("[core]\n\tworktree = ../../../sub\\\"quote\n"),
 			Some(r#"../../../sub"quote"#.to_owned())
+		);
+	}
+
+	#[test]
+	fn core_worktree_skips_a_leading_utf8_bom() {
+		// Git skips a UTF-8 byte-order mark at the start of a config file, so
+		// `git config --file <config> --get core.worktree` on this text returns
+		// `/main`. Without skipping it the first `[core]` header goes
+		// unrecognized and `primary_root()` falls back to the common dir.
+		assert_eq!(
+			parse_core_worktree("\u{feff}[core]\n\tworktree = /main\n"),
+			Some("/main".to_owned())
 		);
 	}
 }
