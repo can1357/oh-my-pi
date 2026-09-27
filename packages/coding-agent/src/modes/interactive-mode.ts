@@ -2318,6 +2318,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) return;
 		if (!this.goalModeEnabled || this.goalModePaused) return;
 		if (this.#goalSuppressNextContinuation) return;
+		if (this.#goalOpenWorkAllBlocked()) return;
 		if (this.#pendingSubmittedInput) return;
 		if (this.editor.getText().trim().length > 0) return;
 		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
@@ -2358,6 +2359,22 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearTimeout(this.#goalContinuationTimer);
 			this.#goalContinuationTimer = undefined;
 		}
+	}
+
+	/**
+	 * Every open todo is `blocked`: the goal waits on the user or another party, so
+	 * a hidden continuation can only re-ask. The next real user message or
+	 * delivered job result starts a turn and re-arms continuation on its `agent_end`.
+	 */
+	#goalOpenWorkAllBlocked(): boolean {
+		let blocked = false;
+		for (const phase of this.session.getTodoPhases()) {
+			for (const task of phase.tasks) {
+				if (task.status === "pending" || task.status === "in_progress") return false;
+				if (task.status === "blocked") blocked = true;
+			}
+		}
+		return blocked;
 	}
 
 	cancelGoalContinuation(): void {

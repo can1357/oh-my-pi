@@ -25,4 +25,6 @@ Before `goal({op:"complete"})`, MUST audit current repo state:
 
 Call `goal({op:"complete"})` only when every deliverable has direct current-state evidence proving satisfaction. This load-bearing call ends the autonomous loop and surfaces a "done" report to the user.
 
+Need the user's decision, approval, or input to proceed → `todo` block that item with the reason, ask once, end turn. Continuations stop while all open todos are blocked. NEVER repeat a pending question.
+
 Unfinished: keep working. NEVER narrate continuation — execute.

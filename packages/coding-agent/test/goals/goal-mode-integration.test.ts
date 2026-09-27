@@ -582,6 +582,104 @@ describe("InteractiveMode goal mode integration", () => {
 		await fourthWaiter.inputPromise;
 	});
 
+	async function countGoalContinuations(
+		todos: { content: string; status: "completed" | "blocked" | "pending" }[],
+		maxTurns: number,
+	): Promise<number> {
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.session.setActiveToolsByName(["todo"]);
+		await harness.mode.handleGoalModeCommand("Speed up CI");
+		harness.session.setTodoPhases([{ name: "Work", tasks: todos }]);
+		let providerCall = 0;
+		// Each continuation turn: one tool call whose arguments change (like re-declaring
+		// a "needs reply" reason), then a final message re-asking the pending question.
+		harness.session.agent.streamFn = () => {
+			const index = providerCall++;
+			const toolTurn = index % 2 === 0;
+			const message = {
+				role: "assistant" as const,
+				content: toolTurn
+					? [
+							{
+								type: "toolCall" as const,
+								id: `call-${index}`,
+								name: "todo",
+								arguments: { op: "view", i: `Awaiting approval ${index}` },
+							},
+						]
+					: [{ type: "text" as const, text: "Approve CQ-1?" }],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: toolTurn ? ("toolUse" as const) : ("stop" as const),
+				timestamp: Date.now(),
+			};
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: message.stopReason, message });
+			});
+			return stream;
+		};
+
+		let fired = 0;
+		for (let turn = 0; turn < maxTurns; turn++) {
+			vi.useFakeTimers();
+			const waiter = await armInputWaiter(harness.mode);
+			vi.advanceTimersByTime(800);
+			await waitForMicrotasks();
+			vi.useRealTimers();
+			const input = waiter.getResolvedInput();
+			if (input?.customType !== "goal-continuation") {
+				harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+				await waiter.inputPromise;
+				break;
+			}
+			fired++;
+			expect(harness.mode.markPendingSubmissionStarted(input)).toBe(true);
+			await harness.session.promptCustomMessage({
+				customType: input.customType,
+				content: input.text,
+				display: false,
+				attribution: "agent",
+			});
+			harness.mode.finishPendingSubmission(input);
+		}
+		return fired;
+	}
+
+	it("does not re-wake a goal whose only open work is blocked on someone else", async () => {
+		const fired = await countGoalContinuations(
+			[
+				{ content: "Inspect CI timings", status: "completed" },
+				{ content: "Implement approved change", status: "blocked" },
+			],
+			4,
+		);
+		expect(fired).toBe(0);
+	});
+
+	it("keeps continuing while unblocked goal work remains", async () => {
+		const fired = await countGoalContinuations(
+			[
+				{ content: "Implement approved change", status: "blocked" },
+				{ content: "Measure baseline", status: "pending" },
+			],
+			2,
+		);
+		expect(fired).toBe(2);
+	});
+
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;
