@@ -96,6 +96,9 @@
 - Fixed `grep` paths like `dir/*.go` also matching files in subdirectories of `dir` ([#13146](https://github.com/can1357/oh-my-pi/issues/13146), [#13150](https://github.com/can1357/oh-my-pi/pull/13150) by [@radkawar](https://github.com/radkawar))
 - Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
 - Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
+- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost.
+- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost. ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
+- Added an "Unexpected cache misses" section to `omp stats --summary`, reporting per provider and agent type how many cacheable prompt tokens were not read from a still-warm cache, the share of affected turns, and the API-equivalent avoidable cost, plus how often omp itself changed the previous prompt (system prompt, tools, options, or messages). ([#13280](https://github.com/can1357/oh-my-pi/pull/13280))
 
 ## [18.3.1] - 2026-09-25
 

@@ -10,6 +10,8 @@ export * from "./compaction";
 export * from "./output-budget";
 // Process-global pause gate
 export * from "./pause";
+// Send-time prompt-cache prefix comparison
+export * from "./prompt-cache-prefix";
 // Proxy utilities
 export * from "./proxy";
 // Replay policy

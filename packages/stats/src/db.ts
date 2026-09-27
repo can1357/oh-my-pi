@@ -17,6 +17,7 @@ import type {
 	BehaviorModelStats,
 	BehaviorOverallStats,
 	BehaviorTimeSeriesPoint,
+	CacheMissStats,
 	CostTimeSeriesPoint,
 	DailyActivityPoint,
 	FolderStats,
@@ -211,6 +212,7 @@ export async function initDb(): Promise<Database> {
 			cost_no_cache_input REAL,
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
+			cache_prefix TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -218,7 +220,7 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_messages_entry_timestamp ON messages(entry_id, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model);
 		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
-		CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_file);
+		CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_file, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_model_provider ON messages(timestamp, model, provider);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_folder ON messages(timestamp, folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_stop_reason_timestamp ON messages(stop_reason, timestamp);
@@ -297,6 +299,10 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
+	// Send-time prompt-cache prefix status; NULL for rows recorded before omp stamped it.
+	if (!messageColumns.some(column => column.name === "cache_prefix")) {
+		db.run("ALTER TABLE messages ADD COLUMN cache_prefix TEXT");
+	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
@@ -318,6 +324,9 @@ export async function initDb(): Promise<Database> {
 		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
 	);
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
+	// Superseded by the (session_file, timestamp) index, which also serves
+	// session_file-only lookups and orders per-session request walks.
+	db.run("DROP INDEX IF EXISTS idx_messages_session");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
 	// already produced the new schema, but we want a clean wipe + re-ingest.
@@ -726,9 +735,9 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
 			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, cost_no_cache_input,
-			cost_unpriced, agent_type
+			cost_unpriced, agent_type, cache_prefix
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM messages
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
@@ -741,7 +750,8 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 			cost_cache_write = excluded.cost_cache_write,
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
-			cost_unpriced = excluded.cost_unpriced
+			cost_unpriced = excluded.cost_unpriced,
+			cache_prefix = excluded.cache_prefix
 	`);
 
 	let inserted = 0;
@@ -775,6 +785,7 @@ export function insertMessageStats(stats: MessageStatsInput[]): number {
 				noCacheInputCost,
 				unpriced ? 1 : 0,
 				s.agentType,
+				s.cachePrefix ?? null,
 				// `WHERE NOT EXISTS` binds: skip when a different session_file
 				// already holds this (entry_id, timestamp).
 				s.entryId,
@@ -1001,6 +1012,178 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 		totalCacheReadTokens: row.total_cache_read_tokens || 0,
 		totalCacheWriteTokens: row.total_cache_write_tokens || 0,
 		totalCost: row.total_cost || 0,
+	}));
+}
+
+/** Idle gap after which a provider prompt cache may have expired. */
+const CACHE_WARM_WINDOW_MS = 5 * 60 * 1000;
+/** Prompts below this size are not cacheable on most providers. */
+const CACHE_MIN_PROMPT_TOKENS = 1024;
+/** A prompt below this fraction of its predecessor was compacted/pruned. */
+const CACHE_PROMPT_SHRINK_RATIO = 0.97;
+/** A turn is "bad" when it misses more than this many tokens... */
+const CACHE_BAD_MISS_MIN_TOKENS = 2048;
+/** ...and more than this fraction of its expected cache hit. */
+const CACHE_BAD_MISS_RATIO = 0.1;
+/**
+ * Providers cache in fixed blocks (OpenAI 128 tokens, DeepSeek 64), so a
+ * perfect hit can still leave the predecessor's last partial block uncached.
+ * Shortfalls up to this size are rounding, not misses.
+ */
+const CACHE_BLOCK_ROUNDING_TOKENS = 256;
+
+/** Full prompt size of one request: uncached input + cache reads + cache writes. */
+function promptTokensSql(alias: string): string {
+	return `(${alias}.input_tokens + ${alias}.cache_read_tokens + ${alias}.cache_write_tokens)`;
+}
+
+interface CacheMissRow {
+	provider: string;
+	agent_type: string | null;
+	pairs: number;
+	exact_pairs: number;
+	provider_pairs: number;
+	bad_pairs: number;
+	expected_tokens: number;
+	missed_tokens: number;
+	avoidable_cost: number | null;
+	prefix_changed_pairs: number;
+	prefix_changed_tokens: number;
+	prefix_changed_cost: number | null;
+	changed_system: number;
+	changed_tools: number;
+	changed_options: number;
+	changed_messages: number;
+}
+
+/**
+ * Get unexpected prompt-cache misses grouped by provider and agent type,
+ * sorted by lost tokens (descending).
+ *
+ * Walks each transcript's requests in start order and pairs every request with
+ * its predecessor. A pair counts only when the cache should still be warm: same
+ * provider and model, neither request errored, both prompts are cacheable
+ * (>= 1024 tokens), the prompt did not shrink below 97% of its predecessor
+ * (compaction/pruning), and the idle gap between the predecessor finishing and
+ * this request starting is under 5 minutes. Models that never reported a cache
+ * read (all-time) have no warm cache to miss and are excluded.
+ *
+ * The request's send-time `cache_prefix` decides the expected hit and who lost
+ * it. `intact`: omp resent the previous prompt unchanged, so all of it should
+ * be cached and any shortfall is the provider's. `changed:<part>`: omp altered
+ * the previous prompt, so the loss is reported as a prefix change instead.
+ * Without a status (older rows), the smaller of the two prompts is the
+ * estimated hit and the pair counts as provider-side. Shortfalls within
+ * cache-block rounding (256 tokens) are not missed.
+ *
+ * With a cutoff, pairs are selected by the later request's timestamp; the
+ * predecessor may precede the cutoff. Costs price missed tokens at each
+ * model's all-time effective input rate minus its cache-read rate.
+ */
+export function getCacheMissStats(cutoff?: number | null): CacheMissStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff !== null && cutoff > 0;
+	const prevPrompt = promptTokensSql("a");
+	const prompt = promptTokensSql("b");
+	// LAG(id) + rowid joins beat six column LAGs: the window runs over the
+	// covering (session_file, timestamp) index and never touches the table.
+	const stmt = db.prepare(`
+		WITH ordered AS (
+			SELECT id, LAG(id) OVER (PARTITION BY session_file ORDER BY timestamp, id) AS prev_id
+			FROM messages
+			${hasCutoff ? "WHERE session_file IN (SELECT session_file FROM messages WHERE timestamp >= ?)" : ""}
+		),
+		candidates AS (
+			SELECT
+				b.provider,
+				b.model,
+				b.agent_type,
+				b.cache_prefix,
+				CASE WHEN b.cache_prefix = 'intact' THEN ${prevPrompt} ELSE MIN(${prevPrompt}, ${prompt}) END AS expected,
+				b.cache_read_tokens AS cache_read
+			FROM ordered o
+			JOIN messages b ON b.id = o.id
+			JOIN messages a ON a.id = o.prev_id
+			WHERE a.provider = b.provider
+				AND a.model = b.model
+				AND a.stop_reason != 'error'
+				AND b.stop_reason != 'error'
+				AND ${prevPrompt} >= ${CACHE_MIN_PROMPT_TOKENS}
+				AND ${prompt} >= ${CACHE_MIN_PROMPT_TOKENS}
+				AND ${prompt} >= ${CACHE_PROMPT_SHRINK_RATIO} * ${prevPrompt}
+				AND b.timestamp - a.timestamp - COALESCE(a.duration, 0) < ${CACHE_WARM_WINDOW_MS}
+				${hasCutoff ? "AND b.timestamp >= ?" : ""}
+		),
+		pairs AS (
+			SELECT
+				*,
+				COALESCE(cache_prefix LIKE 'changed:%', 0) AS prefix_changed,
+				CASE
+					WHEN expected - cache_read > ${CACHE_BLOCK_ROUNDING_TOKENS} THEN expected - cache_read
+					ELSE 0
+				END AS missed
+			FROM candidates
+		),
+		cached_models AS (
+			SELECT
+				provider,
+				model,
+				CASE WHEN SUM(input_tokens) > 0 THEN SUM(cost_input) / SUM(input_tokens) ELSE 0 END AS input_price,
+				SUM(cost_cache_read) / SUM(cache_read_tokens) AS cache_read_price
+			FROM messages
+			GROUP BY provider, model
+			HAVING SUM(cache_read_tokens) > 0
+		)
+		SELECT
+			p.provider,
+			p.agent_type,
+			COUNT(*) AS pairs,
+			SUM(p.cache_prefix = 'intact') AS exact_pairs,
+			SUM(1 - p.prefix_changed) AS provider_pairs,
+			SUM(CASE WHEN p.prefix_changed = 0
+				AND p.missed > MAX(${CACHE_BAD_MISS_MIN_TOKENS}, ${CACHE_BAD_MISS_RATIO} * p.expected)
+				THEN 1 ELSE 0 END) AS bad_pairs,
+			SUM(CASE WHEN p.prefix_changed = 0 THEN p.expected ELSE 0 END) AS expected_tokens,
+			SUM(CASE WHEN p.prefix_changed = 0 THEN p.missed ELSE 0 END) AS missed_tokens,
+			SUM(CASE WHEN p.prefix_changed = 0
+				THEN p.missed * MAX(0, m.input_price - m.cache_read_price) ELSE 0 END) AS avoidable_cost,
+			SUM(p.prefix_changed) AS prefix_changed_pairs,
+			SUM(CASE WHEN p.prefix_changed = 1 THEN p.missed ELSE 0 END) AS prefix_changed_tokens,
+			SUM(CASE WHEN p.prefix_changed = 1
+				THEN p.missed * MAX(0, m.input_price - m.cache_read_price) ELSE 0 END) AS prefix_changed_cost,
+			SUM(p.cache_prefix = 'changed:system') AS changed_system,
+			SUM(p.cache_prefix = 'changed:tools') AS changed_tools,
+			SUM(p.cache_prefix = 'changed:options') AS changed_options,
+			SUM(p.cache_prefix = 'changed:messages') AS changed_messages
+		FROM pairs p
+		JOIN cached_models m ON m.provider = p.provider AND m.model = p.model
+		GROUP BY p.provider, p.agent_type
+		ORDER BY missed_tokens + prefix_changed_tokens DESC, p.provider, p.agent_type
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff, cutoff) : stmt.all()) as CacheMissRow[];
+	return rows.map(row => ({
+		provider: row.provider,
+		agentType: (row.agent_type as AgentType | null) ?? "main",
+		pairs: row.pairs,
+		exactPairs: row.exact_pairs ?? 0,
+		badPairs: row.bad_pairs,
+		expectedTokens: row.expected_tokens,
+		missedTokens: row.missed_tokens,
+		missRate: row.expected_tokens > 0 ? row.missed_tokens / row.expected_tokens : 0,
+		badPairRate: row.provider_pairs > 0 ? row.bad_pairs / row.provider_pairs : 0,
+		avoidableCost: row.avoidable_cost ?? 0,
+		prefixChangedPairs: row.prefix_changed_pairs,
+		prefixChangedRate: row.pairs > 0 ? row.prefix_changed_pairs / row.pairs : 0,
+		prefixChangedTokens: row.prefix_changed_tokens,
+		prefixChangedCost: row.prefix_changed_cost ?? 0,
+		prefixChangedBy: {
+			system: row.changed_system ?? 0,
+			tools: row.changed_tools ?? 0,
+			options: row.changed_options ?? 0,
+			messages: row.changed_messages ?? 0,
+		},
 	}));
 }
 
@@ -1317,6 +1500,7 @@ function rowToMessageStats(row: any): MessageStats {
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
 		costUnpriced: row.cost_unpriced === 1,
+		cachePrefix: row.cache_prefix ?? null,
 	};
 }
 
