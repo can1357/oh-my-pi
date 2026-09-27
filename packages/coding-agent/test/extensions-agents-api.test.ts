@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import * as persistedAgentsModule from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -758,6 +759,38 @@ describe("ExtensionAPI agents", () => {
 		expect(agentsA.list().map(ref => ref.sessionFile)).toEqual([childFileA]);
 		expect(agentsB.list().map(ref => ref.sessionFile)).toEqual([childFileB]);
 		expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childFileA);
+	});
+
+	it("does not rescan the persisted tree once a collision-qualified agent already resolves in scope", async () => {
+		using tempDir = TempDir.createSync("@omp-extension-agents-collision-rescan-");
+		const cwd = tempDir.path();
+		const parentFileA = path.join(cwd, "mainA.jsonl");
+		const childFileA = path.join(cwd, "mainA", "Worker.jsonl");
+		const parentFileB = path.join(cwd, "mainB.jsonl");
+		const childFileB = path.join(cwd, "mainB", "Worker.jsonl");
+		await Bun.write(parentFileA, "");
+		await Bun.write(childFileA, `${persistedWorkerTranscript()}\n`);
+		await Bun.write(parentFileB, "");
+		await Bun.write(childFileB, `${persistedWorkerTranscript()}\n`);
+		const agentsA = await loadAgentsApi(cwd, "AcpSessionA", parentFileA);
+		const agentsB = await loadAgentsApi(cwd, "AcpSessionB", parentFileB);
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+			async () => async () => sessionStub(),
+			() => 0,
+		);
+		await agentsA.ensureLive("Worker", { parentSessionFile: parentFileA });
+		const scanSpy = vi.spyOn(persistedAgentsModule, "registerPersistedSubagents");
+
+		// A holds the bare "Worker", so B's own agent registers under its
+		// qualified key on the first call. Every later call must resolve that
+		// key directly: rescanning (and re-reading every transcript under
+		// B's tree) on each prompt makes repeated calls scale with the size
+		// of the persisted tree instead of staying a registry lookup.
+		const first = await agentsB.ensureLive("Worker", { parentSessionFile: parentFileB });
+		const second = await agentsB.ensureLive("Worker", { parentSessionFile: parentFileB });
+		expect(second).toEqual(first);
+		expect(second.sessionFile).toBe(childFileB);
+		expect(scanSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("resolves a nested persisted id through a collision-qualified parent chain", async () => {

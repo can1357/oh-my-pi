@@ -207,17 +207,20 @@ export function createExtensionAgentActions(
 				scanEligible &&
 				priorRef !== undefined &&
 				!isCurrentTranscriptRef(priorRef, parentSessionFile);
-			// Scan (not just a bare registry miss) whenever `id` isn't yet ours,
-			// or its only in-scope match is stale: a foreign session can already
-			// hold the bare id, or a same-family sibling from a superseded
-			// transcript can, in which case the scan must still run so this
-			// session's own CURRENT-transcript child can be registered under its
-			// disambiguated key. Only ever scan under a transcript verified to be
+			// Scan whenever `id` resolves to no in-scope agent yet, or its only
+			// in-scope match is stale: a foreign session can already hold the
+			// bare id, or a same-family sibling from a superseded transcript can,
+			// in which case the scan must still run so this session's own
+			// CURRENT-transcript child can be registered under its disambiguated
+			// key. Gate on the resolved `priorRef`, not the raw `id`: once that
+			// disambiguated key is registered, the bare `id` still belongs to the
+			// foreign session, and re-testing it would rescan the whole persisted
+			// tree on every call. Only ever scan under a transcript verified to be
 			// this scope's own — see `isOwnSessionFile`. `shouldContinue` re-checks
 			// that ownership on every yield point inside the scan, so a session
 			// transition mid-scan stops it from registering (and thus attributing
 			// to this scope) anything more from the now-foreign transcript.
-			if (scanEligible && (!inScope(id) || stale)) {
+			if (scanEligible && (priorRef === undefined || stale)) {
 				await registerPersistedSubagents(registry, parentSessionFile, {
 					rootParentId: scopeAgentId,
 					shouldContinue: ownsCurrentTranscript,
