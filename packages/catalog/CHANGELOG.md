@@ -5,6 +5,7 @@
 ### Changed
 
 - Updated the Devin CLI request identity to `3000.11.3`, the current released client.
+- Changed the Devin default model from SWE-1.6 to SWE-2 (default effort High), matching Devin's own account default, and the `devin/swe` shorthand now selects SWE-2. SWE-2 is free during Devin's current promotion; OMP prices it at the published rate until discovery reports otherwise.
 
 ### Removed
 
