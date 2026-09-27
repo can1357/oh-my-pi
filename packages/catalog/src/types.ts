@@ -43,7 +43,7 @@ export type ModelKind = (typeof MODEL_KINDS)[number];
 export const KIND_API_KINDS = ["image", "tts", "stt", "embedding", "rerank", "video"] as const;
 export type KindApiKind = (typeof KIND_API_KINDS)[number];
 /** Grounding transport available to chat models selected by the web role. */
-export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter";
+export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter" | "openai";
 /** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
 export const RUNNER_APIS = [
 	"local-inference",

@@ -82,7 +82,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 		webSearch === "anthropic" ||
 		webSearch === "codex" ||
 		webSearch === "xai" ||
-		webSearch === "openrouter"
+		webSearch === "openrouter" ||
+		webSearch === "openai"
 	) {
 		model.webSearch = webSearch;
 	}
