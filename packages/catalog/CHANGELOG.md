@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cerebras models reporting cached input tokens as free; they now cost the model's input rate, matching Cerebras billing
+
 ## [18.3.5] - 2026-09-27
 
 ### Added
