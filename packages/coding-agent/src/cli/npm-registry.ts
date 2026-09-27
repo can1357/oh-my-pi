@@ -15,7 +15,7 @@
  * Project-level config is deliberately ignored: `omp update` modifies a global
  * install, and the working directory it runs from is incidental.
  */
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
@@ -250,14 +250,14 @@ function envLookup(env: Env, name: string): string | undefined {
 }
 
 /**
- * Read a config file that usually does not exist. Uses `fs.promises` rather
+ * Read a config file that usually does not exist. Uses `node:fs/promises` rather
  * than `Bun.file().text()`: on Windows, Bun's rejected read of a missing file
  * holds no loop handle, so the loop drains mid-await and `omp update` trips
  * the unsettled-entry guard (exit 1) before the release lookup completes.
  */
 async function readOptional(file: string): Promise<string | undefined> {
 	try {
-		return await fs.promises.readFile(file, "utf8");
+		return await fs.readFile(file, "utf8");
 	} catch (err) {
 		if (isEnoent(err)) return undefined;
 		throw err;
