@@ -707,8 +707,79 @@ export default function (pi) {
 
 			// `/reload-plugins` re-emits resources_discover with reason "reload";
 			// the marker persists across reloads, so the skill must still be found.
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("keeps extension-contributed skills on an ordinary rescan without re-running reload handlers (regression: PR #9379 review, manage_skill refresh)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-ordinary-rescan-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			await writeStartupSkill(tempDir);
+			// Counts reload-reason emissions on disk (the extension runs in its own
+			// dynamic import, so it cannot share a closure with the test).
+			const reloadLog = path.join(tempDir, "reloads.log");
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "reload-counter.ts");
+			await fs.writeFile(
+				extPath,
+				`import * as fs from "node:fs";
+export default function (pi) {
+	pi.on("resources_discover", event => {
+		if (event.reason === "reload") fs.appendFileSync(${JSON.stringify(reloadLog)}, "reload\\n");
+		return { skillPaths: [${JSON.stringify(tempDir)}] };
+	});
+}
+`,
+			);
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			const readReloads = () =>
+				fs.readFile(reloadLog, "utf8").then(
+					text => text.split("\n").filter(Boolean).length,
+					() => 0,
+				);
+
+			// What manage_skill and live `skills.*` edits call.
+			await session.refreshSkills();
+			expect(await readReloads()).toBe(0);
+			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
+
+			await session.refreshSkills({ reloadPlugins: true });
+			expect(await readReloads()).toBe(1);
 		} finally {
 			await session?.dispose();
 			authStorage.close();
@@ -1018,7 +1089,7 @@ export default function (pi) {
 			);
 
 			// Same fixed-snapshot contract as startup, but exercised through
-			// `/reload-plugins` (`session.refreshSkills()`): the event must
+			// `/reload-plugins` (`session.refreshSkills({ reloadPlugins: true })`): the event must
 			// still fire with reason "reload" even though the skill rescan
 			// it would otherwise trigger stays skipped.
 			session = new AgentSession({
@@ -1040,7 +1111,7 @@ export default function (pi) {
 			});
 			expect(runtimeErrors).toEqual([]);
 
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 
 			const reasons = await fs.readFile(reasonsPath, "utf8");
 			expect(reasons.trim().split("\n")).toEqual(["startup", "reload"]);
@@ -1303,7 +1374,7 @@ export default function (pi) {
 			// reconcile the snapshot back to the inherited base, not leave the
 			// stale skill in the prompt until the child is recreated.
 			await fs.rm(togglePath);
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 
 			expect(session.skills.some(skill => skill.name === "transient-skill")).toBe(false);
 		} finally {
@@ -1387,7 +1458,7 @@ export default function (pi) {
 				skillPath,
 				"---\nname: toggle-visibility-skill\ndescription: Same name, path, and description across reload.\nhide: true\n---\n\nbody\n",
 			);
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 
 			const after = session.skills.find(skill => skill.name === "toggle-visibility-skill");
 			expect(after?.hide).toBe(true);
@@ -1467,7 +1538,7 @@ export default function (pi) {
 				"---\nname: late-skill\ndescription: Appears after startup; reload must merge it.\n---\n\nbody\n",
 			);
 
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 
 			expect(session.skills.some(skill => skill.name === "late-skill")).toBe(true);
 		} finally {
@@ -1827,7 +1898,7 @@ export default function (pi) {
 			expect(session.isStreaming).toBe(false);
 
 			let refreshSettled = false;
-			const refreshPromise = session.refreshSkills().then(() => {
+			const refreshPromise = session.refreshSkills({ reloadPlugins: true }).then(() => {
 				refreshSettled = true;
 			});
 			while (!modelCallStarted) {
@@ -1923,7 +1994,7 @@ export default function (pi) {
 			expect(runtimeErrors).toEqual([]);
 			expect(skillVisibleAtCallTime).toEqual([]);
 
-			await session.refreshSkills();
+			await session.refreshSkills({ reloadPlugins: true });
 
 			expect(skillVisibleAtCallTime).toEqual([true]);
 		} finally {

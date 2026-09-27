@@ -128,6 +128,7 @@ import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/promp
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
+import type { RefreshSkillsOptions } from "../session/session-tools";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -2104,9 +2105,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Reload session skills and the `/skill:<name>` command list. */
-	async refreshSkillState(): Promise<void> {
+	async refreshSkillState(options?: RefreshSkillsOptions): Promise<void> {
 		// The session's command-metadata notification rebuilds the picker.
-		await this.session.refreshSkills();
+		await this.session.refreshSkills(options);
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */

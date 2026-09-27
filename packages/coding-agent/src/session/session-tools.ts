@@ -103,6 +103,15 @@ export interface SettingsGatedToolDelta {
 	readonly xdev: XdevState | undefined;
 }
 
+/** Options for {@link SessionTools.refreshSkills}. */
+export interface RefreshSkillsOptions {
+	/**
+	 * A plugin reload (`/reload-plugins`, `/move`): re-emit `resources_discover`
+	 * with reason `"reload"` so extensions can contribute changed directories.
+	 */
+	reloadPlugins?: boolean;
+}
+
 interface SessionToolsOptions {
 	autoApprove?: boolean;
 	toolRegistry?: Map<string, AgentTool>;
@@ -414,6 +423,8 @@ export class SessionTools {
 	 * returning the directory) drop back out on reload.
 	 */
 	#inheritedSkillsBase: Skill[] | undefined;
+	/** Skill directories the last `resources_discover` round returned; reused by ordinary rescans. */
+	#extensionSkillDirectories: string[] | undefined;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -1855,22 +1866,34 @@ export class SessionTools {
 	}
 
 	/**
-	 * Rediscovers reloadable skills and refreshes prompt metadata. Used by
-	 * `/reload-plugins`. Mirrors the startup contract: the `resources_discover`
-	 * event (reason `"reload"`) always fires when a runner exists, even for a
-	 * fixed skill snapshot, so non-skill side effects still run on reload;
-	 * only the skill rescan is skipped for those sessions.
+	 * Rediscovers reloadable skills and refreshes prompt metadata.
+	 *
+	 * With `reloadPlugins` (`/reload-plugins`, `/move`), mirrors the startup
+	 * contract: the `resources_discover` event (reason `"reload"`) always fires
+	 * when a runner exists, even for a fixed skill snapshot, so non-skill side
+	 * effects still run on reload; only the skill rescan is skipped for those
+	 * sessions. Every other rescan (`manage_skill`, live `skills.*` settings
+	 * edits) reuses the directories the last discovery round returned instead of
+	 * re-running every extension's reload handler (PR #9379 review).
 	 */
-	async refreshSkills(): Promise<void> {
+	async refreshSkills(options?: RefreshSkillsOptions): Promise<void> {
 		resetCapabilities();
 		const runner = this.#host.extensionRunner();
-		const rediscover = async (): Promise<void> => {
-			// Extensions may contribute skill directories (resources_discover).
-			// Re-emit on every refresh so /reload-plugins picks up changes.
-			const discoveredResources = runner
-				? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
-				: undefined;
-			const extensionDirectories = discoveredResources?.skillPaths.map(entry => entry.path);
+		if (!options?.reloadPlugins || !runner) {
+			if (this.#skillsReloadable) await this.#applyDiscoveredSkills(this.#extensionSkillDirectories);
+			await this.refreshBaseSystemPrompt();
+			this.#host.notifyCommandMetadataChanged();
+			return;
+		}
+		// A `resources_discover` handler can call sendMessage/sendUserMessage (e.g.
+		// to announce a directory it just found); a triggered turn would read the
+		// pre-reload skill snapshot (PR #9379 review). The runner holds those sends
+		// until the rediscovered skills and prompt are applied, then this settles
+		// them — each mode's startup scope is long gone by `/reload-plugins`.
+		await runner.sends.withHeld(async () => {
+			const discoveredResources = await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload");
+			const extensionDirectories = discoveredResources.skillPaths.map(entry => entry.path);
+			this.#extensionSkillDirectories = extensionDirectories;
 			if (this.#skillsReloadable) {
 				await this.#applyDiscoveredSkills(extensionDirectories);
 			} else if (this.#mergeDiscoveredSkillPaths) {
@@ -1880,21 +1903,11 @@ export class SessionTools {
 				// directories into the snapshot instead of silently discarding them.
 				// An EMPTY result reconciles too — previously contributed skills
 				// whose directory is no longer returned must drop back out.
-				await this.#mergeDiscoveredSkillDirectories(extensionDirectories ?? []);
+				await this.#mergeDiscoveredSkillDirectories(extensionDirectories);
 			}
 			await this.refreshBaseSystemPrompt();
 			this.#host.notifyCommandMetadataChanged();
-		};
-		if (!runner) {
-			await rediscover();
-			return;
-		}
-		// A `resources_discover` handler can call sendMessage/sendUserMessage (e.g.
-		// to announce a directory it just found); a triggered turn would read the
-		// pre-reload skill snapshot (PR #9379 review). The runner holds those sends
-		// until the rediscovered skills and prompt are applied, then this settles
-		// them — each mode's startup scope is long gone by `/reload-plugins`.
-		await runner.sends.withHeld(rediscover);
+		});
 		await runner.sends.drain();
 	}
 
@@ -1924,8 +1937,9 @@ export class SessionTools {
 		const runner = this.#host.extensionRunner();
 		if (!runner) return;
 		const discoveredResources = await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "startup");
-		if (discoveredResources.skillPaths.length === 0) return;
 		const extensionDirectories = discoveredResources.skillPaths.map(entry => entry.path);
+		this.#extensionSkillDirectories = extensionDirectories;
+		if (extensionDirectories.length === 0) return;
 		if (this.#skillsReloadable) {
 			resetCapabilities();
 			await this.#applyDiscoveredSkills(extensionDirectories);
