@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Goal mode no longer sends hidden continuations while every open todo is blocked, so a goal waiting on the user's reply or approval stops re-asking the same question ([#13501](https://github.com/can1357/oh-my-pi/pull/13501) by [@shawnkoh](https://github.com/shawnkoh)).
+- Goal mode no longer sends hidden continuations while every open todo is blocked, so a goal waiting on the user's reply or approval stops re-asking the same question; an idle todo edit that makes work actionable again resumes it ([#13501](https://github.com/can1357/oh-my-pi/pull/13501) by [@shawnkoh](https://github.com/shawnkoh)).
 
 ## [18.3.4] - 2026-09-27
 

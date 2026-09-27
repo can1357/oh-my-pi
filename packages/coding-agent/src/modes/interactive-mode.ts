@@ -1120,6 +1120,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingGoalContinuationTurns = 0;
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
+	/** Continuation was withheld because every open todo was blocked; a todo edit that unblocks work re-arms it. */
+	#goalWaitingOnBlockedTodos = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
@@ -2318,7 +2320,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) return;
 		if (!this.goalModeEnabled || this.goalModePaused) return;
 		if (this.#goalSuppressNextContinuation) return;
-		if (this.#goalOpenWorkAllBlocked()) return;
+		this.#goalWaitingOnBlockedTodos = this.#goalOpenWorkAllBlocked();
+		if (this.#goalWaitingOnBlockedTodos) return;
 		if (this.#pendingSubmittedInput) return;
 		if (this.editor.getText().trim().length > 0) return;
 		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
@@ -2343,6 +2346,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
 			const latestState = this.session.getGoalModeState();
 			if (!latestState?.enabled || latestState.goal.status !== "active") return;
+			// Todos can become blocked while the timer is armed (`/todo`, extensions).
+			this.#goalWaitingOnBlockedTodos = this.#goalOpenWorkAllBlocked();
+			if (this.#goalWaitingOnBlockedTodos) return;
 			this.#pendingGoalContinuationTurns++;
 			this.onInputCallback(
 				this.startPendingSubmission({
@@ -2364,7 +2370,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Every open todo is `blocked`: the goal waits on the user or another party, so
 	 * a hidden continuation can only re-ask. The next real user message or
-	 * delivered job result starts a turn and re-arms continuation on its `agent_end`.
+	 * delivered job result starts a turn and re-arms continuation on its `agent_end`;
+	 * an idle todo edit that makes work actionable re-arms it via `setTodos`.
 	 */
 	#goalOpenWorkAllBlocked(): boolean {
 		let blocked = false;
@@ -3893,6 +3900,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#cancelGoalContinuation();
+			this.#goalWaitingOnBlockedTodos = false;
 			return;
 		}
 		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
@@ -7383,6 +7391,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncTodoHudState(this.viewSession);
 		this.#renderTodoList();
 		this.ui.requestRender();
+		// An idle `/todo start`/`append`/`edit` that makes work actionable again
+		// has no `agent_end` to re-arm the goal loop, so re-arm it here.
+		if (
+			this.#goalWaitingOnBlockedTodos &&
+			this.viewSession === this.session &&
+			!this.session.isStreaming &&
+			!this.#goalOpenWorkAllBlocked()
+		) {
+			this.#scheduleGoalContinuation();
+		}
 	}
 
 	async reloadTodos(source: AgentSession = this.session): Promise<void> {

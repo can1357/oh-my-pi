@@ -680,6 +680,53 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(fired).toBe(2);
 	});
 
+	async function startBlockedTodoGoal(tasks: { content: string; status: "completed" | "blocked" | "pending" }[]) {
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.session.setActiveToolsByName(["todo"]);
+		await harness.mode.handleGoalModeCommand("Speed up CI");
+		harness.session.setTodoPhases([{ name: "Work", tasks }]);
+	}
+
+	it("drops an armed continuation when todos become blocked before it fires", async () => {
+		await startBlockedTodoGoal([{ content: "Implement approved change", status: "pending" }]);
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		// An extension or `/todo` edit blocks the last open todo while the 800 ms timer is armed.
+		harness.session.setTodoPhases([
+			{ name: "Work", tasks: [{ content: "Implement approved change", status: "blocked" }] },
+		]);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		expect(waiter.getResolvedInput()).toBeUndefined();
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+		vi.useRealTimers();
+		await waiter.inputPromise;
+	});
+
+	it("re-arms the goal when /todo start makes blocked work actionable", async () => {
+		await startBlockedTodoGoal([
+			{ content: "Inspect CI timings", status: "completed" },
+			{ content: "Implement approved change", status: "blocked" },
+		]);
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(waiter.getResolvedInput()).toBeUndefined();
+
+		await harness.mode.handleTodoCommand("start Implement approved change");
+		expect(harness.session.getTodoPhases()[0]?.tasks[1]?.status).toBe("in_progress");
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		vi.useRealTimers();
+		await waiter.inputPromise;
+
+		expect(waiter.getResolvedInput()?.customType).toBe("goal-continuation");
+	});
+
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;
