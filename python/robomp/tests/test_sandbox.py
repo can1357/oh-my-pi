@@ -2715,3 +2715,90 @@ def test_ensure_workspace_resume_skips_rebase_when_branch_has_remote(
         ).stdout.strip()
     )
     assert head == stale_head
+
+
+def test_ensure_workspace_resume_skips_rebase_for_merge_history(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=45,
+        title="merge history",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    # A side branch merged into the workspace branch carries a change that
+    # exists only in the merge commit's resolution.
+    _git(["checkout", "-b", "side"], cwd=ws.repo_dir)
+    (ws.repo_dir / "side.txt").write_text("side change\n", encoding="utf-8")
+    _git(["-C", str(ws.repo_dir), "add", "side.txt"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "side change"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_COMMIT_ENV,
+    )
+    _git(["checkout", ws.branch], cwd=ws.repo_dir)
+    (ws.repo_dir / "mainline.txt").write_text("mainline change\n", encoding="utf-8")
+    _git(["-C", str(ws.repo_dir), "add", "mainline.txt"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "mainline change"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_COMMIT_ENV,
+    )
+    subprocess.run(
+        ["git", "merge", "--no-ff", "-m", "merge side into workspace", "side"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_COMMIT_ENV,
+    )
+    stale_head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    _advance_upstream_main(tmp_path)
+
+    mgr.ensure_workspace(
+        repo="octo/widget",
+        number=45,
+        title="merge history",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head = (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ws.repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert head == stale_head, "merge-bearing branches must not be rebased"
+    merge_count = subprocess.run(
+        ["git", "rev-list", "--merges", "--count", "origin/main..HEAD"],
+        cwd=str(ws.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert merge_count == "1"
+    assert (ws.repo_dir / "side.txt").read_text() == "side change\n"

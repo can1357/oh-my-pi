@@ -1066,9 +1066,11 @@ class SandboxManager:
         the PAT, directly or via gh-proxy) and rebase the workspace branch
         before the tree is handed to the agent. Best-effort by design: detached
         HEAD (review checkouts), dirty worktrees, branches that already have a
-        remote counterpart (PR follow-ups — rebasing would force-push), and
-        unresolvable refs all leave the worktree untouched so existing resume
-        semantics hold.
+        remote counterpart (PR follow-ups — rebasing would force-push),
+        branches whose history contains merge commits (a plain rebase drops
+        merges, silently discarding conflict resolutions that live only in
+        them), and indeterminate (timed-out) or unresolvable ref probes all
+        leave the worktree untouched so existing resume semantics hold.
         """
         if detached:
             return
@@ -1081,6 +1083,16 @@ class SandboxManager:
             env=env,
             **slot_kwargs,
         )
+        if remote_branch.returncode == 124:
+            # A timed-out probe is indeterminate, not "branch absent": treating
+            # absence here could rebase an already-published branch and make
+            # its next push non-fast-forward.
+            log.warning(
+                "workspace reconcile skipped: origin/%s probe indeterminate",
+                branch,
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
         if remote_branch.returncode == 0:
             return
         base_tip = _safe_run(
@@ -1103,6 +1115,27 @@ class SandboxManager:
             **slot_kwargs,
         )
         if merge_base.returncode != 0 or merge_base.stdout.strip() == base_tip.stdout.strip():
+            return
+        merge_count = _safe_run(
+            ["git", "rev-list", "--merges", "--count", f"refs/remotes/origin/{default_branch}..HEAD"],
+            cwd=repo_dir,
+            env=env,
+            **slot_kwargs,
+        )
+        if merge_count.returncode != 0:
+            log.warning(
+                "workspace reconcile skipped: merge history could not be inspected",
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
+            return
+        if merge_count.stdout.strip() not in ("", "0"):
+            # A plain rebase drops merge commits; conflict resolutions that live
+            # only in a merge would be silently rewritten away. Leave merge-
+            # bearing branches untouched rather than risk losing resolutions.
+            log.warning(
+                "workspace reconcile skipped: branch history contains merge commits",
+                extra={"repo": repo, "issue": number, "branch": branch},
+            )
             return
         self.transport.fetch_base_ref(repo=repo, pool_dir=pool, ref=default_branch)
         rebase = _safe_run(
