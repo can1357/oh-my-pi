@@ -331,7 +331,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		key: "webSearch",
 		set: "catalog",
 		shape: "scalar",
-		values: ["gemini", "anthropic", "codex", "xai", "openrouter"],
+		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
