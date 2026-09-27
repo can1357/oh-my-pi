@@ -23,6 +23,7 @@ const originalHerdrPane = Bun.env.HERDR_PANE_ID;
 const originalHerdrTab = Bun.env.HERDR_TAB_ID;
 const originalHerdrWorkspace = Bun.env.HERDR_WORKSPACE_ID;
 const originalTmux = Bun.env.TMUX;
+const originalTerm = Bun.env.TERM;
 const originalForcedProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
 const originalNoPlaceholders = Bun.env.PI_NO_KITTY_PLACEHOLDERS;
 const originalPlaceholdersOverride = Bun.env.PI_KITTY_PLACEHOLDERS;
@@ -45,13 +46,19 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else Bun.env[name] = value;
 }
 
-function startProbe(terminal: VirtualTerminal, insideHerdr = true): TUI {
-	// Heredity safety: an inherited tmux session would wrap the query in a DCS
-	// passthrough envelope, changing the bytes the write assertions expect.
+function startProbe(terminal: VirtualTerminal, insideHerdr = true, nestedTmux = false): TUI {
+	// Heredity safety: an inherited tmux session (or a mux-family TERM) would
+	// suppress the probe entirely — no terminal query routes its reply back
+	// through a nested multiplexer — so the default path clears both. A
+	// dedicated test covers the nested-mux gate.
 	delete Bun.env.TMUX;
+	Bun.env.TERM = "xterm-256color";
 	if (insideHerdr) {
 		Bun.env.HERDR_ENV = "1";
 		Bun.env.HERDR_PANE_ID = "w1:p1";
+	}
+	if (nestedTmux) {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
 	}
 	setTerminalImageProtocol(null);
 	terminalInfo.imageProtocol = null;
@@ -73,6 +80,7 @@ describe("TUI Kitty graphics capability probe", () => {
 		restoreEnv("HERDR_TAB_ID", originalHerdrTab);
 		restoreEnv("HERDR_WORKSPACE_ID", originalHerdrWorkspace);
 		restoreEnv("TMUX", originalTmux);
+		restoreEnv("TERM", originalTerm);
 		restoreEnv("PI_FORCE_IMAGE_PROTOCOL", originalForcedProtocol);
 		restoreEnv("PI_NO_KITTY_PLACEHOLDERS", originalNoPlaceholders);
 		restoreEnv("PI_KITTY_PLACEHOLDERS", originalPlaceholdersOverride);
@@ -130,6 +138,20 @@ describe("TUI Kitty graphics capability probe", () => {
 		tui.stop();
 	});
 
+	it("does not probe through a nested tmux inside a Herdr pane", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const writeSpy = spyOn(terminal, "write");
+		const tui = startProbe(terminal, true, true);
+
+		// A nested multiplexer cannot route the APC reply back to the sending
+		// pane (it would leak as literal text or stray keys), so no query goes
+		// out at all and the pane keeps the text fallback.
+		expect(writeSpy.mock.calls.map(call => String(call[0]))).not.toContain(KITTY_QUERY);
+		terminal.sendInput(KITTY_OK_REPLY);
+		expect(TERMINAL.imageProtocol).toBeNull();
+		tui.stop();
+	});
+
 	it("keeps images disabled when the host replies with an error", () => {
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = startProbe(terminal);
@@ -171,12 +193,19 @@ describe("TUI Kitty graphics capability probe", () => {
 		tui.stop();
 	});
 
-	it("keeps images disabled when unrelated input arrives first", () => {
+	it("forwards unrelated input and stays armed", () => {
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = startProbe(terminal);
 
+		const seen: string[] = [];
+		tui.addInputListener(data => {
+			seen.push(data);
+			return undefined;
+		});
 		terminal.sendInput("hello");
 
+		// Unrelated input reaches the app unchanged while the probe is armed.
+		expect(seen).toContain("hello");
 		expect(TERMINAL.imageProtocol).toBeNull();
 		// The probe stays armed: a host that replied late still resolves.
 		terminal.sendInput(KITTY_OK_REPLY);

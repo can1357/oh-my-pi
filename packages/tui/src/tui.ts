@@ -24,7 +24,6 @@ import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER, resolveKittyPlaceholderOverride, setKittyGraphics } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
-import { wrapTmuxPassthroughIfNeeded } from "./tmux";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
@@ -33,6 +32,7 @@ import {
 	isImageProtocolForced,
 	isInsideHerdr,
 	isInsideTerminalMultiplexer,
+	nestedMultiplexerInsideHerdr,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
 	setTerminalImageProtocol,
@@ -115,6 +115,123 @@ function resizeInPlaceOverride(): boolean | null {
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
 type StartListener = () => void;
+
+type GraphicsProbeOptions = {
+	/** Capability query written to the terminal on start. */
+	query: string;
+	/** Reply pattern; the whole match decides the outcome via `classify`. */
+	reply: RegExp;
+	/** Whether a reply match proves the capability. */
+	classify: (match: RegExpMatchArray) => boolean;
+	/** Offset of an unterminated reply after unrelated input, or -1 when none. */
+	partialStart: (buffer: string) => number;
+	timeoutMs: number;
+	onFinish: (supported: boolean) => void;
+};
+
+type GraphicsProbeHost = {
+	write: (data: string) => void;
+	addInputListener: (listener: InputListener) => () => void;
+};
+
+/**
+ * Input-stream state machine for terminal graphics-capability probes (Kitty
+ * `a=q`, Sixel XTSMGRAPHICS): owns the reply buffer, input listener and
+ * timeout, forwards unrelated input untouched, holds back a partially received
+ * reply, and disarms itself on the first reply or on timeout.
+ */
+class GraphicsProbe {
+	#options: GraphicsProbeOptions;
+	#host: GraphicsProbeHost;
+	#buffer = "";
+	#pending = false;
+	#timeout?: NodeJS.Timeout;
+	#unsubscribe?: () => void;
+
+	constructor(options: GraphicsProbeOptions, host: GraphicsProbeHost) {
+		this.#options = options;
+		this.#host = host;
+	}
+
+	get pending(): boolean {
+		return this.#pending;
+	}
+
+	start(): void {
+		this.dispose();
+		this.#pending = true;
+		this.#unsubscribe = this.#host.addInputListener(data => this.#handleInput(data));
+		this.#host.write(this.#options.query);
+		this.#timeout = setTimeout(() => {
+			this.#finish(false);
+		}, this.#options.timeoutMs);
+	}
+
+	dispose(): void {
+		if (this.#timeout) {
+			clearTimeout(this.#timeout);
+			this.#timeout = undefined;
+		}
+		if (this.#unsubscribe) {
+			this.#unsubscribe();
+			this.#unsubscribe = undefined;
+		}
+		this.#pending = false;
+		this.#buffer = "";
+	}
+
+	#handleInput(data: string): InputListenerResult {
+		if (!this.#pending) {
+			return undefined;
+		}
+
+		this.#buffer += data;
+		let passthrough = "";
+		let probeOutcome: boolean | null = null;
+
+		while (this.#buffer.length > 0) {
+			const responseMatch = this.#buffer.match(this.#options.reply);
+			if (!responseMatch || responseMatch.index === undefined) break;
+
+			passthrough += this.#buffer.slice(0, responseMatch.index);
+			this.#buffer = this.#buffer.slice(responseMatch.index + responseMatch[0].length);
+
+			if (this.#pending) {
+				this.#pending = false;
+				probeOutcome = this.#options.classify(responseMatch);
+			}
+		}
+
+		if (this.#pending) {
+			const pendingStart = this.#options.partialStart(this.#buffer);
+			if (pendingStart >= 0) {
+				passthrough += this.#buffer.slice(0, pendingStart);
+				this.#buffer = this.#buffer.slice(pendingStart);
+			} else {
+				passthrough += this.#buffer;
+				this.#buffer = "";
+			}
+		} else {
+			passthrough += this.#buffer;
+			this.#buffer = "";
+		}
+
+		if (probeOutcome !== null) {
+			this.#finish(probeOutcome);
+		}
+
+		if (passthrough.length === 0) {
+			return { consume: true };
+		}
+
+		return { data: passthrough };
+	}
+
+	#finish(supported: boolean): void {
+		this.dispose();
+		this.#options.onFinish(supported);
+	}
+}
 
 export interface RenderTimer {
 	cancel(): void;
@@ -854,14 +971,8 @@ export class TUI extends Container {
 	static readonly #KITTY_PROBE_TIMEOUT_MS = 250;
 	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	#hardwareCursorState: HardwareCursorState | null = null;
-	#kittyProbePending = false;
-	#kittyProbeBuffer = "";
-	#kittyProbeTimeout?: NodeJS.Timeout;
-	#kittyProbeUnsubscribe?: () => void;
-	#sixelProbePendingGraphics = false;
-	#sixelProbeBuffer = "";
-	#sixelProbeTimeout?: NodeJS.Timeout;
-	#sixelProbeUnsubscribe?: () => void;
+	/** The active graphics-capability probe, if any; one probe owns the input stream. */
+	#graphicsProbe: GraphicsProbe | null = null;
 	#showHardwareCursor = $flag("PI_HARDWARE_CURSOR");
 	#synchronizedOutputEnabled = shouldEnableSynchronizedOutputByDefault();
 	#paintBeginSequence = this.#synchronizedOutputEnabled ? PAINT_BEGIN : PAINT_BEGIN_NO_SYNC;
@@ -1822,6 +1933,10 @@ export class TUI extends Container {
 		// version sniffing while keeping the #10356 suppression as the no-reply
 		// fallback (#9550 deferred auto-detection until capability probing).
 		if (!isInsideHerdr()) return;
+		// No probe through a multiplexer nested inside the pane: it cannot route
+		// the APC reply back to the sending pane, so the reply would leak as
+		// literal text or stray keys (same rule as the glyph-protocol probe).
+		if (nestedMultiplexerInsideHerdr()) return;
 		// Same precedence as the sixel probe: a statically resolved protocol or
 		// an explicit PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill
 		// switch — wins over the probe.
@@ -1829,95 +1944,39 @@ export class TUI extends Container {
 		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
-		this.#clearKittyProbeState();
-		this.#kittyProbePending = true;
-		this.#kittyProbeUnsubscribe = this.addInputListener(data => this.#handleKittyProbeInput(data));
-		// The spec's protocol-support query: one sRGB pixel inline (`AAAA` is the
-		// base64 of three zero bytes — one 24-bit RGB pixel, so the `f=24`
-		// payload is exactly 3·s·v bytes), query action `a=q` — the terminal
-		// tries to load it, answers without storing or displaying anything.
-		// `i=31` is the id the reply echoes. Wrapped for tmux so a Herdr pane
-		// hosting tmux still reaches the pane's rendering VTE.
-		this.terminal.write(wrapTmuxPassthroughIfNeeded("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"));
-		this.#kittyProbeTimeout = setTimeout(() => {
-			this.#finishKittyProbe(false);
-		}, TUI.#KITTY_PROBE_TIMEOUT_MS);
-	}
-
-	#handleKittyProbeInput(data: string): InputListenerResult {
-		if (!this.#kittyProbePending) {
-			return undefined;
-		}
-
-		this.#kittyProbeBuffer += data;
-		let passthrough = "";
-		let probeOutcome: boolean | null = null;
-
-		while (this.#kittyProbeBuffer.length > 0) {
-			const responseMatch = this.#kittyProbeBuffer.match(/\x1b_Gi=31;([^\x1b]*)\x1b\\/u);
-			if (!responseMatch || responseMatch.index === undefined) break;
-
-			passthrough += this.#kittyProbeBuffer.slice(0, responseMatch.index);
-			this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(responseMatch.index + responseMatch[0].length);
-
-			if (this.#kittyProbePending) {
-				this.#kittyProbePending = false;
+		this.#graphicsProbe = new GraphicsProbe(
+			{
+				// The spec's protocol-support query: one sRGB pixel inline (`AAAA` is the
+				// base64 of three zero bytes — one 24-bit RGB pixel, so the `f=24`
+				// payload is exactly 3·s·v bytes), query action `a=q` — the terminal
+				// tries to load it, answers without storing or displaying anything.
+				// `i=31` is the id the reply echoes.
+				query: "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\",
+				reply: /\x1b_Gi=31;([^\x1b]*)\x1b\\/u,
 				// The query action replies `OK` on success or an ASCII error
 				// message; anything but a clean `OK` stays suppressed — a host
 				// that parses graphics but cannot load the payload must not
 				// select the protocol.
-				probeOutcome = responseMatch[1]?.trim() === "OK";
-			}
-		}
-
-		if (this.#kittyProbePending) {
-			const pendingStart = this.#getKittyProbePartialStart(this.#kittyProbeBuffer);
-			if (pendingStart >= 0) {
-				passthrough += this.#kittyProbeBuffer.slice(0, pendingStart);
-				this.#kittyProbeBuffer = this.#kittyProbeBuffer.slice(pendingStart);
-			} else {
-				passthrough += this.#kittyProbeBuffer;
-				this.#kittyProbeBuffer = "";
-			}
-		} else {
-			passthrough += this.#kittyProbeBuffer;
-			this.#kittyProbeBuffer = "";
-		}
-
-		if (probeOutcome !== null) {
-			this.#finishKittyProbe(probeOutcome);
-		}
-
-		if (passthrough.length === 0) {
-			return { consume: true };
-		}
-
-		return { data: passthrough };
-	}
-
-	/** Offset of an unterminated Kitty APC response, after any unrelated input. */
-	#getKittyProbePartialStart(buffer: string): number {
-		const start = buffer.lastIndexOf(KITTY_RESPONSE_INTRODUCER);
-		if (start < 0) return -1;
-		const bodyStart = start + KITTY_RESPONSE_INTRODUCER.length;
-		return buffer.includes(KITTY_RESPONSE_TERMINATOR, bodyStart) ? -1 : start;
-	}
-
-	#clearKittyProbeState(): void {
-		if (this.#kittyProbeTimeout) {
-			clearTimeout(this.#kittyProbeTimeout);
-			this.#kittyProbeTimeout = undefined;
-		}
-		if (this.#kittyProbeUnsubscribe) {
-			this.#kittyProbeUnsubscribe();
-			this.#kittyProbeUnsubscribe = undefined;
-		}
-		this.#kittyProbePending = false;
-		this.#kittyProbeBuffer = "";
+				classify: match => match[1]?.trim() === "OK",
+				// Offset of an unterminated Kitty APC response, after any unrelated input.
+				partialStart: buffer => {
+					const start = buffer.lastIndexOf(KITTY_RESPONSE_INTRODUCER);
+					if (start < 0) return -1;
+					const bodyStart = start + KITTY_RESPONSE_INTRODUCER.length;
+					return buffer.includes(KITTY_RESPONSE_TERMINATOR, bodyStart) ? -1 : start;
+				},
+				timeoutMs: TUI.#KITTY_PROBE_TIMEOUT_MS,
+				onFinish: supported => this.#finishKittyProbe(supported),
+			},
+			{
+				write: data => this.terminal.write(data),
+				addInputListener: listener => this.addInputListener(listener),
+			},
+		);
+		this.#graphicsProbe.start();
 	}
 
 	#finishKittyProbe(supported: boolean): void {
-		this.#clearKittyProbeState();
 		if (!supported) {
 			// The startup path deferred the Sixel probe while this probe owned
 			// the input stream; a negative result hands the decision back so a
@@ -1928,8 +1987,7 @@ export class TUI extends Container {
 		if (TERMINAL.imageProtocol) return;
 
 		// The pane VTE is libghostty: it renders the graphics protocol with
-		// Unicode placeholders, and under a nested tmux only placeholder cells
-		// can carry images at all. Mirrors the verified
+		// Unicode placeholders. Mirrors the verified
 		// PI_FORCE_IMAGE_PROTOCOL=kitty + PI_KITTY_PLACEHOLDERS=1 path (#9550).
 		setTerminalImageProtocol(ImageProtocol.Kitty);
 		// The probe only proves the protocol; an explicit placeholder opt-out
@@ -1942,11 +2000,11 @@ export class TUI extends Container {
 	}
 
 	#querySixelSupport(): void {
-		// A pending Kitty-graphics probe owns the decision: sixel must not race
-		// it on the same input stream, and the Kitty protocol outranks Sixel.
-		// A deferred probe is re-armed from #finishKittyProbe once the Kitty
-		// query resolves negatively.
-		if (this.#kittyProbePending) return;
+		// A pending graphics probe owns the input stream: the Sixel probe must
+		// not race it, and the Kitty protocol outranks Sixel. A deferred probe
+		// is re-armed from #finishKittyProbe once the Kitty query resolves
+		// negatively.
+		if (this.#graphicsProbe?.pending) return;
 		// A statically known protocol (Kitty/iTerm2 terminals) or an explicit
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
 		// over the probe.
@@ -1954,97 +2012,40 @@ export class TUI extends Container {
 		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
-		this.#clearSixelProbeState();
-		this.#sixelProbePendingGraphics = true;
-		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		// XTSMGRAPHICS item 2 reports the terminal's maximum SIXEL geometry. DA1
-		// attribute 4 advertises SIXEL as well, but ProcessTerminal swallows every
-		// `CSI ? … c` reply for the whole session so a late one cannot leak into the
-		// composer (#8542): those bytes never reach an input listener, so this probe
-		// cannot read them.
-		this.terminal.write("\x1b[?2;1;0S");
-		this.#sixelProbeTimeout = setTimeout(() => {
-			this.#finishSixelProbe(false);
-		}, 250);
-	}
-
-	#handleSixelProbeInput(data: string): InputListenerResult {
-		if (!this.#sixelProbePendingGraphics) {
-			return undefined;
-		}
-
-		this.#sixelProbeBuffer += data;
-		let passthrough = "";
-		let probeOutcome: boolean | null = null;
-
-		while (this.#sixelProbeBuffer.length > 0) {
-			const graphicsMatch = this.#sixelProbeBuffer.match(/\x1b\[\?2;(\d+);([0-9;]+)S/u);
-			if (!graphicsMatch || graphicsMatch.index === undefined) break;
-
-			passthrough += this.#sixelProbeBuffer.slice(0, graphicsMatch.index);
-			this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(graphicsMatch.index + graphicsMatch[0].length);
-
-			if (this.#sixelProbePendingGraphics) {
-				this.#sixelProbePendingGraphics = false;
-				// Reply shape `CSI ? 2 ; Ps ; Pv S`: per xterm ctlseqs Ps is the status
-				// (0 = success, 1..3 = error/failure) and Pv the maximum SIXEL geometry,
-				// which a terminal without SIXEL reports as zero.
-				const status = Number.parseInt(graphicsMatch[1] ?? "", 10);
-				const hasGeometry = (graphicsMatch[2] ?? "").split(";").some(part => Number.parseInt(part, 10) > 0);
-				probeOutcome = status === 0 && hasGeometry;
-			}
-		}
-
-		if (this.#sixelProbePendingGraphics) {
-			const partialStart = this.#getSixelProbePartialStart(this.#sixelProbeBuffer);
-			if (partialStart >= 0) {
-				passthrough += this.#sixelProbeBuffer.slice(0, partialStart);
-				this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(partialStart);
-			} else {
-				passthrough += this.#sixelProbeBuffer;
-				this.#sixelProbeBuffer = "";
-			}
-		} else {
-			passthrough += this.#sixelProbeBuffer;
-			this.#sixelProbeBuffer = "";
-		}
-
-		if (probeOutcome !== null) {
-			this.#finishSixelProbe(probeOutcome);
-		}
-
-		if (passthrough.length === 0) {
-			return { consume: true };
-		}
-
-		return { data: passthrough };
-	}
-
-	#getSixelProbePartialStart(buffer: string): number {
-		const lastEsc = buffer.lastIndexOf("\x1b");
-		if (lastEsc < 0) return -1;
-		const tail = buffer.slice(lastEsc);
-		if (/^\x1b\[\?[0-9;]*$/u.test(tail)) {
-			return lastEsc;
-		}
-		return -1;
-	}
-
-	#clearSixelProbeState(): void {
-		if (this.#sixelProbeTimeout) {
-			clearTimeout(this.#sixelProbeTimeout);
-			this.#sixelProbeTimeout = undefined;
-		}
-		if (this.#sixelProbeUnsubscribe) {
-			this.#sixelProbeUnsubscribe();
-			this.#sixelProbeUnsubscribe = undefined;
-		}
-		this.#sixelProbePendingGraphics = false;
-		this.#sixelProbeBuffer = "";
+		this.#graphicsProbe = new GraphicsProbe(
+			{
+				// XTSMGRAPHICS item 2 reports the terminal's maximum SIXEL geometry.
+				// DA1 attribute 4 advertises SIXEL as well, but ProcessTerminal
+				// swallows every `CSI ? … c` reply for the whole session so a late
+				// one cannot leak into the composer (#8542): those bytes never
+				// reach an input listener, so this probe cannot read them.
+				query: "\x1b[?2;1;0S",
+				reply: /\x1b\[\?2;(\d+);([0-9;]+)S/u,
+				// Reply shape `CSI ? 2 ; Ps ; Pv S`: per xterm ctlseqs Ps is the
+				// status (0 = success, 1..3 = error/failure) and Pv the maximum
+				// SIXEL geometry, which a terminal without SIXEL reports as zero.
+				classify: match => {
+					const status = Number.parseInt(match[1] ?? "", 10);
+					const hasGeometry = (match[2] ?? "").split(";").some(part => Number.parseInt(part, 10) > 0);
+					return status === 0 && hasGeometry;
+				},
+				partialStart: buffer => {
+					const lastEsc = buffer.lastIndexOf("\x1b");
+					if (lastEsc < 0) return -1;
+					return /^\x1b\[\?[0-9;]*$/u.test(buffer.slice(lastEsc)) ? lastEsc : -1;
+				},
+				timeoutMs: 250,
+				onFinish: supported => this.#finishSixelProbe(supported),
+			},
+			{
+				write: data => this.terminal.write(data),
+				addInputListener: listener => this.addInputListener(listener),
+			},
+		);
+		this.#graphicsProbe.start();
 	}
 
 	#finishSixelProbe(supported: boolean): void {
-		this.#clearSixelProbeState();
 		if (!supported || TERMINAL.imageProtocol) return;
 
 		setTerminalImageProtocol(ImageProtocol.Sixel);
@@ -2169,8 +2170,8 @@ export class TUI extends Container {
 		// image data lives, so a delete-by-id here blanks every transcript image
 		// the instant the session exits. The terminal enforces its own store quota
 		// (and live-session ghosts are already bounded by the inline-image budget).
-		this.#clearSixelProbeState();
-		this.#clearKittyProbeState();
+		this.#graphicsProbe?.dispose();
+		this.#graphicsProbe = null;
 		this.#stopped = true;
 		this.#watchdog.stop();
 		if (this.#renderTimer) {

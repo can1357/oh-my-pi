@@ -28,6 +28,21 @@ export type TerminalMultiplexer = "herdr" | "tmux" | "screen" | "zellij" | "cmux
  */
 export function classifyTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): TerminalMultiplexer | null {
 	if (isInsideHerdr(env)) return "herdr";
+	return classifyNonHerdrMultiplexer(env);
+}
+
+/**
+ * A multiplexer layer running inside a Herdr pane, or `null` when the pane's
+ * grid is owned by the pane VTE itself. Pane env inherits the outer session's
+ * variables, so TMUX/STY/... can describe a layer the pane is hosting — a
+ * terminal query cannot route its reply back through such a layer.
+ */
+export function nestedMultiplexerInsideHerdr(env: NodeJS.ProcessEnv = Bun.env): TerminalMultiplexer | null {
+	if (!isInsideHerdr(env)) return null;
+	return classifyNonHerdrMultiplexer(env);
+}
+
+function classifyNonHerdrMultiplexer(env: NodeJS.ProcessEnv): TerminalMultiplexer | null {
 	if (env.TMUX) return "tmux";
 	if (env.STY) return "screen";
 	if (env.ZELLIJ) return "zellij";
