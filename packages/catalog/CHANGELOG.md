@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `compat.extraBody` being silently dropped for `openai-responses` and `anthropic-messages` models, so configured extra request-body fields now reach those APIs ([#12087](https://github.com/can1357/oh-my-pi/issues/12087)).
+
 ## [18.3.1] - 2026-09-25
 
 ### Added

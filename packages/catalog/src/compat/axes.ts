@@ -96,7 +96,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"disable-reasoning-with-tools": wire("disableReasoningWithTools", ["openai"]),
 	"drop-thinking-when-reasoning-effort": wire("dropThinkingWhenReasoningEffort", ["openai"]),
 	"empty-length-finish-is-context-error": wire("emptyLengthFinishIsContextError", OAI),
-	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
+	"extra-body": { ...wire("extraBody", [...OAI, "anthropic"], "object"), verbatimKeys: true },
 	"filter-reasoning-history": wire("filterReasoningHistory", OAI),
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),

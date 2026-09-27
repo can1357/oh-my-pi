@@ -33,6 +33,7 @@ import {
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyOpenAIExtraBody,
 	applyResponsesReasoningParams,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
@@ -447,6 +448,9 @@ function buildParams(
 	}
 
 	applyResponsesReasoningParams(params, model, options);
+	// `azure-openai-responses` shares the `openai-responses` compat record, so a
+	// configured `extraBody` must reach this wire path too.
+	applyOpenAIExtraBody(params, model.compat.extraBody);
 
 	return params;
 }
