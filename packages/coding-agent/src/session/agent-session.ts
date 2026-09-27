@@ -5962,7 +5962,7 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.getSelectedMCPToolNames();
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata; `reloadPlugins` re-emits `resources_discover`. */
+	/** Rediscovers reloadable skills and refreshes prompt metadata; `rediscover` re-emits `resources_discover`. */
 	refreshSkills(options?: RefreshSkillsOptions): Promise<void> {
 		return this.#tools.refreshSkills(options);
 	}
@@ -5970,9 +5970,11 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Rediscovers skills and file-based slash commands for the current cwd, rebuilds the
 	 * system prompt, and notifies command-metadata listeners (TUI autocomplete, RPC/ACP
-	 * command lists). Serialized so overlapping reloads apply in call order.
+	 * command lists). Serialized so overlapping reloads apply in call order. Always
+	 * re-emits `resources_discover`: its callers (cwd change, `/reload-plugins`, extension-source
+	 * edits) all change which directories extensions contribute.
 	 */
-	refreshSkillsAndCommands(options?: RefreshSkillsOptions): Promise<void> {
+	refreshSkillsAndCommands(): Promise<void> {
 		const refresh = this.#skillsAndCommandsRefresh
 			.catch(() => {})
 			.then(async () => {
@@ -5983,7 +5985,7 @@ export class AgentSession implements SettingsScope {
 				});
 				// Resets the capability cache again, rediscovers skills, rebuilds the prompt,
 				// and fires the command-metadata notification after both lists are current.
-				await this.#tools.refreshSkills(options);
+				await this.#tools.refreshSkills({ rediscover: true });
 			});
 		this.#skillsAndCommandsRefresh = refresh;
 		return refresh;

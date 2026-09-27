@@ -737,7 +737,7 @@ export default function (pi) {
 
 			// `/reload-plugins` re-emits resources_discover with reason "reload";
 			// the marker persists across reloads, so the skill must still be found.
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
 		} finally {
 			await session?.dispose();
@@ -808,8 +808,81 @@ export default function (pi) {
 			expect(await readReloads()).toBe(0);
 			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
 
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 			expect(await readReloads()).toBe(1);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("rediscovers extension skill directories for the new cwd when refreshSkillsAndCommands runs after a cwd change (regression: PR #9379 review, TUI /move)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-cwd-rediscover-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			const projectA = path.join(tempDir, "a");
+			const projectB = path.join(tempDir, "b");
+			for (const [project, name] of [
+				[projectA, "skill-from-a"],
+				[projectB, "skill-from-b"],
+			]) {
+				await fs.mkdir(path.join(project, "skills", name), { recursive: true });
+				await fs.writeFile(
+					path.join(project, "skills", name, "SKILL.md"),
+					`---\nname: ${name}\ndescription: Contributed for ${name}.\n---\n\nbody\n`,
+				);
+			}
+			// Contributes the skills directory of whatever cwd the event names.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "cwd-skills.ts");
+			await fs.writeFile(
+				extPath,
+				`import * as path from "node:path";
+export default function (pi) {
+	pi.on("resources_discover", event => ({ skillPaths: [path.join(event.cwd, "skills")] }));
+}
+`,
+			);
+			const loaded = await loadExtensions([extPath], projectA);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(projectA);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				projectA,
+				sessionManager,
+				modelRegistry,
+			);
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+			await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+			expect(session.skills.some(skill => skill.name === "skill-from-a")).toBe(true);
+
+			// What interactive-mode applyCwdChange (TUI /move, resume from another project) runs.
+			sessionManager.setCwdWithoutRelocation(projectB);
+			await session.refreshSkillsAndCommands();
+
+			const names = session.skills.map(skill => skill.name);
+			expect(names).toContain("skill-from-b");
+			expect(names).not.toContain("skill-from-a");
 		} finally {
 			await session?.dispose();
 			authStorage.close();
@@ -1119,7 +1192,7 @@ export default function (pi) {
 			);
 
 			// Same fixed-snapshot contract as startup, but exercised through
-			// `/reload-plugins` (`session.refreshSkills({ reloadPlugins: true })`): the event must
+			// `/reload-plugins` (`session.refreshSkills({ rediscover: true })`): the event must
 			// still fire with reason "reload" even though the skill rescan
 			// it would otherwise trigger stays skipped.
 			session = new AgentSession({
@@ -1141,7 +1214,7 @@ export default function (pi) {
 			});
 			expect(runtimeErrors).toEqual([]);
 
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			const reasons = await fs.readFile(reasonsPath, "utf8");
 			expect(reasons.trim().split("\n")).toEqual(["startup", "reload"]);
@@ -1404,7 +1477,7 @@ export default function (pi) {
 			// reconcile the snapshot back to the inherited base, not leave the
 			// stale skill in the prompt until the child is recreated.
 			await fs.rm(togglePath);
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			expect(session.skills.some(skill => skill.name === "transient-skill")).toBe(false);
 		} finally {
@@ -1488,7 +1561,7 @@ export default function (pi) {
 				skillPath,
 				"---\nname: toggle-visibility-skill\ndescription: Same name, path, and description across reload.\nhide: true\n---\n\nbody\n",
 			);
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			const after = session.skills.find(skill => skill.name === "toggle-visibility-skill");
 			expect(after?.hide).toBe(true);
@@ -1568,7 +1641,7 @@ export default function (pi) {
 				skillPath,
 				"---\nname: shared-extension-skill\ndescription: Edited after the parent spawned the child.\nhide: true\n---\n\nbody\n",
 			);
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			const after = session.skills.find(skill => skill.name === "shared-extension-skill");
 			expect(after?.description).toBe("Edited after the parent spawned the child.");
@@ -1649,7 +1722,7 @@ export default function (pi) {
 				"---\nname: late-skill\ndescription: Appears after startup; reload must merge it.\n---\n\nbody\n",
 			);
 
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			expect(session.skills.some(skill => skill.name === "late-skill")).toBe(true);
 		} finally {
@@ -2009,7 +2082,7 @@ export default function (pi) {
 			expect(session.isStreaming).toBe(false);
 
 			let refreshSettled = false;
-			const refreshPromise = session.refreshSkills({ reloadPlugins: true }).then(() => {
+			const refreshPromise = session.refreshSkills({ rediscover: true }).then(() => {
 				refreshSettled = true;
 			});
 			while (!modelCallStarted) {
@@ -2105,7 +2178,7 @@ export default function (pi) {
 			expect(runtimeErrors).toEqual([]);
 			expect(skillVisibleAtCallTime).toEqual([]);
 
-			await session.refreshSkills({ reloadPlugins: true });
+			await session.refreshSkills({ rediscover: true });
 
 			expect(skillVisibleAtCallTime).toEqual([true]);
 		} finally {

@@ -458,7 +458,7 @@ export interface InteractiveModeContext {
 	): Promise<CompactionOutcome>;
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
-	/** Reload session skills and derived `/skill:<name>` commands; `reloadPlugins` re-emits `resources_discover`. */
+	/** Reload session skills and derived `/skill:<name>` commands; `rediscover` re-emits `resources_discover`. */
 	refreshSkillState(options?: RefreshSkillsOptions): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
 

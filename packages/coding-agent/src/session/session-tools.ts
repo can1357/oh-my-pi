@@ -106,10 +106,11 @@ export interface SettingsGatedToolDelta {
 /** Options for {@link SessionTools.refreshSkills}. */
 export interface RefreshSkillsOptions {
 	/**
-	 * A plugin reload (`/reload-plugins`, `/move`): re-emit `resources_discover`
-	 * with reason `"reload"` so extensions can contribute changed directories.
+	 * Re-emit `resources_discover` (reason `"reload"`) so extensions can contribute
+	 * changed directories: `/reload-plugins`, a plugin enable/disable, and every
+	 * `refreshSkillsAndCommands` (cwd change, extension-source edit).
 	 */
-	reloadPlugins?: boolean;
+	rediscover?: boolean;
 }
 
 interface SessionToolsOptions {
@@ -1873,18 +1874,19 @@ export class SessionTools {
 	/**
 	 * Rediscovers reloadable skills and refreshes prompt metadata.
 	 *
-	 * With `reloadPlugins` (`/reload-plugins`, `/move`), mirrors the startup
+	 * With `rediscover` (`/reload-plugins`, a plugin toggle, and every
+	 * `refreshSkillsAndCommands`: cwd change, extension-source edit), mirrors the startup
 	 * contract: the `resources_discover` event (reason `"reload"`) always fires
 	 * when a runner exists, even for a fixed skill snapshot, so non-skill side
 	 * effects still run on reload; only the skill rescan is skipped for those
-	 * sessions. Every other rescan (`manage_skill`, live `skills.*` settings
-	 * edits) reuses the directories the last discovery round returned instead of
-	 * re-running every extension's reload handler (PR #9379 review).
+	 * sessions. A plain rescan (`manage_skill`, `/skills install`/`update`) reuses the
+	 * directories the last discovery round returned instead of re-running every
+	 * extension's reload handler (PR #9379 review).
 	 */
 	async refreshSkills(options?: RefreshSkillsOptions): Promise<void> {
 		resetCapabilities();
 		const runner = this.#host.extensionRunner();
-		if (!options?.reloadPlugins || !runner) {
+		if (!options?.rediscover || !runner) {
 			if (this.#skillsReloadable) await this.#applyDiscoveredSkills(this.#extensionSkillDirectories);
 			await this.refreshBaseSystemPrompt();
 			this.#host.notifyCommandMetadataChanged();
