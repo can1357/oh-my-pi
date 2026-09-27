@@ -1,9 +1,9 @@
 //! Portable CPU decoder: 8-bit block-quantized weights, f32 activations.
 //!
 //! Batch-1 decoding reads every weight once per token, so it is bound by
-//! memory bandwidth: 8-bit blocks (one f32 scale per 32 weights) cut the
-//! traffic 4× against f32 while activations and accumulation stay f32 (no
-//! activation quantization).
+//! memory bandwidth: the file's `Q8_0` blocks (one scale per 32 weights,
+//! widened to f32 at load) cut the traffic 4× against f32 while activations
+//! and accumulation stay f32 (no activation quantization).
 //!
 //! A forward pass is ~250 dependent steps of a few microseconds each, far
 //! below what a work-stealing pool can hand out profitably (its idle workers
@@ -14,15 +14,16 @@
 //! write disjoint ranges of shared buffers ([`Shared`]) between barriers.
 
 use std::{
+	io::{Read, Seek},
 	marker::PhantomData,
 	ops::Range,
 	sync::atomic::{AtomicUsize, Ordering},
 };
 
-use super::config::{Decoder, KvRow, LlamaConfig, TensorSource};
-
-/// Weights per quantization block.
-const BLOCK: usize = 32;
+use super::{
+	config::{Decoder, KvRow, LlamaConfig, LlamaWeights, Proj},
+	gguf::{Q8_BLOCK as BLOCK, Q8Blocks},
+};
 
 /// Row-major matrix of 8-bit blocks with one f32 scale per block.
 struct Q8 {
@@ -33,19 +34,9 @@ struct Q8 {
 }
 
 impl Q8 {
-	fn quantize(values: &[f32], rows: usize, cols: usize) -> Self {
-		debug_assert_eq!(values.len(), rows * cols);
-		let (blocks, _) = values.as_chunks::<BLOCK>();
-		let mut quants = Vec::with_capacity(blocks.len());
-		let mut scales = Vec::with_capacity(blocks.len());
-		for block in blocks {
-			let amax = block.iter().fold(0f32, |m, v| m.max(v.abs()));
-			let scale = amax / 127.0;
-			let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-			quants.push(block.map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8));
-			scales.push(scale);
-		}
-		Self { rows, cols, quants, scales }
+	fn new(matrix: &Q8Blocks) -> Self {
+		let (scales, quants) = matrix.blocks().unzip();
+		Self { rows: matrix.rows, cols: matrix.cols, quants, scales }
 	}
 
 	const fn blocks_per_row(&self) -> usize {
@@ -328,40 +319,30 @@ struct Buffers<'a> {
 }
 
 impl CpuLlama {
-	/// Quantize the weights from `source` and start the worker pool.
+	/// Load `weights` and start the worker pool.
 	///
 	/// # Errors
-	/// Fails for missing or mis-shaped tensors and when no worker thread can
-	/// be spawned.
-	pub fn load(config: LlamaConfig, source: &mut impl TensorSource) -> anyhow::Result<Self> {
-		config.validate()?;
+	/// Fails for missing, mistyped, or mis-shaped tensors and when no worker
+	/// thread can be spawned.
+	pub fn load(mut weights: LlamaWeights<impl Read + Seek>) -> anyhow::Result<Self> {
+		let config = weights.config().clone();
 		let c = &config;
-		let (h, inter) = (c.hidden_size, c.intermediate_size);
-		let kv = c.num_key_value_heads * c.head_dim();
-		let embed = Q8::quantize(
-			&source.expect("model.embed_tokens.weight", &[c.vocab_size, h])?,
-			c.vocab_size,
-			h,
-		);
+		let embed = Q8::new(&weights.embedding()?);
 		let mut layers = Vec::with_capacity(c.num_hidden_layers);
 		for i in 0..c.num_hidden_layers {
-			let p = format!("model.layers.{i}");
-			let mut w =
-				|name: &str, shape: &[usize]| source.expect(&format!("{p}.{name}.weight"), shape);
-			let mut qkv = w("self_attn.q_proj", &[h, h])?;
-			qkv.extend(w("self_attn.k_proj", &[kv, h])?);
-			qkv.extend(w("self_attn.v_proj", &[kv, h])?);
+			let (attn_norm, mlp_norm) = weights.norms(i)?;
+			let mut project = |parts: &[Proj]| weights.stacked(i, parts).map(|m| Q8::new(&m));
 			layers.push(Layer {
-				attn_norm: w("input_layernorm", &[h])?,
-				qkv:       Q8::quantize(&qkv, h + 2 * kv, h),
-				out:       Q8::quantize(&w("self_attn.o_proj", &[h, h])?, h, h),
-				mlp_norm:  w("post_attention_layernorm", &[h])?,
-				gate:      Q8::quantize(&w("mlp.gate_proj", &[inter, h])?, inter, h),
-				up:        Q8::quantize(&w("mlp.up_proj", &[inter, h])?, inter, h),
-				down:      Q8::quantize(&w("mlp.down_proj", &[h, inter])?, h, inter),
+				attn_norm,
+				qkv: project(&[Proj::Q, Proj::K, Proj::V])?,
+				out: project(&[Proj::Out])?,
+				mlp_norm,
+				gate: project(&[Proj::Gate])?,
+				up: project(&[Proj::Up])?,
+				down: project(&[Proj::Down])?,
 			});
 		}
-		let norm = source.expect("model.norm.weight", &[h])?;
+		let norm = weights.output_norm()?;
 		let (cos, sin) = c.rope_tables();
 		// Batch-1 mat-vecs saturate memory bandwidth well before all cores,
 		// and every barrier waits for the slowest worker (efficiency cores).
@@ -691,13 +672,12 @@ impl Decoder for CpuLlama {
 #[cfg(test)]
 pub(super) mod tests {
 	use super::{
-		super::config::tests::{RandomWeights, tiny_config},
+		super::config::tests::{random_weights, tiny_config},
 		*,
 	};
 
 	pub fn random(vocab: usize, seed: u64) -> CpuLlama {
-		let config = tiny_config(vocab);
-		CpuLlama::load(config.clone(), &mut RandomWeights::new(&config, seed)).expect("random llama")
+		CpuLlama::load(random_weights(&tiny_config(vocab), seed)).expect("random llama")
 	}
 
 	fn close(a: &[f32], b: &[f32]) -> bool {

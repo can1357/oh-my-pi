@@ -1,15 +1,16 @@
-//! Llama hyper-parameters, the weights file reader, and the decoder contract
+//! Llama hyper-parameters, the weights loader, and the decoder contract
 //! shared by the CPU and Metal backends.
 
 use std::{
-	collections::HashMap,
 	fs::File,
-	io::{Read, Seek, SeekFrom},
+	io::{Read, Seek},
 	path::Path,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use serde::Deserialize;
+
+use super::gguf::{Gguf, Q8Blocks};
 
 /// Keys and values of one cached position (every layer), as the backend
 /// stores them.
@@ -172,112 +173,167 @@ impl LlamaConfig {
 	}
 }
 
-/// Source of named f32 tensors (`name` → `(shape, values)`).
-pub trait TensorSource {
-	/// Load `name` as f32.
-	///
-	/// # Errors
-	/// Fails for missing tensors, unsupported dtypes, and I/O errors.
-	fn tensor(&mut self, name: &str) -> anyhow::Result<(Vec<usize>, Vec<f32>)>;
+/// A projection matrix of one decoder layer.
+#[derive(Clone, Copy, Debug)]
+pub enum Proj {
+	Q,
+	K,
+	V,
+	Out,
+	Gate,
+	Up,
+	Down,
+}
 
-	/// Load `name` and check its shape.
+/// The weights of a llama.cpp GGUF export (`Q8_0` matrices, F32 norms),
+/// checked against `config.json` and handed out in the Hugging Face layout
+/// both decoders use.
+pub struct LlamaWeights<R> {
+	file:   Gguf<R>,
+	config: LlamaConfig,
+}
+
+impl LlamaWeights<File> {
+	/// Open the GGUF at `path` for `config`.
 	///
 	/// # Errors
-	/// As [`TensorSource::tensor`], plus shape mismatches.
-	fn expect(&mut self, name: &str, shape: &[usize]) -> anyhow::Result<Vec<f32>> {
-		let (actual, values) = self.tensor(name)?;
-		ensure!(actual == shape, "tensor {name}: shape {actual:?}, expected {shape:?}");
-		Ok(values)
+	/// Fails for unreadable or malformed files, non-llama exports, and
+	/// configs the decoders cannot run.
+	pub fn open(path: &Path, config: LlamaConfig) -> anyhow::Result<Self> {
+		Self::new(Gguf::open(path)?, config).with_context(|| format!("load {}", path.display()))
 	}
 }
 
-#[derive(Deserialize)]
-struct Entry {
-	dtype:        String,
-	shape:        Vec<usize>,
-	data_offsets: (u64, u64),
-}
-
-/// Reader for a `.safetensors` file that pulls one tensor at a time, so
-/// loading never holds more than one tensor's bytes.
-pub struct SafeTensors {
-	file:       File,
-	data_start: u64,
-	entries:    HashMap<String, Entry>,
-}
-
-impl SafeTensors {
-	/// Parse the header of `path`.
+impl<R: Read + Seek> LlamaWeights<R> {
+	/// Wrap an indexed GGUF file.
 	///
 	/// # Errors
-	/// Fails for unreadable or malformed files.
-	pub fn open(path: &Path) -> anyhow::Result<Self> {
-		let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-		let mut len = [0u8; 8];
-		file
-			.read_exact(&mut len)
-			.context("safetensors header length")?;
-		let len = u64::from_le_bytes(len);
-		ensure!(len < 100 << 20, "safetensors header is implausibly large");
-		let mut header = vec![0u8; len as usize];
-		file.read_exact(&mut header).context("safetensors header")?;
-		let mut raw: HashMap<String, serde_json::Value> =
-			serde_json::from_slice(&header).context("parse safetensors header")?;
-		raw.remove("__metadata__");
-		let entries = raw
-			.into_iter()
-			.map(|(name, value)| Ok((name, serde_json::from_value(value)?)))
-			.collect::<anyhow::Result<_>>()?;
-		Ok(Self { file, data_start: 8 + len, entries })
-	}
-}
-
-impl TensorSource for SafeTensors {
-	fn tensor(&mut self, name: &str) -> anyhow::Result<(Vec<usize>, Vec<f32>)> {
-		let entry = self
-			.entries
-			.get(name)
-			.with_context(|| format!("tensor {name} missing from weights"))?;
-		let (start, end) = entry.data_offsets;
-		let elements: usize = entry.shape.iter().product();
-		let width = match entry.dtype.as_str() {
-			"BF16" => 2,
-			"F32" => 4,
-			other => bail!("tensor {name}: unsupported dtype {other}"),
-		};
+	/// Fails for exports of another architecture and configs the decoders
+	/// cannot run.
+	pub fn new(file: Gguf<R>, config: LlamaConfig) -> anyhow::Result<Self> {
+		config.validate()?;
+		// The q/k row order below is llama.cpp's llama conversion.
 		ensure!(
-			end - start == (elements * width) as u64,
-			"tensor {name}: size does not match its shape"
+			file.architecture() == Some("llama"),
+			"GGUF architecture {:?}, expected \"llama\"",
+			file.architecture()
 		);
-		let mut bytes = vec![0u8; elements * width];
-		self.file.seek(SeekFrom::Start(self.data_start + start))?;
+		Ok(Self { file, config })
+	}
+
+	/// Hyper-parameters the shapes are checked against.
+	pub const fn config(&self) -> &LlamaConfig {
+		&self.config
+	}
+
+	/// Token embedding `[vocab, hidden]`, also the tied LM head.
+	///
+	/// # Errors
+	/// Fails for missing, mistyped, or mis-shaped tensors and I/O errors.
+	pub fn embedding(&mut self) -> anyhow::Result<Q8Blocks> {
+		let (rows, cols) = (self.config.vocab_size, self.config.hidden_size);
+		let mut bytes = vec![0u8; rows * Q8Blocks::row_bytes(cols)];
 		self
 			.file
-			.read_exact(&mut bytes)
-			.with_context(|| format!("read tensor {name}"))?;
-		let values = if width == 2 {
-			// bf16 is the upper half of an f32.
-			bytes
-				.as_chunks::<2>()
-				.0
-				.iter()
-				.map(|b| f32::from_bits(u32::from(u16::from_le_bytes([b[0], b[1]])) << 16))
-				.collect()
-		} else {
-			bytes
-				.as_chunks::<4>()
-				.0
-				.iter()
-				.map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-				.collect()
-		};
-		Ok((entry.shape.clone(), values))
+			.q8_0_into("token_embd.weight", rows, cols, &mut bytes)?;
+		Ok(Q8Blocks { rows, cols, bytes })
+	}
+
+	/// Final norm gain.
+	///
+	/// # Errors
+	/// As [`LlamaWeights::embedding`].
+	pub fn output_norm(&mut self) -> anyhow::Result<Vec<f32>> {
+		self.file.f32("output_norm.weight", self.config.hidden_size)
+	}
+
+	/// Pre-attention and pre-MLP norm gains of `layer`.
+	///
+	/// # Errors
+	/// As [`LlamaWeights::embedding`].
+	pub fn norms(&mut self, layer: usize) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+		let h = self.config.hidden_size;
+		Ok((
+			self.file.f32(&format!("blk.{layer}.attn_norm.weight"), h)?,
+			self.file.f32(&format!("blk.{layer}.ffn_norm.weight"), h)?,
+		))
+	}
+
+	/// Projections `parts` of `layer` stacked by rows (e.g. the fused `[q; k;
+	/// v]`), with q and k rows back in the checkpoint's rotate-half order.
+	///
+	/// # Errors
+	/// As [`LlamaWeights::embedding`].
+	pub fn stacked(&mut self, layer: usize, parts: &[Proj]) -> anyhow::Result<Q8Blocks> {
+		let c = &self.config;
+		let (h, inter, head_dim) = (c.hidden_size, c.intermediate_size, c.head_dim());
+		let kv = c.num_key_value_heads * head_dim;
+		let shapes: Vec<_> = parts
+			.iter()
+			.map(|part| match part {
+				Proj::Q => ("attn_q", h, h),
+				Proj::K => ("attn_k", kv, h),
+				Proj::V => ("attn_v", kv, h),
+				Proj::Out => ("attn_output", h, h),
+				Proj::Gate => ("ffn_gate", inter, h),
+				Proj::Up => ("ffn_up", inter, h),
+				Proj::Down => ("ffn_down", h, inter),
+			})
+			.collect();
+		let cols = shapes.first().context("nothing to stack")?.2;
+		ensure!(shapes.iter().all(|s| s.2 == cols), "cannot stack {parts:?}");
+		let row_bytes = Q8Blocks::row_bytes(cols);
+		let rows = shapes.iter().map(|s| s.1).sum();
+		let mut bytes = vec![0u8; rows * row_bytes];
+		let mut scratch = Vec::new();
+		let mut at = 0;
+		for (&part, (name, rows, _)) in parts.iter().zip(shapes) {
+			let name = format!("blk.{layer}.{name}.weight");
+			let permuted = matches!(part, Proj::Q | Proj::K);
+			let out = &mut bytes[at..at + rows * row_bytes];
+			if permuted {
+				scratch.resize(out.len(), 0);
+				self.file.q8_0_into(&name, rows, cols, &mut scratch)?;
+				unpermute_rows(&scratch, out, row_bytes, head_dim);
+			} else {
+				self.file.q8_0_into(&name, rows, cols, out)?;
+			}
+			at += rows * row_bytes;
+		}
+		Ok(Q8Blocks { rows, cols, bytes })
+	}
+}
+
+/// Undo llama.cpp's q/k conversion permutation (`LlamaModel.permute`, which
+/// interleaves each head's rotate-half pairs for GGML's `RoPE`): row `2i + j`
+/// of a file head is row `j·head_dim/2 + i` of the checkpoint head. Whole
+/// rows move, so the blocks along them stay intact.
+fn unpermute_rows(file: &[u8], out: &mut [u8], row_bytes: usize, head_dim: usize) {
+	let half = head_dim / 2;
+	let head_bytes = head_dim * row_bytes;
+	for (src, dst) in file
+		.chunks_exact(head_bytes)
+		.zip(out.chunks_exact_mut(head_bytes))
+	{
+		for (r, row) in src.chunks_exact(row_bytes).enumerate() {
+			let (i, j) = (r / 2, r % 2);
+			let to = (j * half + i) * row_bytes;
+			dst[to..to + row_bytes].copy_from_slice(row);
+		}
 	}
 }
 
 #[cfg(test)]
 pub(super) mod tests {
-	use super::*;
+	use std::io::Cursor;
+
+	use super::{
+		super::gguf::{
+			Q8_BLOCK,
+			tests::{Writer, f16_bits},
+		},
+		*,
+	};
 
 	/// A tiny llama shape for decoder tests.
 	pub fn tiny_config(vocab: usize) -> LlamaConfig {
@@ -302,61 +358,156 @@ pub(super) mod tests {
 		}
 	}
 
-	/// Reproducible pseudo-random weights for [`tiny_config`] (xorshift64*
-	/// seeded per tensor name, so load order does not matter).
-	pub struct RandomWeights {
-		config: LlamaConfig,
-		seed:   u64,
-		state:  u64,
-	}
+	/// xorshift64* stream seeded per tensor name, so write order does not
+	/// matter.
+	struct Rng(u64);
 
-	impl RandomWeights {
-		pub fn new(config: &LlamaConfig, seed: u64) -> Self {
-			Self { config: config.clone(), seed, state: 1 }
+	impl Rng {
+		fn new(seed: u64, name: &str) -> Self {
+			Self(
+				name.bytes().fold(seed ^ 0xcbf2_9ce4_8422_2325, |h, b| {
+					(h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+				}) | 1,
+			)
 		}
 
+		/// Uniform in `[-0.5, 0.5)`.
 		fn next(&mut self) -> f32 {
-			let mut s = self.state;
+			let mut s = self.0;
 			s ^= s >> 12;
 			s ^= s << 25;
 			s ^= s >> 27;
-			self.state = s;
+			self.0 = s;
 			(s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
 		}
 	}
 
-	impl TensorSource for RandomWeights {
-		fn tensor(&mut self, name: &str) -> anyhow::Result<(Vec<usize>, Vec<f32>)> {
-			self.state = name
-				.bytes()
-				.fold(self.seed ^ 0xcbf2_9ce4_8422_2325, |h, b| {
-					(h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-				}) | 1;
-			let c = &self.config;
-			let (h, i, kv) =
-				(c.hidden_size, c.intermediate_size, c.num_key_value_heads * c.head_dim());
-			let shape = match name.rsplit('.').nth(1).unwrap_or_default() {
-				"embed_tokens" => vec![c.vocab_size, h],
-				"q_proj" | "o_proj" => vec![h, h],
-				"k_proj" | "v_proj" => vec![kv, h],
-				"gate_proj" | "up_proj" => vec![i, h],
-				"down_proj" => vec![h, i],
-				_ => vec![h],
-			};
-			// Norm gains near 1; matrices scaled by fan-in like a real init, so
-			// activations stay O(1) through the layers.
-			let norm = shape.len() == 1;
-			let gain = 2.0 / (*shape.last().unwrap_or(&1) as f32).sqrt();
-			let values = (0..shape.iter().product())
-				.map(|_| {
-					if norm {
-						self.next().abs() + 0.75
-					} else {
-						self.next() * gain
-					}
-				})
-				.collect();
-			Ok((shape, values))
+	/// llama.cpp's `LlamaModel.permute` on whole rows:
+	/// `w.reshape(heads, 2, head_dim / 2, cols).swapaxes(1, 2)`.
+	fn llama_cpp_permute(rows: &[u8], row_bytes: usize, head_dim: usize) -> Vec<u8> {
+		let half = head_dim / 2;
+		let heads = rows.len() / row_bytes / head_dim;
+		let row = |h: usize, j: usize, i: usize| {
+			let at = ((h * 2 + j) * half + i) * row_bytes;
+			&rows[at..at + row_bytes]
+		};
+		let mut out = Vec::with_capacity(rows.len());
+		for h in 0..heads {
+			for i in 0..half {
+				for j in 0..2 {
+					out.extend_from_slice(row(h, j, i));
+				}
+			}
 		}
+		out
+	}
+
+	fn load(writer: Writer, config: &LlamaConfig) -> anyhow::Result<LlamaWeights<Cursor<Vec<u8>>>> {
+		LlamaWeights::new(Gguf::new(Cursor::new(writer.finish()))?, config.clone())
+	}
+
+	/// Reproducible pseudo-random weights for `config`, as llama.cpp would
+	/// export them: a GGUF with q/k rows permuted, 64-byte alignment, and
+	/// metadata the reader skips.
+	pub fn random_weights(config: &LlamaConfig, seed: u64) -> LlamaWeights<Cursor<Vec<u8>>> {
+		let c = config;
+		let (h, inter, head_dim) = (c.hidden_size, c.intermediate_size, c.head_dim());
+		let kv = c.num_key_value_heads * head_dim;
+		let mut writer = Writer::new(Some(64));
+		writer.string("general.architecture", "llama");
+		writer.noise();
+		// Norm gains near 1; matrices scaled by fan-in like a real init, so
+		// activations stay O(1) through the layers.
+		let mut norm = |name: &str| {
+			let mut rng = Rng::new(seed, name);
+			let gains: Vec<f32> = (0..h).map(|_| rng.next().abs() + 0.75).collect();
+			writer.f32(name, &gains);
+		};
+		norm("output_norm.weight");
+		for layer in 0..c.num_hidden_layers {
+			norm(&format!("blk.{layer}.attn_norm.weight"));
+			norm(&format!("blk.{layer}.ffn_norm.weight"));
+		}
+		let mut matrix = |name: &str, rows: usize, cols: usize| {
+			let mut rng = Rng::new(seed, name);
+			let step = 1.0 / (cols as f32).sqrt() / 127.0;
+			let mut bytes = Vec::with_capacity(rows * Q8Blocks::row_bytes(cols));
+			for _ in 0..rows * cols / Q8_BLOCK {
+				bytes.extend(f16_bits(step * (0.5 + rng.next().abs())).to_le_bytes());
+				bytes
+					.extend((0..Q8_BLOCK).map(|_| ((rng.next() * 254.0).round() as i8).cast_unsigned()));
+			}
+			if name.ends_with("attn_q.weight") || name.ends_with("attn_k.weight") {
+				bytes = llama_cpp_permute(&bytes, Q8Blocks::row_bytes(cols), head_dim);
+			}
+			writer.q8_0(name, rows, cols, bytes);
+		};
+		matrix("token_embd.weight", c.vocab_size, h);
+		for layer in 0..c.num_hidden_layers {
+			let p = format!("blk.{layer}");
+			matrix(&format!("{p}.attn_q.weight"), h, h);
+			matrix(&format!("{p}.attn_k.weight"), kv, h);
+			matrix(&format!("{p}.attn_v.weight"), kv, h);
+			matrix(&format!("{p}.attn_output.weight"), h, h);
+			matrix(&format!("{p}.ffn_gate.weight"), inter, h);
+			matrix(&format!("{p}.ffn_up.weight"), inter, h);
+			matrix(&format!("{p}.ffn_down.weight"), h, inter);
+		}
+		load(writer, config).expect("random weights")
+	}
+
+	#[test]
+	fn q_and_k_rows_come_back_in_checkpoint_order() {
+		let config = tiny_config(8);
+		let (h, head_dim) = (config.hidden_size, config.head_dim());
+		let kv = config.num_key_value_heads * head_dim;
+		let row_bytes = Q8Blocks::row_bytes(h);
+		// Checkpoint rows tagged with their matrix and index.
+		let tagged = |tag: u8, rows: usize| -> Vec<u8> {
+			(0..rows)
+				.flat_map(|r| {
+					let mut row = vec![0u8; row_bytes];
+					row[..2].copy_from_slice(&f16_bits(1.0).to_le_bytes());
+					row[2..4].copy_from_slice(&[tag, r as u8]);
+					row
+				})
+				.collect()
+		};
+		let (q, k, v) = (tagged(1, h), tagged(2, kv), tagged(3, kv));
+		let mut writer = Writer::new(None);
+		writer.string("general.architecture", "llama");
+		writer.q8_0("blk.0.attn_q.weight", h, h, llama_cpp_permute(&q, row_bytes, head_dim));
+		writer.q8_0("blk.0.attn_k.weight", kv, h, llama_cpp_permute(&k, row_bytes, head_dim));
+		writer.q8_0("blk.0.attn_v.weight", kv, h, v.clone());
+		let mut weights = load(writer, &config).expect("weights");
+		let qkv = weights
+			.stacked(0, &[Proj::Q, Proj::K, Proj::V])
+			.expect("qkv");
+		assert_eq!(qkv.rows, h + 2 * kv);
+		assert!(qkv.bytes == [q, k, v].concat(), "rows out of checkpoint order");
+	}
+
+	fn error<T>(result: anyhow::Result<T>) -> String {
+		format!("{:#}", result.err().expect("an error"))
+	}
+
+	#[test]
+	fn tensors_of_the_wrong_type_or_shape_are_rejected() {
+		let config = tiny_config(8);
+		let h = config.hidden_size;
+		let mut writer = Writer::new(None);
+		writer.string("general.architecture", "llama");
+		writer.q8_0("output_norm.weight", 1, h, vec![0; Q8Blocks::row_bytes(h)]);
+		writer.f32("blk.0.attn_norm.weight", &vec![1.0; h]);
+		writer.f32("blk.0.ffn_norm.weight", &vec![1.0; h]);
+		writer.f32("blk.0.attn_output.weight", &vec![0.0; h * h]);
+		writer.q8_0("blk.0.ffn_down.weight", h, h, vec![0; h * Q8Blocks::row_bytes(h)]);
+		let mut weights = load(writer, &config).expect("weights");
+		assert!(error(weights.output_norm()).contains("Q8_0, expected F32"));
+		assert_eq!(weights.norms(0).expect("norms").0.len(), h);
+		assert!(error(weights.stacked(0, &[Proj::Out])).contains("F32, expected Q8_0"));
+		assert!(error(weights.stacked(0, &[Proj::Down])).contains("shape"));
+		assert!(error(weights.stacked(0, &[Proj::Q])).contains("missing"));
+		assert!(error(load(Writer::new(None), &config)).contains("architecture"));
 	}
 }

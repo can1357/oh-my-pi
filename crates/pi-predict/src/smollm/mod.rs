@@ -20,11 +20,12 @@
 //!   word.
 //!
 //! Decoders: [`metal`] (candle, macOS) and the portable [`cpu`] one, both
-//! with 8-bit block weights and f32 activations, quantized at load from the
-//! upstream bf16 safetensors that
-//! `packages/coding-agent/src/predict/smollm-weights.ts` downloads. macOS
-//! uses Metal when a GPU is available; `PI_SMOLLM_DEVICE=cpu|metal`
-//! overrides the choice.
+//! with 8-bit block weights and f32 activations. [`config::LlamaWeights`]
+//! reads them from llama.cpp's `Q8_0` GGUF export ([`gguf`]; q/k rows put
+//! back in the checkpoint's rotate-half order), which
+//! `packages/coding-agent/src/predict/smollm-weights.ts` downloads; both
+//! decoders run those blocks as stored. macOS uses Metal when a GPU is
+//! available; `PI_SMOLLM_DEVICE=cpu|metal` overrides the choice.
 //!
 //! # Parity (research harness, `test-small`, KSR % at quiet / balanced / parity)
 //! A simulated typist replays 600 held-out history.db prompts through N-API;
@@ -43,10 +44,12 @@
 //!   a query averages ~3.9 of them (three alternatives for typed-past).
 //! - CPU (`PI_SMOLLM_DEVICE=cpu`, 8 workers): p50 16 ms, p99 80 ms, +160 MiB
 //!   RSS; ~1.7 ms per forward at short context, ~3.6 ms at 700 tokens.
-//! - Weights: 269 MB bf16 download, ~145 MB resident as 8-bit blocks.
+//! - Weights: 145 MB `Q8_0` GGUF download (byte-identical to quantizing the
+//!   upstream bf16 checkpoint), ~145 MB resident.
 
 mod config;
 mod cpu;
+mod gguf;
 #[cfg(target_os = "macos")]
 mod metal;
 mod search;
@@ -62,7 +65,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use self::{
-	config::{Decoder, LlamaConfig, SafeTensors},
+	config::{Decoder, LlamaConfig, LlamaWeights},
 	cpu::CpuLlama,
 	search::{SearchParams, TokenIndex},
 	session::Session,
@@ -92,6 +95,9 @@ const TYPED_PAST: f32 = 0.15;
 const SHOW_THRESHOLD: f32 = 0.15;
 /// Alternatives searched so typed-past exclusion has a fallback.
 const ALTERNATIVES: usize = 3;
+/// Weights in [`Config::model_dir`], next to `config.json` and
+/// `tokenizer.json`.
+const WEIGHTS_FILE: &str = "SmolLM2-135M.Q8_0.gguf";
 /// Persisted recent-prompt memory in [`Config::state_dir`].
 const STATE_FILE: &str = "memory.json";
 const STATE_VERSION: u32 = 1;
@@ -109,20 +115,19 @@ pub fn open(config: &Config) -> anyhow::Result<Box<dyn Predictor>> {
 		.context("smollm needs Config::model_dir (the downloaded weights)")?;
 	let llama = LlamaConfig::load(&model_dir.join("config.json"))?;
 	let bos = llama.bos_token_id.unwrap_or(0);
-	let decoder = load_decoder(model_dir, llama)?;
+	let weights = LlamaWeights::open(&model_dir.join(WEIGHTS_FILE), llama)?;
+	let decoder = load_decoder(weights)?;
 	Ok(Box::new(SmolLm::open(model_dir, &config.state_dir, config.show_threshold, decoder, bos)?))
 }
 
 /// Load the weights onto Metal when available (macOS), else the CPU.
-fn load_decoder(model_dir: &Path, config: LlamaConfig) -> anyhow::Result<Box<dyn Decoder>> {
-	let path = model_dir.join("model.safetensors");
-	let mut weights = SafeTensors::open(&path)?;
+fn load_decoder(weights: LlamaWeights<std::fs::File>) -> anyhow::Result<Box<dyn Decoder>> {
 	let requested = std::env::var("PI_SMOLLM_DEVICE").ok();
 	#[cfg(target_os = "macos")]
 	if requested.as_deref() != Some("cpu") {
 		match candle_core::Device::new_metal(0) {
 			Ok(device) => {
-				return Ok(Box::new(metal::MetalLlama::load(config, &mut weights, &device)?));
+				return Ok(Box::new(metal::MetalLlama::load(weights, &device)?));
 			},
 			Err(error) if requested.as_deref() == Some("metal") => return Err(error.into()),
 			Err(_) => {},
@@ -132,7 +137,7 @@ fn load_decoder(model_dir: &Path, config: LlamaConfig) -> anyhow::Result<Box<dyn
 		requested.as_deref() != Some("metal"),
 		"PI_SMOLLM_DEVICE=metal needs macOS with a Metal GPU"
 	);
-	Ok(Box::new(CpuLlama::load(config, &mut weights)?))
+	Ok(Box::new(CpuLlama::load(weights)?))
 }
 
 fn utf16_len(text: &str) -> usize {

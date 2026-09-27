@@ -894,7 +894,7 @@ export const cfgSpellingAutocomplete = register({
 			{
 				value: "smollm",
 				label: "SmolLM",
-				description: "Small on-device language model (downloads weights on first use)",
+				description: "Small on-device language model blended with N-gram (downloads weights on first use)",
 			},
 			...(process.platform === "darwin"
 				? [{ value: "apple" as const, label: "Apple", description: "macOS dictionary completions" }]

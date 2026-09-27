@@ -7,17 +7,19 @@
  * open and on every `sync`), persists on a debounce and on exit, and exits
  * after an idle window. A learning engine that starts from empty state first
  * learns the Claude Code and Codex prompt histories (`foreign-history.ts`).
+ * `smollm` requests are answered by SmolLM and ngram together (`blend.ts`).
  * Engine state that fails to load is wiped and rebuilt the same way.
  */
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
-import { TextPredictor } from "@oh-my-pi/pi-natives";
+import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
 import { getHistoryDbPath, isEnoent, logger, postmortem, VERSION, withFileLock } from "@oh-my-pi/pi-utils";
 import { LineParser, writeJsonLine } from "../tiny/jsonl-socket";
 import { endpointAlive } from "../tiny/worker-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
+import { blendPredictions } from "./blend";
 import { readForeignPrompts } from "./foreign-history";
 import {
 	TEXT_PREDICT_AGENT_DIR_ENV,
@@ -266,8 +268,10 @@ class TextPredictDaemon {
 					engines: [...this.#engines.keys()],
 				};
 			case "complete": {
-				const engine = await this.#engine(request.method);
-				const suggestion = await engine.predictor.complete(request.before, request.prefix);
+				const suggestion =
+					request.method === "smollm"
+						? await this.#blend(request.before, request.prefix)
+						: await (await this.#engine(request.method)).predictor.complete(request.before, request.prefix);
 				return { id: request.id, ok: true, op: "complete", suggestion };
 			}
 			case "feedback": {
@@ -290,6 +294,22 @@ class TextPredictDaemon {
 				setImmediate(() => void this.#shutdown().finally(() => process.exit(0)));
 				return { id: request.id, ok: true, op: "shutdown" };
 		}
+	}
+
+	/**
+	 * The `smollm` setting: SmolLM's and ngram's answers blended
+	 * ({@link blendPredictions}). Until SmolLM loads (weights still
+	 * downloading) or while it cannot, ngram answers alone through the blend.
+	 */
+	async #blend(before: string, prefix: string): Promise<PredictedWord | null> {
+		const [ngram, smollm] = await Promise.all([
+			this.#engine("ngram").then(engine => engine.predictor.complete(before, prefix)),
+			this.#engine("smollm").then(
+				engine => engine.predictor.complete(before, prefix),
+				() => null,
+			),
+		]);
+		return blendPredictions(ngram, smollm);
 	}
 
 	#engine(method: TextPredictMethod): Promise<Engine> {
@@ -324,7 +344,9 @@ class TextPredictDaemon {
 			modelDir = getSmolLmModelDir();
 		}
 		const startedAt = performance.now();
-		let predictor = new TextPredictor({ method, stateDir, modelDir });
+		// SmolLM only serves the blend, which gates on its own score.
+		const showThreshold = method === "smollm" ? 0 : undefined;
+		let predictor = new TextPredictor({ method, stateDir, modelDir, showThreshold });
 		let cursor: number | undefined;
 		try {
 			await predictor.ready();
@@ -335,7 +357,7 @@ class TextPredictDaemon {
 			logger.warn("text-predict: engine state failed to load; rebuilding", { method, error: String(error) });
 			await fs.rm(stateDir, { recursive: true, force: true });
 			await fs.mkdir(stateDir, { recursive: true });
-			predictor = new TextPredictor({ method, stateDir, modelDir });
+			predictor = new TextPredictor({ method, stateDir, modelDir, showThreshold });
 			await predictor.ready();
 			cursor = undefined;
 		}

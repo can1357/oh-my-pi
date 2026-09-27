@@ -279,6 +279,63 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(finalThinking?.thinkingSignature).toBe("sig_after_rewind");
 	});
 
+	it("retains a sibling task result after rewinding the same assistant turn", async () => {
+		const report = "investigation complete";
+		const taskSchema = type({ goal: type("string") });
+		const taskTool: AgentTool<typeof taskSchema, unknown> = {
+			name: "task",
+			label: "Task",
+			description: "Run a subagent",
+			parameters: taskSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "<task-result>completed work</task-result>" }] };
+			},
+		};
+		const { session, mock } = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "inspect" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report } },
+						{ type: "toolCall", id: "task", name: "task", arguments: { goal: "complete work" } },
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[checkpointTool as AgentTool, rewindTool as AgentTool, taskTool as AgentTool],
+		);
+
+		await session.prompt("investigate with a subagent");
+
+		const nextTurn = mock.calls[2]?.context.messages;
+		expect(nextTurn).toBeDefined();
+		expect(
+			nextTurn?.some(
+				message =>
+					message.role === "toolResult" &&
+					message.toolCallId === "task" &&
+					messageText(message).includes("<task-result>completed work</task-result>"),
+			),
+		).toBe(true);
+		expect(
+			nextTurn?.some(
+				message =>
+					message.role === "assistant" &&
+					message.content.some(block => block.type === "toolCall" && block.id === "task"),
+			),
+		).toBe(true);
+		expect(nextTurn?.some(message => message.role === "toolResult" && message.toolCallId === "rewind")).toBe(false);
+		expect(
+			session.sessionManager
+				.buildSessionContext()
+				.messages.some(message => message.role === "toolResult" && message.toolCallId === "task"),
+		).toBe(true);
+	});
+
 	it("shows a transient checkpoint-active reminder that is branch-cut away on rewind", async () => {
 		const report = "findings: transient reminder";
 		const proceed = Promise.withResolvers<void>();

@@ -99,7 +99,7 @@ impl Default for Params {
 			cache_window:        4000,
 			session_weight:      0.02,
 			session_prompts:     20,
-			show_threshold:      0.45,
+			show_threshold:      0.15,
 		}
 	}
 }
