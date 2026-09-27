@@ -32,7 +32,7 @@ import { connectJsonlSocket, LineParser, writeJsonLine } from "./jsonl-socket";
 import { formatTitleUserMessage } from "./message-preproc";
 import { ensureTinyMlxRuntime, getTinyMlxModelDir, MLX_LM_VERSION } from "./mlx-runtime";
 import MLX_SERVER_SCRIPT from "./mlx-server.py" with { type: "text" };
-import { getTinyLocalModelSpec, isTinyLocalModelKey, type TinyLocalModelKey } from "./models";
+import { getTinyLocalModelSpec, isTinyJudgeLocalModelKey, isTinyLocalModelKey, type TinyLocalModelKey } from "./models";
 import { normalizeGeneratedTitle } from "./text";
 import {
 	TINY_WORKER_ARG,
@@ -40,6 +40,7 @@ import {
 	TINY_WORKER_MODEL_ENV,
 	TINY_WORKER_SOCKET_ENV,
 	TINY_WORKER_TAG_ENV,
+	type JudgeQuestionPayload,
 	type TinyChatMessage,
 	type TinyTitleProgressEvent,
 	type TinyWorkerBackend,
@@ -71,6 +72,7 @@ type WorkerHandle = RefCountedWorkerHandle<TinyWorkerRequest, TinyWorkerResponse
 type PendingRequest =
 	| { kind: "title"; modelKey: TinyLocalModelKey; source: string; resolve: (title: string | null) => void }
 	| { kind: "chat"; modelKey: TinyLocalModelKey; resolve: (text: string | null) => void }
+	| { kind: "judge"; modelKey: TinyLocalModelKey; resolve: (logits: Record<string, number[]> | null) => void }
 	| { kind: "load"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
@@ -554,7 +556,8 @@ export class TinyTitleClient {
 	}
 
 	async #connectDefault(modelKey: TinyLocalModelKey): Promise<WorkerHandle> {
-		if (tinyWorkerUsesMlx()) {
+		// Judge keys force the ONNX backend: the MLX worker layout does not support Julia-1.
+		if (!isTinyJudgeLocalModelKey(modelKey) && tinyWorkerUsesMlx()) {
 			try {
 				return await connectTinyWorker(
 					mlxLaunch(modelKey, event => this.#emitProgress(event)),
@@ -603,6 +606,8 @@ export class TinyTitleClient {
 	): Promise<string | null> {
 		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
 		if (!isTinyLocalModelKey(modelKey)) return null;
+		// Judge models do not serve chat — fail soft so a misroute never poisons #failedModels.
+		if (isTinyJudgeLocalModelKey(modelKey)) return null;
 		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
 		const { promise, resolve } = Promise.withResolvers<string | null>();
 		const request: TinyWorkerRequest = {
@@ -624,6 +629,8 @@ export class TinyTitleClient {
 		options: TinyModelChatOptions = {},
 	): Promise<string | null> {
 		if (!isTinyLocalModelKey(modelKey)) return null;
+		// Judge models do not serve chat — fail soft so a misroute never poisons #failedModels.
+		if (isTinyJudgeLocalModelKey(modelKey)) return null;
 		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
 		const requested = options.maxTokens ?? COMPLETION_DEFAULT_MAX_NEW_TOKENS;
 		const { promise, resolve } = Promise.withResolvers<string | null>();
@@ -634,6 +641,28 @@ export class TinyTitleClient {
 			maxNewTokens: Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS),
 		};
 		return this.#run(request, { kind: "chat", modelKey, resolve }, promise, options.signal, () => resolve(null));
+	}
+
+	/**
+	 * Score `state` against `questions` with a judge model (Julia-1); resolves
+	 * per-question logits. Non-judge keys resolve null, mirroring `chat()`.
+	 */
+	async judge(
+		modelKey: string,
+		state: string,
+		questions: Record<string, JudgeQuestionPayload>,
+		options: TinyModelChatOptions = {},
+	): Promise<Record<string, number[]> | null> {
+		if (!isTinyJudgeLocalModelKey(modelKey)) return null;
+		if (options.signal?.aborted || this.#hasFailed(modelKey)) return null;
+		const { promise, resolve } = Promise.withResolvers<Record<string, number[]> | null>();
+		const request: TinyWorkerRequest = {
+			type: "judge",
+			id: String(++this.#nextRequestId),
+			state,
+			questions,
+		};
+		return this.#run(request, { kind: "judge", modelKey, resolve }, promise, options.signal, () => resolve(null));
 	}
 
 	async complete(
@@ -781,6 +810,10 @@ export class TinyTitleClient {
 		if (message.type === "text") {
 			if (pending.kind === "title") pending.resolve(extractTinyTitle(message.text, pending.source));
 			else if (pending.kind === "chat") pending.resolve(message.text.trim() || null);
+			return;
+		}
+		if (message.type === "judged") {
+			if (pending.kind === "judge") pending.resolve(message.logits);
 			return;
 		}
 		if (pending.kind === "load") pending.resolve({ ok: true });

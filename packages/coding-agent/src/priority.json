@@ -119,6 +119,7 @@
 	"judge": [
 		"typesafe/jev-latest",
 		"openrouter/~typesafe/jev-latest",
+		"local/julia-1",
 		"@tiny",
 		"@smol",
 		"@default"

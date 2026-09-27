@@ -8,8 +8,8 @@ modelRoles:
   memory: local/lfm2-1.2b
   speech: local/kokoro
   dictation: local/parakeet-tdt-0.6b-v3
-  # A local tiny model may also serve typed judgments:
-  judge: local/lfm2-1.2b
+  # A local judge model for typed choice/noul/score decisions:
+  judge: local/julia-1
 
 retry:
   fallbackChains:
@@ -224,3 +224,7 @@ Kokoro and the transformers.js Whisper models use the same `providers.tinyModelD
 - Session-title generation uses `modelRoles.tiny`; Mnemopi extraction and consolidation use `modelRoles.memory` when its LLM mode is enabled. Their distinct prompts and benchmark groups do not impose separate runtime model types.
 - Auto-thinking, Smart unexpected-stop detection, typed Eval judgments, and AI-assisted git staging use the `judge` role. Assign `typesafe/jev-latest` for TypeSafe or a compatible local tiny model for on-device judgment; order alternatives under `retry.fallbackChains.judge`.
 - The memory local path applies the refined line-format and small-talk-guarded extraction prompt plus the hardened consolidation prompt; selecting an online chat model for the role keeps the online transport path.
+
+## Task 3: Local judgments (`modelRoles.judge`)
+
+The default local judge is `local/julia-1` (`DEFAULT_JUDGE_LOCAL_MODEL_KEY`): a 144M decision model answering typed choice/noul/score questions with native probabilities instead of generated keywords. Weights are fp32 ONNX (~577 MB) served by the shared tiny-model worker; opt in with `modelRoles.judge: local/julia-1`. The built-in chain still prefers credentialed native judges (TypeSafe/OpenRouter) first, with `local/julia-1` as the first local entry and the remaining `@tiny`/`@smol` keyword fallbacks after it.

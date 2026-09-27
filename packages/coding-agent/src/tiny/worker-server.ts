@@ -13,9 +13,9 @@ export interface TinyWorkerServerOptions {
 	tag: string;
 	/** Idle window (nothing in flight, no request received) after which the process exits. */
 	idleMs: number;
-	/** Serve one `load`/`chat`; `reply.send` reaches only the requesting client. Errors become `error` replies. */
+	/** Serve one `load`/`chat`/`judge`; `reply.send` reaches only the requesting client. Errors become `error` replies. */
 	handle(
-		request: Extract<TinyWorkerRequest, { type: "load" | "chat" }>,
+		request: Extract<TinyWorkerRequest, { type: "load" | "chat" | "judge" }>,
 		reply: { send(message: TinyWorkerResponse): void },
 	): Promise<void>;
 }

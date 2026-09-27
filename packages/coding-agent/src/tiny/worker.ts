@@ -7,6 +7,7 @@
  * NAPI finalizer never runs in a shared address space.
  */
 import * as path from "node:path";
+import { createRequire } from "node:module";
 import type {
 	ProgressInfo,
 	TextGenerationPipeline,
@@ -15,6 +16,7 @@ import type {
 } from "@huggingface/transformers";
 import { getTinyModelsCacheDir, logger, setProcessName } from "@oh-my-pi/pi-utils";
 import {
+	TRANSFORMERS_PACKAGE,
 	errorMessage,
 	errorText,
 	formatOnnxRuntimeCudaDiagnostics,
@@ -32,8 +34,11 @@ import {
 	tinyModelDeviceLoadOrder,
 } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
+import { packJudgeBatch, serializeJudgeRow, type JudgeSerializedRow } from "./judge-serialize";
+import { ensureJuliaJudgeFiles } from "./judge-weights";
 import {
 	getTinyLocalModelSpec,
+	isTinyJudgeLocalModelKey,
 	isTinyLocalModelKey,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelSpec,
@@ -44,6 +49,7 @@ import {
 	TINY_WORKER_MODEL_ENV,
 	TINY_WORKER_SOCKET_ENV,
 	TINY_WORKER_TAG_ENV,
+	type JudgeQuestionPayload,
 	type TinyWorkerRequest,
 	type TinyWorkerResponse,
 } from "./title-protocol";
@@ -122,6 +128,225 @@ export function createStopOnTextCriteria(
 		}
 	}
 	return new StopOnTextCriteria();
+}
+
+/** Tokenizer surface `JuliaJudgeModel` needs (subset of transformers.js `PreTrainedTokenizer`). */
+interface JuliaJudgeTokenizer {
+	mask_token_id: number;
+	mask_token: string | undefined;
+	cls_token_id: number | undefined;
+	bos_token_id: number | undefined;
+	sep_token_id: number;
+	(text: string, options: { add_special_tokens: false }): { input_ids: { data: ArrayLike<number> } };
+}
+
+/** Minimal `onnxruntime-node` surface for the Julia-1 judge session. */
+interface OrtTensor {
+	getData(): Promise<ArrayLike<number>>;
+}
+interface OrtSession {
+	run(feeds: Record<string, unknown>): Promise<Record<string, OrtTensor>>;
+}
+/** Minimal `onnxruntime-node` module surface: tensor constructor + session factory. */
+interface OrtRuntime {
+	Tensor: new (type: string, data: BigInt64Array | Uint8Array, dims: number[]) => unknown;
+	InferenceSession: { create(modelPath: string, options: { executionProviders: ["cpu"] }): Promise<OrtSession> };
+}
+
+/** Encode raw text to ids with no special tokens (matches the reference serializer's `encode`). */
+function encodeJudgeText(tokenizer: JuliaJudgeTokenizer, text: string): number[] {
+	return Array.from(tokenizer(text, { add_special_tokens: false }).input_ids.data, Number);
+}
+
+/** Map one wire question onto the serializer's row shape (state passes through as a string). */
+function toJudgeSerializeRow(
+	question: JudgeQuestionPayload,
+	state: string,
+): { type: "choice" | "score" | "noul"; question: string; options: string[]; state: string } {
+	return { type: question.type, question: question.instructions, options: [...question.options], state };
+}
+
+/**
+ * Julia-1 judge model: raw `InferenceSession` + `AutoTokenizer`, no
+ * transformers.js pipeline (the Julia-1-ONNX root layout — `model.onnx` +
+ * `model.onnx.data` + `tokenizer.json` — has no `config.json`, so
+ * `pipeline("text-classification")` cannot resolve it).
+ *
+ * The transformers-BUNDLED `onnxruntime-node` copy (nested 1.30.0) is the
+ * ONLY one loaded in this process: the top-level 1.26.0 copy
+ * dlopen-clashes with it (`libonnxruntime.so.1` VERS symbols, proven in
+ * smoke), so it is never imported here. Resolution goes through
+ * `createRequire` from the transformers package path: from the ambient
+ * install in source runs, from the side-runtime entry
+ * (`__ompTransformersEntry`) in compiled runs. Transformers.js itself is
+ * imported lazily for the tokenizer only — never eagerly at module top, so
+ * this file never triggers the dual load.
+ *
+ * MLX is out of scope for judge keys: the Julia-1-MLX layout
+ * (`encoder/config.json` + `julia_config.json`) does not match
+ * `mlx-server.py` DOWNLOAD_PATTERNS, so the client forces the ONNX backend.
+ */
+class JuliaJudgeModel {
+	#modelKey: TinyLocalModelKey;
+	#spec: TinyTitleLocalModelSpec;
+	#runtime = new MemoizedRuntime<TransformersRuntime>();
+	#loaded: Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime; session: OrtSession }> | null = null;
+
+	constructor(modelKey: TinyLocalModelKey, spec: TinyTitleLocalModelSpec) {
+		this.#modelKey = modelKey;
+		this.#spec = spec;
+	}
+
+	/** Resident tokenizer + session, downloading weights on first use. */
+	load(
+		reply: ReplyTransport,
+		requestId: string,
+	): Promise<{
+		tokenizer: JuliaJudgeTokenizer;
+		ort: OrtRuntime;
+		session: OrtSession;
+	}> {
+		if (this.#loaded) return this.#loaded;
+		const startedAt = performance.now();
+		const loaded = this.#load(reply, requestId).then(
+			result => {
+				logger.debug("tiny-model: local judge model loaded", {
+					modelKey: this.#modelKey,
+					repo: this.#spec.repo,
+					elapsedMs: Math.round(performance.now() - startedAt),
+				});
+				return result;
+			},
+			error => {
+				this.#loaded = null;
+				throw error;
+			},
+		);
+		this.#loaded = loaded;
+		return loaded;
+	}
+
+	async #load(
+		reply: ReplyTransport,
+		requestId: string,
+	): Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime; session: OrtSession }> {
+		const dir = await ensureJuliaJudgeFiles(this.#modelKey, this.#spec.repo, reply, requestId);
+		const transformersEntry = await this.#transformersEntry(reply, requestId);
+		const { tokenizer, ort } = await this.#loadDeps(transformersEntry, dir);
+		const session = await ort.InferenceSession.create(path.join(dir, "model.onnx"), {
+			executionProviders: ["cpu"],
+		});
+		return { tokenizer, ort, session };
+	}
+
+	/**
+	 * Entry point of the ambient/side transformers install (never top-level
+	 * ORT). Loads the tiny side runtime on first use (memoized) so the
+	 * compiled-binary path resolves the nested onnxruntime-node copy from
+	 * the version-keyed runtime dir, exactly like the chat path.
+	 */
+	async #transformersEntry(reply: ReplyTransport, requestId: string): Promise<string> {
+		const runtime = await loadTransformersRuntime(
+			this.#runtime,
+			reply,
+			requestId,
+			this.#modelKey,
+			getTinyTitleRuntimeDir,
+		);
+		return runtime.__ompTransformersEntry ?? createRequire(import.meta.url).resolve(TRANSFORMERS_PACKAGE);
+	}
+
+	async #loadDeps(entry: string, dir: string): Promise<{ tokenizer: JuliaJudgeTokenizer; ort: OrtRuntime }> {
+		const require = createRequire(entry);
+		const transformers = require(entry) as {
+			env: { allowLocalModels?: boolean };
+			AutoTokenizer: {
+				from_pretrained(path: string, options?: { local_files_only?: boolean }): Promise<JuliaJudgeTokenizer>;
+			};
+		};
+		// `loadTransformersRuntime` disables local models (pipeline-only chat
+		// path resolves repos from the HF cache); the judge dir IS the local
+		// model, so re-enable it for this runtime before loading the tokenizer.
+		transformers.env.allowLocalModels = true;
+		const tokenizer = await transformers.AutoTokenizer.from_pretrained(dir);
+		// Nested copy only: resolving from the transformers entry lands in
+		// transformers' own `node_modules/onnxruntime-node` (1.30.0), never
+		// the top-level 1.26.0 (dual load segfaults/dlopen-clashes).
+		const ortEntry = require.resolve("onnxruntime-node/package.json");
+		const ort = createRequire(ortEntry)(path.dirname(ortEntry)) as OrtRuntime;
+		return { tokenizer, ort };
+	}
+
+	/** Send the `ready` marker the client's download UI waits for. */
+	sendReady(reply: ReplyTransport, requestId: string): void {
+		reply.send({
+			type: "progress",
+			id: requestId,
+			event: { modelKey: this.#modelKey, status: "ready", task: "text-classification", model: this.#spec.repo },
+		});
+	}
+
+	async judge(
+		request: Extract<TinyWorkerRequest, { type: "judge" }>,
+		reply: ReplyTransport,
+	): Promise<Record<string, number[]>> {
+		const names = Object.keys(request.questions);
+		// Empty batch would build zero-dim ORT tensors that session.run rejects.
+		if (names.length === 0) return {};
+		const { tokenizer, ort, session } = await this.load(reply, request.id);
+		// Matches the reference clean(): scrub the marker string so id 4 appears only at option markers.
+		const marker = tokenizer.mask_token;
+		const clean = (text: string): string => (marker ? text.split(marker).join(" ") : text);
+		const state = clean(request.state);
+		const rows = names.map(name => {
+			const question = request.questions[name]!;
+			const instructions = clean(question.instructions);
+			// Rebuild per variant so the `noul` tuple option type is preserved.
+			const cleaned: JudgeQuestionPayload =
+				question.type === "choice"
+					? { type: "choice", instructions, options: question.options.map(clean) }
+					: question.type === "noul"
+						? { type: "noul", instructions, options: [clean(question.options[0]!), clean(question.options[1]!)] }
+						: { type: "score", instructions, options: question.options.map(clean) };
+			return serializeJudgeRow(toJudgeSerializeRow(cleaned, state), text => encodeJudgeText(tokenizer, text), {
+				mask: tokenizer.mask_token_id,
+				cls: tokenizer.cls_token_id ?? tokenizer.bos_token_id ?? 2,
+				sep: tokenizer.sep_token_id,
+			});
+		});
+		const batch = packJudgeBatch(rows);
+		const length = batch.length;
+		const count = batch.count;
+		const ids = new BigInt64Array(names.length * length);
+		const attention = new BigInt64Array(names.length * length);
+		const positions = new BigInt64Array(names.length * count);
+		const mask = new Uint8Array(names.length * count);
+		const qtype = new BigInt64Array(names.length);
+		rows.forEach((row: JudgeSerializedRow, rowIndex: number) => {
+			row.ids.forEach((id, tokenIndex) => {
+				ids[rowIndex * length + tokenIndex] = BigInt(id);
+				attention[rowIndex * length + tokenIndex] = 1n;
+			});
+			row.markers.forEach((marker, optionIndex) => {
+				positions[rowIndex * count + optionIndex] = BigInt(marker);
+				mask[rowIndex * count + optionIndex] = 1;
+			});
+			qtype[rowIndex] = BigInt(row.qtype);
+		});
+		const output = await session.run({
+			input_ids: new ort.Tensor("int64", ids, [names.length, length]),
+			attention_mask: new ort.Tensor("int64", attention, [names.length, length]),
+			marker_pos: new ort.Tensor("int64", positions, [names.length, count]),
+			marker_mask: new ort.Tensor("bool", mask, [names.length, count]),
+			qtype: new ort.Tensor("int64", qtype, [names.length]),
+		});
+		const values = Array.from(await output.logits!.getData());
+		const logits: Record<string, number[]> = {};
+		names.forEach((name, rowIndex) => {
+			logits[name] = values.slice(rowIndex * count, rowIndex * count + rows[rowIndex]!.markers.length);
+		});
+		return logits;
+	}
 }
 
 /** The worker's single ONNX model: transformers.js pipeline with the device fallback chain. */
@@ -261,6 +486,27 @@ export async function startTinyWorkerFromEnvironment(): Promise<void> {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	setProcessName(`omp tiny ${modelKey}`);
+	if (isTinyJudgeLocalModelKey(modelKey)) {
+		const judge = new JuliaJudgeModel(modelKey, spec);
+		const judgeServer = new TinyWorkerServer({
+			tag,
+			idleMs: Number(process.env[TINY_WORKER_IDLE_MS_ENV]) || TINY_WORKER_IDLE_MS,
+			async handle(request, reply) {
+				if (request.type === "load") {
+					await judge.load(reply, request.id);
+					judge.sendReady(reply, request.id);
+					reply.send({ type: "loaded", id: request.id });
+					return;
+				}
+				if (request.type === "chat")
+					throw new Error(`${modelKey} is a judge model and does not serve chat requests`);
+				const logits = await judge.judge(request, reply);
+				reply.send({ type: "judged", id: request.id, logits });
+			},
+		});
+		await judgeServer.serve(endpoint);
+		return;
+	}
 	const model = new OnnxModel(modelKey, spec, resolveTinyModelDevicePreference(), resolveTinyModelDtypeOverride());
 	const server = new TinyWorkerServer({
 		tag,
@@ -272,6 +518,8 @@ export async function startTinyWorkerFromEnvironment(): Promise<void> {
 				reply.send({ type: "loaded", id: request.id });
 				return;
 			}
+			if (request.type === "judge")
+				throw new Error(`${modelKey} is not a judge model and does not serve judge requests`);
 			const text = await model.chat(request, reply);
 			reply.send({ type: "text", id: request.id, text });
 		},

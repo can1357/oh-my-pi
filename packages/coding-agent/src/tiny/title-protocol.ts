@@ -91,6 +91,12 @@ export interface TinyChatMessage {
 	content: string;
 }
 
+/** One judge question posed to a judge model (Julia-1). */
+export type JudgeQuestionPayload =
+	| { type: "choice"; instructions: string; options: string[] }
+	| { type: "noul"; instructions: string; options: [string, string] }
+	| { type: "score"; instructions: string; options: string[] };
+
 export type TinyWorkerRequest =
 	| { type: "ping"; id: string }
 	/** Download (if needed) and load the worker's model, streaming `progress` then `loaded`. */
@@ -106,6 +112,8 @@ export type TinyWorkerRequest =
 			stop?: string;
 			maxNewTokens: number;
 	  }
+	/** Score `state` against `questions` with a judge model; replies with per-question logits. */
+	| { type: "judge"; id: string; state: string; questions: Record<string, JudgeQuestionPayload> }
 	/** Exit now (a client found a stale launch tag and will respawn). */
 	| { type: "shutdown"; id: string };
 
@@ -114,4 +122,5 @@ export type TinyWorkerResponse =
 	| { type: "progress"; id: string; event: TinyTitleProgressEvent }
 	| { type: "loaded"; id: string }
 	| { type: "text"; id: string; text: string }
+	| { type: "judged"; id: string; logits: Record<string, number[]> }
 	| { type: "error"; id: string; error: string };

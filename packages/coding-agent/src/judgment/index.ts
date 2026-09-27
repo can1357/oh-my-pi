@@ -32,9 +32,10 @@ import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { SessionManager } from "../session/session-manager";
-import { getTinyLocalModelSpec } from "../tiny/models";
+import { getTinyLocalModelSpec, isTinyJudgeLocalModelKey } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
+import { LocalJudge } from "./local-judge";
 
 /** Usage of one judgment attempt, recorded on the session ledger by callers. */
 export interface JudgmentUsage {
@@ -244,7 +245,10 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference") {
+			if (isTinyJudgeLocalModelKey(model.id)) return new LocalJudge(model.id);
+			return new TextJudge(new LocalTextBackend(model.id));
+		}
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added local judge model Julia-1 (144M decision model, on-device choice/noul/score with native probabilities, default for modelRoles.judge).
 - Added a `telemetry.otlpExportEnabled` setting (`/settings` → Providers → Privacy) that stops OMP from exporting OTLP traces, logs, and metrics even when `OTEL_*` endpoints are set in its environment; export stays enabled by default ([#13444](https://github.com/can1357/oh-my-pi/pull/13444) by [@krizh-p](https://github.com/krizh-p))
 
 ### Changed

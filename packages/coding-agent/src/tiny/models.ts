@@ -1,3 +1,5 @@
+import type { TinyModelDtype } from "./dtype";
+
 /** Local model the `tiny-models` CLI downloads when none is named. */
 export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2.5-230m";
 
@@ -5,7 +7,7 @@ export interface TinyTitleLocalModelSpec {
 	key: string;
 	/** ONNX export loaded by transformers.js on every platform. */
 	repo: string;
-	dtype: "q4";
+	dtype: TinyModelDtype;
 	/** Pre-quantized MLX export loaded by mlx-lm when `PI_TINY_DEVICE=mlx`. */
 	mlxRepo: string;
 	label: string;
@@ -139,14 +141,47 @@ export function isTinyMemoryReasoningModelKey(key: TinyMemoryLocalModelKey): boo
 	return "reasoning" in spec && spec.reasoning === true;
 }
 
-/** Any local model key (title or memory), used by the shared inference worker. */
-export type TinyLocalModelKey = TinyTitleLocalModelKey | TinyMemoryLocalModelKey;
+/** Default local judge model for on-device verdicts when none is named. */
+export const DEFAULT_JUDGE_LOCAL_MODEL_KEY = "julia-1";
 
-/** Resolve a local model spec by key across both the title and memory registries. */
+/**
+ * Local models for decision-model judge tasks (choice/noul/score verdicts).
+ * Julia-1 emits native per-option probabilities, no keyword parsing.
+ */
+export const TINY_JUDGE_LOCAL_MODELS = [
+	{
+		key: "julia-1",
+		repo: "SupersonicLabs/Julia-1-ONNX",
+		dtype: "fp32",
+		mlxRepo: "zainmerchan/Julia-1-MLX",
+		label: "Julia-1 144M",
+		description:
+			"Decision-model judge (144M, fp32 ONNX); native choice/noul/score probabilities, no keyword parsing.",
+		contextNote: "Default local judge; use when a calibrated on-device verdict beats a prompted tiny-model keyword.",
+	},
+] as const satisfies readonly TinyTitleLocalModelSpec[];
+
+export type TinyJudgeLocalModelKey = (typeof TINY_JUDGE_LOCAL_MODELS)[number]["key"];
+
+export function isTinyJudgeLocalModelKey(value: string): value is TinyJudgeLocalModelKey {
+	return TINY_JUDGE_LOCAL_MODELS.some(model => model.key === value);
+}
+
+export function getTinyJudgeModelSpec(key: TinyJudgeLocalModelKey): (typeof TINY_JUDGE_LOCAL_MODELS)[number] {
+	const spec = TINY_JUDGE_LOCAL_MODELS.find(model => model.key === key);
+	if (!spec) throw new Error(`Unknown tiny judge model: ${key}`);
+	return spec;
+}
+
+/** Any local model key (title, memory, or judge), used by the shared inference worker. */
+export type TinyLocalModelKey = TinyTitleLocalModelKey | TinyMemoryLocalModelKey | TinyJudgeLocalModelKey;
+
+/** Resolve a local model spec by key across the title, memory, and judge registries. */
 export function getTinyLocalModelSpec(key: string): TinyTitleLocalModelSpec | undefined {
 	return (
 		TINY_TITLE_LOCAL_MODELS.find(model => model.key === key) ??
-		TINY_MEMORY_LOCAL_MODELS.find(model => model.key === key)
+		TINY_MEMORY_LOCAL_MODELS.find(model => model.key === key) ??
+		TINY_JUDGE_LOCAL_MODELS.find(model => model.key === key)
 	);
 }
 
@@ -154,8 +189,9 @@ export function isTinyLocalModelKey(value: string): value is TinyLocalModelKey {
 	return getTinyLocalModelSpec(value) !== undefined;
 }
 
-/** Combined local model registry (title + memory) for the shared tiny-models CLI. */
+/** Combined local model registry (title + memory + judge) for the shared tiny-models CLI. */
 export const TINY_LOCAL_MODELS = [
 	...TINY_TITLE_LOCAL_MODELS,
 	...TINY_MEMORY_LOCAL_MODELS,
+	...TINY_JUDGE_LOCAL_MODELS,
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
