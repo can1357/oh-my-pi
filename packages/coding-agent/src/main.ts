@@ -424,7 +424,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await session.promptCustomMessage(message, { streamingBehavior });
+			await session.promptCustomMessage(message, { streamingBehavior, onAccepted: input.onAccepted });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -436,6 +436,7 @@ export async function submitInteractiveInput(
 				synthetic: true,
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
+				onAccepted: input.onAccepted,
 			});
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the
@@ -445,11 +446,17 @@ export async function submitInteractiveInput(
 				imageLinks: input.imageLinks,
 				optimistic: true,
 				propagateErrors: true,
+				onAccepted: input.onAccepted,
 			});
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior,
+					onAccepted: input.onAccepted,
+				});
+				if (!forwarded) input.onAccepted?.();
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}

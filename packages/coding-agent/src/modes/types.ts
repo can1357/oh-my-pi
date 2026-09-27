@@ -80,6 +80,8 @@ export type SubmittedUserInput = {
 	 *  it). Normal user Enter carries "steer" to match the streaming-branch Enter;
 	 *  background/continuation submits omit it and default to "followUp". */
 	streamingBehavior?: "steer" | "followUp";
+	/** Tied only to a user-typed editor submission, never an automatic continuation. */
+	onAccepted?: () => void;
 	cancelled: boolean;
 	started: boolean;
 };
@@ -107,6 +109,9 @@ export interface AgentHubOpenOptions {
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
 }
+
+/** Mode command outcome: submitted agent prompt, rejected prompt, or consumed local action. */
+export type ModeCommandResult = boolean | "consumed";
 
 export interface InteractiveModeContext {
 	// UI access
@@ -347,6 +352,7 @@ export interface InteractiveModeContext {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
+			onAccepted?: () => void;
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput;
@@ -514,14 +520,10 @@ export interface InteractiveModeContext {
 	handleImagePaste(): Promise<boolean>;
 	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
 	handleImagePathPaste(path: string): Promise<void>;
-	/**
-	 * Queue a message for delivery only after the active agent turn would stop.
-	 * `detached` is a submission whose draft already left the editor: its attachments
-	 * are queued and its text is restored if queueing fails.
-	 */
+	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(
 		message: string,
-		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted"> & { text?: string },
 	): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
@@ -553,11 +555,19 @@ export interface InteractiveModeContext {
 	toggleThinkingBlockVisibility(): void;
 	handlePlanModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean>;
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
 	handleVibeModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
+	handleGoalModeCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
+	handleGuidedGoalCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
 	): Promise<boolean>;
 	handleGoalModeCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;

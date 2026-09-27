@@ -30,6 +30,7 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
+export type BuiltinSlashCommandExecutionResult = string | boolean | { pending: true };
 
 export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
@@ -122,14 +123,15 @@ export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = 
 /**
  * Execute a builtin slash command in the interactive TUI.
  *
- * Returns `false` when no builtin matched. Returns `true` when a command
- * consumed the input entirely. Returns a `string` when the command was handled
- * but remaining text should be sent as a prompt.
+ * Returns `false` when no builtin matched. Returns `true` when a local command
+ * consumed the input entirely, `{ pending: true }` when the command scheduled
+ * a prompt (its `onAccepted` callback owns draft restoration), and a `string`
+ * when remaining text should be sent as a prompt.
  */
 export async function executeBuiltinSlashCommand(
 	text: string,
 	runtime: BuiltinSlashCommandRuntime,
-): Promise<string | boolean> {
+): Promise<BuiltinSlashCommandExecutionResult> {
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 
@@ -148,6 +150,8 @@ export async function executeBuiltinSlashCommand(
 	if (command.handleTui) {
 		const result = await command.handleTui(parsed, runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
+		if (result && typeof result === "object" && "agentInvoked" in result && result.agentInvoked)
+			return { pending: true };
 		return true;
 	}
 	if (command.handle) {

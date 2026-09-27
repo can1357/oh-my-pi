@@ -74,7 +74,7 @@ export interface AgentTranscriptViewerDeps {
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	expandKeys: KeyId[];
-	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
+	/** Keys that toggle the whole hub closed (app.agents.hub). */
 	hubKeys: KeyId[];
 	requestRender: () => void;
 	/** Close just this viewer (Esc), returning to the hub table. */

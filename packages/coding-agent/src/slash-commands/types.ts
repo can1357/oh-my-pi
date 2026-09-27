@@ -45,6 +45,9 @@ export interface ParsedSlashCommand {
  *   below so the contract typechecks under TypeScript 5.x (which does not
  *   coerce `() => void` to `() => T | undefined`) as well as 6.x / tsgo.
  * - `{ consumed: true }` — explicit equivalent of the above (ACP shape).
+ * - `{ consumed: true, agentInvoked: true }` — TUI submission was scheduled;
+ *   restore a stashed draft only from its `onAccepted` callback, not when the
+ *   slash handler returns (the pending prompt may still be dropped).
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
  */
@@ -111,7 +114,7 @@ export interface SlashCommandRuntime {
 export interface TuiSlashCommandRuntime {
 	ctx: InteractiveModeContext;
 	/** Post-extension-hook attachments belonging to the submitted slash draft. */
-	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
+	input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">;
 	/** The editor snapshot was cleared before asynchronous input hooks ran. */
 	draftDetached?: boolean;
 }
