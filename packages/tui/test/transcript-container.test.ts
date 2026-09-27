@@ -410,6 +410,20 @@ describe("TranscriptContainer", () => {
 		// settled transcript prefix live for one frame while it drains next.
 		expect(transcript.renderViewport(80, 1, frame)).toEqual(["current tool"]);
 	});
+	it("retires finished head rows before clipping the viewport under a pinned frontier (issue #12584)", () => {
+		const transcript = new TranscriptContainer();
+		const finished = new Block(["L1", "L2", "L3", "L4", "L5", "L6"], true);
+		const live = new ToolBlock(["T1", "T2"], false);
+		transcript.addChild(finished);
+		transcript.addChild(live);
+
+		// Capacity 3 with 8 live rows: the viewport must drop 5 rows. The
+		// finished head must retire synchronously so the clipped rows are
+		// already committed to scrollback instead of vanishing.
+		const out = transcript.renderViewport(80, 3, frame);
+		expect(out.length).toBeLessThanOrEqual(3);
+		expect(transcript.peekFinalizedBatch(80, 100)).toBeUndefined();
+	});
 	it("excludes empty blocks so pressure never emits blank rows (issue 9483)", () => {
 		const transcript = new TranscriptContainer();
 		// Text blocks interleaved with empty (hidden tool-activity) blocks that
