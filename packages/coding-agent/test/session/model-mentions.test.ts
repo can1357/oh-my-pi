@@ -7,6 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { expandModelMentionTags } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import {
 	MODEL_MENTION_ENTRY_TYPE,
@@ -86,6 +87,45 @@ describe("model mentions", () => {
 								.join(""),
 				);
 			expect(promptText).toEqual(["ask ^a/x", 'ask <model agent="m1" name="Y"/>']);
+		} finally {
+			await agentSession.dispose();
+		}
+	});
+
+	test("mid-session tags ride a hidden notice instead of the task description", async () => {
+		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Synthetic done"] }, { content: ["User done"] }] }).stream,
+		});
+		const agentSession = new AgentSession({
+			agent,
+			sessionManager: session,
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+		});
+		try {
+			expect(agentSession.getAdvertisedSessionAgents()).toEqual([]);
+			await agentSession.prompt("ask ^b/y");
+			// The description surface only absorbs tags at a base-prompt rebuild, so
+			// the new pseudonym must arrive as a notice carrying its selector.
+			expect(agentSession.getAdvertisedSessionAgents()).toEqual([]);
+			const notice = agent.state.messages.find(
+				(message): message is CustomMessage =>
+					message.role === "custom" && message.customType === "session-agent-notice",
+			);
+			if (!notice || typeof notice.content !== "string") throw new Error("Missing session agent notice");
+			expect(notice.content).toContain("`m1`");
+			expect(notice.content).toContain("b/y");
+			expect(notice.display).toBe(false);
+
+			// The notice is not re-emitted: the model already knows m1.
+			await agentSession.prompt("continue");
+			const notices = agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "session-agent-notice",
+			);
+			expect(notices).toHaveLength(1);
 		} finally {
 			await agentSession.dispose();
 		}
