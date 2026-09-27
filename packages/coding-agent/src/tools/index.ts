@@ -400,6 +400,13 @@ export interface ToolSession {
 	getSessionSpawns: () => string | null;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
+	/**
+	 * Session agents baked into the current base prompt surface. The task
+	 * description lists these instead of the live set so tagging a model
+	 * mid-session does not mutate the provider tool prefix; the delta rides a
+	 * hidden notice. Absent when the embedder has no base-prompt surface.
+	 */
+	advertisedSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */

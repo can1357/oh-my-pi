@@ -1790,6 +1790,7 @@ export class AgentSession implements SettingsScope {
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
+			sessionAgents: () => this.getSessionAgents(),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -5887,6 +5888,15 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.advertisedEvalPreludes;
 	}
 
+	/**
+	 * User-tagged model agents frozen into the task description (see
+	 * {@link SessionTools.advertisedSessionAgents}). Later tags ride a hidden
+	 * notice so the provider cache prefix stays intact.
+	 */
+	getAdvertisedSessionAgents(): readonly AgentDefinition[] {
+		return this.#tools.advertisedSessionAgents;
+	}
+
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
 		this.#memory.cancelLocalMemoryStartup();
@@ -7311,13 +7321,15 @@ export class AgentSession implements SettingsScope {
 				? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice) {
+			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
 					...(xdevMountNotice ? [xdevMountNotice] : []),
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
+					...(sessionAgentNotice ? [sessionAgentNotice] : []),
 				);
 			}
 
