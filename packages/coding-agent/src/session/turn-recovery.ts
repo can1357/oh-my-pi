@@ -2420,11 +2420,27 @@ export class TurnRecovery {
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
 		if (accountPolicyDenial && currentModel) {
-			switchedCredential = await this.#host.modelRegistry.authStorage.limits.rotate(
-				currentModel.provider,
-				this.#host.sessionId(),
-				{ error: errorMessage, modelId: currentModel.id },
-			);
+			// `rotate` may sleep out a sibling's short block; register its signal
+			// as the retry controller so `abortRetry()` cancels that wait exactly
+			// like the backoff sleep below.
+			const rotateAbortController = new AbortController();
+			this.#retryAbortController?.abort();
+			this.#retryAbortController = rotateAbortController;
+			try {
+				switchedCredential = (
+					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
+						error: errorMessage,
+						modelId: currentModel.id,
+						signal: rotateAbortController.signal,
+					})
+				).switched;
+			} catch (error) {
+				if (!rotateAbortController.signal.aborted) throw error;
+				if (this.#retryAbortController !== rotateAbortController) return false;
+				return this.#endCancelledRetry();
+			} finally {
+				if (this.#retryAbortController === rotateAbortController) this.#retryAbortController = undefined;
+			}
 			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
@@ -2638,18 +2654,7 @@ export class TurnRecovery {
 				return false;
 			}
 			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
-			this.#retryAbortController = undefined;
-			await this.#host.emitSessionEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this.#clearPendingRetryErrors();
-			this.resolveRetry();
-			return false;
+			return this.#endCancelledRetry();
 		}
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
@@ -2681,6 +2686,22 @@ export class TurnRecovery {
 		});
 
 		return true;
+	}
+
+	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	async #endCancelledRetry(): Promise<false> {
+		const attempt = this.#retryAttempt;
+		this.#retryAttempt = 0;
+		this.#retryAbortController = undefined;
+		await this.#host.emitSessionEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: "Retry cancelled",
+		});
+		this.#clearPendingRetryErrors();
+		this.resolveRetry();
+		return false;
 	}
 
 	/**

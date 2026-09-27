@@ -2318,6 +2318,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) return;
 		if (!this.goalModeEnabled || this.goalModePaused) return;
 		if (this.#goalSuppressNextContinuation) return;
+		if (this.#goalOpenWorkAllBlocked()) return;
 		if (this.#pendingSubmittedInput) return;
 		if (this.editor.getText().trim().length > 0) return;
 		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
@@ -2342,6 +2343,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
 			const latestState = this.session.getGoalModeState();
 			if (!latestState?.enabled || latestState.goal.status !== "active") return;
+			if (this.#goalOpenWorkAllBlocked()) return;
 			this.#pendingGoalContinuationTurns++;
 			this.onInputCallback(
 				this.startPendingSubmission({
@@ -2351,6 +2353,18 @@ export class InteractiveMode implements InteractiveModeContext {
 				}),
 			);
 		}, 800);
+	}
+
+	/** A blocked-only todo list has no work the agent can advance without another turn. */
+	#goalOpenWorkAllBlocked(): boolean {
+		const phases = this.session.getTodoPhases();
+		if (nextActionableTask(phases)) return false;
+		for (const phase of phases) {
+			for (const task of phase.tasks) {
+				if (task.status === "blocked") return true;
+			}
+		}
+		return false;
 	}
 
 	#cancelGoalContinuation(): void {

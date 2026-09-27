@@ -32,6 +32,7 @@ import {
 	ReadRejectedSchema,
 	ReadResultSchema,
 	ReadSuccessSchema,
+	ShellArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, encodeJsonValue } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1615,6 +1616,184 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(collected.map(result => result.toolCallId)).toEqual(["call-read-orphan"]);
 		expect(collected[0]).toMatchObject({ toolName: "read", isError: true });
 	});
+
+	it("emits an unresolved call when an MCP frame is handed to an external executor", async () => {
+		// auth-gateway sets `externalToolExecutor`: the client's own tools reach
+		// Cursor as MCP tools and the client executes them. Answering the frame
+		// with the handoff text while emitting no block made the turn look like
+		// plain text ending on `stop`, so the client never saw the call
+		// (issue #13082). The block must also stay unmarked: `isClientToolUse`
+		// in `anthropic-messages-server` (and the OpenAI chat finish-reason
+		// mapper) report a handoff only for a call without `kCursorExecResolved`.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const written: unknown[] = [];
+		const h2Request = {
+			write: (chunk: unknown) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const collected: ToolResultMessage[] = [];
+		const serverMsg = create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 1,
+					execId: "exec-mcp-handoff",
+					message: {
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "get_weather",
+							toolName: "get_weather",
+							toolCallId: "call-handoff-1",
+							providerIdentifier: "pi-agent",
+							args: { city: encodeJsonValue('"Paris"') },
+						}),
+					},
+				}),
+			},
+		});
+
+		await handleServerMessage(
+			serverMsg,
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			result => {
+				collected.push(result);
+				return result;
+			},
+			{ sawTokenDelta: false },
+			[],
+			[],
+			undefined,
+			true,
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]).toMatchObject({ id: "call-handoff-1", name: "get_weather", arguments: { city: "Paris" } });
+		expect(blocks[0][kCursorExecResolved]).toBeUndefined();
+		// The external executor owes the result, so nothing is paired locally,
+		// and Cursor still gets its exec answer instead of stalling the turn.
+		expect(collected).toHaveLength(0);
+		expect(written).toHaveLength(1);
+	});
+
+	it("does not duplicate a handed-off call when its interaction frame follows", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 1,
+						execId: "exec-mcp-handoff-2",
+						message: {
+							case: "mcpArgs",
+							value: create(McpArgsSchema, {
+								name: "get_weather",
+								toolName: "get_weather",
+								toolCallId: "call-handoff-2",
+								providerIdentifier: "pi-agent",
+							}),
+						},
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			[],
+			undefined,
+			true,
+		);
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-handoff-2",
+						toolCall: {
+							mcpToolCall: {
+								args: { name: "get_weather", toolName: "get_weather", toolCallId: "call-handoff-2" },
+							},
+						},
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0][kCursorExecResolved]).toBeUndefined();
+	});
+
+	it.each(["shellArgs", "shellStreamArgs", "miniSweAgentBashArgs"] as const)(
+		"records a %s display block's millisecond timeout in bash-tool seconds",
+		async frameCase => {
+			// Cursor states shell budgets in milliseconds; the bridge converts them
+			// before running bash, and the transcript block must match what ran
+			// rather than showing a 15 s budget as 15000.
+			const output = cursorAssistantMessage();
+			const stream = new AssistantMessageEventStream();
+			const state = newBlockState();
+			const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+			await handleServerMessage(
+				create(AgentServerMessageSchema, {
+					message: {
+						case: "execServerMessage",
+						value: create(ExecServerMessageSchema, {
+							id: 1,
+							execId: `exec-${frameCase}`,
+							message: {
+								case: frameCase,
+								value: create(ShellArgsSchema, {
+									command: "sleep 1",
+									workingDirectory: "/tmp",
+									timeout: 15000,
+									toolCallId: `call-${frameCase}`,
+								}),
+							},
+						}),
+					},
+				}),
+				output,
+				stream,
+				state,
+				new Map(),
+				h2Request,
+				undefined,
+				undefined,
+				{ sawTokenDelta: false },
+				[],
+			);
+
+			const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]).toMatchObject({ id: `call-${frameCase}`, name: "bash" });
+			expect(blocks[0].arguments.timeout).toBe(15);
+		},
+	);
 
 	it("survives a local exec tool outliving the lazy idle budget end to end", async () => {
 		const workDone = Promise.withResolvers<void>();

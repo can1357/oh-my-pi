@@ -168,6 +168,8 @@ Optional rendering hooks:
 
 The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
 
+`renderCall`'s `options` argument additionally answers the `Theme` API, so a renderer written against upstream pi's `renderCall(args, theme, context)` order styles correctly under omp.
+
 Runtime behavior in TUI:
 
 - If hooks exist, tool output is rendered inside a `Box` container.

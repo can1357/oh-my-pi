@@ -1356,7 +1356,7 @@ describe("AuthStorage codex oauth ranking", () => {
 			error: Object.assign(new Error("insufficient_quota"), { status: 429 }),
 		});
 
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe(`api-${healthyAccount}`);
 		const activeAccounts = (await authStorage.health.check())
