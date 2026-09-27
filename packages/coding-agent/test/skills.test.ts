@@ -511,6 +511,36 @@ enabled: false
 				await removeWithRetries(tempDir);
 			}
 		});
+
+		it("keeps a custom directory's precedence when it aliases a default-provider skill (regression: PR #9379 review, realpath dedup tier)", async () => {
+			const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-alias-project-"));
+			const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-alias-ext-"));
+			try {
+				await fs.mkdir(path.join(projectDir, ".git"), { recursive: true });
+				// The project's default `.claude/skills` provider loads the file first;
+				// the user also configured that directory as a custom source.
+				const projectSkills = path.join(projectDir, ".claude", "skills");
+				const customPath = await writeSkill(projectSkills, "shared-name", "shared-name", "Configured by the user.");
+				const extensionPath = await writeSkill(extensionDir, "shared-name", "shared-name", "From an extension.");
+
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableClaudeProject: true,
+					cwd: projectDir,
+					customDirectories: [projectSkills],
+					extensionDirectories: [extensionDir],
+				});
+
+				const shared = skills.filter(s => s.name === "shared-name");
+				expect(shared).toHaveLength(1);
+				expect(shared[0].filePath).not.toBe(extensionPath);
+				expect(await fs.realpath(shared[0].filePath)).toBe(await fs.realpath(customPath));
+				expect(shared[0].source).toBe("custom:user");
+			} finally {
+				await removeWithRetries(projectDir);
+				await removeWithRetries(extensionDir);
+			}
+		});
 	});
 
 	it("should expand ~ in customDirectories", async () => {

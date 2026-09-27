@@ -335,20 +335,31 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}),
 	);
 
+	const isConfiguredSource = (source: string): boolean =>
+		source.startsWith("custom:") || source.startsWith("extension:");
 	for (let i = 0; i < allConfiguredSkills.length; i++) {
 		const { skill } = allConfiguredSkills[i];
 		const resolvedPath = configuredRealPaths[i];
-		if (realPathSet.has(resolvedPath)) continue;
-
 		const existing = skillMap.get(skill.name);
+		if (realPathSet.has(resolvedPath)) {
+			// The same file is already loaded. When a DEFAULT-path provider loaded
+			// it under this name, the configured alias takes over the entry so its
+			// tier holds: a later extension skill of the same name must not replace
+			// a skill the user configured via skills.customDirectories (PR #9379 review).
+			if (existing && !isConfiguredSource(existing.source)) {
+				const existingRealPath = await fs.realpath(existing.filePath).catch(() => existing.filePath);
+				if (existingRealPath === resolvedPath) skillMap.set(skill.name, skill);
+			}
+			continue;
+		}
+
 		if (existing) {
 			// A skill name claimed by a DEFAULT-path provider (e.g.
 			// ~/.claude/skills/<name>) yields to an explicitly configured source —
 			// skills.customDirectories or an extension's resources_discover dir —
 			// the user opted into those (issue #7190). Only same-tier configured
 			// duplicates keep first-wins.
-			const isConfiguredExisting = existing.source.startsWith("custom:") || existing.source.startsWith("extension:");
-			if (!isConfiguredExisting) {
+			if (!isConfiguredSource(existing.source)) {
 				skillMap.set(skill.name, skill);
 				realPathSet.add(resolvedPath);
 				continue;
