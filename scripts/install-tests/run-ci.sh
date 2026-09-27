@@ -91,7 +91,15 @@ bun --cwd=packages/coding-agent run build
 
 BINARY_DIR="$WORK_DIR/binary-bin"
 mkdir -p "$BINARY_DIR"
-cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
+# Android builds emit a relocatable directory: cli.js, the canonical preload,
+# and every generated `type:file` asset (including the embedded native archive)
+# stay beside the canonical shell launcher. Desktop builds retain the existing
+# single-file compiled binary contract.
+if [ -d packages/coding-agent/dist/android ]; then
+   cp -R packages/coding-agent/dist/android/. "$BINARY_DIR/"
+else
+   cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
+fi
 smoke_cli "$BINARY_DIR/omp"
 
 section "Source install smoke"
