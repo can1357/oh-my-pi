@@ -96,6 +96,15 @@ export enum SubagentBackgroundReason {
 	QUEUED_FOLLOW_UP = 3,
 }
 
+/** Cursor agent message agent.v1.ActiveBranchChangeUpdate. */
+export interface ActiveBranchChangeUpdate extends ProtoMessage {
+	branch: string;
+}
+
+export const ActiveBranchChangeUpdateSchema: MessageCodec<ActiveBranchChangeUpdate> = pb<ActiveBranchChangeUpdate>("agent.v1.ActiveBranchChangeUpdate", [
+	{ no: 1, name: "branch", kind: "string" },
+]);
+
 /** Cursor agent message agent.v1.AfterAgentResponseRequestQuery. */
 export interface AfterAgentResponseRequestQuery extends ProtoMessage {
 }
@@ -179,6 +188,25 @@ export interface AgentRunRequest extends ProtoMessage {
 	mcpFileSystemOptions?: McpFileSystemOptions;
 	skillOptions?: SkillOptions;
 	customSystemPrompt?: string;
+	suggestNextPrompt: boolean;
+	subagentTypeName: string;
+	excludeWorkspaceContext: boolean;
+	harness: string;
+	selectedSubagentModels: RequestedModel[];
+	selectedSubagentModelDetails: ModelDetails[];
+	conversationGroupId: string;
+	preFetchedBlobs: PreFetchedBlob[];
+	devRawModelSlug: string;
+	clientSupportsInlineImages: boolean;
+	subagentModelOverrides: SubagentModelOverride[];
+	canCreateCloudSubagents: boolean;
+	suppressSubagentProgressUpdateTool: boolean;
+	clientSupportsSendToUser: boolean;
+	computerUseCoordinateMode: number;
+	runId: string;
+	agentSessionId: string;
+	clientSupportsPromptContextUsageRpc: boolean;
+	clientSupportsRoutedModelUpdate: boolean;
 }
 
 export const AgentRunRequestSchema: MessageCodec<AgentRunRequest> = pb<AgentRunRequest>("agent.v1.AgentRunRequest", [
@@ -191,6 +219,25 @@ export const AgentRunRequestSchema: MessageCodec<AgentRunRequest> = pb<AgentRunR
 	{ no: 6, name: "mcpFileSystemOptions", kind: "message", T: () => McpFileSystemOptionsSchema },
 	{ no: 7, name: "skillOptions", kind: "message", T: () => SkillOptionsSchema },
 	{ no: 8, name: "customSystemPrompt", kind: "string", optional: true },
+	{ no: 10, name: "suggestNextPrompt", kind: "bool" },
+	{ no: 11, name: "subagentTypeName", kind: "string" },
+	{ no: 12, name: "excludeWorkspaceContext", kind: "bool" },
+	{ no: 13, name: "harness", kind: "string" },
+	{ no: 14, name: "selectedSubagentModels", kind: "message", T: () => RequestedModelSchema, repeat: true },
+	{ no: 15, name: "selectedSubagentModelDetails", kind: "message", T: () => ModelDetailsSchema, repeat: true },
+	{ no: 16, name: "conversationGroupId", kind: "string" },
+	{ no: 17, name: "preFetchedBlobs", kind: "message", T: () => PreFetchedBlobSchema, repeat: true },
+	{ no: 18, name: "devRawModelSlug", kind: "string" },
+	{ no: 19, name: "clientSupportsInlineImages", kind: "bool" },
+	{ no: 20, name: "subagentModelOverrides", kind: "message", T: () => SubagentModelOverrideSchema, repeat: true },
+	{ no: 21, name: "canCreateCloudSubagents", kind: "bool" },
+	{ no: 22, name: "suppressSubagentProgressUpdateTool", kind: "bool" },
+	{ no: 23, name: "clientSupportsSendToUser", kind: "bool" },
+	{ no: 24, name: "computerUseCoordinateMode", kind: "int32" },
+	{ no: 25, name: "runId", kind: "string" },
+	{ no: 26, name: "agentSessionId", kind: "string" },
+	{ no: 27, name: "clientSupportsPromptContextUsageRpc", kind: "bool" },
+	{ no: 28, name: "clientSupportsRoutedModelUpdate", kind: "bool" },
 ]);
 
 /** Cursor agent message agent.v1.AgentServerMessage. */
@@ -202,7 +249,8 @@ export interface AgentServerMessage extends ProtoMessage {
 		| { case: "execServerControlMessage"; value: ExecServerControlMessage }
 		| { case: "conversationCheckpointUpdate"; value: ConversationStateStructure }
 		| { case: "kvServerMessage"; value: KvServerMessage }
-		| { case: "interactionQuery"; value: InteractionQuery };
+		| { case: "interactionQuery"; value: InteractionQuery }
+		| { case: "ttftBreakdown"; value: TtftBreakdown };
 }
 
 export const AgentServerMessageSchema: MessageCodec<AgentServerMessage> = pb<AgentServerMessage>("agent.v1.AgentServerMessage", [
@@ -216,6 +264,7 @@ export const AgentServerMessageSchema: MessageCodec<AgentServerMessage> = pb<Age
 			{ no: 3, name: "conversationCheckpointUpdate", kind: "message", T: () => ConversationStateStructureSchema },
 			{ no: 4, name: "kvServerMessage", kind: "message", T: () => KvServerMessageSchema },
 			{ no: 7, name: "interactionQuery", kind: "message", T: () => InteractionQuerySchema },
+			{ no: 8, name: "ttftBreakdown", kind: "message", T: () => TtftBreakdownSchema },
 		],
 	},
 ]);
@@ -1035,6 +1084,15 @@ export interface ConnectScmToolCall extends ProtoMessage {
 export const ConnectScmToolCallSchema: MessageCodec<ConnectScmToolCall> = pb<ConnectScmToolCall>("agent.v1.ConnectScmToolCall", [
 	{ no: 1, name: "args", kind: "message", T: () => ConnectScmArgsSchema },
 	{ no: 2, name: "result", kind: "message", T: () => ConnectScmResultSchema },
+]);
+
+/** Cursor agent message agent.v1.ContextInjectionStateUpdate. */
+export interface ContextInjectionStateUpdate extends ProtoMessage {
+	injectionId: string;
+}
+
+export const ContextInjectionStateUpdateSchema: MessageCodec<ContextInjectionStateUpdate> = pb<ContextInjectionStateUpdate>("agent.v1.ContextInjectionStateUpdate", [
+	{ no: 1, name: "injectionId", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.ConversationAction. */
@@ -2547,6 +2605,15 @@ export const ExtraContextEntrySchema: MessageCodec<ExtraContextEntry> = pb<Extra
 	},
 ]);
 
+/** Cursor agent message agent.v1.FeedbackRequestUpdate. */
+export interface FeedbackRequestUpdate extends ProtoMessage {
+	question: string;
+}
+
+export const FeedbackRequestUpdateSchema: MessageCodec<FeedbackRequestUpdate> = pb<FeedbackRequestUpdate>("agent.v1.FeedbackRequestUpdate", [
+	{ no: 1, name: "question", kind: "string" },
+]);
+
 /** Cursor agent message agent.v1.FetchArgs. */
 export interface FetchArgs extends ProtoMessage {
 	url: string;
@@ -3284,7 +3351,14 @@ export interface InteractionUpdate extends ProtoMessage {
 		| { case: "heartbeat"; value: HeartbeatUpdate }
 		| { case: "turnEnded"; value: TurnEndedUpdate }
 		| { case: "stepStarted"; value: StepStartedUpdate }
-		| { case: "stepCompleted"; value: StepCompletedUpdate };
+		| { case: "stepCompleted"; value: StepCompletedUpdate }
+		| { case: "promptSuggestion"; value: PromptSuggestionUpdate }
+		| { case: "postRequestPrompt"; value: PostRequestPromptUpdate }
+		| { case: "activeBranchChange"; value: ActiveBranchChangeUpdate }
+		| { case: "feedbackRequest"; value: FeedbackRequestUpdate }
+		| { case: "responseComparison"; value: ResponseComparisonUpdate }
+		| { case: "contextInjectionState"; value: ContextInjectionStateUpdate }
+		| { case: "routedModel"; value: RoutedModelUpdate };
 }
 
 export const InteractionUpdateSchema: MessageCodec<InteractionUpdate> = pb<InteractionUpdate>("agent.v1.InteractionUpdate", [
@@ -3309,6 +3383,13 @@ export const InteractionUpdateSchema: MessageCodec<InteractionUpdate> = pb<Inter
 			{ no: 14, name: "turnEnded", kind: "message", T: () => TurnEndedUpdateSchema },
 			{ no: 16, name: "stepStarted", kind: "message", T: () => StepStartedUpdateSchema },
 			{ no: 17, name: "stepCompleted", kind: "message", T: () => StepCompletedUpdateSchema },
+			{ no: 18, name: "promptSuggestion", kind: "message", T: () => PromptSuggestionUpdateSchema },
+			{ no: 19, name: "postRequestPrompt", kind: "message", T: () => PostRequestPromptUpdateSchema },
+			{ no: 20, name: "activeBranchChange", kind: "message", T: () => ActiveBranchChangeUpdateSchema },
+			{ no: 21, name: "feedbackRequest", kind: "message", T: () => FeedbackRequestUpdateSchema },
+			{ no: 22, name: "responseComparison", kind: "message", T: () => ResponseComparisonUpdateSchema },
+			{ no: 23, name: "contextInjectionState", kind: "message", T: () => ContextInjectionStateUpdateSchema },
+			{ no: 24, name: "routedModel", kind: "message", T: () => RoutedModelUpdateSchema },
 		],
 	},
 ]);
@@ -4725,6 +4806,15 @@ export const PositionSchema: MessageCodec<Position> = pb<Position>("agent.v1.Pos
 	{ no: 2, name: "column", kind: "uint32" },
 ]);
 
+/** Cursor agent message agent.v1.PostRequestPromptUpdate. */
+export interface PostRequestPromptUpdate extends ProtoMessage {
+	prompt: string;
+}
+
+export const PostRequestPromptUpdateSchema: MessageCodec<PostRequestPromptUpdate> = pb<PostRequestPromptUpdate>("agent.v1.PostRequestPromptUpdate", [
+	{ no: 1, name: "prompt", kind: "string" },
+]);
+
 /** Cursor agent message agent.v1.PostToolUseFailureRequestQuery. */
 export interface PostToolUseFailureRequestQuery extends ProtoMessage {
 }
@@ -4771,6 +4861,17 @@ export interface PreCompactRequestResponse extends ProtoMessage {
 
 export const PreCompactRequestResponseSchema: MessageCodec<PreCompactRequestResponse> = pb<PreCompactRequestResponse>("agent.v1.PreCompactRequestResponse", [
 	{ no: 1, name: "userMessage", kind: "string", optional: true },
+]);
+
+/** Cursor agent message agent.v1.PreFetchedBlob. */
+export interface PreFetchedBlob extends ProtoMessage {
+	id: string;
+	data: Uint8Array;
+}
+
+export const PreFetchedBlobSchema: MessageCodec<PreFetchedBlob> = pb<PreFetchedBlob>("agent.v1.PreFetchedBlob", [
+	{ no: 1, name: "id", kind: "string" },
+	{ no: 2, name: "data", kind: "bytes" },
 ]);
 
 /** Cursor agent message agent.v1.PreToolUseRequestQuery. */
@@ -4820,6 +4921,15 @@ export const PrewarmRequestSchema: MessageCodec<PrewarmRequest> = pb<PrewarmRequ
 	{ no: 6, name: "bestOfNGroupId", kind: "string", optional: true },
 	{ no: 7, name: "tryUseBestOfNPromotion", kind: "bool", optional: true },
 	{ no: 8, name: "customSystemPrompt", kind: "string", optional: true },
+]);
+
+/** Cursor agent message agent.v1.PromptSuggestionUpdate. */
+export interface PromptSuggestionUpdate extends ProtoMessage {
+	suggestion: string;
+}
+
+export const PromptSuggestionUpdateSchema: MessageCodec<PromptSuggestionUpdate> = pb<PromptSuggestionUpdate>("agent.v1.PromptSuggestionUpdate", [
+	{ no: 1, name: "suggestion", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.Range. */
@@ -5648,6 +5758,15 @@ export const RequestedModel_ModelParameterbytesSchema: MessageCodec<RequestedMod
 	{ no: 2, name: "value", kind: "string" },
 ]);
 
+/** Cursor agent message agent.v1.ResponseComparisonUpdate. */
+export interface ResponseComparisonUpdate extends ProtoMessage {
+	comparison: string;
+}
+
+export const ResponseComparisonUpdateSchema: MessageCodec<ResponseComparisonUpdate> = pb<ResponseComparisonUpdate>("agent.v1.ResponseComparisonUpdate", [
+	{ no: 1, name: "comparison", kind: "string" },
+]);
+
 /** Cursor agent message agent.v1.ResumeAction. */
 export interface ResumeAction extends ProtoMessage {
 	requestContext?: RequestContext;
@@ -5655,6 +5774,17 @@ export interface ResumeAction extends ProtoMessage {
 
 export const ResumeActionSchema: MessageCodec<ResumeAction> = pb<ResumeAction>("agent.v1.ResumeAction", [
 	{ no: 2, name: "requestContext", kind: "message", T: () => RequestContextSchema },
+]);
+
+/** Cursor agent message agent.v1.RoutedModelUpdate. */
+export interface RoutedModelUpdate extends ProtoMessage {
+	modelId: string;
+	displayName: string;
+}
+
+export const RoutedModelUpdateSchema: MessageCodec<RoutedModelUpdate> = pb<RoutedModelUpdate>("agent.v1.RoutedModelUpdate", [
+	{ no: 1, name: "modelId", kind: "string" },
+	{ no: 2, name: "displayName", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.SandboxPolicy. */
@@ -7146,6 +7276,25 @@ export const SubagentErrorSchema: MessageCodec<SubagentError> = pb<SubagentError
 	{ no: 2, name: "error", kind: "string" },
 ]);
 
+/** Cursor agent message agent.v1.SubagentModelOverride. */
+export interface SubagentModelOverride extends ProtoMessage {
+	subagentType: string;
+	selection:
+		| { case: undefined; value?: undefined }
+		| { case: "requestedModel"; value: RequestedModel };
+}
+
+export const SubagentModelOverrideSchema: MessageCodec<SubagentModelOverride> = pb<SubagentModelOverride>("agent.v1.SubagentModelOverride", [
+	{ no: 1, name: "subagentType", kind: "string" },
+	{
+		kind: "oneof",
+		name: "selection",
+		variants: [
+			{ no: 2, name: "requestedModel", kind: "message", T: () => RequestedModelSchema },
+		],
+	},
+]);
+
 /** Cursor agent message agent.v1.SubagentPersistedState. */
 export interface SubagentPersistedState extends ProtoMessage {
 	conversationState?: ConversationStateStructure;
@@ -7833,6 +7982,23 @@ export interface TruncatedToolCallSuccess extends ProtoMessage {
 }
 
 export const TruncatedToolCallSuccessSchema: MessageCodec<TruncatedToolCallSuccess> = pb<TruncatedToolCallSuccess>("agent.v1.TruncatedToolCallSuccess", [
+]);
+
+/** Cursor agent message agent.v1.TtftBreakdown. */
+export interface TtftBreakdown extends ProtoMessage {
+	serverFirstTokenMs: bigint;
+	preStreamSetupMs: bigint;
+	waitForFirstEventMs: bigint;
+	providerTtftMs?: bigint;
+	slowPoolWaitMs: bigint;
+}
+
+export const TtftBreakdownSchema: MessageCodec<TtftBreakdown> = pb<TtftBreakdown>("agent.v1.TtftBreakdown", [
+	{ no: 1, name: "serverFirstTokenMs", kind: "int64" },
+	{ no: 2, name: "preStreamSetupMs", kind: "int64" },
+	{ no: 3, name: "waitForFirstEventMs", kind: "int64" },
+	{ no: 4, name: "providerTtftMs", kind: "int64", optional: true },
+	{ no: 5, name: "slowPoolWaitMs", kind: "int64" },
 ]);
 
 /** Cursor agent message agent.v1.TurnEndedUpdate. */

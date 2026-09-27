@@ -347,6 +347,12 @@ export interface CursorOptions extends StreamOptions {
 	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
+	/** Cursor AgentRunRequest capability/session wiring echoed by the CLI. */
+	cursorClientSupportsInlineImages?: boolean;
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	cursorRunId?: string;
+	cursorAgentSessionId?: string;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -5208,9 +5214,12 @@ function createCursorUserMessage(
 	messageId = crypto.randomUUID(),
 ) {
 	const images = typeof content === "string" ? [] : extractImages(content);
+	// The CLI maps a missing/default session mode to AgentMode.AGENT (= 1);
+	// leaving mode unset serializes 0 (UNSPECIFIED), which the CLI never sends.
 	return create(UserMessageSchema, {
 		text,
 		messageId,
+		mode: 1,
 		...(images.length > 0
 			? {
 					selectedContext: create(SelectedContextSchema, {
@@ -5305,7 +5314,14 @@ function resolveCursorWireModel(
 	parameters: RequestedModel_ModelParameterbytes[];
 	maxMode: boolean;
 } {
-	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
+	const rawWireModelId = requestModelId ?? model.requestModelId ?? model.id;
+	// Synthetic catalog id `auto` is the Cursor router sentinel; without roster
+	// proof the wire contract expects `default` (and gateway SSE already treats
+	// both as auto intent). An explicitly resolved `requestModelId` of "auto" —
+	// from discovery or an exact caller override — echoes the roster verbatim,
+	// matching what the CLI itself sends.
+	const rosterEchoedAuto = rawWireModelId === "auto" && (requestModelId === "auto" || model.requestModelId === "auto");
+	const wireModelId = !rosterEchoedAuto && rawWireModelId === "auto" ? "default" : rawWireModelId;
 	const maxMode = resolveCursorMaxMode(model, wireModelId);
 	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [], maxMode };
 	// `collapseVariantId` keeps the lane in the logical id (`-high-fast` →
@@ -5479,6 +5495,11 @@ async function buildGrpcRequestForWireMode(
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
+	runRequest.clientSupportsInlineImages = options?.cursorClientSupportsInlineImages === true;
+	runRequest.clientSupportsRoutedModelUpdate = options?.cursorClientSupportsRoutedModelUpdate === true;
+	runRequest.clientSupportsPromptContextUsageRpc = options?.cursorClientSupportsPromptContextUsageRpc === true;
+	runRequest.runId = options?.cursorRunId ?? "";
+	runRequest.agentSessionId = options?.cursorAgentSessionId ?? "";
 
 	// Tools are sent later via requestContext (exec handshake)
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
