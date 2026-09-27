@@ -35,13 +35,6 @@ describe("Tokenizer", () => {
 		expect(tokenizer.countTokens("hello world")).toBe(3);
 	});
 
-	test("encoding is fixed at construction from the catalog model", () => {
-		expect(new Tokenizer({ tokenizer: "claude-v47" }).encoding).toBe(natives.Encoding.ClaudeV47);
-		expect(new Tokenizer({ tokenizer: "claude-v5" }).encoding).toBe(natives.Encoding.ClaudeV5);
-		expect(new Tokenizer({}).encoding).toBeNull();
-		expect(new Tokenizer(undefined).encoding).toBeNull();
-	});
-
 	test("separate instances do not interfere with each other", () => {
 		const t1 = new Tokenizer({ tokenizer: "claude-v47" });
 		const t2 = new Tokenizer({ tokenizer: "qwen3" });

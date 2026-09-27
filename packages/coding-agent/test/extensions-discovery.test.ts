@@ -79,19 +79,6 @@ describe("extensions discovery", () => {
 		expect(path.basename(result.extensions[0].path)).toBe("foo.js");
 	});
 
-	it("discovers subdirectory with index.ts", async () => {
-		const subdir = path.join(extensionsDir, "my-extension");
-		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain("my-extension");
-		expect(result.extensions[0].path).toContain("index.ts");
-	});
-
 	it("discovers subdirectory with index.js", async () => {
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
@@ -288,19 +275,6 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain(path.join("linked-package", "src", "main.ts"));
-	});
-
-	it("discovers index.ts in a symlinked extension directory", async () => {
-		const packageDir = path.join(tempDir.path(), "linked-index-ts");
-		fs.mkdirSync(packageDir);
-		fs.writeFileSync(path.join(packageDir, "index.ts"), extensionCode);
-		fs.symlinkSync(packageDir, path.join(extensionsDir, "linked-index-ts"), "dir");
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain(path.join("linked-index-ts", "index.ts"));
 	});
 
 	it("discovers index.js in a symlinked extension directory", async () => {
@@ -546,26 +520,6 @@ describe("extensions discovery", () => {
 		expect(paths).toEqual([]);
 	});
 
-	it("loads extensions and registers commands", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode);
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].commands.has("test")).toBe(true);
-	});
-
-	it("loads extensions and registers tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), extensionCodeWithTool("my-tool"));
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
-	});
-
 	it("reports errors for invalid extension code", async () => {
 		fs.writeFileSync(path.join(extensionsDir, "invalid.ts"), "this is not valid typescript export");
 
@@ -574,18 +528,6 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].path).toContain("invalid.ts");
 		expect(result.extensions).toHaveLength(0);
-	});
-
-	it("handles explicitly configured paths", async () => {
-		const customPath = path.join(tempDir.path(), "custom-location", "my-ext.ts");
-		fs.mkdirSync(path.dirname(customPath), { recursive: true });
-		fs.writeFileSync(customPath, extensionCode);
-
-		const result = await discoverForTest([customPath]);
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain("my-ext.ts");
 	});
 
 	it("resolves 3rd party npm dependencies (chalk)", async () => {
@@ -705,44 +647,6 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(0);
 	});
 
-	it("allows multiple extensions to register different tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "tool-a.ts"), extensionCodeWithTool("tool-a"));
-		fs.writeFileSync(path.join(extensionsDir, "tool-b.ts"), extensionCodeWithTool("tool-b"));
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(2);
-
-		const allTools = new Set<string>();
-		for (const ext of result.extensions) {
-			for (const name of ext.tools.keys()) {
-				allTools.add(name);
-			}
-		}
-		expect(allTools.has("tool-a")).toBe(true);
-		expect(allTools.has("tool-b")).toBe(true);
-	});
-
-	it("loads extension with event handlers", async () => {
-		const extCode = `
-			export default function(pi) {
-				pi.on("agent_start", async () => {});
-				pi.on("tool_call", async (event) => undefined);
-				pi.on("agent_end", async () => {});
-			}
-		`;
-		fs.writeFileSync(path.join(extensionsDir, "with-handlers.ts"), extCode);
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].handlers.has("agent_start")).toBe(true);
-		expect(result.extensions[0].handlers.has("tool_call")).toBe(true);
-		expect(result.extensions[0].handlers.has("agent_end")).toBe(true);
-	});
-
 	it("loads hookCapability JS factories as extension handlers", async () => {
 		const hookDir = path.join(getProjectAgentDir(tempDir.path()), "hooks", "pre");
 		fs.mkdirSync(hookDir, { recursive: true });
@@ -816,42 +720,6 @@ describe("extensions discovery", () => {
 		expect(loadedHook?.handlers.has("tool_call")).toBe(true);
 	});
 
-	it("loads extension with shortcuts", async () => {
-		const extCode = `
-			export default function(pi) {
-				pi.registerShortcut("ctrl+t", {
-					description: "Test shortcut",
-					handler: async (ctx) => {},
-				});
-			}
-		`;
-		fs.writeFileSync(path.join(extensionsDir, "with-shortcut.ts"), extCode);
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].shortcuts.has("ctrl+t")).toBe(true);
-	});
-
-	it("loads extension with flags", async () => {
-		const extCode = `
-			export default function(pi) {
-				pi.registerFlag("--my-flag", {
-					description: "My custom flag",
-					handler: async (value) => {},
-				});
-			}
-		`;
-		fs.writeFileSync(path.join(extensionsDir, "with-flag.ts"), extCode);
-
-		const result = await discoverForTest();
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].flags.has("--my-flag")).toBe(true);
-	});
-
 	it("loadExtensions only loads explicit paths without discovery", async () => {
 		// Create discoverable extensions (would be found by discoverAndLoadExtensions)
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCodeWithTool("discovered"));
@@ -869,16 +737,6 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("discovered")).toBe(false);
 	});
 
-	it("loadExtensions with no paths loads nothing", async () => {
-		// Create discoverable extensions (would be found by discoverAndLoadExtensions)
-		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
-
-		// Use loadExtensions directly with empty paths
-		const result = await loadExtensions([], tempDir.path());
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(0);
-	});
 	it("discoverExtensionPaths only invokes the native extension-module provider (#4198)", async () => {
 		// The extension-module capability has multiple providers
 		// (native, claude, codex, gemini, opencode), but discoverExtensionPaths

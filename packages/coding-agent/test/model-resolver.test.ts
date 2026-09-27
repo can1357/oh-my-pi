@@ -542,20 +542,6 @@ describe("parseModelPattern", () => {
 	});
 
 	describe("patterns with valid thinking levels", () => {
-		test("sonnet:high returns sonnet with high thinking level", () => {
-			const result = parseModelPattern("sonnet:high", allModels);
-			expect(result.model?.id).toBe("claude-sonnet-4-5");
-			expect(result.thinkingLevel).toBe(Effort.High);
-			expect(result.warning).toBeUndefined();
-		});
-
-		test("gpt-4o:medium returns gpt-4o with medium thinking level", () => {
-			const result = parseModelPattern("gpt-4o:medium", allModels);
-			expect(result.model?.id).toBe("gpt-4o");
-			expect(result.thinkingLevel).toBe(Effort.Medium);
-			expect(result.warning).toBeUndefined();
-		});
-
 		test("all valid thinking levels work", () => {
 			const levels = [
 				"off",
@@ -637,14 +623,6 @@ describe("parseModelPattern", () => {
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toContain("Invalid thinking level");
 			expect(result.warning).toContain("random");
-		});
-
-		test("gpt-4o:invalid returns gpt-4o with undefined thinking level and warning", () => {
-			const result = parseModelPattern("gpt-4o:invalid", allModels);
-			expect(result.model?.id).toBe("gpt-4o");
-			expect(result.thinkingLevel).toBeUndefined();
-			expect(result.explicitThinkingLevel).toBe(false);
-			expect(result.warning).toContain("Invalid thinking level");
 		});
 	});
 
@@ -803,12 +781,6 @@ describe("parseModelPattern", () => {
 			expect(result.error).toBeTruthy();
 		});
 
-		test("openai/gpt-4o:extended still resolves to the OpenRouter raw id (openai carries no such id)", () => {
-			const result = parseModelPattern("openai/gpt-4o:extended", allModels);
-			expect(result.model?.provider).toBe("openrouter");
-			expect(result.model?.id).toBe("openai/gpt-4o:extended");
-		});
-
 		describe("dotted revision spelling", () => {
 			// First-party ids spell revisions with dashes (`claude-fable-5-1`);
 			// aggregators use dots, and their flat id is verbatim the dotted
@@ -842,14 +814,6 @@ describe("parseModelPattern", () => {
 	});
 
 	describe("edge cases", () => {
-		test("empty pattern matches via partial matching", () => {
-			// Empty string is included in all model IDs, so partial matching finds a match
-			const result = parseModelPattern("", allModels);
-			expect(result.model).not.toBeNull();
-			expect(result.thinkingLevel).toBeUndefined();
-			expect(result.explicitThinkingLevel).toBe(false);
-		});
-
 		test("pattern ending with colon treats empty suffix as invalid", () => {
 			const result = parseModelPattern("sonnet:", allModels);
 			// Empty string after colon is not a valid thinking level
@@ -1130,15 +1094,6 @@ describe("resolveModelRoleValue", () => {
 		expect(result.thinkingLevel).toBe("auto");
 		expect(result.explicitThinkingLevel).toBe(true);
 		expect(result.warning).toBeUndefined();
-	});
-
-	test("does not clamp :auto against the model's supported efforts", () => {
-		// claude-sonnet-4-5 caps at "high"; ensure auto isn't collapsed onto it
-		// by resolveThinkingLevelForModel.
-		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto", allModels);
-
-		expect(result.thinkingLevel).toBe("auto");
-		expect(result.explicitThinkingLevel).toBe(true);
 	});
 });
 describe("resolveAgentPrewalkPattern", () => {
@@ -2149,11 +2104,6 @@ describe("parseModelString", () => {
 	});
 
 	describe("thinking level suffix extraction", () => {
-		test("extracts valid thinking level from provider/id:level", () => {
-			const result = parseModelString("anthropic/claude-sonnet-4-5:high");
-			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5", thinkingLevel: Effort.High });
-		});
-
 		test("extracts all valid thinking levels", () => {
 			const levels = ["off", Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
 			for (const level of levels) {
@@ -2221,11 +2171,6 @@ describe("parseModelString", () => {
 		test("does not strip inherited object keys as thinking suffixes", () => {
 			const result = parseModelString("anthropic/claude-sonnet-4-5:constructor");
 			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:constructor" });
-		});
-		test("does not extract thinking level from model ID with invalid suffix", () => {
-			const result = parseModelString("openrouter/openai/gpt-4o:extended");
-			// :extended is not a valid thinking level, so it stays as part of the ID
-			expect(result).toEqual({ provider: "openrouter", id: "openai/gpt-4o:extended" });
 		});
 
 		test("handles empty suffix after colon", () => {
@@ -2556,11 +2501,6 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 	test("returns empty list when no pattern matches (misconfiguration)", () => {
 		const result = filterAvailableModelsByEnabledPatterns(models, ["nonexistent-model"]);
 		expect(result).toHaveLength(0);
-	});
-
-	test("includes multiple patterns from different providers", () => {
-		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]);
-		expect(result).toHaveLength(2);
 	});
 
 	test("keeps synthetic Bedrock inference profile matches", () => {

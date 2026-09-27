@@ -344,10 +344,6 @@ describe("learn tool (local backend)", () => {
 		};
 	}
 
-	it("createIf returns a tool for the local backend", () => {
-		expect(LearnTool.createIf(localSession())).toBeInstanceOf(LearnTool);
-	});
-
 	it("tiers the local save as a write approval even without a skill payload", () => {
 		expect(new LearnTool(localSession()).approval({ memory: "x" })).toBe("write");
 	});

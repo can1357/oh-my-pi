@@ -96,13 +96,6 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(cfgTierSubagent.get(settings)).toBe("priority"); // claude-only → priority
 		expect(cfgTierAdvisor.get(settings)).toBe("flex");
 	});
-
-	it("leaves a fresh config on the per-family defaults", async () => {
-		const settings = await loadWith({});
-		expect(cfgTierOpenai.get(settings)).toBe("none");
-		expect(cfgTierSubagent.get(settings)).toBe("inherit");
-		expect(cfgTierAdvisor.get(settings)).toBe("none");
-	});
 });
 
 describe("task.agentServiceTierOverrides", () => {

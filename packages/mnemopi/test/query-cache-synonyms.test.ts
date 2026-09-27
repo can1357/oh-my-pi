@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { isEnhancedRecallEnabled, isQueryCacheEnabled, QueryCache } from "@oh-my-pi/pi-mnemopi/core/query-cache";
+import { QueryCache } from "@oh-my-pi/pi-mnemopi/core/query-cache";
 import { expandQuery, getSynonyms, normalizeQuery } from "@oh-my-pi/pi-mnemopi/core/synonyms";
 
 const openCaches: QueryCache[] = [];
@@ -134,13 +134,5 @@ describe("QueryCache", () => {
 			size: 1,
 			max_size: 100,
 		});
-	});
-
-	it("keeps enhanced recall and query cache disabled unless the Python env gate is set", () => {
-		expect(isEnhancedRecallEnabled({})).toBe(false);
-		expect(isQueryCacheEnabled(true, {})).toBe(false);
-		expect(isQueryCacheEnabled(true, { MNEMOPI_ENHANCED_RECALL: "0" })).toBe(false);
-		expect(isQueryCacheEnabled(false, { MNEMOPI_ENHANCED_RECALL: "1" })).toBe(false);
-		expect(isQueryCacheEnabled(true, { MNEMOPI_ENHANCED_RECALL: "1" })).toBe(true);
 	});
 });

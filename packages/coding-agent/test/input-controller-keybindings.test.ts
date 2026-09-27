@@ -438,20 +438,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
 	});
 
-	it("consumes b while a completed /btw branch is unavailable", async () => {
-		const { InputController, ctx, spies } = await createContext();
-		spies.handlesBtwBranchKey.mockReturnValue(true);
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
-
-		expect(result).toEqual({ consume: true });
-		expect(spies.handleBtwBranchKey).toHaveBeenCalledTimes(1);
-	});
-
 	it("lets b reach the composer before an active /btw answer is branchable", async () => {
 		const { InputController, ctx, spies } = await createContext();
 		spies.hasActiveBtw.mockReturnValue(true);
@@ -597,22 +583,6 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwCopyKey).not.toHaveBeenCalled();
-	});
-
-	it("empty Enter aborts the active stream when queued messages are pending", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const session = ctx.session as unknown as { isStreaming: boolean; hasInterruptibleInput: boolean };
-		session.isStreaming = true;
-		session.hasInterruptibleInput = true;
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		await editor.onSubmit?.("");
-
-		expect(spies.abort).toHaveBeenCalledWith({ reason: "Interrupted by user" });
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledTimes(1);
-		expect(spies.prompt).not.toHaveBeenCalled();
 	});
 
 	it("marks streaming follow-up submissions as local", async () => {

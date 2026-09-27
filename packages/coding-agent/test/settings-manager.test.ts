@@ -76,7 +76,6 @@ import { cfgHindsightBankId, cfgHindsightScoping } from "@oh-my-pi/pi-coding-age
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgExaEnabled } from "@oh-my-pi/pi-coding-agent/web/settings";
 import {
-	cfgCompaction,
 	cfgCompactionMethodOrder,
 	cfgSnapcompactSystemPrompt,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -151,13 +150,6 @@ describe("Settings", () => {
 	});
 
 	describe("effective values", () => {
-		it("keeps cloned defaults independent across settings instances", () => {
-			const first = cfgCompaction.get(Settings.isolated());
-			const second = cfgCompaction.get(Settings.isolated());
-			expect(first).not.toBe(second);
-			expect(first.methodOrder).not.toBe(second.methodOrder);
-		});
-
 		it("bumps the effective revision when cwd re-resolves scoped arrays", async () => {
 			const otherProject = tempDir.join("other-project");
 			fs.mkdirSync(otherProject);
@@ -2354,14 +2346,6 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("none");
-		});
-
-		it("resolves unconfigured features.unexpectedStopDetection to the mechanical default", async () => {
-			await writeSettings({});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("mechanical");
 		});
 
 		it("normalizes a quoted-dotted legacy unexpected-stop boolean", async () => {

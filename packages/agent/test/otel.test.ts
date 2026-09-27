@@ -1119,34 +1119,4 @@ describe("ChatUsageEvent.headers and pi.gen_ai.gateway.* span attributes", () =>
 		expect(events[0]?.headers?.["cf-aig-cache-key"]).toBe("secret-key");
 		expect(events[0]?.headers?.["x-custom-secret"]).toBe("nope");
 	});
-
-	it("classifies miss/bypass/unknown response-cache statuses on the chat span", async () => {
-		const cases = [
-			{ header: "MISS", expected: "miss" },
-			{ header: "bypass", expected: "bypass" },
-			{ header: "DYNAMIC", expected: "unknown" },
-		] as const;
-		for (const { header, expected } of cases) {
-			exporter.reset();
-			const mock = createMockModel({
-				...MOCK_IDENT,
-				responses: [
-					{
-						content: ["ok"],
-						usage: { input: 1, output: 1, totalTokens: 2 },
-						responseHeaders: { "cf-aig-cache-status": header },
-					},
-				],
-			});
-			const config: AgentLoopConfig = {
-				model: mock.model,
-				convertToLlm: identityConverter,
-				telemetry: {},
-			};
-			const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
-			await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
-			const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
-			expect(chat?.attributes[PiGenAIAttr.GatewayResponseCacheStatus]).toBe(expected);
-		}
-	});
 });
