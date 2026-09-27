@@ -50,7 +50,7 @@ declare const chrome: {
 		get(tabId: number): Promise<ChromeTab>;
 		create(createProperties: { url?: string; active?: boolean }): Promise<ChromeTab>;
 		remove(tabId: number): Promise<void>;
-		update(tabId: number, updateProperties: { active?: boolean }): Promise<ChromeTab>;
+		update(tabId: number, updateProperties: { active?: boolean; autoDiscardable?: boolean }): Promise<ChromeTab>;
 		group(options: { tabIds: number[]; groupId?: number }): Promise<number>;
 		ungroup(tabIds: number[]): Promise<void>;
 		onCreated: ChromeEvent<(tab: ChromeTab) => void>;

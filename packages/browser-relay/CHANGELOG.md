@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- omp tabs are now created in the background (`active: false`, `autoDiscardable: false`): opening one never switches your visible tab, and Chrome's memory saver cannot discard an idle agent tab.
+- The omp tab group is now sticky and all-or-nothing: membership follows the tab's lifetime, not the driving session's. Releasing a tab or losing the relay connection no longer ungroups (previously the group was dissolved on disconnect while its tabs stayed behind); the group shrinks only as tabs close or are dragged out by hand.
+- Group matching now recognizes every title form (busy "⏳omp" / done "✅omp"), so concurrent sessions converge on the single omp group per window instead of minting parallel ones whenever the title was mid-rename; duplicate omp groups are folded into the first.
+
 ## [18.3.1] - 2026-09-25
 
 ### Fixed

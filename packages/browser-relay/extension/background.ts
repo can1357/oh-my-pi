@@ -65,7 +65,7 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 	};
 }
 
-/** Title of the omp tab group; mirrored to session storage so a restarted service worker can still dissolve it. */
+/** Title of the omp tab group; mirrored to session storage so a restarted service worker can still update busy/done marks. */
 let ompGroupTitle: string | null = null;
 /** Tabs currently marked busy per group id, so the "⏳" suffix survives multiple concurrently-driven tabs. */
 const busyTabsByGroup = new Map<number, Set<number>>();
@@ -82,7 +82,13 @@ function enqueueGroupOp<T>(fn: () => Promise<T>): Promise<T> {
 	return result;
 }
 
-/** Move tabs into the per-window omp group, creating or reusing it by title. */
+/**
+ * Move tabs into the per-window omp group, creating or reusing it. The group is
+ * matched by ANY title form (busy "⏳…"/done "✅…" marks rename it while omp
+ * works), so concurrent sessions converge on ONE group per window instead of
+ * minting a parallel one whenever the title happens to be mid-rename. Duplicate
+ * omp groups from earlier races are folded into the first match.
+ */
 async function groupTabs(tabIds: number[], title: string, color: string): Promise<{ grouped: Record<string, number> }> {
 	ompGroupTitle = title;
 	void chrome.storage.session.set({ ompGroupTitle: title });
@@ -101,21 +107,28 @@ async function groupTabs(tabIds: number[], title: string, color: string): Promis
 	}
 	const grouped: Record<string, number> = {};
 	for (const [windowId, ids] of byWindow) {
-		const existing = await chrome.tabGroups.query({ title, windowId });
+		const wanted = ompGroupTitles(title);
+		const existing = (await chrome.tabGroups.query({ windowId })).filter(
+			group => group.title !== undefined && wanted[group.title],
+		);
 		let groupId: number;
 		if (existing[0]) {
 			groupId = existing[0].id;
-			// Heal duplicate same-title groups left behind by older races.
+			// Heal duplicate omp groups (older title races): fold their tabs in;
+			// emptied groups dissolve on their own.
 			for (const dupe of existing.slice(1)) {
 				const dupeTabs = await chrome.tabs.query({ groupId: dupe.id });
 				const dupeIds = dupeTabs.map(tab => tab.id).filter(id => id !== undefined);
 				if (dupeIds.length > 0) await chrome.tabs.group({ tabIds: dupeIds, groupId });
 			}
 			await chrome.tabs.group({ tabIds: ids, groupId });
+			// Keep the current title form (busy/done marks carry information);
+			// only refresh the color so all sessions render identically.
+			await chrome.tabGroups.update(groupId, { color });
 		} else {
 			groupId = await chrome.tabs.group({ tabIds: ids });
+			await chrome.tabGroups.update(groupId, { title, color });
 		}
-		await chrome.tabGroups.update(groupId, { title, color });
 		for (const id of ids) grouped[String(id)] = groupId;
 	}
 	return { grouped };
@@ -126,25 +139,18 @@ function ompGroupTitles(title: string): Record<string, true> {
 	return { [title]: true, [`⏳${title}`]: true, [`✅${title}`]: true, [`${title} ⏳`]: true };
 }
 
-/** Dissolve every omp-titled group (relay disconnected or asked us to release tabs). */
-async function restoreGroups(): Promise<void> {
+/**
+ * Recover the omp group title after a service-worker restart (mirrored to
+ * session storage on every group op). Only used for the busy/done title marks —
+ * membership itself is never touched here: the omp group and its tabs persist
+ * as a unit until each tab is closed or the user pulls it out by hand.
+ */
+async function ensureOmpGroupTitle(): Promise<string | null> {
 	if (!ompGroupTitle) {
-		// Service worker restarted since the last group op; recover the title.
 		const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
 		ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
 	}
-
-	if (!ompGroupTitle) return;
-	// Query every group and match by any title form (busy/done marks included).
-	const allGroups = await chrome.tabGroups.query({}).catch(() => []);
-	const title = ompGroupTitle;
-	const wanted = ompGroupTitles(title);
-	const groups = allGroups.filter(group => group.title !== undefined && wanted[group.title]);
-	for (const group of groups) {
-		const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
-		const ids = tabs.map(tab => tab.id).filter(id => id !== undefined);
-		if (ids.length > 0) await chrome.tabs.ungroup(ids).catch(() => {});
-	}
+	return ompGroupTitle;
 }
 
 /** Toggle the "⏳" busy suffix on the title of whichever group `tabId` currently belongs to. */
@@ -176,9 +182,10 @@ async function setGroupBusy(tabId: number, busy: boolean): Promise<void> {
  * a glance whether omp is working or finished (until the next burst or release).
  */
 async function updateGroupBusyTitle(groupId: number, busy: boolean): Promise<void> {
-	if (!ompGroupTitle) return;
+	const title = await ensureOmpGroupTitle();
+	if (!title) return;
 	try {
-		await chrome.tabGroups.update(groupId, { title: busy ? `⏳${ompGroupTitle}` : `✅${ompGroupTitle}` });
+		await chrome.tabGroups.update(groupId, { title: busy ? `⏳${title}` : `✅${title}` });
 	} catch {
 		// Group may have been dissolved concurrently; ignore.
 	}
@@ -240,7 +247,13 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				msg.params,
 			);
 		case "createTab": {
-			const tab = await chrome.tabs.create({ url: msg.url });
+			// Background + non-discardable: opening an omp tab must never steal
+			// focus from what the user is doing. `autoDiscardable` is not a
+			// tabs.create property (schema rejects it) — set it via tabs.update
+			// so the memory saver cannot discard an idle agent tab (a discarded
+			// tab loses its debugger).
+			const tab = await chrome.tabs.create({ url: msg.url, active: false });
+			if (tab.id !== undefined) await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
 			// Group inside the same RPC that creates the tab, so a driven tab is
 			// born in the omp group rather than flashing standalone first. An absent
 			// spec means the relay runs with --no-group; leave the tab loose.
@@ -326,7 +339,9 @@ async function connect(): Promise<void> {
 			pingTimer = null;
 		}
 		void setBadge(false);
-		void restoreGroups();
+		// omp groups and their tabs persist across relay disconnects — the group
+		// only disappears when its last tab closes or the user removes it. No
+		// dissolve here.
 		scheduleReconnect();
 	};
 	socket.onerror = () => {
