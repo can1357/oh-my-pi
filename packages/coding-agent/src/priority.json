@@ -88,6 +88,10 @@
 		"web/mojeek",
 		"web/public"
 	],
+	"xsearch": [
+		"xai/grok-4.6",
+		"xai-oauth/grok-4.6"
+	],
 	"speech": [
 		"local/kokoro",
 		"xai/grok-tts",

@@ -47,6 +47,7 @@ export type ModelRole =
 	| "advisor"
 	| "image"
 	| "web"
+	| "xsearch"
 	| "speech"
 	| "dictation"
 	| "judge";
@@ -63,6 +64,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"advisor",
 	"image",
 	"web",
+	"xsearch",
 	"speech",
 	"dictation",
 	"judge",
@@ -79,7 +81,7 @@ export const CHAT_MODEL_ROLE_IDS: ModelRole[] = [
 	"task",
 	"advisor",
 ];
-export const KIND_ROLE_IDS: ModelRole[] = ["image", "web", "speech", "dictation", "judge"];
+export const KIND_ROLE_IDS: ModelRole[] = ["image", "web", "xsearch", "speech", "dictation", "judge"];
 
 /** Measured model performance shown in browser rows. */
 export interface ModelBrowserPerf {

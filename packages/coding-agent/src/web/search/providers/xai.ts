@@ -46,7 +46,7 @@ interface XAIResponseOutputItem {
 	phase?: "commentary" | "final_answer" | null;
 	content?: XAIResponseContentPart[] | null;
 	annotations?: XAIUrlCitationAnnotation[] | null;
-	action?: { sources?: XAIWebSearchSource[] | null } | null;
+	action?: Record<string, unknown> | null;
 	sources?: XAIWebSearchSource[] | null;
 	results?: XAIWebSearchSource[] | null;
 }
@@ -102,7 +102,99 @@ function domainFilterList(sites: readonly string[]): string[] {
 	return [...hosts];
 }
 
+/** xAI x_search accepts at most 20 handles on an allow or exclude list. */
+const MAX_X_HANDLES = 20;
+
+function assertIsoDate(value: string, field: string): string {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		throw new SearchProviderError("xai", `${field} must be YYYY-MM-DD (got ${JSON.stringify(value)})`, 400);
+	}
+	const [year, month, day] = value.split("-").map(Number);
+	const utc = new Date(Date.UTC(year, month - 1, day));
+	if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) {
+		throw new SearchProviderError("xai", `${field} must be YYYY-MM-DD (got ${JSON.stringify(value)})`, 400);
+	}
+	return value;
+}
+
+function normalizeHandles(handles: readonly string[] | undefined, field: string): string[] {
+	const cleaned: string[] = [];
+	const seen = new Set<string>();
+	for (const raw of handles ?? []) {
+		const handle = raw.trim().replace(/^@+/, "");
+		if (!handle) continue;
+		const key = handle.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		cleaned.push(handle);
+		if (cleaned.length > MAX_X_HANDLES) {
+			throw new SearchProviderError("xai", `${field} accepts at most ${MAX_X_HANDLES} handles`, 400);
+		}
+	}
+	return cleaned;
+}
+
+function xSearchHasNarrowingFilters(params: SearchParams): boolean {
+	const spec = params.xSearch;
+	if (!spec) return false;
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const hasHandle = (handles: readonly string[] | undefined) =>
+		handles?.some(handle => handle.trim().replace(/^@+/, "")) ?? false;
+	return (
+		hasHandle(spec.allowedHandles) ||
+		hasHandle(spec.excludedHandles) ||
+		Boolean(spec.fromDate?.trim() || spec.toDate?.trim() || parsed.after || parsed.before)
+	);
+}
+
+function buildXSearchRequestBody(params: SearchParams): Record<string, unknown> {
+	const spec = params.xSearch;
+	if (!spec) throw new SearchProviderError("xai", "x_search options missing", 400);
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const allowed = normalizeHandles(spec.allowedHandles, "allowed_x_handles");
+	const excluded = normalizeHandles(spec.excludedHandles, "excluded_x_handles");
+	if (allowed.length > 0 && excluded.length > 0) {
+		throw new SearchProviderError("xai", "allowed_x_handles and excluded_x_handles cannot be used together", 400);
+	}
+	const fromDate = spec.fromDate?.trim() || parsed.after;
+	const toDate = spec.toDate?.trim() || parsed.before;
+	if (fromDate) assertIsoDate(fromDate, "from_date");
+	if (toDate) assertIsoDate(toDate, "to_date");
+	if (fromDate && toDate && fromDate > toDate) {
+		throw new SearchProviderError("xai", "from_date must be on or before to_date", 400);
+	}
+	if (fromDate && fromDate > new Date().toISOString().slice(0, 10)) {
+		throw new SearchProviderError("xai", "from_date must not be after today (UTC)", 400);
+	}
+
+	const tool: Record<string, unknown> = { type: "x_search" };
+	if (allowed.length > 0) tool.allowed_x_handles = allowed;
+	else if (excluded.length > 0) tool.excluded_x_handles = excluded;
+	if (fromDate) tool.from_date = fromDate;
+	if (toDate) tool.to_date = toDate;
+	if (spec.enableImageUnderstanding) tool.enable_image_understanding = true;
+	if (spec.enableVideoUnderstanding) tool.enable_video_understanding = true;
+
+	// Dates are tool fields; x_search has no domain filter, so `site:` and
+	// friends degrade to plain terms rather than literal syntax on the wire.
+	const query = parsed.hasDirectives ? formatQuery(parsed, { ...XAI_QUERY_SYNTAX, dateRange: false }) : params.query;
+	const body: Record<string, unknown> = {
+		model: params.model.id,
+		input: [
+			{ role: "system", content: params.systemPrompt },
+			{ role: "user", content: query },
+		],
+		tools: [tool],
+		reasoning: { effort: XAI_WEB_SEARCH_REASONING_EFFORT },
+		store: false,
+	};
+	if (params.maxOutputTokens !== undefined) body.max_output_tokens = params.maxOutputTokens;
+	if (params.temperature !== undefined) body.temperature = params.temperature;
+	return body;
+}
+
 function buildRequestBody(params: SearchParams): Record<string, unknown> {
+	if (params.xSearch) return buildXSearchRequestBody(params);
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const webSearchTool: Record<string, unknown> = { type: "web_search" };
 	let query = params.query;
@@ -233,12 +325,15 @@ function collectAnnotationSources(
 	for (const annotation of annotations) {
 		if (!annotation || typeof annotation !== "object") continue;
 		if (annotation.type !== "url_citation" || typeof annotation.url !== "string") continue;
+		// x_search emits bare index labels ("1","2",…) as titles, not real titles.
+		const title =
+			typeof annotation.title === "string" && !/^\d+$/.test(annotation.title.trim()) ? annotation.title : undefined;
 		addCitationSource(
 			sources,
 			citations,
 			seenUrls,
 			annotation.url,
-			annotation.title,
+			title,
 			annotation.cited_text ??
 				annotation.text ??
 				extractSnippetAround(contentText, annotation.start_index, annotation.end_index),
@@ -252,14 +347,22 @@ function collectWebSearchSources(
 	citations: SearchCitation[],
 	seenUrls: Set<string>,
 ): void {
-	if (item.type !== "web_search_call") return;
-	for (const group of [item.action?.sources, item.sources, item.results]) {
+	if (item.type !== "web_search_call" && item.type !== "x_search_call") return;
+	const groups: unknown[] = [item.sources, item.results];
+	if (item.action && typeof item.action === "object") {
+		for (const value of Object.values(item.action)) groups.push(value);
+	}
+	for (const group of groups) {
 		if (!Array.isArray(group)) continue;
 		for (const source of group) {
 			if (!source || typeof source !== "object") continue;
-			const url = source.url ?? source.source_website_url;
+			const record = source as XAIWebSearchSource;
+			const url = record.url ?? record.source_website_url;
 			if (typeof url !== "string") continue;
-			addCitationSource(sources, citations, seenUrls, url, source.title ?? source.caption);
+			// x_search labels sources "1","2",… — index citations, not titles.
+			const rawTitle = record.title ?? record.caption;
+			const title = rawTitle && !/^\d+$/.test(rawTitle.trim()) ? rawTitle : undefined;
+			addCitationSource(sources, citations, seenUrls, url, title);
 		}
 	}
 }
@@ -447,8 +550,12 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 			? "oauth"
 			: "api_key";
 	const parsed = parseResponse(response, resultCap, authMode);
+	if (params.xSearch && xSearchHasNarrowingFilters(params) && parsed.sources.length === 0) {
+		parsed.degraded = true;
+	}
 	if (!parsed.answer && parsed.sources.length === 0) {
-		throw new SearchProviderError("xai", "xAI web_search returned no answer or sources", 502);
+		const tool = params.xSearch ? "x_search" : "web_search";
+		throw new SearchProviderError("xai", `xAI ${tool} returned no answer or sources`, 502);
 	}
 	return parsed;
 }
