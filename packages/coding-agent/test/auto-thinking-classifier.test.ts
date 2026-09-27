@@ -244,19 +244,21 @@ describe("auto thinking classifier helpers", () => {
 	const MAX_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 	const XHIGH_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 
-	it("shows the delegator's complexity rationale to the judge only when non-blank", async () => {
+	it("classifies a delegated turn from its solution space alone, falling back to the request when blank", async () => {
 		const fixture = createOnlineFixture(buildLadderModel("mock-xhigh", XHIGH_LADDER), "xhigh");
 		// State rides the user message; the system prompt names the field in its instructions.
 		const judgeState = (call: number) => JSON.stringify(fixture.completeSimpleMock.mock.calls[call]?.[1].messages);
 
 		await classifyDifficulty(
-			{ request: "update the retry handler", complexity: " race between cancel and retry; no repro " },
+			{ request: "update the retry handler", solutionSpace: " deadlock cause open, no repro " },
 			fixture.deps,
 		);
-		await classifyDifficulty({ request: "update the retry handler", complexity: "   " }, fixture.deps);
+		await classifyDifficulty({ request: "update the retry handler", solutionSpace: "   " }, fixture.deps);
 
-		expect(judgeState(0)).toContain("<complexity>race between cancel and retry; no repro</complexity>");
-		expect(judgeState(1)).not.toContain("<complexity>");
+		expect(judgeState(0)).toContain("<solution_space>deadlock cause open, no repro</solution_space>");
+		expect(judgeState(0)).not.toContain("update the retry handler");
+		expect(judgeState(1)).toContain("update the retry handler");
+		expect(judgeState(1)).not.toContain("<solution_space>");
 	});
 
 	it("reports usage for each response when a transient classifier failure is retried", async () => {

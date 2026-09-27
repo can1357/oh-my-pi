@@ -468,8 +468,8 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
-	/** Caller's terse difficulty rationale; rides the initial prompt into the child's `auto` thinking classifier. */
-	complexity?: string;
+	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
+	solutionSpace?: string;
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -2164,8 +2164,8 @@ async function driveSessionToYield(
 	monitor: SubagentRunMonitor,
 	task: string,
 	options: {
-		/** Difficulty rationale forwarded to the session's `auto` thinking classifier. */
-		complexity?: string;
+		/** Open-endedness description forwarded to the session's `auto` thinking classifier. */
+		solutionSpace?: string;
 		/**
 		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
 		 * retrying. Lets the caller restore a safe contract and detach its monitor
@@ -2174,7 +2174,7 @@ async function driveSessionToYield(
 		onPromptBusy?: () => Promise<void>;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { complexity, onPromptBusy } = options;
+	const { solutionSpace, onPromptBusy } = options;
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2218,7 +2218,7 @@ async function driveSessionToYield(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					await awaitAbortable(session.prompt(task, { attribution: "agent", complexity }));
+					await awaitAbortable(session.prompt(task, { attribution: "agent", solutionSpace }));
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -4204,7 +4204,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			readyAt = performance.now();
-			const outcome = await driveSessionToYield(session, monitor, task, { complexity: options.complexity });
+			const outcome = await driveSessionToYield(session, monitor, task, { solutionSpace: options.solutionSpace });
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.

@@ -284,7 +284,7 @@ describe("task.batch validation", () => {
 		expect(text).not.toContain("was missing");
 	});
 
-	it("advertises complexity as required but still spawns a model call that omits it", async () => {
+	it("advertises solutionSpace as required but still spawns a model call that omits it", async () => {
 		mockDiscovery();
 		const spawned: Array<string | undefined> = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -293,7 +293,7 @@ describe("task.batch validation", () => {
 		});
 		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
 		const items = getSchemaProperties(tool).tasks;
-		expect(isRecord(items) && isRecord(items.items) ? items.items.required : undefined).toContain("complexity");
+		expect(isRecord(items) && isRecord(items.items) ? items.items.required : undefined).toContain("solutionSpace");
 
 		const mock = createMockModel({
 			responses: [
@@ -301,7 +301,7 @@ describe("task.batch validation", () => {
 					content: [
 						{
 							type: "toolCall",
-							id: "tc-no-complexity",
+							id: "tc-no-solution-space",
 							name: "task",
 							arguments: { context: "# Goal\nX", tasks: [{ name: "Alpha", task: "Do A." }] },
 						},

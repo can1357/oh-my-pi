@@ -361,8 +361,8 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
-	/** Delegator's terse difficulty rationale (task tool `complexity`); extra evidence for `auto` thinking classification. */
-	complexity?: string;
+	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
+	solutionSpace?: string;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

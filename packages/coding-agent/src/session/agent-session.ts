@@ -2094,6 +2094,9 @@ export class AgentSession implements SettingsScope {
 			removeAssistantMessageFromActiveContext: message =>
 				this.#recovery.removeAssistantMessageFromActiveContext(message),
 			dropPersistedAssistantTurn: message => this.#recovery.dropPersistedAssistantTurn(message),
+			retainTerminalFailure: message => {
+				this.#prunedTerminalFailure = message;
+			},
 			runRecoveryCompactionWithRollback: (reason, message, allowDefer, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, allowDefer, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
@@ -2924,12 +2927,13 @@ export class AgentSession implements SettingsScope {
 	// Track last assistant message for auto-compaction check
 	#lastAssistantMessage: AssistantMessage | undefined = undefined;
 	/**
-	 * Classifier-refusal turn pruned from active context at settle (#3591).
-	 * Retained until the next run starts so post-settle readers
-	 * ({@link getLastAssistantMessage}: print mode, task executor) still see
-	 * the terminal error instead of a silently successful-looking state.
+	 * Terminal failure whose turn was pruned from history at settle: a classifier
+	 * refusal (#3591) or an abandoned length-stop recovery. Retained until the next
+	 * run starts so post-settle readers ({@link getLastAssistantMessage}: print
+	 * mode, task executor) still see the terminal error instead of a silently
+	 * successful-looking state.
 	 */
-	#prunedTerminalRefusal: AssistantMessage | undefined = undefined;
+	#prunedTerminalFailure: AssistantMessage | undefined = undefined;
 
 	/**
 	 * In-flight {@link #dispatchAgentEvent} promises. agent-core invokes the
@@ -3347,7 +3351,7 @@ export class AgentSession implements SettingsScope {
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
-			this.#prunedTerminalRefusal = undefined;
+			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
@@ -4018,7 +4022,7 @@ export class AgentSession implements SettingsScope {
 			// continue, telemetry) still fire — matching the pre-fix flow for
 			// `stopReason === "error"`.
 			if (this.#recovery.isClassifierRefusal(msg)) {
-				this.#prunedTerminalRefusal = msg;
+				this.#prunedTerminalFailure = msg;
 				this.#recovery.removeAssistantMessageFromActiveContext(msg);
 			} else if (!AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) {
 				// No retry, fallback, or compaction continuation fired: this errored
@@ -5661,7 +5665,7 @@ export class AgentSession implements SettingsScope {
 	 * the refusal error rather than the previous turn — or nothing.
 	 */
 	getLastAssistantMessage(): AssistantMessage | undefined {
-		return this.#prunedTerminalRefusal ?? this.#findLastAssistantMessage();
+		return this.#prunedTerminalFailure ?? this.#findLastAssistantMessage();
 	}
 	/** Current effective system prompt blocks (includes any per-turn extension modifications) */
 	get systemPrompt(): string[] {
@@ -7130,7 +7134,7 @@ export class AgentSession implements SettingsScope {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "complexity"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
@@ -7267,7 +7271,7 @@ export class AgentSession implements SettingsScope {
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
 			if (this.isAutoThinking && isUserTurn) {
-				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.complexity);
+				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
