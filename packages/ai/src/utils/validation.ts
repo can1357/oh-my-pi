@@ -1759,11 +1759,14 @@ function coerceArgsFromIssues(
 		if (issue.keyword === "unrecognized") {
 			if (issue.unionBranch) continue;
 			const previous = nextArgs;
-			const removed = getValueAtPointer(nextArgs, issue.instancePath);
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) {
 				changed = true;
-				recorder?.keys.push({ pointer: recorder.prefix + issue.instancePath, value: removed });
+				// The delete is copy-on-write, so `previous` still holds the key.
+				if (recorder) {
+					const value = getValueAtPointer(previous, issue.instancePath);
+					recorder.keys.push({ pointer: recorder.prefix + issue.instancePath, value });
+				}
 			}
 			continue;
 		}
