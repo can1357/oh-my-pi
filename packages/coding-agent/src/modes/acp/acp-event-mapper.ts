@@ -177,6 +177,7 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 		case "ast_grep":
 			return "search";
 		case "web_search":
+		case "x_search":
 			return "fetch";
 		case "todo":
 			return "think";

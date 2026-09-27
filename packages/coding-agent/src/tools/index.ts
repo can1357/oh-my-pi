@@ -42,6 +42,7 @@ import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
+import { isXSearchEnabled, XSearchTool } from "../web/search/xsearch";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -584,6 +585,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	wait: s => new WaitTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
+	x_search: s => new XSearchTool(s),
 	write: s => new WriteTool(s),
 	memory_edit: MemoryEditTool.createIf,
 	retain: MemoryRetainTool.createIf,
@@ -762,6 +764,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "ast_grep") return cfgAstGrepEnabled.get(session.settings);
 		if (name === "ast_edit") return cfgAstEditEnabled.get(session.settings);
 		if (name === "web_search") return cfgWebSearchEnabled.get(session.settings);
+		if (name === "x_search") return isXSearchEnabled(session);
 		if (name === "security_scan") return cfgSecurityEnabled.get(session.settings);
 		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return cfgAskEnabled.get(session.settings);

@@ -165,7 +165,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Availability: credentials for the selected model's provider (`xai`, `xai-oauth`, or a compatible host). The role candidate chooses the provider; this adapter does not independently prefer OAuth over API-key models.
     - Querying: POSTs the Responses API with the selected `web` candidate's model id, `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
     - Up to five `site:` or `-site:` hosts map to mutually exclusive `allowed_domains` / `excluded_domains` filters (allow-list wins); path restrictions remain for central filtering. Absolute dates stay as query hints because the current Responses `web_search` tool has no date fields.
-    - The request carries no `search_parameters` (the deprecated Live Search field now returns 410), so `recency` is ignored beyond natural-language date hints in the query text.
+    - X/Twitter posts are out of scope; the dedicated [`x_search` tool](./x_search.md) drives the Responses `x_search` server tool on the same credentials.
     - `max_tokens` and `temperature` pass through. `num_search_results` (or `limit`) only caps parsed sources/citations locally via `clampNumResults(...)`, default `10`, max `30`; it is not sent as an upstream search-count parameter.
     - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode: "api_key" | "oauth"`.
   - **Z.AI** — `packages/coding-agent/src/web/search/providers/zai.ts`
