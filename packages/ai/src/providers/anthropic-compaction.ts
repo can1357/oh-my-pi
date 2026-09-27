@@ -4,11 +4,24 @@ import type { AnthropicMessagesClientLike } from "./anthropic-client";
 import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
 
 function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
-	return (
-		model.compat.supportsServerCompaction === true &&
-		model.compat.supportsContextManagement !== false &&
-		model.remoteCompaction?.enabled !== false
-	);
+	return model.compat.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
+}
+
+/** Supported Anthropic Messages deployments; gateways require an explicit opt-in. */
+function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
+	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
+	if (!baseUrl) return false;
+	try {
+		const { hostname, pathname } = new URL(baseUrl);
+		return (
+			/^(?:[a-z0-9-]+[-.])?aiplatform\.googleapis\.com$/.test(hostname) ||
+			(hostname.endsWith(".services.ai.azure.com") &&
+				(pathname === "/" || pathname === "/anthropic" || pathname.startsWith("/anthropic/"))) ||
+			/^aws-external-anthropic\.[a-z0-9-]+\.api\.aws$/.test(hostname)
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** Whether the model's effective first-party route is the official Anthropic API. */
@@ -18,10 +31,9 @@ export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-mess
 	return isOfficialAnthropicApiUrl(baseUrl);
 }
 
-/** Whether the model and effective endpoint support Anthropic native compaction. */
+/** Whether model policy and the effective deployment support on-demand compaction. */
 export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, effectiveBaseUrl?: string): boolean {
 	if (!isCompactionCapableModel(model)) return false;
-	if (model.remoteCompaction?.enabled === true) return true;
 	if (
 		model.transport === "pi-native" &&
 		model.compat.firstPartyProvider === true &&
@@ -29,11 +41,16 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 	) {
 		return true;
 	}
+	const route =
+		effectiveBaseUrl ??
+		(model.provider === "anthropic"
+			? resolveDirectAnthropicBaseUrl(model)
+			: normalizeAnthropicBaseUrl(model.baseUrl));
 	return (
-		model.compat.firstPartyProvider === true &&
-		(effectiveBaseUrl === undefined
-			? resolvesToOfficialAnthropicEndpoint(model)
-			: isOfficialAnthropicApiUrl(effectiveBaseUrl))
+		isSupportedCompactionEndpoint(route) &&
+		(model.compat.firstPartyProvider === true ||
+			model.provider === "google-vertex" ||
+			model.remoteCompaction?.enabled === true)
 	);
 }
 

@@ -9,7 +9,7 @@
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthStorage } from "../auth-storage";
+import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -92,7 +92,7 @@ export async function resolveGatewayApiKey(
 ): Promise<string | GatewayErrorClassification> {
 	let apiKey: string | undefined;
 	try {
-		apiKey = await storage.keys.get(model.provider, sessionId, { modelId: model.id, signal });
+		apiKey = await storage.keys.get(model.provider, sessionId, modelKeyOptions(model, signal));
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
@@ -161,7 +161,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.keys.get(provider, sessionId, { modelId: model.id, signal });
+		return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -170,7 +170,12 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.keys.get(provider, sessionId, { modelId: model.id, signal });
+	return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
+}
+
+/** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
+function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOptions {
+	return { modelId: model.id, accountIds: model.accountAccess && Object.keys(model.accountAccess), signal };
 }
 
 /**
@@ -207,8 +212,7 @@ export function buildGatewayApiKeyResolver(
 		}
 		if (!lastChance) {
 			const refreshed = await storage.keys.get(model.provider, sessionId, {
-				modelId: model.id,
-				signal: sig,
+				...modelKeyOptions(model, sig),
 				forceRefresh: true,
 			});
 			lastKey = refreshed ?? lastKey;

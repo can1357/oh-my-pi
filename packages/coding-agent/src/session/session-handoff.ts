@@ -18,6 +18,8 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
 
+import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
 	return `handoff-${fileTimestamp}.md`;
@@ -41,7 +43,7 @@ export interface SessionHandoffHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
-	obfuscator: SecretObfuscator | undefined;
+	obfuscator(): SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
@@ -169,7 +171,7 @@ export class SessionHandoff {
 				model.provider,
 			);
 			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
+				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
 				{
 					streamOptions: handoffStreamOptions,
@@ -207,7 +209,7 @@ export class SessionHandoff {
 			}
 
 			let savedPath: string | undefined;
-			if (options?.autoTriggered && this.#host.settings.get("compaction.handoffSaveToDisk")) {
+			if (options?.autoTriggered && cfgCompactionHandoffSaveToDisk.get(this.#host.settings)) {
 				const artifactsDir = this.#host.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());

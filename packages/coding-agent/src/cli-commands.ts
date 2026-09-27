@@ -172,6 +172,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.pluginHelp,
 	},
 	{
+		name: "predict",
+		load: () => import("./commands/predict").then(m => m.default),
+		help: commandHelp.predictHelp,
+	},
+	{
 		name: "ps",
 		load: () => import("./commands/ps").then(m => m.default),
 		help: commandHelp.psHelp,
@@ -256,6 +261,11 @@ export const commands: CommandEntry[] = [
 		name: "token",
 		load: () => import("./commands/token").then(m => m.default),
 		help: commandHelp.tokenHelp,
+	},
+	{
+		name: "toks",
+		load: () => import("./commands/toks").then(m => m.default),
+		help: commandHelp.toksHelp,
 	},
 	{
 		name: "ttsr",

@@ -4,7 +4,29 @@
 
 ### Added
 
-- Added `org-scoped-identity` and `oauth-token-env` rule support for auth providers
+- Added the `openai` web-search grounding for OpenAI API models that support Responses web search (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`) ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `Model.promptCache`, per-retention-tier prompt-cache entry lifetimes in seconds (`short` / `long`), declared per provider through the `prompt-cache` KDL rule (bundled: direct Anthropic, 5 min / 1 h). Custom models and `modelOverrides` opt in with the models.yml `promptCache` key ([#12699](https://github.com/can1357/oh-my-pi/pull/12699) by [@KamijoToma](https://github.com/KamijoToma)).
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added compatibility flags for models that stop output at the context-window limit and models that support steering, including defaults for Claude 4.5+ and GPT-6+ models.
+
+### Fixed
+
+- Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
+- Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
+- Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added compaction support for the `claude-mythos-preview` model.
+- Added provider and authentication rule definitions for on-device Apple Foundation Models.
+- Added per-account discovery of Codex cyber access entitlements.
+- Added `org-scoped-identity` and `oauth-token-env` authentication rules for providers.
 
 ## [18.2.11] - 2026-09-23
 

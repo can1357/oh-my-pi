@@ -2,9 +2,75 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an "OpenAI API" option to the setup wizard's web-search step; the existing ChatGPT-OAuth option is now labeled "OpenAI Codex" ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added responsive ghost-text word completion with pluggable backend providers, context-aware prose filtering, and feedback support.
+- Improved autocomplete responsiveness for high-latency file discovery by showing interim suggestions and a searching state while results are refreshed.
+
 ### Changed
 
-- Updated model hub and oauth selector components to use namespaced `authStorage` API
+- Improved word-completion acceptance and persistence when typing through existing ghost text, including more natural handling of trailing spaces and punctuation.
+- Made keyboard labels across the TUI platform-aware so shortcuts are displayed using the appropriate key names for the user's operating system.
+- Updated the process monitor to distinguish target scope from current and global scope in its labels.
+
+### Fixed
+
+- Fixed autocomplete submission so Enter commits the current input correctly while suggestions are still loading.
+- Fixed the background tint for truncated skip lines.
+
+### Removed
+
+- Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+
+## [18.3.1] - 2026-09-25
+
+### Breaking Changes
+
+- Replaced the `CustomEditor` space-hold callbacks and `sttHoldEnabled` option with the `spaceHold.handler` API.
+- Removed `Editor.cursorOverrideWidth`; widths for `cursorOverride` glyphs are now measured automatically.
+
+### Added
+
+- Added push-to-talk dictation to `Input`, with live transcription and `cursorOverride` support.
+- Added visual indicators for live-steered user messages and paginated content in read-tool results.
+- Added transcript support for `cfg://` configuration read and write tool calls.
+- Added an Anthropic slow-mode badge to the status-line model segment, showing the priority state, end time, and remaining request percentage when available.
+
+### Changed
+
+- Updated the settings selector so clearing an input field fully unsets the corresponding setting.
+
+### Fixed
+
+- Fixed dimmed blockquote styling after inline code spans.
+- Fixed rendering of tool calls and results for top-level extension and MCP tools invoked through `xd://` links.
+- Fixed file links in pending Read and Write cards so they open the correct local targets, including paths in the home directory, archives, and databases.
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added proc:// and agent:// URI support for interacting with processes and agents.
+- Added support for xd:// documentation topic URLs.
+- Added rendering for background job state and peer-to-peer messages from the wait tool.
+- Added supervised bash service rendering with status, readiness, and output information.
+- Added a fullscreen annotation overlay for diffs and text, including multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added Daybreak-enabled account listings to the usage dashboard.
+
+### Changed
+
+- Mermaid flowcharts and state diagrams now automatically choose a layout that best fits the available terminal width and reflow when the terminal is resized.
+- Plan Review annotations now support multi-line editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed AltGr characters, including `[`, `]`, `{`, and `}`, being dropped in Windows Terminal when using the kitty keyboard protocol on Hungarian and other international keyboard layouts ([#12984](https://github.com/can1357/oh-my-pi/pull/12984) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.2.11] - 2026-09-23
 

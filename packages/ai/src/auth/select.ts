@@ -525,6 +525,12 @@ export class CredentialSelector {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
+		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
+		const enforceAccounts =
+			accountIds !== undefined &&
+			credentials.some(
+				({ credential }) => credential.accountId !== undefined && accountIds.has(credential.accountId),
+			);
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
@@ -793,15 +799,20 @@ export class CredentialSelector {
 		const passes: Array<{
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
+			enforceAccounts: boolean;
 		}> = [
-			{ allowBlocked: false, enforcePlanRequirement },
-			{ allowBlocked: true, enforcePlanRequirement },
+			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
+			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
 		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false });
+		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {
 				if (preflightFailures.has(candidate)) continue;
+				const candidateAccountId = candidate.selection.credential.accountId;
+				if (pass.enforceAccounts && (candidateAccountId === undefined || !accountIds?.has(candidateAccountId)))
+					continue;
 				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
 					checkUsage,
 					allowBlocked: pass.allowBlocked,

@@ -6,7 +6,10 @@ import "@oh-my-pi/pi-coding-agent/discovery";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { loadSkillshareSkills } from "@oh-my-pi/pi-coding-agent/discovery/skillshare";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import {
+	getSkillshareStoreDir,
 	getSkillStorePath,
 	STORE_INTEGRITY_FILE,
 	type SkillsLock,
@@ -82,16 +85,38 @@ describe("skillshare discovery provider", () => {
 				name: "pdf-tools",
 				level: "project",
 				origin: "skillshare:@alice/pdf-tools@1.2.0",
-				path: path.join(pdfDir, "SKILL.md"),
+				path: path.join(await fs.realpath(pdfDir), "SKILL.md"),
 			},
 			{
 				name: "review",
 				level: "user",
 				origin: "skillshare:@bob/review@2.0.0",
-				path: path.join(getSkillStorePath("bob", "review", "2.0.0"), "SKILL.md"),
+				path: path.join(await fs.realpath(getSkillStorePath("bob", "review", "2.0.0")), "SKILL.md"),
 			},
 		]);
 		expect(result.warnings).toEqual([]);
+	});
+
+	it("keeps skills readable through skill:// when the store sits behind a symlink", async () => {
+		if (process.platform === "win32") return;
+		const realStore = path.join(tempHome, "dotfiles", "skillshare");
+		await fs.mkdir(realStore, { recursive: true });
+		await fs.mkdir(path.dirname(getSkillshareStoreDir()), { recursive: true });
+		await fs.symlink(realStore, getSkillshareStoreDir());
+		await writeSkillsLock(path.join(project, ".omp", "skills.lock.json"), {
+			version: 1,
+			skills: { "@alice/pdf-tools": lockEntry("alice", "pdf-tools", "1.2.0") },
+		});
+		const storeDir = await storeSkill("alice", "pdf-tools", "1.2.0", "PDF helpers");
+		await Bun.write(path.join(storeDir, "references", "a.md"), "reference body\n");
+
+		const { skills } = await loadSkills({ cwd: project });
+		const handler = new SkillProtocolHandler();
+		const read = (url: string) => handler.resolve(parseInternalUrl(url), { skills });
+
+		expect((await read("skill://pdf-tools")).content).toContain("# pdf-tools");
+		expect((await read("skill://pdf-tools/references/a.md")).content).toBe("reference body\n");
+		expect(await handler.locate(parseInternalUrl("skill://pdf-tools/missing.md"), { skills })).toBeNull();
 	});
 
 	it("lets an authored project skill win a name collision", async () => {

@@ -61,6 +61,8 @@ try {
 			String.raw`
 import assert from "node:assert/strict";
 import { SettingsManager } from "@mariozechner/pi-coding-agent";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
+import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { hasMatch } from "@oh-my-pi/pi-natives";
 
 function registerFixtureProvider(api) {
@@ -113,13 +115,13 @@ export default function (api) {
 						extensions: [registerFixtureProvider, childApi => childApi.registerCommand("probe", {
 							handler: async (_args, childCtx) => {
 								try {
-									SettingsManager.create(childCtx.cwd).override("extensions", [fixture.work + "/extension-" + name]);
+									cfgExtensions.override(SettingsManager.create(childCtx.cwd), [fixture.work + "/extension-" + name]);
 									entered[index].resolve();
 									await entered[1 - index].promise;
 									if (name === "b") await disposedA.promise;
 									// Re-enter after an overlapping callback (and, for B,
 									// after A's disposal) before mutating a second setting.
-									SettingsManager.create(childCtx.cwd).override("task.agentModelOverrides", {
+									cfgTaskAgentModelOverrides.override(SettingsManager.create(childCtx.cwd), {
 										["only-" + name]: "fixture/model-" + name,
 									});
 									const task = session.getToolByName("task");

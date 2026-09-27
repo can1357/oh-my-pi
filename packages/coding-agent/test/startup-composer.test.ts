@@ -28,6 +28,24 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
 
+import {
+	cfgAutocompleteMaxVisible,
+	cfgComposerShape,
+	cfgMarketplaceAutoUpdate,
+	cfgShowHardwareCursor,
+	cfgSpellingAutocomplete,
+	cfgSpellingAutocorrect,
+	cfgSpellingTypoDetection,
+	cfgStartupChangelogMode,
+	cfgStartupCheckUpdate,
+	cfgStartupQuiet,
+	cfgStartupSetupWizard,
+	cfgStartupShowSplash,
+	cfgTuiImeSafeCursor,
+	cfgTuiMaxInlineImages,
+	cfgTuiResizeScrollback,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
 	stops = 0;
@@ -82,11 +100,11 @@ describe("outer startup collaboration gate", () => {
 		});
 		setProjectDir(testSession.tempDir);
 		const activeSettings = await Settings.init({ inMemory: true, cwd: testSession.tempDir });
-		activeSettings.override("startup.checkUpdate", false);
-		activeSettings.override("startup.changelogMode", "hidden");
-		activeSettings.override("startup.setupWizard", false);
-		activeSettings.override("startup.showSplash", false);
-		activeSettings.override("marketplace.autoUpdate", "off");
+		cfgStartupCheckUpdate.override(activeSettings, false);
+		cfgStartupChangelogMode.override(activeSettings, "hidden");
+		cfgStartupSetupWizard.override(activeSettings, false);
+		cfgStartupShowSplash.override(activeSettings, false);
+		cfgMarketplaceAutoUpdate.override(activeSettings, "off");
 		installInMemoryRelay();
 		const publish = registry.publishCollabHost;
 		vi.spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
@@ -257,16 +275,16 @@ describe("Composer prepaint", () => {
 		await initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
-			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
-			showHardwareCursor: settings.get("showHardwareCursor"),
-			maxInlineImages: settings.get("tui.maxInlineImages"),
-			resizeScrollback: settings.get("tui.resizeScrollback"),
-			imeSafeCursor: settings.get("tui.imeSafeCursor"),
-			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			quiet: cfgStartupQuiet.get(settings),
+			composerShape: cfgComposerShape.get(settings) ?? "box",
+			showHardwareCursor: cfgShowHardwareCursor.get(settings),
+			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
+			resizeScrollback: cfgTuiResizeScrollback.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
 		};
 	});
 
@@ -322,7 +340,7 @@ describe("Composer prepaint", () => {
 
 		try {
 			await initTheme(false, "ascii");
-			settings.set("composer.shape", "box");
+			cfgComposerShape.set(settings, "box");
 			vi.spyOn(KeybindingsManager, "create").mockReturnValue(KeybindingsManager.inMemory({ "app.clear": "ctrl+x" }));
 			mode = new InteractiveMode(
 				testSession.session,
@@ -745,9 +763,9 @@ describe("Composer prepaint", () => {
 			resizeScrollback: config.resizeScrollback,
 			imeSafeCursor: config.imeSafeCursor,
 			autocompleteMaxVisible: config.autocompleteMaxVisible,
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
 			theme: {},
 		});
 		await terminal.waitForRender();

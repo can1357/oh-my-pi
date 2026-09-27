@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { dispatchRpcSkillPrompt, tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import {
-	dispatchRpcSkillPrompt,
 	RpcExtensionUserMessageTracker,
-	tryRunRpcSkillCommand,
-} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+	RpcPromptResults,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -150,6 +150,15 @@ async function settleUntil(condition: () => boolean, timeoutMs = 5000): Promise<
 	if (!condition()) throw new Error("condition not met while settling");
 }
 
+/** Prompt-result plumbing for an idle session; frames land in `frames`. */
+function promptResultsFor(id: string, frames: object[] = []) {
+	const results = new RpcPromptResults(
+		{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+		frame => frames.push(frame),
+	);
+	return { ticket: results.begin(id), results };
+}
+
 describe("dispatchRpcSkillPrompt", () => {
 	test("answers the prompt command before the skill dispatch completes", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
@@ -162,7 +171,7 @@ describe("dispatchRpcSkillPrompt", () => {
 		const dispatchGate = Promise.withResolvers<void>();
 		let promptCustomMessageCalls = 0;
 		const result = await dispatchRpcSkillPrompt({
-			id: "cmd-1",
+			...promptResultsFor("cmd-1"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
 				skills: [
@@ -176,7 +185,6 @@ describe("dispatchRpcSkillPrompt", () => {
 			},
 			message: "/skill:reviewer go",
 			streamingBehavior: undefined,
-			output: () => {},
 			onError: () => {},
 			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 		});
@@ -195,7 +203,7 @@ describe("dispatchRpcSkillPrompt", () => {
 
 	test("returns null for non-skill messages", async () => {
 		const result = await dispatchRpcSkillPrompt({
-			id: "cmd-2",
+			...promptResultsFor("cmd-2"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
 				skills: [],
@@ -205,7 +213,6 @@ describe("dispatchRpcSkillPrompt", () => {
 			},
 			message: "just a normal prompt",
 			streamingBehavior: undefined,
-			output: () => {},
 			onError: () => {},
 			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 		});
@@ -219,7 +226,7 @@ describe("dispatchRpcSkillPrompt", () => {
 
 		const errors: Error[] = [];
 		await dispatchRpcSkillPrompt({
-			id: "cmd-3",
+			...promptResultsFor("cmd-3"),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
 				skills: [
@@ -231,7 +238,6 @@ describe("dispatchRpcSkillPrompt", () => {
 			},
 			message: "/skill:reviewer go",
 			streamingBehavior: undefined,
-			output: () => {},
 			onError: error => errors.push(error),
 			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 		});
@@ -249,7 +255,7 @@ describe("dispatchRpcSkillPrompt", () => {
 		let promptCustomMessageCalls = 0;
 		await expect(
 			dispatchRpcSkillPrompt({
-				id: "cmd-4",
+				...promptResultsFor("cmd-4"),
 				session: {
 					skillsSettings: { enableSkillCommands: true },
 					skills: [
@@ -268,7 +274,6 @@ describe("dispatchRpcSkillPrompt", () => {
 				},
 				message: "/skill:reviewer go",
 				streamingBehavior: undefined,
-				output: () => {},
 				onError: () => {},
 				extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 			}),
@@ -285,7 +290,7 @@ describe("dispatchRpcSkillPrompt", () => {
 
 		const frames: object[] = [];
 		const result = await dispatchRpcSkillPrompt({
-			id: "cmd-5",
+			...promptResultsFor("cmd-5", frames),
 			session: {
 				skillsSettings: { enableSkillCommands: true },
 				skills: [
@@ -299,14 +304,15 @@ describe("dispatchRpcSkillPrompt", () => {
 			},
 			message: "/skill:reviewer go",
 			streamingBehavior: undefined,
-			output: frame => frames.push(frame),
 			onError: () => {},
 			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
 		});
 
 		expect(result).toEqual({ agentInvoked: true });
 		await settleUntil(() => frames.length === 1);
-		expect(frames).toEqual([{ type: "prompt_result", id: "cmd-5", agentInvoked: false }]);
+		expect(frames).toEqual([
+			{ type: "prompt_result", id: "cmd-5", agentInvoked: false, status: "completed", sessionSettled: true },
+		]);
 
 		await removeWithRetries(dir);
 	});

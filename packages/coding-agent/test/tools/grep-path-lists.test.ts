@@ -911,6 +911,48 @@ describe("tool path arrays", () => {
 		await removeWithRetries(tmp);
 	});
 
+	it("grep keeps directory-prefixed globs out of subdirectories", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
+		await Bun.write(path.join(tmp, "internal", "awsapi", "client.go"), "depth-needle awsapi-root\n");
+		await Bun.write(path.join(tmp, "internal", "awsapi", "svc", "nested.go"), "depth-needle awsapi-nested\n");
+		await Bun.write(path.join(tmp, "internal", "crypto_util.go"), "depth-needle crypto-root\n");
+		await Bun.write(path.join(tmp, "internal", "services", "kms", "crypto_kms.go"), "depth-needle kms\n");
+		await Bun.write(path.join(tmp, "internal", "roles.go"), "depth-needle roles\n");
+
+		const tools = await createTools(createTestSession(tmp));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const dirGlob = getText(
+			await tool.execute("grep-dir-glob", { pattern: "depth-needle", path: "internal/awsapi/*.go" }),
+		);
+		expect(dirGlob).toContain("awsapi-root");
+		expect(dirGlob).not.toContain("awsapi-nested");
+
+		const list = getText(
+			await tool.execute("grep-dir-glob-list", {
+				pattern: "depth-needle",
+				path: "internal/crypto*; internal/roles.go",
+			}),
+		);
+		expect(list).toContain("crypto-root");
+		expect(list).toContain("roles");
+		expect(list).not.toContain("kms");
+
+		// An explicit `**` under a directory prefix still recurses.
+		const deepGlob = getText(
+			await tool.execute("grep-dir-deep-glob", { pattern: "depth-needle", path: "internal/awsapi/**/*.go" }),
+		);
+		expect(deepGlob).toContain("awsapi-root");
+		expect(deepGlob).toContain("awsapi-nested");
+
+		// A bare glob with no directory prefix still matches at any depth.
+		const bareGlob = getText(await tool.execute("grep-bare-glob", { pattern: "depth-needle", path: "*.go" }));
+		expect(bareGlob).toContain("awsapi-nested");
+		expect(bareGlob).toContain("kms");
+		await removeWithRetries(tmp);
+	});
+
 	it("grep renders only file headings that have child lines", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");

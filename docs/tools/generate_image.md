@@ -7,7 +7,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/image-gen.md`
 - Session injection: `packages/coding-agent/src/sdk.ts` (`getImageGenTools()`)
 
-The custom tool is registered only when `generate_image.enabled=true` (default `false`) and the session's explicit tool filter, if any, requests `generate_image`.
+The custom tool is registered only when `generate_image.enabled=true` (default `false`) and the session's explicit tool filter, if any, requests `generate_image`. Toggling the setting registers or removes it in the running session.
 
 ## Inputs
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type OAuthCredential, type UsageProvider, withAuth } from "@oh-my-pi/pi-ai";
+import { type OAuthCredential, type UsageProvider, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import * as oauth from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -232,8 +232,9 @@ describe("AuthStorage account rotation", () => {
 			return false;
 		});
 		const registry: Parameters<typeof createApiKeyResolver>[0] = {
-			async getApiKeyForProvider() {
-				return resolvedKeys.shift();
+			async getApiKeyWithCredentialForProvider() {
+				const apiKey = resolvedKeys.shift();
+				return apiKey === undefined ? undefined : { apiKey };
 			},
 			authStorage,
 		};
@@ -245,11 +246,11 @@ describe("AuthStorage account rotation", () => {
 		const refreshed = await resolver({
 			lastChance: true,
 			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: initial,
+			previousKey: resolvedApiKeyBearer(initial),
 		});
 
-		expect(initial).toBe("stale-access");
-		expect(refreshed).toBe("refreshed-access");
+		expect(resolvedApiKeyBearer(initial)).toBe("stale-access");
+		expect(resolvedApiKeyBearer(refreshed)).toBe("refreshed-access");
 		expect(rotationTargets).toEqual(["stale-access"]);
 	});
 
@@ -257,8 +258,9 @@ describe("AuthStorage account rotation", () => {
 		const resolvedKeys = ["quota-blocked-B", "quota-blocked-A"];
 		vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(false);
 		const registry: Parameters<typeof createApiKeyResolver>[0] = {
-			async getApiKeyForProvider() {
-				return resolvedKeys.shift();
+			async getApiKeyWithCredentialForProvider() {
+				const apiKey = resolvedKeys.shift();
+				return apiKey === undefined ? undefined : { apiKey };
 			},
 			authStorage,
 		};

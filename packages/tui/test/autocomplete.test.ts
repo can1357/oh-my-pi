@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+import * as natives from "@oh-my-pi/pi-natives";
+import { type AutocompleteItem, CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
@@ -829,6 +830,51 @@ describe("CombinedAutocompleteProvider", () => {
 			const values = result?.items.map(item => item.value) ?? [];
 			expect(values.length).toBeGreaterThan(20);
 			expect(values.length).toBeGreaterThanOrEqual(total);
+		});
+	});
+
+	describe("slow @ fuzzy search", () => {
+		let baseDir: string;
+
+		beforeEach(() => {
+			baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-partial-test-"));
+			for (const dir of ["widget-app", ".cache", "other"]) fs.mkdirSync(path.join(baseDir, dir));
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		});
+
+		it("reports the prefix listing while a slow walk runs, then resolves to the fuzzy results", async () => {
+			const walk = Promise.withResolvers<natives.FuzzyFindResult>();
+			spyOn(natives, "fuzzyFind").mockReturnValue(walk.promise);
+			const partial = Promise.withResolvers<AutocompleteItem[]>();
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "see @widget";
+			const result = provider.getSuggestions([line], 0, line.length, undefined, suggestions =>
+				partial.resolve(suggestions.items),
+			);
+
+			expect((await partial.promise).map(item => item.value)).toEqual(["@widget-app/"]);
+			walk.resolve({
+				matches: [{ path: "other/widget.md", isDirectory: false, score: 1 }],
+				totalMatches: 1,
+			});
+			expect((await result)?.items.map(item => item.value)).toEqual(["@other/widget.md"]);
+		});
+
+		it("skips the interim listing when the walk finishes quickly", async () => {
+			const partials: AutocompleteItem[][] = [];
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@widget";
+			const result = await provider.getSuggestions([line], 0, line.length, undefined, suggestions =>
+				partials.push(suggestions.items),
+			);
+
+			expect(result?.items.map(item => item.value)).toContain("@widget-app/");
+			expect(partials).toEqual([]);
 		});
 	});
 

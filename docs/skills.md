@@ -166,7 +166,7 @@ Invoked skill content is identified by invocation kind, each with its own prompt
 
 `src/internal-urls/skill-protocol.ts` supports:
 
-- `skill://<name>` → resolves to that skill's `SKILL.md`
+- `skill://<name>` → resolves to that skill's `SKILL.md` for `read`; in `bash` it is the skill directory (instructions at `skill://<name>/SKILL.md`), and `realpath`/`readlink` print the physical path
 - `skill://<name>/<relative-path>` → resolves inside that skill directory
 
 ```text

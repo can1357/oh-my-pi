@@ -2,14 +2,9 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(unix)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::{
 	borrow::Cow,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
 	io::{Error, ErrorKind},
 	path::{Path, PathBuf},
 	time::SystemTime,
@@ -19,16 +14,13 @@ use clap::{
 	Arg, ArgAction, ArgGroup, ArgMatches, Command,
 	builder::{PossibleValue, ValueParser},
 };
-use filetime::{FileTime, set_file_times, set_symlink_file_times};
+use filetime::FileTime;
 use jiff::{Timestamp, ToSpan, Zoned, civil::Time, fmt::strtime, tz::TimeZone};
 #[cfg(unix)]
 use libc::O_NONBLOCK;
+use pi_vfs::BlockingFs;
 #[cfg(unix)]
-use rustix::fs::Timestamps;
-#[cfg(unix)]
-use rustix::fs::futimens;
-#[cfg(target_os = "linux")]
-use uucore::libc;
+use pi_vfs::OpenOptions;
 use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValueParser};
 
 use brush_core::{ShellExtensions, builtins::Registration};
@@ -450,48 +442,50 @@ fn touch(
 	host: &mut Host,
 	time_zone: &TimeZone,
 ) -> Result<(), TouchError> {
+	// Only the times being changed are needed; a reference file may lack the
+	// other one.
+	let wants_atime = opts.change_times != ChangeTimes::MtimeOnly;
+	let wants_mtime = opts.change_times != ChangeTimes::AtimeOnly;
 	let (atime, mtime) = match &opts.source {
 		Source::Reference(reference) => {
 			let resolved = host.resolve(reference);
-			stat(&resolved, !opts.no_deref)
+			stat(host.fs(), &resolved, !opts.no_deref, wants_atime, wants_mtime)
 				.map_err(|error| TouchError::ReferenceFileInaccessible(reference.to_owned(), error))?
 		},
 		Source::Now => {
-			let now: FileTime;
-			#[cfg(target_os = "linux")]
-			{
-				if opts.date.is_none() {
-					now = FileTime::from_unix_time(0, libc::UTIME_NOW as u32);
-				} else {
-					now = timestamp_to_filetime(Timestamp::now());
-				}
-			}
-			#[cfg(not(target_os = "linux"))]
-			{
-				now = timestamp_to_filetime(Timestamp::now());
-			}
-			(now, now)
+			let now = timestamp_to_filetime(Timestamp::now());
+			(Some(now), Some(now))
 		},
-		&Source::Timestamp(ts) => (ts, ts),
+		&Source::Timestamp(ts) => (Some(ts), Some(ts)),
 	};
+	let (atime, mtime) = (atime.filter(|_| wants_atime), mtime.filter(|_| wants_mtime));
 
 	let (atime, mtime) = if let Some(date) = &opts.date {
-		(
-			parse_date(
-				filetime_to_zoned(&atime, time_zone)
-					.ok_or(TouchError::InvalidFiletime(atime))?,
-				date,
-				time_zone,
-			)?,
-			parse_date(
-				filetime_to_zoned(&mtime, time_zone)
-					.ok_or(TouchError::InvalidFiletime(mtime))?,
-				date,
-				time_zone,
-			)?,
-		)
+		let adjust = |time: Option<FileTime>| {
+			time.map(|time| {
+				parse_date(
+					filetime_to_zoned(&time, time_zone).ok_or(TouchError::InvalidFiletime(time))?,
+					date,
+					time_zone,
+				)
+			})
+			.transpose()
+		};
+		(adjust(atime)?, adjust(mtime)?)
 	} else {
 		(atime, mtime)
+	};
+
+	// A plain `touch` asks the filesystem for its own current time
+	// (`UTIME_NOW`), which also lets a non-owner with write access update it.
+	// Times not being changed are left alone (`UTIME_OMIT`).
+	let (atime, mtime) = if opts.source == Source::Now && opts.date.is_none() {
+		(pi_vfs::FileTime::Now, pi_vfs::FileTime::Now)
+	} else {
+		let at = |time: Option<FileTime>| {
+			time.map_or(pi_vfs::FileTime::Omit, |time| pi_vfs::FileTime::At(SystemTime::from(time)))
+		};
+		(at(atime), at(mtime))
 	};
 
 	for file in files {
@@ -518,15 +512,16 @@ fn touch_file(
 	path: &Path,
 	is_stdout: bool,
 	opts: &Options,
-	atime: FileTime,
-	mtime: FileTime,
+	atime: pi_vfs::FileTime,
+	mtime: pi_vfs::FileTime,
 	host: &mut Host,
 ) -> Result<(), TouchError> {
 	let filename = if is_stdout { OsStr::new("-") } else { path.as_os_str() };
 	let resolved = host.resolve(path);
+	let fs = host.fs().clone();
 
 	let metadata_result =
-		if opts.no_deref { resolved.symlink_metadata() } else { resolved.metadata() };
+		if opts.no_deref { fs.symlink_metadata(&resolved) } else { fs.metadata(&resolved) };
 
 	if let Err(error) = metadata_result {
 		if error.kind() != ErrorKind::NotFound {
@@ -547,9 +542,9 @@ fn touch_file(
 			return Ok(());
 		}
 
-		if let Err(error) = File::create(&resolved) {
-			// A trailing separator denotes a directory, but `File::create`
-			// cannot create one.
+		if let Err(error) = fs.create(&resolved).and_then(pi_vfs::File::close) {
+			// A trailing separator denotes a directory, but `create` cannot
+			// create one.
 			let is_directory = path
 				.to_string_lossy()
 				.chars()
@@ -577,7 +572,7 @@ fn touch_file(
 		}
 	}
 
-	update_times(path, &resolved, is_stdout, opts, atime, mtime)
+	update_times(&fs, path, &resolved, is_stdout, opts, atime, mtime)
 }
 
 /// Returns which of the times (access, modification) are to be changed.
@@ -615,100 +610,110 @@ fn determine_atime_mtime_change(matches: &ArgMatches) -> ChangeTimes {
 /// passed, then, if the given file is a symlink, its own times will be updated,
 /// rather than the file it points to.
 fn update_times(
+	fs: &BlockingFs,
 	path: &Path,
 	resolved: &Path,
 	is_stdout: bool,
 	opts: &Options,
-	atime: FileTime,
-	mtime: FileTime,
+	atime: pi_vfs::FileTime,
+	mtime: pi_vfs::FileTime,
 ) -> Result<(), TouchError> {
-	// If changing "only" atime or mtime, grab the existing value of the other.
+	// When changing "only" atime or mtime, leave the other untouched
+	// (`UTIME_OMIT`).
 	let (atime, mtime) = match opts.change_times {
-		ChangeTimes::AtimeOnly => (
-			atime,
-			stat(resolved, !opts.no_deref)
-				.map_err(|error| {
-					io_context(error, format!("failed to get attributes of {}", path.quote()))
-				})?
-				.1,
-		),
-		ChangeTimes::MtimeOnly => (
-			stat(resolved, !opts.no_deref)
-				.map_err(|error| {
-					io_context(error, format!("failed to get attributes of {}", path.quote()))
-				})?
-				.0,
-			mtime,
-		),
+		ChangeTimes::AtimeOnly => (atime, pi_vfs::FileTime::Omit),
+		ChangeTimes::MtimeOnly => (pi_vfs::FileTime::Omit, mtime),
 		ChangeTimes::Both => (atime, mtime),
 	};
 
-	if opts.no_deref && !is_stdout {
-		return set_symlink_file_times(resolved, atime, mtime)
-			.map_err(|error| io_context(error, format!("setting times of {}", path.quote())));
-	}
+	let follow = !opts.no_deref || is_stdout;
+
+	let setting_times =
+		|error: std::io::Error| io_context(error, format!("setting times of {}", path.quote()));
 
 	#[cfg(unix)]
 	{
-		// Open write-only and use futimens to trigger IN_CLOSE_WRITE on Linux.
-		if !is_stdout && try_futimens_via_write_fd(resolved, atime, mtime).is_ok() {
-			return Ok(());
+		// Open write-only and set times on the handle to trigger
+		// IN_CLOSE_WRITE on Linux. This is a native-descriptor optimization
+		// only; other filesystems take the path-level call below.
+		if follow && !is_stdout && fs.is_native_local(resolved) {
+			match try_set_times_via_write_handle(fs, resolved, atime, mtime) {
+				Some(Ok(())) => return Ok(()),
+				Some(Err(error)) => return Err(setting_times(error)),
+				None => {},
+			}
 		}
 	}
 
-	set_file_times(resolved, atime, mtime)
-		.map_err(|error| io_context(error, format!("setting times of {}", path.quote())))
+	fs.set_times(resolved, atime, mtime, follow).map_err(setting_times)
 }
 
 #[cfg(unix)]
-/// Set file times via file descriptor using `futimens`.
+/// Set file times through an open handle (`futimens` for native files).
 ///
-/// This opens the file write-only and uses the POSIX `futimens` call to set
-/// access and modification times on the open FD (not by path), which also
-/// triggers `IN_CLOSE_WRITE` on Linux when the FD is closed.
-fn try_futimens_via_write_fd(path: &Path, atime: FileTime, mtime: FileTime) -> std::io::Result<()> {
-	let file = OpenOptions::new()
-		.write(true)
-		// Avoid blocking on special files (e.g. FIFOs) before we can inspect metadata.
-		.custom_flags(O_NONBLOCK)
-		.open(path)?;
-
-	let timestamps = Timestamps {
-		last_access:       rustix::fs::Timespec {
-			tv_sec:  atime.unix_seconds(),
-			tv_nsec: atime.nanoseconds() as _,
-		},
-		last_modification: rustix::fs::Timespec {
-			tv_sec:  mtime.unix_seconds(),
-			tv_nsec: mtime.nanoseconds() as _,
-		},
-	};
-
-	futimens(&file, &timestamps).map_err(|e| Error::from_raw_os_error(e.raw_os_error()))
+/// This opens the file write-only and sets access and modification times on
+/// the open handle (not by path), which also triggers `IN_CLOSE_WRITE` on
+/// Linux when the descriptor is closed.
+///
+/// Returns `None` when the handle could not be opened or could not take the
+/// times, so the caller should fall back to setting them by path; otherwise
+/// the result of closing the handle, which must not be hidden by a retry.
+fn try_set_times_via_write_handle(
+	fs: &BlockingFs,
+	path: &Path,
+	atime: pi_vfs::FileTime,
+	mtime: pi_vfs::FileTime,
+) -> Option<std::io::Result<()>> {
+	let file = fs
+		.open_with(
+			path,
+			OpenOptions::new()
+				.write(true)
+				// Avoid blocking on special files (e.g. FIFOs) before we can inspect metadata.
+				.custom_flags(O_NONBLOCK),
+		)
+		.ok()?;
+	let result = file.set_times(atime, mtime);
+	let closed = file.close();
+	match result {
+		Ok(()) => Some(closed),
+		Err(_) => closed.err().map(Err),
+	}
 }
 
 /// Get metadata of the provided path
 /// If `follow` is `true`, the function will try to follow symlinks. Errors if
 /// the symlink is dangling, otherwise defaults to symlink metadata. If `follow`
 /// is `false`, the function will return metadata of the symlink itself
-fn stat(path: &Path, follow: bool) -> std::io::Result<(FileTime, FileTime)> {
+///
+/// Only the requested times are read: a filesystem may not record the other.
+fn stat(
+	fs: &BlockingFs,
+	path: &Path,
+	follow: bool,
+	want_atime: bool,
+	want_mtime: bool,
+) -> std::io::Result<(Option<FileTime>, Option<FileTime>)> {
 	let metadata = if follow {
-		match fs::metadata(path) {
+		match fs.metadata(path) {
 			// Successfully followed symlink
 			Ok(meta) => meta,
 			// Dangling symlink
 			Err(e) if e.kind() == ErrorKind::NotFound => return Err(e),
 			// Other error (?), try to get the symlink metadata
-			Err(_) => fs::symlink_metadata(path)?,
+			Err(_) => fs.symlink_metadata(path)?,
 		}
 	} else {
-		fs::symlink_metadata(path)?
+		fs.symlink_metadata(path)?
 	};
 
-	Ok((
-		FileTime::from_last_access_time(&metadata),
-		FileTime::from_last_modification_time(&metadata),
-	))
+	let atime = want_atime
+		.then(|| metadata.accessed().map(FileTime::from_system_time))
+		.transpose()?;
+	let mtime = want_mtime
+		.then(|| metadata.modified().map(FileTime::from_system_time))
+		.transpose()?;
+	Ok((atime, mtime))
 }
 
 fn parse_date(ref_zoned: Zoned, s: &str, time_zone: &TimeZone) -> Result<FileTime, TouchError> {

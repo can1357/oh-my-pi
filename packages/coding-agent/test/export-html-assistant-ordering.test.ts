@@ -363,8 +363,8 @@ describe("HTML export assistant content ordering", () => {
 				{ type: "text", text: "before-read" },
 				{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "one.ts" } },
 				{ type: "text", text: "after-read" },
-				{ type: "toolCall", id: "tool-2", name: "hub", arguments: { op: "jobs" } },
-				{ type: "text", text: "after-hub" },
+				{ type: "toolCall", id: "tool-2", name: "custom_tool", arguments: { op: "jobs" } },
+				{ type: "text", text: "after-custom" },
 			],
 			"stop",
 			true,
@@ -377,8 +377,8 @@ describe("HTML export assistant content ordering", () => {
 			"assistant: before-read",
 			"[read: one.ts]",
 			"assistant: after-read",
-			'[hub: {"op":"jobs"}]',
-			"assistant: after-hub",
+			'[custom_tool: {"op":"jobs"}]',
+			"assistant: after-custom",
 		]);
 		expect(
 			Array.from(rendered.document.querySelectorAll("#tree-container .tree-node")).map(row =>

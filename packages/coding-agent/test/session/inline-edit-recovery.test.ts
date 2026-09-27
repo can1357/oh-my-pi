@@ -24,7 +24,7 @@ function assistant(content: AssistantMessage["content"], stopReason: AssistantMe
 	};
 }
 
-const payload = ["*** SM:EDIT src/a.ts", "*** SM:FIND", "const x = 1;", "*** SM:PUT", "const x = 2;"].join("\n");
+const payload = ["*** Edit File: src/a.ts", "*** Find", "const x = 1;", "*** Replace", "const x = 2;"].join("\n");
 
 describe("recoverInlineSloppyEdit", () => {
 	test("lifts a stray payload out of prose into a synthetic edit tool call", () => {

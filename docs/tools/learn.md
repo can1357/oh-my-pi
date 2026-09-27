@@ -11,7 +11,7 @@
 
 ## Registration / Visibility
 - `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
-- Approval is dynamic: a call containing `skill`, or any call while `memory.backend = "local"`, has `approval = "write"`; a memory-only Hindsight/Mnemopi call has `approval = "read"`.
+- Approval is dynamic: a call containing `skill` or `scope: "global"`, or any call while `memory.backend = "local"`, has `approval = "write"`; any other memory-only Hindsight/Mnemopi call has `approval = "read"`.
 - Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, or `"local"`.
 - Enabled top-level sessions auto-include `learn` in an ordinary explicit tool list. Subagents do not discover or auto-receive it, but may use it when their requested-tools/frontmatter list explicitly includes it.
 - Execution is single-shot and emits no progress updates.
@@ -22,6 +22,7 @@
 |---|---|---:|---|
 | `memory` | `string` | Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds. |
 | `context` | `string` | No | Source context for the lesson. |
+| `scope` | `"project" \| "global"` | No | `global` stores the lesson in the Mnemopi bank every project recalls. In the schema and tool description only when `memory.backend = "mnemopi"` and `mnemopi.scoping` is `global` or `per-project-tagged`; omitted means `project`. |
 | `skill` | `{ action: "create" \| "update"; name: string; description: string; body: string }` | No | Managed skill to create or enhance after the lesson succeeds. `body` is Markdown without frontmatter. |
 
 ## Outputs
@@ -36,8 +37,9 @@
 ## Flow
 1. `LearnTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and `memory.backend` is `"hindsight"`, `"mnemopi"`, or `"local"`.
 2. `execute(...)` stores the lesson before attempting any skill mutation:
-   - Mnemopi: calls `rememberScoped(...)` with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata; an absent returned id is treated as failure.
+   - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata; an absent returned id is treated as failure.
    - Local backend: calls `localBackend.save(...)`, which normalizes and writes a project-scoped `learned.md`; `stored === 0` is treated as failure.
+   - Local backend and Hindsight reject `scope: "global"` with `Global memory scope is only available with the Mnemopi backend.` before storing, queueing, or writing a skill.
    - Hindsight: enqueues retention with `state.enqueueRetain(memory, context)` and reports the lesson as queued.
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.

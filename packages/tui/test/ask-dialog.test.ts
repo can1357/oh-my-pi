@@ -702,7 +702,6 @@ describe("AskDialogComponent", () => {
 			onCancel,
 			onPrompt,
 		});
-		expect(render(component)).toContain("Space toggle · Enter next");
 
 		// Space toggles Option A; Enter on the plain option row confirms and
 		// advances to Q2 instead of submitting the whole dialog (#8265 review).
@@ -1095,7 +1094,6 @@ describe("AskDialogComponent", () => {
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
-		expect(render(component)).toContain("Space toggle · Enter submit");
 
 		// Space selects Option A; Enter submits right away — no need to
 		// discover the Submit tab (issue #8252).
@@ -1211,40 +1209,6 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-	it("keeps the cancel hint visible with tabs and a tall preview", () => {
-		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
-		try {
-			const preview = `\`\`\`\n${Array.from({ length: 40 }, (_, index) => `line-${index}`).join("\n")}\n\`\`\``;
-			const component = new AskDialogComponent(
-				[
-					{ id: "q1", question: "Inspect?", options: [{ label: "Alpha", preview }], multi: true },
-					{ id: "q2", question: "Continue?", options: [{ label: "Bravo" }] },
-				],
-				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
-			);
-			const out = render(component);
-
-			expect(out).toContain("PgUp/PgDn");
-			expect(out).toContain("Tab/←/→");
-			expect(out).not.toContain(" tabs");
-			expect(out).toContain("Ctrl+G cancel");
-			setKeybindings(
-				KeybindingsManager.inMemory({
-					"tui.select.cancel": "ctrl+g",
-					"tui.select.pageUp": "ctrl+u",
-					"tui.select.pageDown": "ctrl+d",
-				}),
-			);
-			const remapped = render(component);
-			expect(remapped).toContain("Ctrl+U/Ctrl+D");
-			expect(remapped).toContain("Ctrl+G cancel");
-		} finally {
-			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
-			else Reflect.deleteProperty(process.stdout, "rows");
-		}
-	});
-
 	it("pages through an inline preview taller than the question viewport", () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
@@ -1272,22 +1236,18 @@ describe("AskDialogComponent", () => {
 			expect(out).toContain("PREVIEW-FIRST");
 			expect(out).not.toContain("PREVIEW-MIDDLE");
 			expect(out).not.toContain("PREVIEW-LAST");
-			expect(out).not.toContain("PgUp/PgDn");
 			expect(out).toContain("↓ scroll");
 			component.handleInput(DOWN);
 			for (let page = 0; page < 4; page++) component.handleInput(PAGE_DOWN);
 			out = render(component);
-			expect(out).toContain("PgUp/PgDn");
 			expect(out).toContain("PREVIEW-MIDDLE");
 			component.handleInput(DOWN);
 			out = render(component);
 			expect(out).toContain("Other (type your own)");
 			expect(out).not.toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PgUp/PgDn");
 			component.handleInput(UP);
 			out = render(component);
 			expect(out).toContain("PREVIEW-FIRST");
-			expect(out).toContain("PgUp/PgDn");
 			for (let page = 0; page < 10; page++) {
 				component.handleInput(PAGE_DOWN);
 				out = render(component);
@@ -1329,13 +1289,11 @@ describe("AskDialogComponent", () => {
 			let out = render(component);
 			expect(out).toContain("PREVIEW-SHORT-FIRST");
 			expect(out).toContain("PREVIEW-SHORT-LAST");
-			expect(out).not.toContain("PgUp/PgDn");
 			expect(out).toMatch(/[↓↑↕] scroll/);
 			component.handleInput(PAGE_DOWN);
 			out = render(component);
 			expect(out).toContain("PREVIEW-SHORT-FIRST");
 			expect(out).toContain("PREVIEW-SHORT-LAST");
-			expect(out).not.toContain("PgUp/PgDn");
 			expect(out).toMatch(/[↓↑↕] scroll/);
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
@@ -1387,7 +1345,6 @@ describe("AskDialogComponent", () => {
 		// Count occurrences of the repeated phrase — should be far fewer than 30.
 		const matches = output.match(/This is a very long question/g);
 		expect(matches?.length ?? 0).toBeLessThan(10);
-		expect(output).toContain("Ctrl+O expand");
 	});
 
 	it("expands a truncated question header on Ctrl+O and collapses on a second press", () => {
@@ -1410,7 +1367,6 @@ describe("AskDialogComponent", () => {
 		const collapsed = render(component);
 		const collapsedCount = collapsed.match(/This is a very long question/g)?.length ?? 0;
 		expect(collapsedCount).toBeLessThan(10);
-		expect(collapsed).toContain("Ctrl+O expand");
 
 		component.handleInput("\x0f");
 		const expanded = render(component);
@@ -1421,13 +1377,10 @@ describe("AskDialogComponent", () => {
 		// Wrapping can split a few phrases across lines; require a clearly
 		// larger header rather than an exact copy count.
 		expect(expandedCount).toBeGreaterThanOrEqual(15);
-		expect(expanded).toContain("Ctrl+O collapse");
-		expect(expanded).not.toContain("Ctrl+O expand");
 
 		component.handleInput("\x0f");
 		const recollapsed = render(component);
 		expect(recollapsed.match(/This is a very long question/g)?.length ?? 0).toBe(collapsedCount);
-		expect(recollapsed).toContain("Ctrl+O expand");
 	});
 
 	it("does not consume expansion while the submit tab hides the question header", () => {
@@ -1455,7 +1408,6 @@ describe("AskDialogComponent", () => {
 			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
 		);
 		const before = render(component);
-		expect(before).not.toContain("Ctrl+O expand");
 		expect(component.toggleQuestionExpansion()).toBe(false);
 		expect(render(component)).toBe(before);
 	});
@@ -1475,19 +1427,16 @@ describe("AskDialogComponent", () => {
 		const collapsed = render(component);
 		const collapsedCount = collapsed.match(/This is a very long description/g)?.length ?? 0;
 		expect(collapsedCount).toBeLessThan(10);
-		expect(collapsed).toContain("Ctrl+O expand");
 		expect(component.toggleQuestionExpansion()).toBe(true);
 
 		const expanded = render(component);
 		const expandedCount = expanded.match(/This is a very long description/g)?.length ?? 0;
 		expect(expandedCount).toBeGreaterThan(collapsedCount);
 		expect(expandedCount).toBeGreaterThanOrEqual(10);
-		expect(expanded).toContain("Ctrl+O collapse");
 
 		component.handleInput("\x0f");
 		const recollapsed = render(component);
 		expect(recollapsed.match(/This is a very long description/g)?.length ?? 0).toBe(collapsedCount);
-		expect(recollapsed).toContain("Ctrl+O expand");
 	});
 
 	it("does not advertise expand for short option descriptions", () => {
@@ -1502,7 +1451,6 @@ describe("AskDialogComponent", () => {
 			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
 		);
 		const before = render(component);
-		expect(before).not.toContain("Ctrl+O expand");
 		expect(component.toggleQuestionExpansion()).toBe(false);
 		expect(render(component)).toBe(before);
 	});

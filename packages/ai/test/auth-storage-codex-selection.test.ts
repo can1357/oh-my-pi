@@ -2643,6 +2643,36 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-solo");
 	});
 
+	test("prefers discovered model accounts over a pinned Codex account, without filtering unmatched catalogs", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("account-A", "a@example.com") },
+			{ type: "oauth", ...createCredential("account-B", "b@example.com") },
+		]);
+		const firstAccount = authStorage.oauth.accounts("openai-codex")[0];
+		if (!firstAccount) throw new Error("expected first Codex account");
+
+		const sessionId = "daybreak-account-eligible";
+		expect(authStorage.sessions.pin("openai-codex", sessionId, firstAccount.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-account-A");
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				modelId: "gpt-daybreak-blue-latest",
+				accountIds: ["account-B"],
+			}),
+		).toBe("api-account-B");
+
+		const unmatchedSessionId = "daybreak-account-unmatched";
+		expect(authStorage.sessions.pin("openai-codex", unmatchedSessionId, firstAccount.credentialId)).toBe(true);
+		expect(
+			await authStorage.keys.get("openai-codex", unmatchedSessionId, {
+				modelId: "gpt-daybreak-blue-latest",
+				accountIds: ["unknown-account"],
+			}),
+		).toBe("api-account-A");
+	});
+
 	test.each([
 		["gpt-5.6-sol", "free", "plus"],
 		["gpt-5.6-luna", "go", "business"],

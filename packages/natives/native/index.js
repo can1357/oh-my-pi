@@ -38,6 +38,7 @@ export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
 export const Shell = nativeBindings.Shell;
+export const TextPredictor = nativeBindings.TextPredictor;
 export const TtyWriter = nativeBindings.TtyWriter;
 export const VcsGitRepo = nativeBindings.VcsGitRepo;
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
@@ -45,7 +46,10 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
-export const __piNativesV18_2_11 = nativeBindings.__piNativesV18_2_11;
+export const __piNativesBuildVersion = nativeBindings.__piNativesBuildVersion;
+export const appleFmAvailability = nativeBindings.appleFmAvailability ?? missingNativeExport("appleFmAvailability");
+export const appleFmCancel = nativeBindings.appleFmCancel ?? missingNativeExport("appleFmCancel");
+export const appleFmGenerate = nativeBindings.appleFmGenerate ?? missingNativeExport("appleFmGenerate");
 export const astEdit = nativeBindings.astEdit ?? missingNativeExport("astEdit");
 export const astGrep = nativeBindings.astGrep ?? missingNativeExport("astGrep");
 export const astMatch = nativeBindings.astMatch ?? missingNativeExport("astMatch");
@@ -95,7 +99,6 @@ export const isoStop = nativeBindings.isoStop ?? missingNativeExport("isoStop");
 export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport("listWorkspace");
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
-export const macOSCompleteWord = nativeBindings.macOSCompleteWord ?? missingNativeExport("macOSCompleteWord");
 export const macOSSpellCheckerAvailable = nativeBindings.macOSSpellCheckerAvailable ?? missingNativeExport("macOSSpellCheckerAvailable");
 export const macOSSpellingGuesses = nativeBindings.macOSSpellingGuesses ?? missingNativeExport("macOSSpellingGuesses");
 export const matchesKey = nativeBindings.matchesKey ?? missingNativeExport("matchesKey");
@@ -163,6 +166,7 @@ export const Encoding = {
 	DeepSeekV3: "DeepSeekV3",
 	KimiK2: "KimiK2",
 	Glm5: "Glm5",
+	Jev: "Jev",
 };
 export const FileType = {
 	File: 1,
@@ -201,5 +205,60 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const ShellFsFileType = {
+	File: "file",
+	Dir: "dir",
+	Symlink: "symlink",
+	Fifo: "fifo",
+	Socket: "socket",
+	Char: "char",
+	Block: "block",
+};
+export const ShellFsMissing = {
+	Existing: "existing",
+	Normal: "normal",
+	Missing: "missing",
+};
+export const ShellFsOp = {
+	Metadata: "metadata",
+	SymlinkMetadata: "symlinkMetadata",
+	ReadDir: "readDir",
+	Canonicalize: "canonicalize",
+	BackingPath: "backingPath",
+	ReadLink: "readLink",
+	Access: "access",
+	Open: "open",
+	Read: "read",
+	Write: "write",
+	Flush: "flush",
+	Close: "close",
+	FileMetadata: "fileMetadata",
+	IsLocked: "isLocked",
+	SetLen: "setLen",
+	FileSetTimes: "fileSetTimes",
+	FileSetPermissions: "fileSetPermissions",
+	Sync: "sync",
+	CreateDir: "createDir",
+	RemoveFile: "removeFile",
+	RemoveDir: "removeDir",
+	RemoveDirAll: "removeDirAll",
+	Rename: "rename",
+	HardLink: "hardLink",
+	Symlink: "symlink",
+	SetPermissions: "setPermissions",
+	SetTimes: "setTimes",
+	Chown: "chown",
+	StatFs: "statFs",
+	GetXattr: "getXattr",
+	SetXattr: "setXattr",
+	ListXattr: "listXattr",
+	RemoveXattr: "removeXattr",
+	Mknod: "mknod",
+};
+export const ShellFsResolve = {
+	Physical: "physical",
+	Logical: "logical",
+	None: "none",
 };
 // --- end generated native exports ---

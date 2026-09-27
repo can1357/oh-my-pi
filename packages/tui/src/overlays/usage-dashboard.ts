@@ -38,6 +38,8 @@ import {
 	matchesSelectUp,
 } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 
 /** Local calendar-day activity consumed by the usage heatmap. */
 export interface DailyActivityPoint {
@@ -83,6 +85,8 @@ export interface ProviderCard {
 		soonestExpiryMs?: number;
 		unavailableReasons: string[];
 	};
+	/** Labels of accounts with verified Daybreak access. */
+	daybreakAccounts?: string[];
 }
 
 /**
@@ -202,6 +206,17 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 						unavailableReasons,
 					}
 				: undefined;
+		const daybreakAccounts = providerReports.flatMap((report, index) =>
+			report.metadata?.daybreak === true
+				? [
+						typeof report.metadata.email === "string" && report.metadata.email
+							? report.metadata.email
+							: typeof report.metadata.accountId === "string" && report.metadata.accountId
+								? report.metadata.accountId
+								: `account ${index + 1}`,
+					]
+				: [],
+		);
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
@@ -209,8 +224,11 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 			windows,
 			unlimited: windows.length === 0,
 			idle:
-				!resetCredits && windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+				!resetCredits &&
+				daybreakAccounts.length === 0 &&
+				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
 			resetCredits,
+			...(daybreakAccounts.length > 0 ? { daybreakAccounts } : {}),
 		});
 	}
 
@@ -452,6 +470,11 @@ export class UsageDashboardComponent implements Component {
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+
+		for (const account of card.daybreakAccounts ?? []) {
+			const label = sanitizeText(account.replace(/[\r\n\t]+/g, " "));
+			lines.push(`  ${theme.fg("success", truncateToWidth(`daybreak · ${label}`, width - 2))}`);
+		}
 
 		if (card.resetCredits) {
 			const resets = card.resetCredits;
@@ -704,8 +727,12 @@ export class UsageDashboardComponent implements Component {
 		const checkedText = latestFetchedAt ? `checked ${formatDuration(this.#nowMs - latestFetchedAt)} ago` : "";
 		const title = this.#view === "detail" ? "Usage · Details" : "Usage";
 
-		const scrollHint = maxScroll > 0 ? "↑/↓ scroll · " : "";
-		const hint = this.#view === "detail" ? `${scrollHint}Esc back` : `${scrollHint}↵ details · Esc close`;
+		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")} scroll · ` : "";
+		const cancel = editorKey("tui.select.cancel");
+		const hint =
+			this.#view === "detail"
+				? `${scrollHint}${cancel} back`
+				: `${scrollHint}${formatKeyHint("enter")} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
 		this.#body.setLines(contentSource.slice(this.#scroll, this.#scroll + contentRows));

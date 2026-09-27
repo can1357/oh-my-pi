@@ -149,6 +149,16 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 }
 
 /**
+ * True when a settled assistant message contributes reply text or thinking to
+ * {@link buildReplanTitleContext}. Deferred auto-titling waits for one before
+ * retitling from conversation context; aborted/errored turns do not count.
+ */
+export function isTitleContextReply(message: AssistantMessage): boolean {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return false;
+	return textFromContent(message.content) !== "" || thinkingFromContent(message.content) !== "";
+}
+
+/**
  * Compares session messages by provider-replay semantics, ignoring runtime-only
  * fields that do not change a restored request.
  */
@@ -485,6 +495,11 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 	}
 }
 
+/** Output the user or the agent loop can act on: reasoning alone does not count. */
+function isDeliverableContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	return content?.type === "toolCall" || content?.type === "image" || (content?.type === "text" && hasText(content));
+}
+
 /** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
  *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
  *  than an empty completion, and a `length` stop was cut off mid-output. */
@@ -522,6 +537,17 @@ export function isEmptyAssistantStop(message: Pick<AssistantMessage, "stopReason
 export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
 	return !isEmptyAssistantStop(message) && message.content.some(isActionableContent);
+}
+
+/**
+ * True when the turn emitted text, a tool call, or an image. Stricter than
+ * {@link assistantTurnProducedOutput}: signed reasoning is replay-worthy but
+ * delivers nothing, so length-stop recovery in `checkCompaction` treats a
+ * reasoning-only truncation as budget burned (retry) rather than a truncated
+ * deliverable (keep), and only a delivered turn resets its retry cap.
+ */
+export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
+	return message.content.some(isDeliverableContent);
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -1058,7 +1084,11 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			// stripped whether or not they were long enough for a continuity note.
 			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
 			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
+			// An empty interrupted response still carries the controls its request
+			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
+			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
+				return [];
+			}
 			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}

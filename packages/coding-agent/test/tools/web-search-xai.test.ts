@@ -648,10 +648,10 @@ describe("xAI web search provider", () => {
 		const authorizationHeaders: string[] = [];
 		const wireModels: unknown[] = [];
 		let requestCount = 0;
-		vi.spyOn(modelRegistry, "getApiKeyForProvider")
-			.mockResolvedValueOnce("initial-xai-key")
-			.mockResolvedValueOnce("refreshed-xai-key")
-			.mockResolvedValueOnce("rotated-xai-key");
+		vi.spyOn(modelRegistry, "getApiKeyWithCredentialForProvider")
+			.mockResolvedValueOnce({ apiKey: "initial-xai-key" })
+			.mockResolvedValueOnce({ apiKey: "refreshed-xai-key" })
+			.mockResolvedValueOnce({ apiKey: "rotated-xai-key" });
 		const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(true);
 		const fetchMock: FetchImpl = (_input, init) => {
 			requestCount += 1;

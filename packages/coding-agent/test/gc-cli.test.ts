@@ -919,6 +919,36 @@ describe("runGcCommand cold-session archive", () => {
 		expect(ftsRows.map(row => row.session_id)).toEqual(["keep-me"]);
 	});
 
+	test("removes archived session recaps even when history.db has no prompt history", async () => {
+		await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
+		const dbPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath);
+		db.run("CREATE TABLE session_recaps (id INTEGER PRIMARY KEY, session_id TEXT, cwd TEXT, recap TEXT)");
+		db.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES ('archive-me', '/p', 'old recap')");
+		db.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES ('keep-me', '/p', 'live recap')");
+		db.close();
+
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+
+		const check = new Database(dbPath);
+		const rows = check.prepare("SELECT session_id FROM session_recaps").all() as Array<{ session_id: string }>;
+		check.close();
+
+		expect(result.archive?.archived).toBe(1);
+		expect(result.archive?.errors).toEqual([]);
+		expect(rows.map(row => row.session_id)).toEqual(["keep-me"]);
+	});
+
 	test("removes archived main and nested session rows from stats", async () => {
 		const session = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
 		const nestedSession = path.join(session.slice(0, -".jsonl".length), "nested.jsonl");

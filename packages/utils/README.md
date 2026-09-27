@@ -1,6 +1,6 @@
 # @oh-my-pi/pi-utils
 
-Shared utilities for [oh-my-pi](https://github.com/can1357/oh-my-pi) packages. Zero ceremony, Bun-first.
+Shared utilities for [omp](https://github.com/can1357/oh-my-pi) packages. Zero ceremony, Bun-first.
 
 ## Notable modules
 

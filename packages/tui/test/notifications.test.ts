@@ -149,7 +149,7 @@ describe("terminal notifications", () => {
 		});
 
 		expect(out).toBe(
-			"\x1b]99;i=complete-1:f=T2ggTXkgUGk=:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
+			"\x1b]99;i=complete-1:f=b21w:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
 				"\x1b]99;i=complete-1:p=body;Complete\x1b\\",
 		);
 	});
@@ -158,7 +158,7 @@ describe("terminal notifications", () => {
 		setOsc99Supported(true);
 		const terminal = getTerminalInfo("kitty");
 		const out = terminal.formatNotification({ title: "Line 1\nLine 2", id: "unsafe" });
-		expect(out).toBe("\x1b]99;i=unsafe:f=T2ggTXkgUGk=:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
+		expect(out).toBe("\x1b]99;i=unsafe:f=b21w:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
 	});
 
 	it("queries and confirms OSC 99 support before rich notifications", () => {
@@ -304,7 +304,7 @@ describe("terminal notifications", () => {
 		TERMINAL.sendNotification({ title: "-x session", body: "Complete", type: "completion" });
 
 		const titles = spawn.mock.calls.map(call => (call[0] as unknown as { cmd: string[] }).cmd[3]);
-		expect(titles).toEqual(["Oh My Pi", "-x session"]);
+		expect(titles).toEqual(["omp", "-x session"]);
 	});
 
 	it("keeps the OSC fallback when the Herdr pane id is absent", () => {

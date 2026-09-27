@@ -6,6 +6,7 @@
 import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
@@ -17,6 +18,8 @@ import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODELS } from "../tts";
 import { selectSetupModel } from "@oh-my-pi/pi-tui/apps/setup-model-picker";
+
+import { cfgPythonInterpreter } from "../eval/settings";
 
 export type SetupComponent = "python" | "speech";
 
@@ -121,7 +124,7 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
 	const cwd = getProjectDir();
 	const projectSettings = await Settings.init({ cwd });
-	const interpreter = projectSettings.get("python.interpreter")?.trim() || undefined;
+	const interpreter = cfgPythonInterpreter.get(projectSettings)?.trim() || undefined;
 	const check = await checkPythonSetup(cwd, interpreter);
 
 	if (flags.json) {
@@ -298,7 +301,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	console.log(chalk.green(`\n${theme.status.success} Speech is ready`));
 	console.log(
 		chalk.dim(
-			"Enable speech-to-text via stt.enabled, then hold Space to talk (or bind app.stt.toggle); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.",
+			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} to talk (or bind app.stt.toggle); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
 		),
 	);
 }

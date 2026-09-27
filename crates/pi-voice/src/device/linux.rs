@@ -291,7 +291,7 @@ impl PulseStream {
 		let stream = unsafe {
 			(api.simple_new)(
 				ptr::null(),
-				c"oh-my-pi".as_ptr(),
+				c"omp".as_ptr(),
 				direction,
 				ptr::null(),
 				c"voice".as_ptr(),

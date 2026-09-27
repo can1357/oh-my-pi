@@ -18,6 +18,8 @@ import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
+import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
+
 const contextNotesSchema = type({
 	"text?": type("string").describe("Entire replacement notebook text. Omit to read; use an empty string to clear."),
 });
@@ -40,7 +42,7 @@ export interface NewContextToolDetails {
 type ExperimentalContextSessionManager = NonNullable<ToolSession["sessionManager"]>;
 
 function resolveExperimentalContextSession(session: ToolSession): ExperimentalContextSessionManager | undefined {
-	if (session.settings.get("compaction.experimentalContextManagement") !== true || session.isDisposed?.()) {
+	if (cfgCompactionExperimentalContextManagement.get(session.settings) !== true || session.isDisposed?.()) {
 		return undefined;
 	}
 	const manager = session.sessionManager;
@@ -57,7 +59,7 @@ function resolveExperimentalContextSession(session: ToolSession): ExperimentalCo
 export function getExperimentalContextSession(session: ToolSession): ExperimentalContextSessionManager {
 	const manager = resolveExperimentalContextSession(session);
 	if (manager) return manager;
-	if (session.settings.get("compaction.experimentalContextManagement") !== true) {
+	if (cfgCompactionExperimentalContextManagement.get(session.settings) !== true) {
 		throw new ToolError("Experimental context management is disabled.");
 	}
 	if (session.isDisposed?.()) {

@@ -38,7 +38,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
 	const hasScheme = path => typeof path === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path);
-	const shouldDelegateRead = path => hasScheme(path) && !path.toLowerCase().startsWith("local://");
+	const shouldDelegateRead = path => hasScheme(path) && !callHelper("hasRoot", path);
 	const withReadLineSelector = (path, options) => {
 		const offset = typeof options.offset === "number" ? options.offset : 1;
 		const limit = typeof options.limit === "number" ? options.limit : undefined;
@@ -162,11 +162,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 
 		async send(message) {
-			return await globalThis.__omp_call_tool__("hub", {
-				op: "send",
-				to: this.id,
-				message: String(message),
-				i: "agent handle",
+			return await globalThis.__omp_call_tool__("write", {
+				path: this.handle,
+				content: String(message),
+				i: "Messaging agent",
 			});
 		}
 

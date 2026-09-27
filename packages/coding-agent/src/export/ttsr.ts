@@ -11,10 +11,10 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
-import { AstMatchStrictness, astMatch } from "@oh-my-pi/pi-natives";
+import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { compileRuleCondition, type Rule } from "../capability/rule";
-import type { TtsrSettings } from "../config/settings";
+import type { TtsrSettings } from "./ttsr-settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
 
@@ -45,8 +45,27 @@ export interface JudgedCandidate {
 
 /** Yes-probability at or above which a judged rule counts as violated. */
 export const JUDGED_RULE_THRESHOLD = 0.7;
-/** Output characters sent per judgment; Jev budgets 32k tokens for `state`. */
-const JUDGED_STATE_MAX_CHARS = 60_000;
+/**
+ * Jev tokens of output content sent per judgment. Jev rejects a judgment branch
+ * past ~33k tokens (`max_tokens_exceeded`), and each branch also carries the
+ * request template, the state keys, the subject and one question.
+ */
+export const JUDGED_CONTENT_MAX_TOKENS = 32_000;
+
+/** Longest prefix of `text` within `maxTokens` Jev tokens, never ending on half a surrogate pair. */
+function jevPrefix(text: string, maxTokens: number): string {
+	if (countTokens(text, Encoding.Jev) <= maxTokens) return text;
+	// Counts grow with length up to whole-word jitter, so bisect; `lo` always fits, `hi` never does.
+	let lo = 0;
+	let hi = text.length;
+	while (hi - lo > 1) {
+		const mid = (lo + hi) >>> 1;
+		if (countTokens(text.slice(0, mid), Encoding.Jev) <= maxTokens) lo = mid;
+		else hi = mid;
+	}
+	const last = text.charCodeAt(lo - 1);
+	return text.slice(0, last >= 0xd800 && last <= 0xdbff ? lo - 1 : lo);
+}
 
 /**
  * Ask every candidate's question about `output` in one request — Jev bills the
@@ -64,7 +83,7 @@ export async function judgeRules(
 		questions[`q${index}`] = { type: "noul", instructions: candidate.question };
 	}
 	const { answers } = await judge.judge(
-		{ state: { output: output.subject, content: output.content.slice(0, JUDGED_STATE_MAX_CHARS) }, questions },
+		{ state: { output: output.subject, content: jevPrefix(output.content, JUDGED_CONTENT_MAX_TOKENS) }, questions },
 		options,
 	);
 	return candidates
@@ -102,7 +121,7 @@ interface InjectionRecord {
 	lastInjectedAt: number;
 }
 
-const DEFAULT_SETTINGS: Required<TtsrSettings> = {
+const DEFAULT_SETTINGS: TtsrSettings = {
 	enabled: true,
 	judge: "auto",
 	contextMode: "discard",
@@ -113,6 +132,12 @@ const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	disabledRules: [],
 };
 
+/**
+ * Fixed TTSR settings (omitted fields take the defaults), or a getter the manager reads on every
+ * check so live setting changes apply immediately.
+ */
+export type TtsrSettingsSource = Partial<TtsrSettings> | (() => TtsrSettings);
+
 const DEFAULT_SCOPE: TtsrScope = {
 	allowText: true,
 	allowThinking: false,
@@ -121,7 +146,7 @@ const DEFAULT_SCOPE: TtsrScope = {
 };
 
 export class TtsrManager {
-	readonly #settings: Required<TtsrSettings>;
+	readonly #settingsSource: () => TtsrSettings;
 	readonly #rules = new Map<string, TtsrEntry>();
 	readonly #injectionRecords = new Map<string, InjectionRecord>();
 	readonly #buffers = new Map<string, string>();
@@ -132,8 +157,18 @@ export class TtsrManager {
 	#canMatchThinking = false;
 	#hasJudgedRules = false;
 
-	constructor(settings?: TtsrSettings) {
-		this.#settings = { ...DEFAULT_SETTINGS, ...settings };
+	constructor(settings?: TtsrSettingsSource) {
+		if (typeof settings === "function") {
+			this.#settingsSource = settings;
+		} else {
+			const snapshot: TtsrSettings = { ...DEFAULT_SETTINGS, ...settings };
+			this.#settingsSource = () => snapshot;
+		}
+	}
+
+	/** Current settings; resolved per call so a live source is never cached. */
+	get #settings(): TtsrSettings {
+		return this.#settingsSource();
 	}
 
 	/** Check if a rule can be triggered based on repeat settings. */
@@ -687,13 +722,14 @@ export class TtsrManager {
 
 	/**
 	 * Atomically replace monitored rules while retaining injection state for names
-	 * that remain registered.
+	 * that remain registered. While TTSR is disabled nothing registers, so injection
+	 * state is kept intact for when it is re-enabled.
 	 *
 	 * Returns the names accepted for TTSR monitoring so the caller can bucket
 	 * rejected conditional rules through its normal fallback path.
 	 */
 	replaceRules(rules: readonly Rule[]): Set<string> {
-		const replacement = new TtsrManager(this.#settings);
+		const replacement = new TtsrManager(this.#settingsSource);
 		for (const rule of rules) {
 			replacement.addRule(rule);
 		}
@@ -708,6 +744,7 @@ export class TtsrManager {
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
 		this.resetBuffer();
 
+		if (!this.#settings.enabled) return registered;
 		for (const name of this.#injectionRecords.keys()) {
 			if (!registered.has(name)) this.#injectionRecords.delete(name);
 		}
@@ -729,8 +766,8 @@ export class TtsrManager {
 		return this.#messageCount;
 	}
 
-	/** Get settings. */
-	getSettings(): Required<TtsrSettings> {
+	/** Current settings, read live from the manager's source. */
+	getSettings(): TtsrSettings {
 		return this.#settings;
 	}
 }

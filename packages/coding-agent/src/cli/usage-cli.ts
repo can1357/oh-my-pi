@@ -29,6 +29,9 @@ import { Settings } from "../config/settings";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+
+import { cfgRetryUsageReservePct } from "../session/settings";
 
 const BAR_WIDTH = 28;
 
@@ -399,6 +402,7 @@ function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<str
 
 function formatAccountHeader(
 	report: UsageReport,
+	peers: readonly UsageReport[],
 	index: number,
 	nowMs: number,
 	redaction?: Map<string, string>,
@@ -407,14 +411,19 @@ function formatAccountHeader(
 	const icon = STATUS_COLOR[status]("●");
 	const label = reportAccountLabel(report, index);
 	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
-	const metaOrgName = report.metadata?.orgName;
-	const metaOrgId = report.metadata?.orgId;
-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-	if (typeof org === "string" && org && org !== label) {
-		header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+	if (report.provider === "openai-codex") {
+		const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
+		const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
+		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
+	} else {
+		const metaOrgName = report.metadata?.orgName;
+		const metaOrgId = report.metadata?.orgId;
+		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+		const plan = report.metadata?.planType;
+		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
 	}
-	const planType = report.metadata?.planType;
-	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
+	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 	if (resets && resets.bankedCount > 0) {
 		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);
@@ -498,10 +507,20 @@ export interface ProviderWindowStat {
 	remainingAccounts: number;
 }
 
+/**
+ * Meter identity for a limit that holds its own quota pool inside a window. A model-scoped
+ * allowance is a separate pool from the umbrella window it caps - `claude.ts` marks the Fable
+ * weekly cap `tier` without `shared` precisely so it cannot gate Opus or Sonnet requests - and
+ * reporting it separately keeps a spent scoped cap visible next to the umbrella remainder.
+ * Only Anthropic and Codex use `tier` for such a pool; other providers (Copilot, Devin, Muse Code)
+ * put the subscription plan there, which must not split one window per plan. Codex meters that
+ * carry no tier fall back to the limit-id slug.
+ */
 function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
-	if (report.provider !== "openai-codex") return undefined;
+	if (report.provider !== "anthropic" && report.provider !== "openai-codex") return undefined;
 	const tier = limit.scope.tier?.trim().toLowerCase();
 	if (tier) return tier;
+	if (report.provider !== "openai-codex") return undefined;
 	const slug = limit.id.toLowerCase().split(":")[1];
 	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
 }
@@ -510,8 +529,9 @@ function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefin
  * Aggregate one provider's reports into per-window quota capacity stats.
  *
  * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
- * account contributes its single highest used fraction. Codex keeps each meter
- * in its own bucket because chat and Spark can share a window duration.
+ * account contributes its single highest used fraction. Limits that hold their
+ * own pool inside a window keep their own bucket: a model-scoped tier cap, and
+ * Codex chat versus Spark, which can share a window duration.
  */
 export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
 	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
@@ -770,7 +790,7 @@ export function formatUsageBreakdown(
 		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
 
 		providerReports.forEach((report, index) => {
-			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
 					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
@@ -1196,7 +1216,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: settings.get("retry.usageReservePct"),
+			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);

@@ -942,6 +942,10 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureParent, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureParent, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureParent, ["config", "user.name", "Test User"]);
+		// beforeEach copies both repos with fs.cp; auto maintenance would race
+		// the copy the same way as in the commitToBranch fixture below.
+		await runGit(fixtureParent, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureParent, ["config", "gc.auto", "0"]);
 		await fs.writeFile(path.join(fixtureParent, ".gitignore"), "sub/\n");
 		await runGit(fixtureParent, ["add", "."]);
 		await runGit(fixtureParent, ["commit", "-q", "-m", "parent-init"]);
@@ -951,6 +955,8 @@ describe("applyNestedPatches", () => {
 		await runGit(fixtureNested, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureNested, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureNested, ["config", "user.name", "Test User"]);
+		await runGit(fixtureNested, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureNested, ["config", "gc.auto", "0"]);
 		await fs.writeFile(path.join(fixtureNested, "file.txt"), "v1\n");
 		await runGit(fixtureNested, ["add", "."]);
 		await runGit(fixtureNested, ["commit", "-q", "-m", "nested-init"]);
@@ -1065,6 +1071,12 @@ describe("commitToBranch preserves agent commits", () => {
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		// `git commit` kicks off `git maintenance run --auto`, which writes
+		// `.git/objects/maintenance.lock` and removes it again. beforeEach copies
+		// this repo with fs.cp, and a lock that disappears between readdir and
+		// lstat fails the copy with ENOENT.
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
+		await runGit(fixtureRepo, ["config", "gc.auto", "0"]);
 		await fs.writeFile(
 			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",

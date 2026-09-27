@@ -9,6 +9,8 @@ import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+import { cfgSttLanguage, cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
+
 const ZERO_USAGE = {
 	input: 0,
 	output: 0,
@@ -53,7 +55,7 @@ describe("STTController cloud transcription", () => {
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.submitTrigger", "never");
+		cfgSttSubmitTrigger.set(settings, "never");
 	});
 
 	afterEach(() => {
@@ -65,7 +67,7 @@ describe("STTController cloud transcription", () => {
 	it("buffers microphone PCM into a valid mono 16-bit WAV and commits the cloud transcript", async () => {
 		const model = getBundledModel("openai", "whisper-1");
 		settings.setModelRole("dictation", "openai/whisper-1");
-		settings.set("stt.language", "en");
+		cfgSttLanguage.set(settings, "en");
 		const registry = registryFor(model);
 		const transcribe = vi.spyOn(transcription, "transcribeAudio").mockResolvedValue({
 			text: "cloud transcript",
@@ -154,6 +156,27 @@ describe("STTController cloud transcription", () => {
 		controller.dispose();
 		expect(requestSignal?.aborted).toBe(true);
 		await stopping;
+	});
+
+	it("keeps the mic off after a hold that begins and ends while the previous clip is transcribing", async () => {
+		const model = getBundledModel("openai", "whisper-1");
+		settings.setModelRole("dictation", "openai/whisper-1");
+		const transcribed = Promise.withResolvers<TranscriptionResult>();
+		vi.spyOn(transcription, "transcribeAudio").mockReturnValue(transcribed.promise);
+		const capture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(capture, { settings, registry: registryFor(model) });
+		const editor = makeEditor();
+
+		await controller.start(editor, makeOptions());
+		const transcribing = controller.stop();
+		await controller.start(editor, makeOptions());
+		transcribed.resolve({ text: "first clip", usage: ZERO_USAGE });
+		await transcribing;
+		await controller.stop();
+
+		expect(controller.state).toBe("idle");
+		expect(capture).toHaveBeenCalledTimes(1);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("first clip");
 	});
 
 	it("keeps local-inference models on the streaming worker path", async () => {

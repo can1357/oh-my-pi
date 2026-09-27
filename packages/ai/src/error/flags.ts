@@ -659,7 +659,8 @@ export function classify(error: unknown, api?: Api): number {
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
+					(is402BillingCapBody(link.message) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}

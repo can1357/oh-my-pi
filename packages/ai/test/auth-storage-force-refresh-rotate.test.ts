@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { withAuth } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -158,6 +158,15 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(second).not.toBe(first);
 	});
 
+	test("resolver binds stored API keys to their credential rows", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.credentials.set(PROVIDER, { type: "api_key", key: "stored-key" });
+		const row = store.listAuthCredentials(PROVIDER).find(entry => entry.credential.type === "api_key");
+		if (!row) throw new Error("expected stored API key row");
+		const resolved = await authStorage.keys.resolver(PROVIDER)({ lastChance: false, error: undefined });
+		expect(resolved).toEqual({ apiKey: "stored-key", credentialId: row.id });
+	});
+
 	test("resolver rotates the credential matching previousKey instead of a stale sticky", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		await authStorage.credentials.set(PROVIDER, [
@@ -178,8 +187,8 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey: failed,
 		});
 
-		expect(retry).toBe(sticky);
-		expect(retry).not.toBe(failed);
+		expect(resolvedApiKeyBearer(retry)).toBe(sticky);
+		expect(resolvedApiKeyBearer(retry)).not.toBe(failed);
 
 		const laterSelections = new Set<string>();
 		for (let index = 0; index < 6; index += 1) {
@@ -219,7 +228,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey,
 		});
 
-		expect(retry).toBe(sibling.credential.access);
+		expect(retry).toMatchObject({ apiKey: sibling.credential.access, credentialId: sibling.id });
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sibling.credential.access);
 	});
 
@@ -248,7 +257,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			previousKey,
 		});
 
-		expect(retry).toBe(refreshedKey);
+		expect(retry).toMatchObject({ apiKey: refreshedKey, credentialId: target.id });
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(refreshedKey);
 		expect(
 			store
@@ -262,9 +271,9 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 	test("resolver stops when a usage-limit rotation has no unblocked sibling", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		const getApiKey = vi
-			.spyOn(authStorage.keys, "get")
-			.mockResolvedValueOnce("quota-blocked-B")
-			.mockResolvedValueOnce("quota-blocked-A");
+			.spyOn(authStorage.keys, "getWithCredential")
+			.mockResolvedValueOnce({ apiKey: "quota-blocked-B", credentialId: 1 })
+			.mockResolvedValueOnce({ apiKey: "quota-blocked-A", credentialId: 2 });
 		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(false);
 		const attemptedKeys: string[] = [];
 

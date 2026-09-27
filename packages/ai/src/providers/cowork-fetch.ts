@@ -104,18 +104,25 @@ function responseHeaders(message: IncomingMessage): Headers {
 function decodedResponseStream(message: IncomingMessage): stream.Readable {
 	const rawEncoding = message.headers["content-encoding"];
 	const encoding = (Array.isArray(rawEncoding) ? rawEncoding[0] : rawEncoding)?.trim().toLowerCase();
+	let decoder: stream.Transform;
 	switch (encoding) {
 		case "gzip":
-			return message.pipe(zlib.createGunzip());
+			decoder = zlib.createGunzip();
+			break;
 		case "deflate":
-			return message.pipe(zlib.createInflate());
+			decoder = zlib.createInflate();
+			break;
 		case "br":
-			return message.pipe(zlib.createBrotliDecompress());
+			decoder = zlib.createBrotliDecompress();
+			break;
 		case "zstd":
-			return message.pipe(zlib.createZstdDecompress());
+			decoder = zlib.createZstdDecompress();
+			break;
 		default:
 			return message;
 	}
+	// Couple decoded-body cancellation to the source so its keep-alive socket cannot be stranded.
+	return stream.pipeline(message, decoder, () => {});
 }
 
 function createResponse(message: IncomingMessage, method: string): Response {
