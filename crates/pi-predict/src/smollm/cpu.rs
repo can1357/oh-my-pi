@@ -45,6 +45,10 @@ impl Q8 {
 
 	/// `row_j · x`.
 	#[inline]
+	#[allow(
+		clippy::suboptimal_flops,
+		reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+	)]
 	fn dot(&self, j: usize, x: &[f32]) -> f32 {
 		let per = self.blocks_per_row();
 		let quants = &self.quants[j * per..(j + 1) * per];
@@ -57,11 +61,11 @@ impl Q8 {
 			let mut block = [0f32; 8];
 			for (qc, xc) in q.as_chunks::<8>().0.iter().zip(x.as_chunks::<8>().0) {
 				for k in 0..8 {
-					block[k] = f32::mul_add(f32::from(qc[k]), xc[k], block[k]);
+					block[k] += f32::from(qc[k]) * xc[k];
 				}
 			}
 			for k in 0..8 {
-				acc[k] = f32::mul_add(scale, block[k], acc[k]);
+				acc[k] += scale * block[k];
 			}
 		}
 		acc.iter().sum()
@@ -80,19 +84,28 @@ impl Q8 {
 
 /// `a · b` with lane-wise accumulators.
 #[inline]
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
 	let mut acc = [0f32; 8];
 	for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
 		for k in 0..8 {
-			acc[k] = f32::mul_add(x[k], y[k], acc[k]);
+			acc[k] += x[k] * y[k];
 		}
 	}
 	acc.iter().sum()
 }
 
 /// `a · b[t]` for four rows of `b` at once: independent accumulator chains
-/// keep the FMA pipes busy (the multi-token path is compute-bound).
+/// keep the multiply and add pipes busy (the multi-token path is
+/// compute-bound).
 #[inline]
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn dot4(a: &[f32], b: [&[f32]; 4]) -> [f32; 4] {
 	let (a, _) = a.as_chunks::<8>();
 	let b = b.map(|row| row.as_chunks::<8>().0);
@@ -101,7 +114,7 @@ fn dot4(a: &[f32], b: [&[f32]; 4]) -> [f32; 4] {
 	for (i, x) in a.iter().enumerate() {
 		for (acc, row) in acc.iter_mut().zip(&b) {
 			for k in 0..8 {
-				acc[k] = f32::mul_add(x[k], row[i][k], acc[k]);
+				acc[k] += x[k] * row[i][k];
 			}
 		}
 	}
@@ -275,14 +288,18 @@ fn rms_norm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
 
 /// Non-interleaved `RoPE` (`x·cos + rotate_half(x)·sin`) on every head of one
 /// token.
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+)]
 fn rope(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
 	let half = head_dim / 2;
 	for head in x.chunks_mut(head_dim) {
 		let (a, b) = head.split_at_mut(half);
 		for i in 0..half {
 			let (x1, x2) = (a[i], b[i]);
-			a[i] = f32::mul_add(x2, -sin[i], x1 * cos[i]);
-			b[i] = f32::mul_add(x1, sin[i], x2 * cos[i]);
+			a[i] = x1 * cos[i] - x2 * sin[i];
+			b[i] = x1 * sin[i] + x2 * cos[i];
 		}
 	}
 }
@@ -507,10 +524,14 @@ impl Weights {
 					sum += *s;
 				}
 				out.fill(0.0);
+				#[allow(
+					clippy::suboptimal_flops,
+					reason = "mul_add is a libm call without target FMA (x86-64-v2 builds)"
+				)]
 				for (&p, v) in scores.iter().zip(values.chunks_exact(kv_width)) {
 					let w = p / sum;
 					for (o, &vv) in out.iter_mut().zip(&v[offset..offset + head_dim]) {
-						*o = w.mul_add(vv, *o);
+						*o += w * vv;
 					}
 				}
 			}

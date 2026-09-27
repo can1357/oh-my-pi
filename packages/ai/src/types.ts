@@ -429,20 +429,10 @@ export interface StreamOptions {
 	credentialId?: number;
 	cacheRetention?: CacheRetention;
 	/**
-	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
-	 *
-	 * This is an ownership flag, not a general provider default: exactly one
-	 * primary agent loop sharing `providerSessionState` should enable it.
-	 * Side-channel and advisor requests must leave it unset.
-	 */
-	anthropicCacheRefresh?: boolean;
-	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches
 	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
-	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
-	anthropicCacheRefreshRequest?: boolean;
 	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the

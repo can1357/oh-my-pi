@@ -56,6 +56,7 @@ import type {
 	AnthropicFallbackCreditHandle,
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Judge,
 	Message,
@@ -391,6 +392,7 @@ import {
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
@@ -438,6 +440,8 @@ import {
 	cfgPowerSleepPrevention,
 	cfgPrewalkEnabled,
 	cfgProviderAppendOnlyContext,
+	cfgProvidersCacheWarming,
+	cfgProvidersCacheRetention,
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
@@ -981,6 +985,7 @@ export class AgentSession implements SettingsScope {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	readonly #cacheWarmer: CacheWarmer | undefined;
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
@@ -1536,6 +1541,15 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#cacheWarmer = config.cacheWarmer;
+		if (config.cacheWarmer) {
+			const warmer = config.cacheWarmer;
+			warmer.onWarmed = (message, extensionOverride) => this.#recordCacheWarmUsage(message, extensionOverride);
+			this.subscribeRunState(state => {
+				if (state === "idle") warmer.onAgentSettled();
+			});
+			cfgProvidersCacheWarming.listen(this, () => warmer.onModeChanged());
+		}
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#customCommands = config.customCommands ?? [];
@@ -3381,6 +3395,7 @@ export class AgentSession implements SettingsScope {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			this.#cacheWarmer?.onResponse(event.message);
 			if (this.#deferredTitle && isTitleContextReply(event.message)) this.#advanceDeferredTitle("replied");
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
@@ -4786,6 +4801,87 @@ export class AgentSession implements SettingsScope {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
+	/**
+	 * Current prompt-cache warming state, for hosts that surface it. Undefined
+	 * when the session has no warmer (side-channels, subagents, older hosts).
+	 */
+	get cacheWarmingStatus(): CacheWarmingStatus | undefined {
+		return this.#cacheWarmer?.status;
+	}
+
+	/**
+	 * Arms the prompt-cache warmer for a main-loop request. Called from the
+	 * session's streamFn after the request's options are finalized; a no-op
+	 * when the session has no warmer.
+	 */
+	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): void {
+		const warmer = this.#cacheWarmer;
+		if (!warmer) return;
+		const armMessages = this.messages;
+		const armShape = this.#cacheWarmingShape(model);
+		warmer.start({ model, context, options }, () => {
+			// The armed request must still be a prefix of the live messages by
+			// entry identity: appends are fine (tool results mid-run), but a
+			// rewrite, shallow array copy with new objects, compaction, branch,
+			// or session switch invalidates the cache key being warmed.
+			const current = this.messages;
+			if (current.length < armMessages.length) return false;
+			for (let index = 0; index < armMessages.length; index++) {
+				if (current[index] !== armMessages[index]) return false;
+			}
+			// So does anything else the next real request would send differently:
+			// replaying the old shape would keep an entry nobody reads.
+			return this.#cacheWarmingShape(this.model) === armShape;
+		});
+	}
+
+	/**
+	 * Fingerprint of the request inputs outside the transcript that are part of
+	 * the cache key: model, system prompt, tool set, thinking level, retention.
+	 */
+	#cacheWarmingShape(model: Model | undefined): number | bigint {
+		return Bun.hash(
+			JSON.stringify([
+				model?.provider,
+				model?.id,
+				this.agent.state.systemPrompt,
+				this.agent.state.tools.map(tool => tool.name),
+				this.thinkingLevel,
+				cfgProvidersCacheRetention.get(this.settings),
+			]),
+		);
+	}
+
+	/** Prompt size (input + cacheRead + cacheWrite) of the most recent real provider response. */
+	lastPromptTokens(): number {
+		const messages = this.messages;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message.role === "assistant")
+				return message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+		}
+		return 0;
+	}
+
+	/** Persist a completed warm request as off-transcript usage so session totals include its cost. */
+	#recordCacheWarmUsage(message: AssistantMessage, extensionOverride: boolean): void {
+		try {
+			this.sessionManager.appendModelUsage(
+				{
+					purpose: extensionOverride ? "cache-warm:extension-override" : "cache-warm",
+					api: message.api,
+					provider: message.provider,
+					model: message.model,
+					usage: message.usage,
+					stopReason: message.stopReason,
+				},
+				{ sessionId: this.sessionId, parentId: this.sessionManager.getLeafId() },
+			);
+		} catch (error) {
+			logger.debug("Failed to persist cache-warm usage", { error: String(error) });
+		}
+	}
+
 	/** True while a session identity or transcript transition is still applying or rolling back. */
 	get isSessionTransitioning(): boolean {
 		return this.#sessionTransitionDepth > 0;
@@ -5151,6 +5247,13 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		// Stop cache warming before the drain windows below: an armed tick firing
+		// mid-dispose would issue a paid warm request and persist usage into the
+		// closing session writer.
+		if (this.#cacheWarmer) {
+			this.#cacheWarmer.onWarmed = undefined;
+			this.#cacheWarmer.cancel();
+		}
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
