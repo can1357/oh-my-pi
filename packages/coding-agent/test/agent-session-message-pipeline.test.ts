@@ -711,6 +711,60 @@ describe("AgentSession message pipeline", () => {
 		expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
 		session.clearQueue();
 	});
+	it("runs custom slash commands only when sendUserMessage opts into command processing", async () => {
+		const execute = vi.fn(async () => undefined);
+		const failure = new Error("remote command failed");
+		const fail = vi.fn(async () => {
+			throw failure;
+		});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			customCommands: [
+				{
+					path: "remote-command",
+					resolvedPath: "remote-command",
+					source: "user",
+					command: { name: "remote", description: "Remote command", execute },
+				},
+				{
+					path: "failing-command",
+					resolvedPath: "failing-command",
+					source: "user",
+					command: { name: "broken", description: "Failing command", execute: fail },
+				},
+			],
+		});
+		sessions.push(session);
+
+		vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+		await session.sendUserMessage("/remote", { deliverAs: "followUp" });
+		expect(execute).not.toHaveBeenCalled();
+		expect(session.getQueuedMessages().followUp).toEqual(["/remote"]);
+		session.clearQueue();
+
+		const handled = vi.fn();
+		await session.sendUserMessage("/remote", {
+			processCommands: true,
+			onCommandHandled: handled,
+		});
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(handled).toHaveBeenCalledTimes(1);
+
+		const failedHandled = vi.fn();
+		const onCommandError = vi.fn();
+		await session.sendUserMessage("/broken", {
+			processCommands: true,
+			onCommandHandled: failedHandled,
+			onCommandError,
+		});
+		expect(fail).toHaveBeenCalledTimes(1);
+		expect(onCommandError).toHaveBeenCalledWith(failure);
+		expect(failedHandled).not.toHaveBeenCalled();
+		expect(session.messages.filter(message => message.role === "user")).toHaveLength(0);
+	});
 
 	it("resolves image attachments from submitted messages, not tool-result images", () => {
 		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };

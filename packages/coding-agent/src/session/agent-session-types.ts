@@ -366,6 +366,10 @@ export interface PromptOptions {
 	userInitiated?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Called when slash-command expansion consumes the prompt locally. */
+	onCommandHandled?: () => void;
+	/** Called when slash-command processing fails before forwarding a prompt. */
+	onCommandError?: (error: unknown) => void;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
@@ -404,6 +408,12 @@ export interface SendUserMessageOptions {
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Process slash commands and prompt templates before sending (default: false). */
+	processCommands?: boolean;
+	/** Called when command processing consumes the prompt locally. */
+	onCommandHandled?: () => void;
+	/** Called when command processing fails before forwarding a prompt. */
+	onCommandError?: (error: unknown) => void;
 }
 
 /** Result from a handoff operation. */

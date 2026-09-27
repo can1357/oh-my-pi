@@ -7181,6 +7181,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleImagePaste(): Promise<boolean> {
 		return this.#inputController.handleImagePaste();
 	}
+	dispatchBuiltinSlashCommand(text: string, images?: ImageContent[]): Promise<boolean | string> {
+		return this.#inputController.dispatchBuiltinSlashCommand(text, images);
+	}
 
 	/** Queue slash-command input behind the active turn. */
 	handleQueueCommand(message: string): Promise<void> {

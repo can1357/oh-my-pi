@@ -278,6 +278,8 @@ export interface InteractiveModeContext {
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void;
 	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void;
+	/** Run a built-in slash command through the interactive command registry. */
+	dispatchBuiltinSlashCommand(text: string, images?: ImageContent[]): Promise<boolean | string>;
 	/** Stack extension autocomplete behavior on top of the built-in editor provider. */
 	addAutocompleteProvider(factory: AutocompleteProviderFactory): void;
 	setEditorComponent(

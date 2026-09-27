@@ -304,6 +304,12 @@ export interface ExtensionUIContext {
 
 	/** Get the current text from the core input editor. */
 	getEditorText(): string;
+	/**
+	 * Dispatch a built-in slash command through the interactive controller.
+	 * Returns false when no built-in handles it, true when consumed, or replacement prompt text
+	 * when the built-in expands into a prompt. Available only in interactive mode.
+	 */
+	dispatchBuiltinSlashCommand?(text: string, images?: ImageContent[]): Promise<boolean | string>;
 
 	/** Show a multi-line editor for text editing. */
 	editor(

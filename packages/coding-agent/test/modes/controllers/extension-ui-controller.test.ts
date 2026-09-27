@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
@@ -40,9 +41,11 @@ function makeHarness() {
 		isHidden: vi.fn(() => false),
 	};
 	const showOverlay = vi.fn(() => fakeHandle);
+	const dispatchBuiltinSlashCommand = vi.fn(async (_text: string, _images?: ImageContent[]) => "replacement prompt");
 	let uiContext: ExtensionUIContext | undefined;
 	const ctx = {
 		editor,
+		dispatchBuiltinSlashCommand,
 		ui: {
 			requestRender,
 			getFocused,
@@ -71,6 +74,7 @@ function makeHarness() {
 		requestRender,
 		addAutocompleteProvider,
 		editorContainer,
+		dispatchBuiltinSlashCommand,
 		getFocused,
 		setFocus,
 		showOverlay,
@@ -93,6 +97,17 @@ function makeHarness() {
 		},
 	};
 }
+
+describe("ExtensionUiController built-in slash dispatch", () => {
+	it("exposes the interactive dispatcher and preserves rewritten prompts", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		const image: ImageContent = { type: "image", data: "remote-image", mimeType: "image/png" };
+
+		await expect(ui.dispatchBuiltinSlashCommand?.("/plan draft", [image])).resolves.toBe("replacement prompt");
+		expect(harness.dispatchBuiltinSlashCommand).toHaveBeenCalledWith("/plan draft", [image]);
+	});
+});
 
 describe("ExtensionUiController Ask dialog input", () => {
 	const questions: ExtensionAskDialogQuestion[] = [

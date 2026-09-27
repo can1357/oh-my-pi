@@ -149,6 +149,24 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);
 	});
+	it("dispatches remote builtins without clobbering the local editor draft", async () => {
+		const { ctx, editor } = makeCtx();
+		const controller = new InputController(ctx);
+		const localImage: ImageContent = { type: "image", data: "local", mimeType: "image/png" };
+		const remoteImage: ImageContent = { type: "image", data: "remote", mimeType: "image/jpeg" };
+		editor.setText("preserve this local draft");
+		editor.pendingImages = [localImage];
+		editor.pendingImageLinks = ["file:///local.png"];
+		editor.imageLinks = ["file:///local.png"];
+
+		await expect(controller.dispatchBuiltinSlashCommand("/hotkeys", [remoteImage])).resolves.toBe(true);
+
+		expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("preserve this local draft");
+		expect(editor.pendingImages).toEqual([localImage]);
+		expect(editor.pendingImageLinks).toEqual(["file:///local.png"]);
+		expect(editor.imageLinks).toEqual(["file:///local.png"]);
+	});
 
 	it("routes /queue through the yield-only follow-up queue while streaming", async () => {
 		const { ctx, editor, addToHistory, followUp, showStatus } = makeCtx(true);

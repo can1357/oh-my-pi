@@ -6801,15 +6801,22 @@ export class AgentSession implements SettingsScope {
 		const typedText = text;
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
-			const handled = await this.#tryExecuteExtensionCommand(text);
+			let commandProcessingFailed = false;
+			const onCommandError = (error: unknown): void => {
+				commandProcessingFailed = true;
+				options?.onCommandError?.(error);
+			};
+			const handled = await this.#tryExecuteExtensionCommand(text, onCommandError);
 			if (handled) {
+				if (!commandProcessingFailed) options?.onCommandHandled?.();
 				return false;
 			}
 
 			// Try custom commands (TypeScript slash commands)
-			const customResult = await this.#tryExecuteCustomCommand(text);
+			const customResult = await this.#tryExecuteCustomCommand(text, onCommandError);
 			if (customResult !== null) {
 				if (customResult === "") {
+					if (!commandProcessingFailed) options?.onCommandHandled?.();
 					return false;
 				}
 				text = customResult;
@@ -7482,7 +7489,7 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
-	async #tryExecuteExtensionCommand(text: string): Promise<boolean> {
+	async #tryExecuteExtensionCommand(text: string, onCommandError?: (error: unknown) => void): Promise<boolean> {
 		if (!this.#extensionRunner) return false;
 
 		// Parse command name and args
@@ -7506,6 +7513,7 @@ export class AgentSession implements SettingsScope {
 				event: "command",
 				error: err instanceof Error ? err.message : String(err),
 			});
+			onCommandError?.(err);
 			return true;
 		}
 	}
@@ -7595,7 +7603,7 @@ export class AgentSession implements SettingsScope {
 	 * Try to execute a custom command. Returns the prompt string if found, null otherwise.
 	 * If the command returns void, returns empty string to indicate it was handled.
 	 */
-	async #tryExecuteCustomCommand(text: string): Promise<string | null> {
+	async #tryExecuteCustomCommand(text: string, onCommandError?: (error: unknown) => void): Promise<string | null> {
 		if (this.#customCommands.length === 0 && this.#mcpPromptCommands.length === 0) return null;
 
 		// Parse command name and args
@@ -7634,6 +7642,7 @@ export class AgentSession implements SettingsScope {
 				const message = err instanceof Error ? err.message : String(err);
 				logger.error("Custom command failed", { commandName, error: message });
 			}
+			onCommandError?.(err);
 			return ""; // Command was handled (with error)
 		}
 	}
@@ -8267,36 +8276,48 @@ export class AgentSession implements SettingsScope {
 			if (images.length === 0) images = undefined;
 		}
 
+		const processCommands = options?.processCommands === true;
 		let deliveredAsAside = false;
-		if (options?.deliverAs === "aside") {
-			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
+		if (!processCommands) {
+			if (options?.deliverAs === "aside") {
+				if (this.isStreaming) {
+					await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
+					return;
+				}
+				// Idle: fall through to the prompt flow below (starts a turn, like an omitted
+				// deliverAs) — there is no live run to inject an aside into.
+				deliveredAsAside = true;
+			} else if (options?.deliverAs === "followUp") {
+				await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
+				return;
+			} else if (options?.deliverAs === "steer") {
+				await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
 				return;
 			}
-			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
-			// deliverAs) — there is no live run to inject an aside into.
-			deliveredAsAside = true;
-		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
-			return;
-		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
-			return;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template
-		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
-		// image normalization/vision description before dispatching, so a stream can start in
-		// that gap; prompt() re-checks isStreaming at each await boundary and queues via
-		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
-		// "steer") keeps that race from degrading a non-interrupting aside into a
-		// tool-batch-aborting steer.
-		await this.prompt(text, {
-			attribution: options?.attribution,
-			expandPromptTemplates: false,
-			images,
-			streamingBehavior: deliveredAsAside ? "aside" : "steer",
-		});
+		// The default caller surface deliberately skips slash handling. An explicit
+		// processCommands opt-in routes slash input through the normal prompt dispatcher,
+		// while preserving the requested queue mode if a turn is already streaming.
+		let commandErrorReported = false;
+		const onCommandError = (error: unknown): void => {
+			if (commandErrorReported) return;
+			commandErrorReported = true;
+			options?.onCommandError?.(error);
+		};
+		try {
+			await this.prompt(text, {
+				attribution: options?.attribution,
+				expandPromptTemplates: processCommands,
+				images,
+				streamingBehavior: options?.deliverAs ?? (deliveredAsAside ? "aside" : "steer"),
+				onCommandHandled: processCommands ? options?.onCommandHandled : undefined,
+				onCommandError: processCommands ? onCommandError : undefined,
+			});
+		} catch (error) {
+			if (processCommands) onCommandError(error);
+			throw error;
+		}
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).

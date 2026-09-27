@@ -862,6 +862,27 @@ export class InputController {
 		editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		return compacted.text.trim();
 	}
+	async dispatchBuiltinSlashCommand(text: string, images?: ImageContent[]): Promise<boolean | string> {
+		if (!text.startsWith("/")) return false;
+		const editor = this.ctx.editor;
+		const draftText = editor.getText();
+		const draftImages = [...editor.pendingImages];
+		const draftImageLinks = [...editor.pendingImageLinks];
+		const draftImageLinkAlias = editor.imageLinks ? [...editor.imageLinks] : undefined;
+		const mode = parseSlashCommand(text)?.name;
+		const draftDetached = mode === "plan" || mode === "vibe" || mode === "goal" || mode === "guided-goal";
+		const input = images?.length ? { images } : undefined;
+		this.#recordSlashCommandUsage(text);
+		try {
+			return await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+		} finally {
+			if (editor.getText() !== draftText) editor.setText(draftText);
+			editor.pendingImages = draftImages;
+			editor.pendingImageLinks = draftImageLinks;
+			editor.imageLinks = draftImageLinkAlias;
+			this.ctx.ui.requestRender();
+		}
+	}
 
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
