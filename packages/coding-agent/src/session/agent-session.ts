@@ -3720,10 +3720,15 @@ export class AgentSession implements SettingsScope {
 				// tell final settles from scheduled continuations, and `yielded` so
 				// they can tell the agent's own follow-up work (retries, reminders,
 				// compaction) from a finished turn that only background work resumes.
+				// `awaitingAsyncWork` singles out that last case: `yielded` alone also
+				// covers queued steer/follow-up and IRC continuations, which
+				// `#flushPendingAgentEnd` re-tags non-terminal.
+				const awaitingAsyncWork = options?.willContinue === true && options.awaitingAsyncWork === true;
 				await this.#emitSessionEvent({
 					...event,
 					isTerminal: !options?.willContinue,
-					yielded: !options?.willContinue || options.awaitingAsyncWork === true,
+					yielded: !options?.willContinue || awaitingAsyncWork,
+					...(awaitingAsyncWork ? { awaitingAsyncWork } : {}),
 				});
 				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
