@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.3.5] - 2026-09-27
+
 ### Added
 
 - Added the `openai` web-search grounding for OpenAI API models that support Responses web search (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`) ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
