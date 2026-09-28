@@ -820,7 +820,8 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
-		emitTerminalTitle();
+		// An extension override is frame-independent; the sink would dedupe it anyway.
+		if (terminalTitleRuntime.extensionOverride === undefined) emitTerminalTitle();
 	}, TITLE_SPINNER_INTERVAL_MS);
 	// Never keep the event loop alive for a cosmetic animation.
 	terminalTitleRuntime.timer.unref?.();

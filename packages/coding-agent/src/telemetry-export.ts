@@ -61,14 +61,17 @@ export function createTelemetryExportConfig(
 }
 
 /**
- * Register global trace/log/meter providers when OTLP endpoints are configured
- * through env. Idempotent, and a no-op when no signal has an endpoint (or when
- * the OTEL kill-switches are engaged), so startup can call it unconditionally.
+ * Register global trace/log/meter providers when enabled and OTLP endpoints are
+ * configured through env. Idempotent, and a no-op when disabled, no signal has
+ * an endpoint, or the OTEL kill-switch is engaged.
+ *
+ * @param exportEnabled `telemetry.otlpExportEnabled`; required so every caller
+ *   decides whether the user's opt-out applies.
  */
-export async function initTelemetryExport(): Promise<void> {
+export async function initTelemetryExport(exportEnabled: boolean): Promise<void> {
 	if (initPromise) return initPromise;
 
-	if (process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
+	if (!exportEnabled || process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
 
 	const signalConfig = resolveSignalConfig();
 	if (!signalConfig.trace && !signalConfig.log && !signalConfig.metric) return;

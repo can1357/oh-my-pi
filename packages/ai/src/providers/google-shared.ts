@@ -22,6 +22,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	Usage,
 } from "../types";
 import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -38,6 +39,7 @@ import type {
 	Part,
 	ThinkingConfig,
 	ThinkingLevel,
+	UsageMetadata,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
@@ -474,6 +476,33 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 }
 
 /**
+ * Maps Gemini `usageMetadata` onto {@link Usage} (cost zeroed for `calculateCost`).
+ *
+ * `promptTokenCount` includes `cachedContentTokenCount`, so input = prompt − cached,
+ * matching the OpenAI convention where input + cacheRead = total prompt tokens.
+ * Upstream sometimes omits `promptTokenCount` or reports a cache count above the
+ * prompt (Antigravity), so the prompt falls back to `total − candidates − thoughts`
+ * and cached tokens are clamped to it: input is never negative.
+ * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
+ */
+export function mapGoogleUsage(metadata: UsageMetadata): Usage {
+	const candidates = metadata.candidatesTokenCount || 0;
+	const thinking = metadata.thoughtsTokenCount || 0;
+	const total = metadata.totalTokenCount || 0;
+	const prompt = metadata.promptTokenCount || Math.max(0, total - candidates - thinking);
+	const cacheRead = Math.min(metadata.cachedContentTokenCount || 0, prompt);
+	return {
+		input: prompt - cacheRead,
+		output: candidates + thinking,
+		cacheRead,
+		cacheWrite: 0,
+		totalTokens: total,
+		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+/**
  * Module-local counter for generating unique tool call IDs across Google providers.
  * Shared so that a single monotonically-increasing sequence is used regardless of which
  * Google API surface produced the stream — purely for uniqueness, not ordering semantics.
@@ -739,28 +768,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		}
 
 		if (chunk.usageMetadata) {
-			// promptTokenCount includes cachedContentTokenCount when cached content is used.
-			// Subtract to get non-cached input, matching the OpenAI convention where
-			// input = uncached prompt tokens and cacheRead = cached tokens so that
-			// input + cacheRead = total prompt tokens (no double-counting).
-			// Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
-			const cachedTokens = chunk.usageMetadata.cachedContentTokenCount || 0;
-			const thinkingTokens = chunk.usageMetadata.thoughtsTokenCount || 0;
-			output.usage = {
-				input: (chunk.usageMetadata.promptTokenCount || 0) - cachedTokens,
-				output: (chunk.usageMetadata.candidatesTokenCount || 0) + thinkingTokens,
-				cacheRead: cachedTokens,
-				cacheWrite: 0,
-				totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-				...(thinkingTokens > 0 ? { reasoningTokens: thinkingTokens } : {}),
-				cost: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					total: 0,
-				},
-			};
+			output.usage = mapGoogleUsage(chunk.usageMetadata);
 			calculateCost(model, output.usage, output.timestamp);
 		}
 	}

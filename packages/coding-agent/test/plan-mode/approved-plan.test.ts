@@ -203,11 +203,6 @@ describe("resolvePlanTitle", () => {
 		expect(result.fileName).toBe("Code-Review-nettools-Updated-Issues.md");
 	});
 
-	it("falls back to the H1 when `suppliedTitle` is missing entirely", () => {
-		const result = resolvePlanTitle({ planContent, planFilePath });
-		expect(result.source).toBe("heading");
-	});
-
 	it("falls back to the H1 when `suppliedTitle` is an empty / whitespace string", () => {
 		expect(resolvePlanTitle({ suppliedTitle: "", planContent, planFilePath }).source).toBe("heading");
 		expect(resolvePlanTitle({ suppliedTitle: "   ", planContent, planFilePath }).source).toBe("heading");

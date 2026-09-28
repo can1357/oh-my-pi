@@ -37,6 +37,7 @@ const WEB_SEARCH_GROUNDINGS: Readonly<Record<WebSearchGrounding, true>> = {
 	gemini: true,
 	anthropic: true,
 	codex: true,
+	openai: true,
 	xai: true,
 	openrouter: true,
 };

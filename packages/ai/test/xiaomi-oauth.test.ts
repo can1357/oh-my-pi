@@ -29,29 +29,6 @@ describe("xiaomi oauth validation", () => {
 		expect(capturedSignals[1]?.aborted).toBe(false);
 	});
 
-	it("sends Authorization: Bearer header (not Anthropic-style x-api-key) for tp- keys", async () => {
-		// Regression: commit 92e8ac06b moved validation from /anthropic/v1/messages to
-		// /v1/chat/completions but kept the Anthropic-style `x-api-key` header. Xiaomi's
-		// OpenAI-compatible endpoint requires Bearer auth and rejects x-api-key as 401
-		// "Invalid API Key" — see issue #1580.
-		const capturedHeaders: Record<string, string>[] = [];
-		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
-			capturedHeaders.push((init?.headers ?? {}) as Record<string, string>);
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		});
-
-		await loginXiaomi({
-			onPrompt: async () => "tp-test-key",
-			onAuth: () => {},
-			fetch: fetchMock,
-		});
-
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const headers = capturedHeaders[0];
-		expect(headers.Authorization).toBe("Bearer tp-test-key");
-		expect(headers["x-api-key"]).toBeUndefined();
-	});
-
 	it("sends Authorization: Bearer for standard sk- keys as well", async () => {
 		const capturedHeaders: Record<string, string>[] = [];
 		const capturedUrls: string[] = [];

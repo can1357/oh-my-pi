@@ -1,4 +1,6 @@
 import { type Component, type OverlayFocusOwner } from "../tui";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { matchesKey } from "../keys";
 import { centerLine, padding } from "../utils";
 import { padToWidth } from "../render/utils";
@@ -200,10 +202,9 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		header.push("");
 		this.#bodyRowStart = header.length;
 
-		const footer = [
-			"",
-			centerLine(theme.fg("dim", "↑/↓ select · enter confirm · esc skip · ctrl+c exit setup"), width),
-		];
+		const navKeys = editorKeys("tui.select.up", "tui.select.down");
+		const footerHint = `${navKeys} select · ${editorKey("tui.select.confirm")} confirm · ${editorKey("tui.select.cancel")} skip · ${formatKeyHint("ctrl+c")} exit setup`;
+		const footer = ["", centerLine(theme.fg("dim", footerHint), width)];
 		const maxBodyLines = Math.max(0, height - header.length - footer.length);
 		const body = this.#activeScene?.render(contentWidth, maxBodyLines).slice(0, maxBodyLines) ?? [];
 		const lines = [...header, ...body.map(line => indentLine(line, width, SCENE_MARGIN_X))];

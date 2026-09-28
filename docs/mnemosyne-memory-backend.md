@@ -76,6 +76,8 @@ The coding-agent wrapper applies scoping on top of the underlying `Mnemopi` pack
 - `per-project` writes to and recalls from a bank derived from the current working directory alone — its basename plus a stable hash of its absolute path, independent of the surrounding git layout.
 - `per-project-tagged` writes to the project-local bank and recalls from both the project-local bank and the shared global bank, with duplicate recall results merged.
 
+Under `global` and `per-project-tagged`, the `retain` and `learn` tools also accept `scope: "global"`, which writes an item or lesson to the shared bank so every project recalls it. Under `per-project` the option is not offered, because no bank is recalled by every project.
+
 The combined project-plus-global behavior lives in the wrapper. The `@oh-my-pi/pi-mnemopi` package itself still exposes banks and constructor options directly, including `bank` for selecting a bank name. Project-local banks other than the shared bank are stored as sibling bank databases managed by Mnemopi's `BankManager`.
 
 ## Recall previews and full-row reads

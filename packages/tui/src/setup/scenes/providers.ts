@@ -1,5 +1,6 @@
 import { type SgrMouseEvent } from "../../mouse";
 import { TabBar } from "../../components/tab-bar";
+import { editorKey } from "../../chrome/keybinding-hints";
 import { getTabBarTheme } from "../../chrome/shared";
 import { SignInTab } from "./sign-in";
 import type { SetupScene, SetupSceneController, SetupSceneHost, SetupTab } from "./types";
@@ -13,7 +14,9 @@ import { WebSearchTab } from "./web-search";
  */
 class ProvidersSceneController implements SetupSceneController {
 	title = "Set up your providers";
-	subtitle = "Sign in and pick a web search provider. Press Esc when you're done.";
+	get subtitle(): string {
+		return `Sign in and pick a web search provider. Press ${editorKey("tui.select.cancel")} when you're done.`;
+	}
 
 	#tabs: SetupTab[];
 	#tabBar: TabBar;

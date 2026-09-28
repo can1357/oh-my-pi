@@ -782,6 +782,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.stop();
 	});
 
+	it("reasserts confirmed bracketed paste after a terminal resets mode 2004", () => {
+		vi.useFakeTimers();
+		const { terminal, writes } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		const before = writes.filter(write => write.includes("\x1b[?2004h")).length;
+		vi.advanceTimersByTime(1000);
+		expect(writes.filter(write => write.includes("\x1b[?2004h")).length).toBe(before + 1);
+		terminal.stop();
+		const stopped = writes.length;
+		vi.advanceTimersByTime(1000);
+		expect(writes).toHaveLength(stopped);
+	});
+
 	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {
 		const { terminal, received } = setup();
 

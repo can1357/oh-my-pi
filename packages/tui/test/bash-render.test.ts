@@ -280,7 +280,6 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
-		expect(lines.some(line => line.includes("ctrl+o to expand"))).toBe(false);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

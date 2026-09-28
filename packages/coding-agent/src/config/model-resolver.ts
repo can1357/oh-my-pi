@@ -510,6 +510,24 @@ type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
+const kModelOrderIndex = Symbol("model-resolver.modelOrderIndex");
+type ModelsWithOrderIndex = readonly Model<Api>[] & {
+	[kModelOrderIndex]?: Map<string, number>;
+};
+
+/** `provider/id` → last position in `availableModels`; cached on the array like the provider indexes. */
+function getModelOrderIndex(availableModels: readonly Model<Api>[]): Map<string, number> {
+	const tagged = availableModels as ModelsWithOrderIndex;
+	const cached = tagged[kModelOrderIndex];
+	if (cached) return cached;
+	const index = new Map<string, number>();
+	for (let i = 0; i < availableModels.length; i += 1) {
+		index.set(formatModelString(availableModels[i]), i);
+	}
+	tagged[kModelOrderIndex] = index;
+	return index;
+}
+
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
 	providerUsageRank: Map<string, number>;
@@ -537,10 +555,7 @@ function buildPreferenceContext(
 	}
 	const providerPriorityRank = buildModelProviderPriorityRank(preferences?.providerOrder);
 	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? []);
-	const modelOrder = new Map<string, number>();
-	for (let i = 0; i < availableModels.length; i += 1) {
-		modelOrder.set(formatModelString(availableModels[i]), i);
-	}
+	const modelOrder = getModelOrderIndex(availableModels);
 
 	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
 }

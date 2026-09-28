@@ -604,100 +604,95 @@ function isSgrParamByte(c: number): boolean {
 // standalone fg-red), changing the rendered color. The self-delimiting colon
 // form (`38:2::r:g:b`) is unambiguous — its tokens never equal a bare `38`, so
 // the scan treats it as a complete unit and merging stays safe.
-function endsWithIncompleteExtendedColor(params: string): boolean {
-	const t = params.split(";");
-	let i = 0;
-	while (i < t.length) {
-		const tok = t[i];
-		if (tok === "38" || tok === "48" || tok === "58") {
-			const mode = t[i + 1];
-			if (mode === undefined) return true; // introducer with no mode
-			if (mode === "2") {
-				if (i + 4 >= t.length) return true; // missing r/g/b
-				i += 5;
-				continue;
-			}
-			if (mode === "5") {
-				if (i + 2 >= t.length) return true; // missing index
-				i += 3;
-				continue;
-			}
+function endsWithIncompleteExtendedColor(line: string, start: number, end: number): boolean {
+	let tokenStart = start;
+	let needsMode = false;
+	let valuesRemaining = 0;
+	for (let i = start; i <= end; i++) {
+		if (i !== end && line.charCodeAt(i) !== CC_SEMI) continue;
+		const tokenLength = i - tokenStart;
+		const first = line.charCodeAt(tokenStart);
+		if (valuesRemaining > 0) {
+			valuesRemaining--;
+		} else if (needsMode && tokenLength === 1 && (first === 0x32 || first === 0x35)) {
+			valuesRemaining = first === 0x32 ? 3 : 1;
+			needsMode = false;
+		} else {
+			// An unrecognized mode is also a standalone token: `38;48;5`
+			// still ends in an incomplete background palette spec.
+			needsMode = tokenLength === 2 && first >= 0x33 && first <= 0x35 && line.charCodeAt(tokenStart + 1) === 0x38;
 		}
-		i += 1;
+		tokenStart = i + 1;
 	}
-	return false;
+	return needsMode || valuesRemaining > 0;
 }
 
 /**
  * Merge runs of byte-adjacent SGR sequences (`CSI [0-9;:]* m`) into one. Only
  * CSI-SGR sequences are touched; text, cursor moves, OSC, hyperlinks and image
- * payloads pass through verbatim. Returns the original reference when nothing
- * merges, so SGR-light lines incur only a single `indexOf` scan.
+ * payloads pass through verbatim. Isolated sequences require no parameter
+ * slices or arrays; output is built only at merged boundaries or empty resets
+ * that need normalization within an adjacent run.
  */
 export function coalesceAdjacentSgr(line: string): string {
-	if (!SGR_COALESCE_ENABLED || line.indexOf("\x1b[") === -1) return line;
+	if (!SGR_COALESCE_ENABLED) return line;
 	const n = line.length;
 	let out = "";
 	let copiedUpto = 0;
-	let i = 0;
-	while (i < n) {
-		if (line.charCodeAt(i) !== CC_ESC || line.charCodeAt(i + 1) !== CC_BRACKET) {
-			i++;
-			continue;
-		}
+	let i = line.indexOf("\x1b[");
+	while (i !== -1) {
 		// Scan a candidate SGR sequence: ESC [ <params> m.
-		let j = i + 2;
-		while (j < n && isSgrParamByte(line.charCodeAt(j))) j++;
+		let start = i + 2;
+		let j = start;
+		let groupTokens = 1;
+		while (j < n && isSgrParamByte(line.charCodeAt(j))) {
+			const cc = line.charCodeAt(j++);
+			if (cc === CC_SEMI || cc === CC_COLON) groupTokens++;
+		}
 		if (j >= n || line.charCodeAt(j) !== CC_M) {
 			// Not an SGR (e.g. cursor move); leave it in the pending region.
-			i = j;
+			i = line.indexOf("\x1b[", j);
 			continue;
 		}
-		// Collect the run of adjacent SGR sequences starting here.
-		const params: string[] = [line.slice(i + 2, j)];
+
+		let adjacent = false;
 		let k = j + 1;
 		while (k < n && line.charCodeAt(k) === CC_ESC && line.charCodeAt(k + 1) === CC_BRACKET) {
-			let p = k + 2;
-			while (p < n && isSgrParamByte(line.charCodeAt(p))) p++;
+			const nextStart = k + 2;
+			let p = nextStart;
+			let tokens = 1;
+			while (p < n && isSgrParamByte(line.charCodeAt(p))) {
+				const cc = line.charCodeAt(p++);
+				if (cc === CC_SEMI || cc === CC_COLON) tokens++;
+			}
 			if (p >= n || line.charCodeAt(p) !== CC_M) break;
-			params.push(line.slice(k + 2, p));
+			adjacent = true;
+
+			// Keep the boundary if the preceding list could absorb a missing
+			// channel/index, or if merging would overflow the parameter cap.
+			// Otherwise replace only `m ESC [` with `;`, keeping the source
+			// untouched until a boundary actually merges. Empty lists in an
+			// adjacent run normalize to `0`, including at a guarded boundary.
+			if (groupTokens + tokens <= MERGE_TOKEN_CAP && !endsWithIncompleteExtendedColor(line, start, j)) {
+				out += line.slice(copiedUpto, j) + (start === j ? "0;" : ";");
+				copiedUpto = nextStart;
+				groupTokens += tokens;
+			} else {
+				if (start === j) {
+					out += `${line.slice(copiedUpto, j)}0`;
+					copiedUpto = j;
+				}
+				groupTokens = tokens;
+			}
+			start = nextStart;
+			j = p;
 			k = p + 1;
 		}
-		if (params.length > 1) {
-			out += line.slice(copiedUpto, i);
-			// Emit the merged run, but flush the current group before appending a
-			// list when (a) the previous list ended mid extended-color, so the
-			// next code cannot be absorbed as its missing channel/index, or (b)
-			// the token count would exceed MERGE_TOKEN_CAP. SGR params apply
-			// left-to-right regardless of how they are grouped across adjacent
-			// CSIs, so a capped/guarded split stays behavior-preserving — while a
-			// single unbounded merge would overflow a terminal's CSI parameter
-			// buffer (xterm.js caps at 32 and silently truncates the rest,
-			// corrupting colors). Empty params (`CSI m`) mean a full reset;
-			// normalize to `0` so the merged list stays unambiguous.
-			let group = "";
-			let groupTokens = 0;
-			let groupOpenSafe = true;
-			for (let q = 0; q < params.length; q++) {
-				const norm = params[q]!.length === 0 ? "0" : params[q]!;
-				let tk = 1;
-				for (let z = 0; z < norm.length; z++) {
-					const cc = norm.charCodeAt(z);
-					if (cc === CC_SEMI || cc === CC_COLON) tk++;
-				}
-				if (groupTokens > 0 && (!groupOpenSafe || groupTokens + tk > MERGE_TOKEN_CAP)) {
-					out += `\x1b[${group}m`;
-					group = "";
-					groupTokens = 0;
-				}
-				group += group.length === 0 ? norm : `;${norm}`;
-				groupTokens += tk;
-				groupOpenSafe = !endsWithIncompleteExtendedColor(norm);
-			}
-			if (group.length > 0) out += `\x1b[${group}m`;
-			copiedUpto = k;
+		if (adjacent && start === j) {
+			out += `${line.slice(copiedUpto, j)}0`;
+			copiedUpto = j;
 		}
-		i = k;
+		i = line.indexOf("\x1b[", k);
 	}
 	if (copiedUpto === 0) return line;
 	return out + line.slice(copiedUpto);
@@ -776,6 +771,12 @@ export class TUI extends Container {
 	// the established differential comparison and resize accounting.
 	#providerWindow: string[] = [];
 	#providerPreparedRows: PreparedLine[] = [];
+	// Rows of the last marker-stripping prepare pass keyed by their stripped
+	// raw line, so rows that only moved (a scroll or a history commit shifts
+	// every row under the positional sidecar) reuse their preparation. Swapped
+	// with the spare each pass, which bounds the memo to one frame of rows.
+	#preparedLineMemo = new Map<string, PreparedLine>();
+	#preparedLineMemoSpare = new Map<string, PreparedLine>();
 	#previousFrameLength = 0;
 	#previousWidth = 0;
 	#previousHeight = 0;
@@ -883,7 +884,8 @@ export class TUI extends Container {
 	// engine paints only the modal on the alt buffer and leaves every
 	// normal-screen accounting field (#previousFrameLength, #viewportTopRow, …)
 	// untouched, so exiting reconciles cleanly against the terminal-restored
-	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
+	// normal screen. #altPreviousLines is the last alt frame, diffed row by row
+	// against the next one.
 	#altActive = false;
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
@@ -1761,9 +1763,13 @@ export class TUI extends Container {
 				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
 		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
-		this.#extractCursorMarkers(viewport);
 		// The borrowed resize buffer is transient, not a streamable session paint.
-		this.#emitAltFrame(this.#prepareLinesArray(viewport, width, this.#altPreparedRows, height), width, height, false);
+		this.#emitAltFrame(
+			this.#prepareLinesArray(viewport, width, this.#altPreparedRows, height, []),
+			width,
+			height,
+			false,
+		);
 	}
 
 	/**
@@ -2586,30 +2592,6 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Strip every CURSOR_MARKER from the rendered lines (markers are internal
-	 * sentinels and must never reach the terminal) and return their positions,
-	 * bottom-most first. Callers pick the visible one once the window top is
-	 * known.
-	 */
-	#extractCursorMarkers(lines: string[]): { row: number; col: number }[] {
-		const markers: { row: number; col: number }[] = [];
-		for (let row = lines.length - 1; row >= 0; row--) {
-			const line = lines[row];
-			let markerIndex = line.indexOf(CURSOR_MARKER);
-			if (markerIndex === -1) continue;
-			const beforeMarker = line.slice(0, markerIndex);
-			markers.push({ row, col: visibleWidth(beforeMarker) });
-			let stripped = line;
-			while (markerIndex !== -1) {
-				stripped = stripped.slice(0, markerIndex) + stripped.slice(markerIndex + CURSOR_MARKER.length);
-				markerIndex = stripped.indexOf(CURSOR_MARKER, markerIndex);
-			}
-			lines[row] = stripped;
-		}
-		return markers;
-	}
-
-	/**
 	 * Rewrite a Kitty direct-placement line for the viewport row it is written
 	 * at, clipping to the visible slice (see {@link encodeKittyPlacementLine})
 	 * under the placement id resolved by the budget's epoch tracking (see
@@ -2801,9 +2783,11 @@ export class TUI extends Container {
 				replayViewportRows = moved;
 			}
 		}
-		const markers = this.#extractCursorMarkers(viewport);
-		const prepared = this.#prepareLinesArray(viewport, width, this.#providerPreparedRows);
+		// History first: it reuses the previous viewport's rows by content, and
+		// the viewport pass replaces that memo with its own rows.
 		const preparedHistory = this.#prepareLinesArray(historyRows, width);
+		const markers: { row: number; col: number }[] = [];
+		const prepared = this.#prepareLinesArray(viewport, width, this.#providerPreparedRows, viewport.length, markers);
 		const rows = prepared.lines.length;
 		// Destructive reset (session replace, /tree, explicit clear, or a settled
 		// resize in rebuild mode): erase native history and the viewport,
@@ -2867,16 +2851,18 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
-				const previous = this.#providerPreparedRows[index];
-				const current = prepared.rows[index]!;
 				if (
-					this.#providerWindow[index] === prepared.lines[index] &&
-					previous !== undefined &&
-					previous.widthEpoch === current.widthEpoch &&
-					previous.imageProtocol === current.imageProtocol
+					!this.#rowNeedsRewrite(
+						this.#providerWindow,
+						this.#providerPreparedRows,
+						prepared.lines,
+						prepared.rows,
+						index,
+					)
 				) {
 					continue;
 				}
+				const current = prepared.rows[index]!;
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
 					current,
 					width,
@@ -3145,13 +3131,23 @@ export class TUI extends Container {
 	 * Prepare one string projection plus its structured write sidecar. A prior
 	 * sidecar entry is reusable only under identical raw content, width, width
 	 * configuration, and image protocol; those are every mutable input to
-	 * normalization, fitting, classification, and terminal coalescing.
+	 * normalization, fitting, classification, and terminal coalescing. The same
+	 * row at the same index is checked first, then the previous stripping pass's
+	 * rows by content, so a scrolled row is not re-prepared.
+	 *
+	 * With `markers`, every CURSOR_MARKER is stripped (markers are internal
+	 * sentinels and must never reach the terminal) and its position recorded,
+	 * bottom-most first; callers pick the visible one once the window top is
+	 * known. Without it (history rows) lines are prepared verbatim. Every
+	 * reusable entry holds a stripped raw line, so a row that matches one
+	 * carries no marker and skips the marker scan.
 	 */
 	#prepareLinesArray(
 		lines: readonly string[],
 		width: number,
 		previous: readonly PreparedLine[] = [],
 		length = lines.length,
+		markers?: { row: number; col: number }[],
 	): PreparedLines {
 		// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 		const prepared: string[] = new Array(length);
@@ -3159,21 +3155,59 @@ export class TUI extends Container {
 		const rows: PreparedLine[] = new Array(length);
 		const widthEpoch = getWidthConfigEpoch();
 		const imageProtocol = TERMINAL.imageProtocol;
+		const memo = this.#preparedLineMemo;
+		// Only stripping passes index their rows: a verbatim history row may keep
+		// a marker, and reusing it for a viewport row would leak that marker.
+		const nextMemo = markers === undefined ? undefined : this.#preparedLineMemoSpare;
 		for (let i = 0; i < length; i++) {
-			const raw = lines[i] ?? "";
-			const cached = previous[i];
-			const row =
-				cached !== undefined &&
-				cached.raw === raw &&
-				cached.width === width &&
-				cached.widthEpoch === widthEpoch &&
-				cached.imageProtocol === imageProtocol
-					? cached
-					: this.#prepareLine(raw, width, widthEpoch, imageProtocol);
+			const source = lines[i] ?? "";
+			let row = this.#reusablePreparedLine(previous[i], memo, source, width, widthEpoch, imageProtocol);
+			if (row === undefined) {
+				let raw = source;
+				if (markers !== undefined) {
+					let markerIndex = source.indexOf(CURSOR_MARKER);
+					if (markerIndex !== -1) {
+						markers.push({ row: i, col: visibleWidth(source.slice(0, markerIndex)) });
+						// Resume the search just before the splice so a marker that the
+						// removal itself joins together is stripped too; reusable rows
+						// must stay marker-free.
+						while (markerIndex !== -1) {
+							raw = raw.slice(0, markerIndex) + raw.slice(markerIndex + CURSOR_MARKER.length);
+							markerIndex = raw.indexOf(CURSOR_MARKER, Math.max(0, markerIndex - CURSOR_MARKER.length + 1));
+						}
+						row = this.#reusablePreparedLine(previous[i], memo, raw, width, widthEpoch, imageProtocol);
+					}
+				}
+				row ??= this.#prepareLine(raw, width, widthEpoch, imageProtocol);
+			}
+			nextMemo?.set(row.raw, row);
 			prepared[i] = row.line;
 			rows[i] = row;
 		}
+		if (nextMemo !== undefined) {
+			memo.clear();
+			this.#preparedLineMemo = nextMemo;
+			this.#preparedLineMemoSpare = memo;
+			markers?.reverse();
+		}
 		return { lines: prepared, rows };
+	}
+
+	#reusablePreparedLine(
+		positional: PreparedLine | undefined,
+		memo: ReadonlyMap<string, PreparedLine>,
+		raw: string,
+		width: number,
+		widthEpoch: number,
+		imageProtocol: ImageProtocol | null,
+	): PreparedLine | undefined {
+		const cached = positional !== undefined && positional.raw === raw ? positional : memo.get(raw);
+		return cached !== undefined &&
+			cached.width === width &&
+			cached.widthEpoch === widthEpoch &&
+			cached.imageProtocol === imageProtocol
+			? cached
+			: undefined;
 	}
 
 	#prepareLine(raw: string, width: number, widthEpoch: number, imageProtocol: ImageProtocol | null): PreparedLine {
@@ -3440,6 +3474,29 @@ export class TUI extends Container {
 		return visibleWidth(above);
 	}
 
+	/**
+	 * Whether screen row `index` must be rewritten to turn the previously painted
+	 * frame into this one: its line, or the preparation it was painted with,
+	 * changed.
+	 */
+	#rowNeedsRewrite(
+		previousLines: readonly string[],
+		previousRows: readonly PreparedLine[],
+		lines: readonly string[],
+		rows: readonly PreparedLine[],
+		index: number,
+	): boolean {
+		const previous = previousRows[index];
+		const current = rows[index]!;
+		return (
+			previousLines[index] !== lines[index] ||
+			previous === undefined ||
+			previous.width !== current.width ||
+			previous.widthEpoch !== current.widthEpoch ||
+			previous.imageProtocol !== current.imageProtocol
+		);
+	}
+
 	#lineRewriteSequence(
 		line: PreparedLine,
 		width: number,
@@ -3543,15 +3600,16 @@ export class TUI extends Container {
 			this.#imageBudget.beginPass(false, true);
 			lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		} while (this.#imageBudget.endPass());
-		this.#extractCursorMarkers(lines);
-		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height);
+		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height, []);
 		this.#emitAltFrame(prepared, width, height, true);
 	}
 
 	/**
-	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
-	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
-	 * native-scrollback byte. The hardware cursor stays hidden here.
+	 * Paint a frame on the alt buffer: only the rows that changed since the
+	 * previous frame, or every row when the height changed, a repaint is forced,
+	 * or a changed frame holds OSC 66 text before or after. Emits only
+	 * sync-output brackets, cursor moves, and per-row rewrites — never ED3 or
+	 * any native-scrollback byte. The hardware cursor stays hidden here.
 	 */
 	#emitAltFrame(prepared: PreparedLines, width: number, height: number, notifyPaint: boolean): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
@@ -3573,38 +3631,34 @@ export class TUI extends Container {
 			for (const seq of imageTransmits) transmitBuffer += seq;
 			this.terminal.write(transmitBuffer);
 		}
-		// Skip an identical repaint (the modal is mostly static between
-		// keystrokes) — unless a forced repaint (resetDisplay,
-		// requestRender(true)) is pending: the redraw gesture must repair a
-		// corrupted modal even when our cached frame is byte-identical.
+		// A forced repaint (resetDisplay, requestRender(true)) rewrites every row
+		// even when the cached frame is byte-identical: the redraw gesture must
+		// repair a corrupted modal. So does a changed frame with OSC 66 text in
+		// it, before or after: a scaled glyph spans the rows below its own and the
+		// terminal drops it when any of them is written, so those rows are not
+		// independent. Otherwise rewrite only the rows that changed (a keystroke
+		// in a modal touches a row or two), and skip an identical frame entirely.
 		const force = this.#forceViewportRepaintOnNextRender;
 		this.#forceViewportRepaintOnNextRender = false;
-		if (!force && this.#altPreviousLines.length === height) {
-			let same = true;
-			for (let r = 0; r < height; r++) {
-				const previous = this.#altPreparedRows[r];
-				const current = prepared.rows[r]!;
-				if (
-					prepared.lines[r] !== this.#altPreviousLines[r] ||
-					previous === undefined ||
-					previous.width !== current.width ||
-					previous.widthEpoch !== current.widthEpoch ||
-					previous.imageProtocol !== current.imageProtocol
-				) {
-					same = false;
-					break;
-				}
-			}
-			if (same) {
-				this.#altPreviousLines = prepared.lines;
-				this.#altPreparedRows = prepared.rows;
-				return;
-			}
-		}
-		let buffer = `${this.#paintBeginSequence}\x1b[H`;
+		const full =
+			force ||
+			this.#altPreviousLines.length !== height ||
+			((this.#altPreviousLines.some(isOsc66Line) || prepared.lines.some(isOsc66Line)) &&
+				prepared.rows.some((_row, r) =>
+					this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r),
+				));
+		let rowsBuffer = "";
 		for (let r = 0; r < height; r++) {
-			if (r > 0) buffer += "\n";
-			buffer += this.#lineRewriteSequence(
+			if (full) {
+				if (r > 0) rowsBuffer += "\n";
+			} else if (
+				this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r)
+			) {
+				rowsBuffer += `\x1b[${r + 1};1H`;
+			} else {
+				continue;
+			}
+			rowsBuffer += this.#lineRewriteSequence(
 				prepared.rows[r]!,
 				width,
 				r,
@@ -3613,10 +3667,10 @@ export class TUI extends Container {
 				this.#osc66SpacerGlyphWidth(prepared.lines, r),
 			);
 		}
-		buffer += this.#paintEndSequence;
-		this.terminal.write(buffer);
 		this.#altPreviousLines = prepared.lines;
 		this.#altPreparedRows = prepared.rows;
+		if (rowsBuffer === "") return;
+		this.terminal.write(`${this.#paintBeginSequence}${full ? "\x1b[H" : ""}${rowsBuffer}${this.#paintEndSequence}`);
 		this.#debugPaint = { lines: prepared.lines, windowTop: 0, altScreen: true };
 		if (notifyPaint) {
 			this.#notifyPaint({
@@ -3628,6 +3682,6 @@ export class TUI extends Container {
 				rows: height,
 			});
 		}
-		this.#fullRedrawCount += 1;
+		if (full) this.#fullRedrawCount += 1;
 	}
 }

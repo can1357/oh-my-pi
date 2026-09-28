@@ -30,6 +30,8 @@ Any of the following opens the same selector:
 
 Double-escape on an empty editor opens the fullscreen transcript rewind selector instead (see `doubleEscapeAction`): it replays the transcript, outlines the block the rewind would land on, and rewinds via `branch()` for user prompts or `navigateTree()` for anything else.
 
+Rewind opens on the latest ~600 entries, keeping whole user turns (which may exceed the limit). Press `a` for all earlier history without changing the selected point or branch.
+
 ## Tree UI model
 
 The tree is rendered from session-entry parent pointers (`id` / `parentId`).

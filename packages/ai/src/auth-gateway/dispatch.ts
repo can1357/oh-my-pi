@@ -214,6 +214,7 @@ export function buildGatewayApiKeyResolver(
 			const refreshed = await storage.keys.get(model.provider, sessionId, {
 				...modelKeyOptions(model, sig),
 				forceRefresh: true,
+				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			});
 			lastKey = refreshed ?? lastKey;
 			if (refreshed) onResolvedKey?.(refreshed);

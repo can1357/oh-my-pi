@@ -321,6 +321,16 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
+	/**
+	 * The host bills cache-hit input tokens at the full input rate (no cache
+	 * discount), so the built row's `cacheRead` tracks its live `input` price.
+	 */
+	"cache-read-at-input-rate": {
+		key: "cacheReadAtInputRate",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -331,10 +341,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		key: "webSearch",
 		set: "catalog",
 		shape: "scalar",
-		values: ["gemini", "anthropic", "codex", "xai", "openrouter"],
+		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {

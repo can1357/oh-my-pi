@@ -327,6 +327,21 @@ pub async fn execute_shell_streams(
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
 
+/// How long a cancelled run waits for its task to wind down before aborting
+/// it (discarding any output still queued in the pipe readers).
+///
+/// On Windows the wait covers more hops: in-process pipeline producers stop on
+/// a poll between writes and consumers cannot observe cancellation out of a
+/// blocked pipe read (readiness polling is unix-only in the builtin stdin
+/// layer), so producer exit, pipe EOF, the consumer's final flush and the
+/// reader's last read each need a separate thread wakeup. Under heavy load
+/// that chain exceeded 2s, the abort then discarded the consumer's final
+/// output mid-flight (`yes x | tail -5` lost its 5 lines).
+#[cfg(windows)]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(not(windows))]
+const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
@@ -375,7 +390,7 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut run_task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
 			if graceful.is_err() {
 				run_task.abort();
 				let _ = run_task.await;
@@ -452,7 +467,7 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -518,7 +533,7 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(Duration::from_secs(2), &mut task).await;
+			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
 				let _ = task.await;
@@ -578,6 +593,56 @@ const fn normalize_env_key(key: &str) -> &str {
 #[cfg(not(windows))]
 const fn normalize_env_key(key: &str) -> &str {
 	key
+}
+
+/// Canonical spelling for a key inherited from the host environment (the
+/// process env or the caller-forwarded session env). Windows env names are
+/// case-insensitive, so a host `Temp` must still surface as `$TEMP` in the
+/// case-sensitive shell. Per-command env keeps the narrower
+/// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
+#[cfg(windows)]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	if key.eq_ignore_ascii_case("TEMP") {
+		"TEMP"
+	} else if key.eq_ignore_ascii_case("TMP") {
+		"TMP"
+	} else if key.eq_ignore_ascii_case("TMPDIR") {
+		"TMPDIR"
+	} else {
+		normalize_env_key(key)
+	}
+}
+
+#[cfg(not(windows))]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	key
+}
+
+/// Value exported for an inherited (already normalized) env key.
+///
+/// A host `TEMP`/`TMP`/`TMPDIR` may carry an 8.3 profile alias
+/// (`C:\Users\ADMINI~1\...`) while `cd` stores the long form in `PWD`, so
+/// `cd "$TEMP"` would leave the two spellings disagreeing. Absolute temp paths
+/// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
+/// and junctions kept); anything else, or a failed expansion, passes through.
+#[cfg(windows)]
+fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	let path = std::path::Path::new(value);
+	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
+		return std::borrow::Cow::Borrowed(value);
+	}
+	match brush_core::sys::fs::expand_to_long_path(path)
+		.into_os_string()
+		.into_string()
+	{
+		Ok(expanded) => std::borrow::Cow::Owned(expanded),
+		Err(_) => std::borrow::Cow::Borrowed(value),
+	}
+}
+
+#[cfg(not(windows))]
+const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	std::borrow::Cow::Borrowed(value)
 }
 
 #[cfg(windows)]
@@ -649,7 +714,7 @@ fn copy_env_into_shell(
 		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
 			continue;
 		};
-		let normalized_key = normalize_env_key(key);
+		let normalized_key = normalize_inherited_env_key(key);
 		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
@@ -660,7 +725,8 @@ fn copy_env_into_shell(
 			});
 			continue;
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
+		let value = inherited_env_value(normalized_key, value);
+		let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 		var.export();
 		shell
 			.env_mut()
@@ -756,11 +822,14 @@ async fn create_session_for_run(
 
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
-			let normalized_key = normalize_env_key(key);
+			let normalized_key = normalize_inherited_env_key(key);
 			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 				continue;
 			}
-			let mut var = ShellVariable::new(ShellValue::String(value.clone()));
+			// The agent forwards its whole host env here, so temp paths need the
+			// same long-form expansion as the direct host copy above.
+			let value = inherited_env_value(normalized_key, value);
+			let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 			var.export();
 			shell
 				.env_mut()
@@ -1244,7 +1313,13 @@ async fn run_shell_command_once(
 	});
 	// Let pipeline consumers flush output after cancellation kills their
 	// producers. The outer run cancellation remains bounded, and this delayed
-	// fallback still releases readers whose writers never close.
+	// fallback still releases readers whose writers never close. Windows needs
+	// a wider budget for the same reason as `CANCEL_RUN_GRACE`: the consumer's
+	// flush depends on the producer's exit becoming visible through several
+	// thread wakeups.
+	#[cfg(windows)]
+	const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
+	#[cfg(not(windows))]
 	const CANCEL_READER_GRACE: Duration = Duration::from_millis(500);
 	let cancel_bridge = tokio::spawn({
 		let cancel_token = cancel_token.clone();
@@ -2146,6 +2221,124 @@ mod tests {
 			"cd {}",
 			short.display()
 		);
+	}
+
+	/// A temp directory reachable through an 8.3 alias, as
+	/// `(short, long, guard)`. Existing profile aliases survive after new 8.3
+	/// creation is disabled, so the host TEMP is preferred; otherwise a fresh
+	/// alias is made when the volume still creates them.
+	#[cfg(windows)]
+	fn short_temp_fixture()
+	-> Option<(std::path::PathBuf, std::path::PathBuf, Option<tempfile::TempDir>)> {
+		let host_temp = std::env::temp_dir();
+		let expanded_host_temp = brush_core::sys::fs::expand_to_long_path(&host_temp);
+		if host_temp != expanded_host_temp {
+			return Some((host_temp, expanded_host_temp, None));
+		}
+		let (root, long, short) = short_alias_fixture()?;
+		Some((short, brush_core::sys::fs::expand_to_long_path(&long), Some(root)))
+	}
+
+	/// Runs `cd "$TEMP"` and asserts the shell cwd, `PWD`, and every temp var
+	/// share the long spelling `expected`.
+	#[cfg(windows)]
+	async fn assert_cd_temp_matches_pwd(shell: &mut BrushShell, expected: &std::path::Path) {
+		let expected_str = expected.to_string_lossy().into_owned();
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let result = shell
+			.run_string("cd \"$TEMP\"", &SourceInfo::from("pi-shell:test"), &params)
+			.await
+			.expect("cd inherited TEMP");
+		assert_eq!(exit_code(&result), 0);
+		assert_eq!(shell.working_dir(), expected);
+		for key in ["TEMP", "TMP", "TMPDIR", "PWD"] {
+			assert_eq!(shell.env_str(key).as_deref(), Some(expected_str.as_str()), "{key}");
+		}
+	}
+
+	/// Host TEMP/TMP paths must not export the short profile spelling after
+	/// entering the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.working_dir(short.parent().expect("parent").to_path_buf())
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			["TEMP", "TMP", "TMPDIR"]
+				.into_iter()
+				.map(|key| (std::ffi::OsString::from(key), short.as_os_str().to_os_string())),
+		)
+		.expect("inherit temp vars");
+
+		assert_cd_temp_matches_pwd(&mut shell, &expected).await;
+	}
+
+	/// The agent forwards its host env as `session_env`, applied after the
+	/// direct host copy; a short TEMP arriving that way must be expanded too,
+	/// or it overwrites the expanded host value.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn session_env_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let short_str = short.to_str().expect("utf8 short temp").to_string();
+		let env = ["TEMP", "TMP", "TMPDIR"]
+			.into_iter()
+			.map(|key| (key.to_string(), short_str.clone()))
+			.collect();
+		let config = ShellConfig {
+			session_env:   Some(env),
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create_session");
+
+		assert_cd_temp_matches_pwd(&mut session.shell, &expected).await;
+	}
+
+	/// Windows env names are case-insensitive: a host `Temp`/`Tmp`/`TmpDir`
+	/// must surface as the uppercase names shell scripts read. Relative values
+	/// are not paths to expand and pass through verbatim.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_temp_keys_fold_to_uppercase() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			[("Temp", "rel\\temp"), ("Tmp", "rel\\tmp"), ("TmpDir", "rel\\tmpdir")]
+				.into_iter()
+				.map(|(key, value)| (key.into(), value.into())),
+		)
+		.expect("inherit temp vars");
+
+		assert_eq!(shell.env_str("TEMP").as_deref(), Some("rel\\temp"));
+		assert_eq!(shell.env_str("TMP").as_deref(), Some("rel\\tmp"));
+		assert_eq!(shell.env_str("TMPDIR").as_deref(), Some("rel\\tmpdir"));
+		assert_eq!(shell.env_str("Temp"), None);
 	}
 
 	/// A host cwd spelled with 8.3 short names matches the stored long form of

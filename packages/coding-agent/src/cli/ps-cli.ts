@@ -39,7 +39,7 @@ export interface PsCommandArgs {
 	/** Daemon name; required for every action except `list`. */
 	name?: string;
 	flags: {
-		/** list: include every project and global service scope on this machine. */
+		/** list: include every project scope and exited global services (live global services always show). */
 		all: boolean;
 		json: boolean;
 		/** list: force the static listing instead of the interactive monitor. */
@@ -181,7 +181,7 @@ async function runList(cmd: PsCommandArgs): Promise<void> {
 		printTable(report.daemons);
 	}
 	if (!cmd.flags.all) {
-		console.log(chalk.dim("\nUse --all to include other projects and global services."));
+		console.log(chalk.dim("\nUse --all to include other projects and exited global services."));
 	}
 }
 

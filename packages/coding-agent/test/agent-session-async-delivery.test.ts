@@ -29,6 +29,7 @@ import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -273,6 +274,82 @@ describe("AgentSession owner-routed async delivery", () => {
 			expect(read.content.map(block => (block.type === "text" ? block.text : "")).join("\n")).toContain(
 				complete.trimEnd(),
 			);
+		} finally {
+			await session.dispose();
+			await store.close();
+		}
+	});
+
+	it("links a background bash follow-up to the sink's raw capture instead of its elided body", async () => {
+		await using temp = await TempDir.create("@bash-followup-raw-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const store = SessionManager.inMemory(temp.path());
+		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		const settings = Settings.isolated({
+			"async.enabled": true,
+			"bashInterceptor.enabled": false,
+			"bash.autoBackground.enabled": false,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: store,
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "RawCaptureOwner",
+			asyncJobManager: manager,
+		});
+		const toolSession: ToolSession = {
+			cwd: temp.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getAgentId: () => "RawCaptureOwner",
+			allocateOutputArtifact: toolType => store.allocateArtifactPath(toolType),
+			asyncJobManager: manager,
+			settings,
+		};
+		// ~109 KB: well past the sink's inline budget, so its body elides the middle.
+		const expected = `${Array.from({ length: 20_000 }, (_, index) => index + 1).join("\n")}\n`;
+		try {
+			const started = await new BashTool(toolSession).execute("raw-followup", {
+				command: "seq 1 20000; exit 3",
+				async: true,
+			});
+			const jobId = started.details?.async?.jobId;
+			if (!jobId) throw new Error("Expected background job");
+			await session.settleAsyncWork();
+			const rawArtifactId = manager.getJob(jobId)?.latestDetails?.meta?.truncation?.artifactId;
+			if (!rawArtifactId) throw new Error("Expected the bash sink to capture raw output");
+			const followUp = agent.state.messages
+				.filter(
+					(message): message is CustomMessage =>
+						message.role === "custom" && message.customType === "async-result",
+				)
+				.map(message =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+				)
+				.join("\n");
+			expect(followUp).toContain(`Full output: artifact://${rawArtifactId}`);
+			// The raw capture holds only the stream; the exit notice the tool appended
+			// after it must survive in the preview's tail.
+			expect(followUp).toContain("Command exited with code 3");
+			const linkedPath = await store.getArtifactPath(rawArtifactId);
+			if (!linkedPath) throw new Error("Expected linked artifact on disk");
+			expect(await Bun.file(linkedPath).text()).toBe(expected);
 		} finally {
 			await session.dispose();
 			await store.close();

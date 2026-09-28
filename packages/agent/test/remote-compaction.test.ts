@@ -721,6 +721,7 @@ describe("remote compaction input forwarding", () => {
 		expect(result.input).toEqual(input);
 		expect(result.input[3].output).toBe("useful latest result");
 		expect(result.estimatedTokensAfter).toBe(result.estimatedTokensBefore);
+		expect(result.fits).toBe(false);
 	});
 
 	test("charges inline images by the maximum vision budget instead of serialized base64 size", () => {
@@ -1095,6 +1096,46 @@ describe("requestCompactionV2Streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
 		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
+	});
+
+	test("surfaces a standalone error event as a terminal failure without retrying", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
+			"instructions",
+		);
+		const fetchMock = vi.fn(async () =>
+			sseResponse([
+				{
+					type: "error",
+					status: 400,
+					error: {
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+						type: "invalid_request_error",
+						code: "context_too_large",
+					},
+				},
+			]),
+		);
+
+		const error = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock,
+			retryWait: async () => {},
+		}).catch(cause => cause);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
+		expect(error).toMatchObject({ status: 400 });
+		expect(error.message).toContain("context_too_large");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.ContextOverflow)).toBe(true);
 	});
 });
 
@@ -2068,6 +2109,31 @@ describe("compact() remote compaction failure handling", () => {
 			expect(secondInput).not.toContain(preparation.previousSummary);
 		},
 	);
+
+	test.each(["v1", "v2"])("does not dispatch a native request that cannot fit the window (%s)", async protocol => {
+		const streaming = protocol === "v2";
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+		preparation.messagesToSummarize = [{ role: "user", content: "re-expanded history ".repeat(4_000), timestamp: 1 }];
+		const model: Model = {
+			...makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: streaming } }),
+			contextWindow: 2_000,
+		};
+		const fetchMock = vi.fn<FetchImpl>(async () => {
+			throw new Error("native compaction must not reach the network");
+		});
+
+		const error = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock }).catch(
+			cause => cause,
+		);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(error).toBeInstanceOf(NativeCompactionError);
+		// Overflow is deterministic: callers must advance to the next method, not retry.
+		const id = AIError.classify(error.cause);
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
 
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));

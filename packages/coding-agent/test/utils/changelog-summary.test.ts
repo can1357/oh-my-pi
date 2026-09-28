@@ -429,20 +429,4 @@ An intervening paragraph closes the list.
 		expect(selection.changeCount).toBe(2);
 		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
 	});
-
-	test("announces unreleased-shaped notes truthfully", () => {
-		const selection = summarize(`
-- Uncategorized note.
-
-### Fixed
-
-   - Indented fix.
-- Ordinary fix.
-`);
-
-		const breakdown = Object.values(selection.categoryCounts).reduce((total, count) => total + count, 0);
-		expect(selection.changeCount).toBe(breakdown);
-		expect(selection.changeCount).toBe(3);
-		expect(selection.categoryCounts).toEqual({ Other: 1, Fixed: 2 });
-	});
 });

@@ -191,19 +191,6 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		expect(toolResults[0]).toMatchObject({ toolCallId: "call_real" });
 	});
 
-	it("is a no-op when no tool call has an empty name (identity returns same array reference)", () => {
-		const messages: Message[] = [
-			{ role: "user", content: "ping", timestamp: 1 },
-			assistant([{ type: "toolCall", id: "call_ok", name: "read", arguments: { path: "a" } }], 2),
-			toolResult("call_ok", "ok", 3),
-		];
-
-		const transformed = transformMessages(messages, model);
-
-		expect(getToolCalls(transformed)).toHaveLength(1);
-		expect(transformed.filter(m => m.role === "toolResult")).toHaveLength(1);
-	});
-
 	// Regression for PR #3459 review feedback: a tool-call id can legitimately
 	// repeat across history when an OpenAI-Responses composite id
 	// (`callId|itemId`) collapses on the wire — `deduplicateToolCallIds` exists

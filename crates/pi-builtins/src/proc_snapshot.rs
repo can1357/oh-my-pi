@@ -336,9 +336,11 @@ mod proc_snapshot {
 			.filter_map(|entry| parse_stat(&fs::read_to_string(entry.path().join("stat")).ok()?))
 			.map(|stat| {
 				let seconds = |value: u64| ticks.map(|ticks| Duration::from_secs_f64(value as f64 / ticks));
-				let cpu_percent = uptime.zip(ticks).and_then(|(uptime, ticks)| {
+				// A thread started within the current clock tick has no elapsed time
+				// yet; procps reports 0% rather than an unknown share.
+				let cpu_percent = uptime.zip(ticks).map(|(uptime, ticks)| {
 					let age = uptime - stat.start_time as f64 / ticks;
-					(age > 0.0).then(|| 100.0 * (stat.utime + stat.stime) as f64 / ticks / age)
+					if age > 0.0 { 100.0 * (stat.utime + stat.stime) as f64 / ticks / age } else { 0.0 }
 				});
 				ThreadInfo {
 					state: stat.state,
@@ -1207,9 +1209,9 @@ mod proc_snapshot {
 					policy:      None,
 					user_time:   times.map(|(_, _, user)| ticks_duration(user)),
 					system_time: times.map(|(_, kernel, _)| ticks_duration(kernel)),
-					cpu_percent: times.and_then(|(creation, kernel, user)| {
+					cpu_percent: times.map(|(creation, kernel, user)| {
 						let age = now.saturating_sub(creation);
-						(age > 0).then(|| 100.0 * kernel.saturating_add(user) as f64 / age as f64)
+						if age > 0 { 100.0 * kernel.saturating_add(user) as f64 / age as f64 } else { 0.0 }
 					}),
 				});
 			}

@@ -15,7 +15,7 @@ import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, getEnabledEvalPreludes } from "../eval/preludes";
+import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -263,8 +263,8 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
-		const doc = prelude.documentation.trim();
-		if (doc) preludes.push({ name: prelude.name, summary: doc.split("\n", 1)[0]! });
+		const summary = evalPreludeSummary(prelude);
+		if (summary) preludes.push({ name: prelude.name, summary });
 	}
 	return prompt.render(evalDescription, {
 		...evalTemplateContext(options),
@@ -367,11 +367,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return this.#codeModeDescription(base) ?? base;
 	}
 
+	/**
+	 * `xd://eval/<topic>` docs follow the live prelude set so a prelude announced
+	 * by the mid-session notice is readable before the description catches up.
+	 */
 	docTopics(): Record<string, string> {
-		return getEvalDocTopics(this.#descriptionOptions());
+		return getEvalDocTopics({
+			...this.#descriptionOptions(),
+			preludes: getEnabledEvalPreludes(this.session?.getEvalPreludes?.() ?? []),
+		});
 	}
 
-	/** Live session state feeding both the description and its `xd://eval/<topic>` docs. */
+	/**
+	 * Session state feeding the description. Preludes come from the advertised
+	 * snapshot, not the live set, so toggles never rewrite the cached tool prefix.
+	 */
 	#descriptionOptions(): EvalToolDescriptionOptions {
 		const session = this.session;
 		if (!session) return {};
@@ -388,10 +398,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			evalTools: cfgEvalToolsEnabled.get(session.settings),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
 			waitTool: hasWaitTool(session),
-			preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []),
+			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 		};
+	}
+
+	/** Frozen advertised snapshot; sessions without a snapshot owner advertise the live set. */
+	#advertisedPreludes(session: ToolSession): readonly EvalPreludeDefinition[] {
+		return session.getAdvertisedEvalPreludes?.() ?? getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
 	}
 
 	/**
@@ -412,7 +427,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
 			}),
 		);
-		const preludeDeclarations = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])
+		const preludeDeclarations = this.#advertisedPreludes(session)
 			.map(definition => definition.codeModeDeclarations?.trim())
 			.filter((declaration): declaration is string => Boolean(declaration))
 			.join("\n\n");

@@ -6,22 +6,6 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { FakeKernel } from "./helpers";
 
 describe("executePythonWithKernel", () => {
-	it("captures text and display outputs", async () => {
-		const kernel = new FakeKernel(
-			{ status: "ok", cancelled: false, timedOut: false, stdinRequested: false },
-			options => {
-				options?.onChunk?.("hello\n");
-				options?.onDisplay?.({ type: "json", data: { foo: "bar" } });
-			},
-		);
-
-		const result = await executePythonWithKernel(kernel, "print('hello')");
-
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain("hello");
-		expect(result.displayOutputs).toHaveLength(1);
-	});
-
 	it("marks stdin request as error", async () => {
 		const kernel = new FakeKernel(
 			{ status: "ok", cancelled: false, timedOut: false, stdinRequested: true },

@@ -52,6 +52,8 @@ import {
 import { joinPlanSections, parsePlanSections, sectionDeletionSpan } from "./plan-toc";
 import { padToWidth } from "../render/utils";
 import { renderSegmentTrack } from "../chrome/segment-track";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 
 /** Title shown in the overlay's top border. */
 const OVERLAY_TITLE = "Plan Review";
@@ -166,9 +168,6 @@ export interface PlanReviewOverlayOptions {
 	annotationState?: PlanReviewAnnotationState;
 }
 
-/** Default trailing footer hint when the caller supplies none. */
-const DEFAULT_HELP_SUFFIX = "esc cancel";
-
 export class PlanReviewOverlay implements Component {
 	#mdTheme: MarkdownTheme;
 	#scrollView: ScrollView;
@@ -185,7 +184,7 @@ export class PlanReviewOverlay implements Component {
 
 	#options: string[];
 	#disabled: Set<number>;
-	#helpSuffix: string;
+	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
 	#promptTitle: string | undefined;
 	#selectedIndex: number;
@@ -240,7 +239,7 @@ export class PlanReviewOverlay implements Component {
 		this.#disabled = new Set(
 			(options.disabledIndices ?? []).filter(i => Number.isInteger(i) && i >= 0 && i < this.#options.length),
 		);
-		this.#helpSuffix = options.helpText ?? DEFAULT_HELP_SUFFIX;
+		this.#helpSuffix = options.helpText;
 		this.#externalEditorLabel = options.externalEditorLabel;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
@@ -1069,22 +1068,39 @@ export class PlanReviewOverlay implements Component {
 	#buildHelp(): string {
 		const sep = " · ";
 		const parts: string[] = [];
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const enter = formatKeyHint("enter");
 		switch (this.#focus) {
 			case "actions":
-				parts.push("↑↓ select", "⏎ confirm");
-				if (this.#slider) parts.push("◂▸ model");
+				parts.push(`${upDown} select`, `${enter} confirm`);
+				if (this.#slider) parts.push(`${formatKeyHints(["left", "right"])} model`);
 				break;
 			case "toc":
-				parts.push("↑↓ section", "⏎ open", "a annotate", "e edit", "d delete", "u undo");
+				parts.push(
+					`${upDown} section`,
+					`${enter} open`,
+					`${formatKeyHint("a")} annotate`,
+					`${formatKeyHint("e")} edit`,
+					`${formatKeyHint("d")} delete`,
+					`${formatKeyHint("u")} undo`,
+				);
 				break;
 			case "body":
-				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends", "a annotate", "e edit", "u undo");
+				parts.push(
+					`${upDown} scroll`,
+					`${formatKeyHint("shift")} faster`,
+					formatKeyHints(["pageUp", "pageDown"]),
+					`${formatKeyHints(["g", "shift+g"])} ends`,
+					`${formatKeyHint("a")} annotate`,
+					`${formatKeyHint("e")} edit`,
+					`${formatKeyHint("u")} undo`,
+				);
 				break;
 		}
-		if (this.callbacks.onCopyPlan) parts.push("c copy");
-		parts.push("tab regions");
+		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
+		parts.push(`${formatKeyHint("tab")} regions`);
 		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
-		parts.push(this.#helpSuffix);
+		parts.push(this.#helpSuffix ?? `${editorKey("tui.select.cancel")} cancel`);
 		return parts.join(sep);
 	}
 
@@ -1295,7 +1311,13 @@ export class PlanReviewOverlay implements Component {
 			lines.push(truncateToWidth(label, innerWidth, Ellipsis.Unicode));
 		}
 		if (!Number.isFinite(maxRows) || maxRows >= 2) {
-			lines.push(theme.fg("dim", "↑↓ choose · enter edit · esc cancel"));
+			const upDown = editorKeys("tui.select.up", "tui.select.down");
+			lines.push(
+				theme.fg(
+					"dim",
+					`${upDown} choose · ${formatKeyHint("enter")} edit · ${editorKey("tui.select.cancel")} cancel`,
+				),
+			);
 		}
 		return lines.slice(0, Math.max(0, Math.floor(maxRows)));
 	}
@@ -1315,7 +1337,11 @@ export class PlanReviewOverlay implements Component {
 				innerWidth,
 				Ellipsis.Unicode,
 			);
-			const hintParts = ["enter save", "shift+enter newline", "esc cancel"];
+			const hintParts = [
+				`${editorKey("tui.input.submit")} save`,
+				`${editorKey("tui.input.newLine")} newline`,
+				`${editorKey("tui.select.cancel")} cancel`,
+			];
 			if (this.#editingAnnotation) hintParts.push("empty deletes");
 			if (this.#externalEditorLabel) hintParts.push(`${this.#externalEditorLabel} editor`);
 			this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, (process.stdout.rows || 40) - 12)));

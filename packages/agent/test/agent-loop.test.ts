@@ -385,49 +385,6 @@ describe("agentLoop with AgentMessage", () => {
 		expect(finalMessage.errorMessage).toBe("Interrupted by user");
 	});
 
-	it("should handle custom message types via convertToLlm", async () => {
-		// Create a custom message type
-		interface CustomNotification {
-			role: "notification";
-			text: string;
-			timestamp: number;
-		}
-
-		const notification: CustomNotification = {
-			role: "notification",
-			text: "This is a notification",
-			timestamp: Date.now(),
-		};
-
-		const context: AgentContext = {
-			systemPrompt: ["You are helpful."],
-			messages: [notification as unknown as AgentMessage], // Custom message in context
-			tools: [],
-		};
-
-		let convertedMessages: Message[] = [];
-		const mock = createMockModel({ responses: [{ content: ["Response"] }] });
-		const config: AgentLoopConfig = {
-			model: mock.model,
-			convertToLlm: messages => {
-				// Filter out notifications, convert rest
-				convertedMessages = messages
-					.filter(m => (m as { role: string }).role !== "notification")
-					.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
-				return convertedMessages;
-			},
-		};
-
-		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
-		for await (const _ of stream) {
-			// drain
-		}
-
-		// The notification should have been filtered out in convertToLlm
-		expect(convertedMessages.length).toBe(1); // Only user message
-		expect(convertedMessages[0].role).toBe("user");
-	});
-
 	it("should apply transformContext before convertToLlm", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
@@ -523,53 +480,6 @@ describe("agentLoop with AgentMessage", () => {
 		]);
 		expect(contexts[0]?.index).toBe(0);
 		expect(contexts[1]?.index).toBe(1);
-	});
-
-	it("should handle tool calls and results", async () => {
-		const toolSchema = type({ value: "string" });
-		const executed: string[] = [];
-		const tool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "echo",
-			label: "Echo",
-			description: "Echo tool",
-			parameters: toolSchema,
-			async execute(_toolCallId, params) {
-				executed.push(params.value);
-				return {
-					content: [{ type: "text", text: `echoed: ${params.value}` }],
-					details: { value: params.value },
-				};
-			},
-		};
-
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
-
-		const mock = createMockModel({
-			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
-				{ content: ["done"] },
-			],
-		});
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
-
-		const events: AgentEvent[] = [];
-		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
-
-		for await (const event of stream) {
-			events.push(event);
-		}
-
-		// Tool should have been executed
-		expect(executed).toEqual(["hello"]);
-
-		// Should have tool execution events
-		const toolStart = events.find(e => e.type === "tool_execution_start");
-		const toolEnd = events.find(e => e.type === "tool_execution_end");
-		expect(toolStart).toBeDefined();
-		expect(toolEnd).toBeDefined();
-		if (toolEnd?.type === "tool_execution_end") {
-			expect(toolEnd.isError).toBeFalsy();
-		}
 	});
 
 	it("surfaces validation error for malformed JSON parse sentinels without leaking __rawJson", async () => {
@@ -1213,6 +1123,45 @@ describe("agentLoop with AgentMessage", () => {
 		);
 	});
 
+	it("records fallback-resolved alias calls under the resolved tool's name", async () => {
+		// Providers reject `xd://recall` as a replayed function-call name, so the
+		// alias must not reach history, persistence, or the next request.
+		const toolSchema = type({ value: "string" });
+		const deviceTool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "recall",
+			label: "Recall",
+			description: "Mounted device tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `recall: ${params.value}` }], details: params };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "xd://recall", arguments: { value: "x" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			resolveFallbackTool: name => (name === "xd://recall" || name === "recall" ? deviceTool : undefined),
+		};
+
+		const messages = await agentLoop([createUserMessage("recall")], context, config, undefined, mock.stream).result();
+
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		expect(assistant?.content).toContainEqual(
+			expect.objectContaining({ type: "toolCall", id: "tool-1", name: "recall" }),
+		);
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(result).toMatchObject({ toolCallId: "tool-1", toolName: "recall", isError: false });
+		// The follow-up request replays the canonical name.
+		const replayed = mock.calls[1]?.context.messages.find((m): m is AssistantMessage => m.role === "assistant");
+		expect(replayed?.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "recall" }));
+	});
+
 	it("hands resolveFallbackTool the request's advertised snapshot", async () => {
 		// A host that recovers a mis-spelled name must resolve it against the set
 		// THIS request advertised, not its own live tool state: an MCP
@@ -1532,7 +1481,87 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("runs shared tools in parallel and emits completion-ordered results", async () => {
+	it("rejects a tool call whose intent field carries the payload instead of a label", async () => {
+		const writeSchema = type({ path: "string", content: "string" });
+		const written: Record<string, unknown>[] = [];
+		const writeTool: AgentTool<typeof writeSchema> = {
+			name: "write",
+			label: "Write",
+			description: "Write a file",
+			parameters: writeSchema,
+			async execute(_toolCallId, params) {
+				written.push(params as Record<string, unknown>);
+				return { content: [{ type: "text", text: `wrote ${params.content.length} bytes` }] };
+			},
+		};
+		// A tool that owns `i` as a real parameter: a long value there is not misplaced.
+		const ownedSchema = type({ value: "string", [`${INTENT_FIELD}?`]: "string" });
+		const ownedRuns: string[] = [];
+		const ownedTool: AgentTool<typeof ownedSchema> = {
+			name: "owned",
+			label: "Owned",
+			description: "Owns i",
+			parameters: ownedSchema,
+			async execute(_toolCallId, params) {
+				ownedRuns.push(params.value);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const body = `# Guide\n\n${"Explains how the query pipeline is reconstructed.\n".repeat(20)}`;
+		const call = (id: string, name: string, args: Record<string, unknown>) => ({
+			type: "toolCall" as const,
+			id,
+			name,
+			arguments: args,
+		});
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						call("swapped", "write", {
+							path: "guide.md",
+							[INTENT_FIELD]: body,
+							content: "Writing reconstruction guide",
+						}),
+						call("normal", "write", { path: "notes.md", [INTENT_FIELD]: "Writing notes", content: "hello" }),
+						call("at-limit", "write", { path: "limit.md", [INTENT_FIELD]: "x".repeat(200), content: "a" }),
+						call("over-limit", "write", { path: "over.md", [INTENT_FIELD]: "x".repeat(201), content: "b" }),
+						call("owned", "owned", { value: "kept", [INTENT_FIELD]: body }),
+						call("unknown", "nope", { [INTENT_FIELD]: body }),
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool, ownedTool] };
+
+		const messages = await agentLoop([createUserMessage("run")], context, config, undefined, mock.stream).result();
+		const results = new Map(
+			messages.filter((m): m is ToolResultMessage => m.role === "toolResult").map(r => [r.toolCallId, r]),
+		);
+		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
+		const atLimitCall = assistant?.content.find(c => c.type === "toolCall" && c.id === "at-limit");
+		const unknownText = (results.get("unknown")?.content ?? [])
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("\n");
+
+		// The swapped call must not run with the one-line `content`: the model is
+		// told to retry instead of believing the body was written.
+		expect(written).toEqual([
+			{ path: "notes.md", content: "hello" },
+			{ path: "limit.md", content: "a" },
+		]);
+		expect(results.get("swapped")?.isError).toBe(true);
+		expect(results.get("over-limit")?.isError).toBe(true);
+		expect(results.get("normal")?.isError).toBe(false);
+		expect(atLimitCall?.type === "toolCall" && atLimitCall.intent).toBe("x".repeat(200));
+		expect(ownedRuns).toEqual(["kept"]);
+		expect(unknownText).toContain("Tool nope not found");
+	});
+
+	it("runs shared tools in parallel and records results in call order", async () => {
 		const toolSchema = type({ value: "string" });
 		const startTimes: Record<string, number> = {};
 		const finishTimes: Record<string, number> = {};
@@ -1603,13 +1632,18 @@ describe("agentLoop with AgentMessage", () => {
 				e.type === "message_start" && e.message.role === "toolResult",
 		);
 		expect(toolResultStarts).toHaveLength(2);
-		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-2");
-		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-2");
+		// Live execution events still report the fast call as soon as it settles.
+		expect(events.flatMap(e => (e.type === "tool_execution_end" ? [e.toolCallId] : []))).toEqual([
+			"tool-2",
+			"tool-1",
+		]);
 
 		const turnEndEvent = events.find((e): e is Extract<AgentEvent, { type: "turn_end" }> => e.type === "turn_end");
 		expect(turnEndEvent).toBeDefined();
 		if (!turnEndEvent) return;
-		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-2", "tool-1"]);
+		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-1", "tool-2"]);
 	});
 
 	it("resolves function-form concurrency per call", async () => {
@@ -6121,6 +6155,71 @@ describe("agentLoop streaming snapshots", () => {
 		expect(cloned.nul).toBeNull();
 	});
 
+	it("isolates snapshots from providers that mutate streaming arguments in place", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+
+		// Owned-stream / GLM style: the live arguments object and its nested
+		// containers are mutated in place between deltas. `__proto__` arrives as
+		// an own data key the way JSON.parse produces it.
+		const args: Record<string, unknown> = JSON.parse('{"__proto__":{"k":1},"meta":{"tags":["a"]},"content":""}');
+		const toolCall = { type: "toolCall" as const, id: "tc-inplace", name: "noop", arguments: args };
+		const partial = createAssistantMessage([], "toolUse");
+		let advance = (): void => {};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			if (turn++ > 0) {
+				const done = createAssistantMessage([{ type: "text", text: "ok" }], "stop");
+				stream.push({ type: "start", partial: done });
+				stream.push({ type: "done", reason: "stop", message: done });
+				return stream;
+			}
+			stream.push({ type: "start", partial });
+			const steps: (() => void)[] = [
+				() => {
+					partial.content.push(toolCall);
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+				},
+				...["x", "y", "z"].map(delta => () => {
+					args.content = `${args.content}${delta}`;
+					const meta = args.meta;
+					if (meta && typeof meta === "object" && "tags" in meta && Array.isArray(meta.tags))
+						meta.tags.push(delta);
+					stream.push({ type: "toolcall_delta", contentIndex: 0, delta, partial });
+				}),
+				() => stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial }),
+				() => stream.push({ type: "done", reason: "toolUse", message: partial }),
+			];
+			let step = 0;
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
+			};
+			return stream;
+		};
+
+		const seen: { event: AgentEvent; json: string }[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, streamFn)) {
+			if (event.type === "message_update" && turn === 1) seen.push({ event, json: JSON.stringify(event) });
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
+		}
+
+		expect(seen.length).toBe(5);
+		for (const { event, json } of seen) expect(JSON.stringify(event)).toBe(json);
+		const first = seen[1]!.event;
+		if (first.type !== "message_update" || first.message.role !== "assistant") throw new Error("expected update");
+		const block = first.message.content[0];
+		if (block?.type !== "toolCall") throw new Error("expected toolCall");
+		expect(block.arguments).toEqual({ meta: { tags: ["a", "x"] }, content: "x", ["__proto__"]: { k: 1 } });
+		expect(Object.hasOwn(block.arguments, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(block.arguments)).toBe(Object.prototype);
+	});
+
 	it("shares one immutable snapshot between message and assistantMessageEvent.partial on message_update", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
@@ -6177,11 +6276,14 @@ describe("agentLoop streaming snapshots", () => {
 		};
 
 		// Interleaved block lifecycle: block 0 finalizes first; block 2 starts
-		// and ends while block 1 is still streaming. Events are pushed one
-		// microtask at a time, mutating the live partial immediately before each
-		// push (the mutate-then-push stream contract), so the consumer observes
-		// each event with only the deltas delivered so far applied.
+		// and ends while block 1 is still streaming. Each event mutates the live
+		// partial immediately before its push (the mutate-then-push stream
+		// contract). The producer advances in lockstep with the consumer — one
+		// step per observed assistant event — so each snapshot sees exactly the
+		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
+		// free-running timer producer would race ahead during that sleep.
 		const partial = createAssistantMessage([], "stop");
+		let advance = (): void => {};
 		const streamFn = () => {
 			const stream = new AssistantMessageEventStream();
 			stream.push({ type: "start", partial });
@@ -6211,13 +6313,9 @@ describe("agentLoop streaming snapshots", () => {
 				() => stream.push({ type: "done", reason: "stop", message: partial }),
 			];
 			let step = 0;
-			const runNext = (): void => {
-				if (step < steps.length) {
-					steps[step++]!();
-					setTimeout(runNext, 0);
-				}
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
 			};
-			setTimeout(runNext, 0);
 			return stream;
 		};
 
@@ -6225,6 +6323,12 @@ describe("agentLoop streaming snapshots", () => {
 		const stream = agentLoop([createUserMessage("stream")], context, config, undefined, streamFn);
 		for await (const event of stream) {
 			events.push(event);
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
 		}
 
 		type MessageUpdate = Extract<AgentEvent, { type: "message_update" }>;

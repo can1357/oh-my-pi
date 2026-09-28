@@ -277,6 +277,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 		return params.tasks;
 	}
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
@@ -298,6 +299,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
+	if (item.solutionSpace !== undefined) spawn.solutionSpace = item.solutionSpace;
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
@@ -613,7 +615,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
-			sessionAgents: this.session.getSessionAgents?.() ?? [],
+			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
@@ -1224,8 +1226,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// error on a zero exit (changes captured but not landed, or a
 					// retained workspace) is a failure too: the work needs manual
 					// recovery, which a "completed" job would hide. Mirrors the sync
-					// path's status derivation.
+					// path's status derivation. `isError` marks a child that finished
+					// before a later step (isolation merge, nested patch apply) threw.
 					const resultFailed =
+						result.isError === true ||
 						!singleResult ||
 						(singleResult.aborted ?? false) ||
 						singleResult.exitCode !== 0 ||
@@ -1501,6 +1505,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
@@ -1551,12 +1556,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
+			// A child that finished before the failure keeps its exit status,
+			// usage, and artifact path. `error` is set so nothing reads a zero
+			// exit code as a completed run.
+			const settled = error instanceof StructuredSubagentError ? error.result : undefined;
+			const cause = error instanceof StructuredSubagentError ? error.cause : undefined;
+			const salvaged = settled
+				? { ...settled, error: settled.error ?? (cause instanceof Error ? cause.message : message) }
+				: undefined;
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				isError: true,
 				details: {
 					projectAgentsDir: null,
-					results: [],
+					results: salvaged ? [salvaged] : [],
 					totalDurationMs: Date.now() - startTime,
+					...(salvaged?.usage ? { usage: salvaged.usage } : {}),
+					...(salvaged?.outputPath ? { outputPaths: [salvaged.outputPath] } : {}),
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};

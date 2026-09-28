@@ -132,6 +132,14 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
+// Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
+// root chalk context, so later `chalk.level` changes still apply.
+const boldStyler = chalk.bold;
+const italicStyler = chalk.italic;
+const underlineStyler = chalk.underline;
+const strikethroughStyler = chalk.strikethrough;
+const inverseStyler = chalk.inverse;
+
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -139,6 +147,10 @@ export class Theme {
 	readonly #hexFgColors: Record<ThemeColor, string>;
 	/** Resolved hex strings for background colors — populated at construction. */
 	readonly #hexBgColors: Record<ThemeBg, string>;
+	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
+	readonly #resolvedFgColors = new Map<ThemeColor, string>();
+	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
+	#sessionAccentInputs: SessionAccentTheme | undefined;
 	#symbols: SymbolMap;
 	#spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>>;
 	/**
@@ -279,14 +291,15 @@ export class Theme {
 	 * Theme-derived inputs for `getSessionAccentHex`: the accent hex whose
 	 * OKLCH weight session accents adopt, the major colors they must not
 	 * hue-collide with, and the light-theme surface luminance to contrast
-	 * against.
+	 * against. Built once per instance and frozen; callers share the object.
 	 */
 	get sessionAccentInputs(): SessionAccentTheme {
-		return {
+		this.#sessionAccentInputs ??= Object.freeze({
 			accentHex: this.getAccentColorHex(),
-			colorHexes: this.getMajorThemeColorHexes(),
+			colorHexes: Object.freeze(this.getMajorThemeColorHexes()),
 			surfaceLuminance: this.accentSurfaceLuminance,
-		};
+		});
+		return this.#sessionAccentInputs;
 	}
 
 	fg(color: ThemeColor, text: string): string {
@@ -297,9 +310,13 @@ export class Theme {
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
 	fgResolved(color: ThemeColor, text: string): string {
-		const ansi = this.#fgColors[color];
-		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		const resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
+		let resolved = this.#resolvedFgColors.get(color);
+		if (resolved === undefined) {
+			const ansi = this.#fgColors[color];
+			if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
+			this.#resolvedFgColors.set(color, resolved);
+		}
 		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
 	}
 
@@ -332,23 +349,23 @@ export class Theme {
 	}
 
 	bold(text: string): string {
-		return chalk.bold(text);
+		return boldStyler(text);
 	}
 
 	italic(text: string): string {
-		return chalk.italic(text);
+		return italicStyler(text);
 	}
 
 	underline(text: string): string {
-		return chalk.underline(text);
+		return underlineStyler(text);
 	}
 
 	strikethrough(text: string): string {
-		return chalk.strikethrough(text);
+		return strikethroughStyler(text);
 	}
 
 	inverse(text: string): string {
-		return chalk.inverse(text);
+		return inverseStyler(text);
 	}
 
 	getFgAnsi(color: ThemeColor): string {
@@ -592,7 +609,6 @@ export class Theme {
 			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
-			esc: this.#symbols["icon.esc"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			job: this.#symbols["icon.job"],

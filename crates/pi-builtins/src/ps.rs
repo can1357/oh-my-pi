@@ -331,7 +331,7 @@ impl PsProcessRow {
 	fn cpu_percent(&self) -> Option<f64> {
 		let age = self.age?.as_secs_f64();
 		let cpu_time = self.cpu_time?.as_secs_f64();
-		(age > 0.0).then_some(100.0 * cpu_time / age)
+		Some(if age > 0.0 { 100.0 * cpu_time / age } else { 0.0 })
 	}
 
 	fn memory_percent(&self, total_memory: Option<u64>) -> Option<f64> {

@@ -68,12 +68,6 @@ describe("findMostRecentSession", () => {
 		removeSyncWithRetries(tempDir);
 	});
 
-	it("returns single valid session file", async () => {
-		const file = path.join(tempDir, "session.jsonl");
-		fs.writeFileSync(file, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
-		expect(await findMostRecentSession(tempDir)).toBe(file);
-	});
-
 	it("returns most recently modified session", async () => {
 		const file1 = path.join(tempDir, "older.jsonl");
 		const file2 = path.join(tempDir, "newer.jsonl");

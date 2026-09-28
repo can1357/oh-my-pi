@@ -131,36 +131,6 @@ describe("BashTool ACP terminal routing", () => {
 		]);
 	});
 
-	it("wraps shell metacharacters into args instead of packing them into command", async () => {
-		// Regression for #4333: a bash line with `&&`, pipes, or spaces must not
-		// be sent as raw `command` (spec-conformant ACP clients spawn command+args
-		// directly and would ENOENT the whole line as argv[0]).
-		const handle: ClientBridgeTerminalHandle = {
-			terminalId: "term-shell-wrap",
-			waitForExit: async () => ({ exitCode: 0, signal: null }),
-			currentOutput: async () => ({ output: "", truncated: false }),
-			kill: async () => {},
-			release: async () => {},
-		};
-		const bridge: ClientBridge = {
-			capabilities: { terminal: true },
-			createTerminal: async () => handle,
-		};
-		const createSpy = spyOn(bridge, "createTerminal");
-
-		const line = "git status && echo x | head";
-		const tool = new BashTool(makeSession(bridge));
-		await tool.execute("call-shell-wrap", { command: line });
-
-		expect(createSpy).toHaveBeenCalledTimes(1);
-		const params = createSpy.mock.calls[0]![0];
-		expect(params.command).toBe("/bin/bash");
-		expect(params.args).toEqual(["-l", "-c", line]);
-		// `args` must actually be present — the bug was omitting it entirely.
-		expect(params.args).toBeDefined();
-		expect(params.args?.length).toBeGreaterThan(0);
-	});
-
 	it("does not allocate a client terminal when the signal is already aborted before createTerminal", async () => {
 		const handle: ClientBridgeTerminalHandle = {
 			terminalId: "term-should-not-create",

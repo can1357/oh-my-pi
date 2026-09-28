@@ -299,6 +299,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
 
 	/**
+	 * Called when live steering dequeues messages via {@link getSteeringMessages}
+	 * for the response being streamed. The loop records them in the transcript
+	 * after that response (or its tool batch); an abort before then leaves them
+	 * unrecorded for the host to requeue.
+	 */
+	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
+
+	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only

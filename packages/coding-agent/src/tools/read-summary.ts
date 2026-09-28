@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
+import { type SummaryResult, summarizeCodeAsync } from "@oh-my-pi/pi-natives";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
 import type { ClientBridge } from "../session/client-bridge";
@@ -17,7 +17,7 @@ import {
 	cfgReadSummarizeUnfoldUntil,
 } from "./settings";
 
-// Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
+// Per-session memo for tree-sitter summaries. `summarizeCodeAsync` is a pure function
 // of (code, path, fold settings) but costs ~12-18ms for a ~1500-line file, and a
 // repeat summary read of the same unchanged file re-parses from scratch. Key on
 // the content hash of the freshly-read bytes (+ path + fold settings): the file
@@ -97,7 +97,7 @@ export async function trySummarize(
 		const cacheKey = `${absolutePath}\0${languagePath ?? ""}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
 		const memoized = cache.get(cacheKey);
 		if (memoized !== undefined) return memoized || null;
-		const result = summarizeCode({
+		const result = await summarizeCodeAsync({
 			code,
 			path: languagePath ?? absolutePath,
 			minBodyLines,

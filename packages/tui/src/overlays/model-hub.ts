@@ -19,7 +19,8 @@ import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/typ
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
 import { fuzzyFilter } from "../fuzzy";
-import { getKeybindings } from "../keybindings";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { Input } from "../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { truncateToWidth, visibleWidth } from "../utils";
@@ -983,7 +984,11 @@ export class ModelHubComponent implements Component {
 		);
 	}
 
-	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
+	/**
+	 * Persist `role → item`, preserving a still-supported thinking level, then
+	 * open the thinking strip — skipped for models with no reasoning surface,
+	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
+	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
@@ -1002,6 +1007,13 @@ export class ModelHubComponent implements Component {
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
+			if (supported.length === 0) {
+				if (returnToRoles) {
+					this.#setActiveEntry("roles");
+					this.#focus = "list";
+				}
+				return;
+			}
 			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
 		});
 	}
@@ -1018,8 +1030,37 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
+	/**
+	 * Thinking levels a role assignment can actually apply. A model that does
+	 * not reason gets none: no request path sends reasoning for it, and
+	 * `applyAutoThinkingLevel` early-returns on `!model.reasoning`, so
+	 * `inherit`/`off`/`auto` would all be no-ops. Reasoners without an effort
+	 * dial (`thinking: undefined`, e.g. `xai/grok-code-fast-1`) keep the three
+	 * always-on levels — their thinking is real, only the ladder is absent.
+	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
+		if (!model.reasoning) return [];
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+	}
+
+	/**
+	 * Resolve what `t` on a role row would edit: the role's model in its
+	 * persisted scope. Undefined when the role is unassigned or its model has
+	 * no thinking levels to offer, which makes both `t` and its footer hint
+	 * inert — the same rule wildcard fallback rows follow.
+	 */
+	#roleThinkingTarget(role: string): { item: ModelBrowserItem; scope?: ModelRoleSelectionScope } | undefined {
+		const assignment = this.#roles[role];
+		if (!assignment) return undefined;
+		const source =
+			this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
+		const scope = source === "project" || source === "global" ? source : undefined;
+		const model = scope ? this.#roleForScope(role, scope).model : assignment.model;
+		if (!model || this.#thinkingOptionsFor(model).length === 0) return undefined;
+		return {
+			item: { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` },
+			scope,
+		};
 	}
 
 	/** Offer only the roles this model can actually fill (chat roles for chat models, `web` for search runners, …). */
@@ -1630,6 +1671,13 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
+		// Enter on the sidebar is a pane switch, like →: it lands on the model
+		// rows instead of acting on a row the user cannot see is selected.
+		if (this.#focus === "scope" && (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n")) {
+			this.#focus = "list";
+			return;
+		}
+
 		const beforeQuery = this.#browser.query;
 		const isPrintable = extractPrintableText(data) !== undefined;
 		this.#browser.handleInput(data);
@@ -1813,20 +1861,9 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (printable === "t") {
-			const assignment = role ? this.#roles[role] : undefined;
-			if (role && assignment) {
-				const source =
-					this.#settings.modelRoleStorage === "project" ? this.#settings.getModelRoleSource(role) : "default";
-				const scope = source === "project" || source === "global" ? source : undefined;
-				const scopedModel = scope ? this.#roleForScope(role, scope).model : assignment.model;
-				if (!scopedModel) return;
-				const item: ModelBrowserItem = {
-					provider: scopedModel.provider,
-					id: scopedModel.id,
-					model: scopedModel,
-					selector: `${scopedModel.provider}/${scopedModel.id}`,
-				};
-				this.#openThinkingStrip(item, role, true, scope);
+			if (role) {
+				const target = this.#roleThinkingTarget(role);
+				if (target) this.#openThinkingStrip(target.item, role, true, target.scope);
 			} else if (row?.kind === "fallback") {
 				this.#openFallbackThinkingStrip(row);
 			}
@@ -2006,7 +2043,10 @@ export class ModelHubComponent implements Component {
 			MODEL_KIND_TABS.map(kind => ({ label: kind })),
 			Math.max(0, active),
 		);
-		return truncateToWidth(` ${theme.fg("dim", "Kind:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+		return truncateToWidth(
+			` ${theme.fg("dim", "Kind:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}`,
+			width,
+		);
 	}
 
 	#renderRoleTabs(width: number): string {
@@ -2015,7 +2055,10 @@ export class ModelHubComponent implements Component {
 			ROLE_TABS.map(tab => ({ label: tab === "kind" ? "kinds" : tab })),
 			Math.max(0, active),
 		);
-		return truncateToWidth(` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
+		return truncateToWidth(
+			` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}`,
+			width,
+		);
 	}
 
 	#statusRow(width: number): string {
@@ -2023,9 +2066,11 @@ export class ModelHubComponent implements Component {
 			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
 		}
 		if (this.#assigning !== null) {
+			const enter = formatKeyHint("enter");
+			const cancel = editorKey("tui.select.cancel");
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
-					theme.fg("accent", " New fallback chain — Enter picks the model it protects, Esc cancels"),
+					theme.fg("accent", ` New fallback chain — ${enter} picks the model it protects, ${cancel} cancels`),
 					width,
 				);
 			}
@@ -2034,12 +2079,15 @@ export class ModelHubComponent implements Component {
 			if (this.#assigning.kind === "fallback") {
 				const verb = this.#assigning.index === null ? "Adding fallback for" : "Replacing fallback of";
 				return truncateToWidth(
-					theme.fg("accent", ` ${verb} ${theme.bold(label)} — Enter picks the fallback model, Esc cancels`),
+					theme.fg(
+						"accent",
+						` ${verb} ${theme.bold(label)} — ${enter} picks the fallback model, ${cancel} cancels`,
+					),
 					width,
 				);
 			}
 			return truncateToWidth(
-				theme.fg("accent", ` Assigning ${theme.bold(label)} — Enter assigns, Esc cancels`),
+				theme.fg("accent", ` Assigning ${theme.bold(label)} — ${enter} assigns, ${cancel} cancels`),
 				width,
 			);
 		}
@@ -2051,7 +2099,7 @@ export class ModelHubComponent implements Component {
 				text = `Recently used models${scopedSuffix}`;
 				break;
 			case "roles":
-				text = "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
+				text = `Model roles — ${formatKeyHint("f")} adds a retry fallback, cleared roles fall back to auto-selection`;
 				break;
 			case "provider":
 				if (entry.locked) {
@@ -2206,7 +2254,7 @@ export class ModelHubComponent implements Component {
 		// segment track the ctrl+p status uses; the selected role's chip fills.
 		while (lines.length < rows - 1) lines.push("");
 		if (rows >= 2) {
-			const cycleKey = getKeybindings().getKeys("app.model.cycleForward")[0] ?? "ctrl+p";
+			const cycleKey = editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p");
 			if (cycleOrder.length > 0) {
 				const selectedRow = this.#rolesRows[this.#roleIndex];
 				const selectedRole =
@@ -2219,7 +2267,7 @@ export class ModelHubComponent implements Component {
 				lines[rows - 1] = truncateToWidth(`  ${theme.fg("dim", `${cycleKey} cycle:`)} ${track}`, width);
 			} else {
 				lines[rows - 1] = truncateToWidth(
-					theme.fg("dim", `  ${cycleKey} cycle is empty — press c on a role to add it`),
+					theme.fg("dim", `  ${cycleKey} cycle is empty — press ${formatKeyHint("c")} on a role to add it`),
 					width,
 				);
 			}
@@ -2246,7 +2294,12 @@ export class ModelHubComponent implements Component {
 		}
 		if (entry.oauth) {
 			this.#lockedLoginLine = lines.length + 1; // +1 for the status row offset handled by caller
-			lines.push(truncateToWidth(theme.fg("accent", `  ${theme.nav.cursor} Log in with OAuth (Enter)`), width));
+			lines.push(
+				truncateToWidth(
+					theme.fg("accent", `  ${theme.nav.cursor} Log in with OAuth (${formatKeyHint("enter")})`),
+					width,
+				),
+			);
 		}
 		lines.push("");
 		const catalogCount = entry.catalogCount ?? 0;
@@ -2264,29 +2317,40 @@ export class ModelHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const left = formatKeyHint("left");
+		const leftRight = formatKeyHints(["left", "right"]);
+		const enterRight = formatKeyHints(["enter", "right"]);
+		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
 		const strip = this.#strip;
 		if (strip) {
 			if (strip.kind === "roleName") {
-				return "Enter create + pick model · Esc cancel";
+				return `${enter} create + pick model · ${cancel} cancel`;
 			}
-			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
-			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
-			return "←/→ thinking level · Enter apply · Esc keep";
+			if (strip.kind === "role") return `${leftRight} choose · ${enter} assign/clear · ${cancel} cancel`;
+			if (strip.kind === "scope") return `${leftRight} save scope · ${enter} choose · ${cancel} cancel`;
+			return `${leftRight} thinking level · ${enter} apply · ${cancel} keep`;
 		}
 		if (this.#assigning !== null) {
+			if (this.#focus === "scope") {
+				return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
+			}
+			const browse = `${upDown} models · ${left} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
 			switch (this.#assigning.kind) {
 				case "fallback":
-					return "Enter pick fallback · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} pick fallback · ${browse}`;
 				case "fallbackKey":
-					return "Enter pick the protected model · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} pick the protected model · ${browse}`;
 				default:
-					return "Enter assign · ↑/↓ providers · type to search · Alt+←/→ kind · Esc cancel";
+					return `${enter} assign · ${browse}`;
 			}
 		}
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return "↑/↓ providers · → roles · Alt+←/→ tabs · Esc close";
+				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs · ${cancel} close`;
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
@@ -2294,23 +2358,31 @@ export class ModelHubComponent implements Component {
 				// inherit and unknown models have no ladder to offer, so the
 				// action would be inert there.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
-				const thinking = editable ? " · t thinking" : "";
-				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
+				const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
+				return `${upDown} rows · ${enter} replace · ${formatKeyHint("f")} add another · ${formatKeyHint("x")} remove${thinking} · [/] reorder · ${left} providers`;
 			}
 			if (row?.kind === "chainKey") {
-				return "↑/↓ rows · Enter/f add fallback · x clear chain · ← providers";
+				return `${upDown} rows · ${formatKeyHints(["enter", "f"])} add fallback · ${formatKeyHint("x")} clear chain · ${left} providers`;
 			}
 			if (row?.kind === "newFallback") {
-				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
+				return `${upDown} rows · ${enter} new model/provider fallback chain · ${left} providers`;
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			// Same rule as fallback rows: advertise `t` only where a strip would
+			// open — an assigned role whose model has thinking levels to offer.
+			const editable = row?.kind === "role" && this.#roleThinkingTarget(row.role) !== undefined;
+			const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
+			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
-			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
+			return entry.oauth
+				? `${enter} log in · ${upDown} providers · ${cancel} close`
+				: `${upDown} providers · ${cancel} close`;
 		}
-		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
-		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search · Alt+←/→ kind${refresh} · Esc close`;
+		const refresh = entry.kind === "provider" ? ` · ${formatKeyHint("f5")} refresh` : "";
+		if (this.#focus === "scope") {
+			return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind${refresh} · ${cancel} close`;
+		}
+		return `${enter} assign roles · ${upDown} models · ${left} providers · type to search · ${altLeftRight} kind${refresh} · ${cancel} close`;
 	}
 
 	#renderFooter(width: number): string {
