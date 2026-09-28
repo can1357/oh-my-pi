@@ -14,7 +14,30 @@ import * as path from "node:path";
 import * as AIError from "../../error";
 import type { OAuthController } from "./types";
 
-const DEVIN_CLI_CREDENTIALS_PATH = path.join(os.homedir(), ".local/share/devin/credentials.toml");
+/**
+ * Candidate locations of the Devin CLI credential file, in probe order. The
+ * CLI keeps its data under the XDG-style `~/.local/share/devin` on Unix
+ * (macOS included, even without XDG_DATA_HOME) and under `%APPDATA%\devin` on
+ * Windows; the XDG and macOS-Library variants cover alternate configurations.
+ */
+export function devinCliCredentialPaths(
+	homedir = os.homedir(),
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): string[] {
+	const pathImpl = platform === "win32" ? path.win32 : path;
+	const paths = [pathImpl.join(homedir, ".local", "share", "devin", "credentials.toml")];
+	const push = (candidate: string): void => {
+		if (!paths.includes(candidate)) paths.push(candidate);
+	};
+	if (platform === "win32") {
+		if (env.APPDATA) push(pathImpl.join(env.APPDATA, "devin", "credentials.toml"));
+	} else {
+		if (env.XDG_DATA_HOME) paths.unshift(pathImpl.join(env.XDG_DATA_HOME, "devin", "credentials.toml"));
+		push(pathImpl.join(homedir, "Library", "Application Support", "devin", "credentials.toml"));
+	}
+	return paths;
+}
 
 /**
  * Parse and validate the CLI credential file. Split from the hook so tests can
@@ -57,5 +80,18 @@ function parseDevinCliCredentials(filePath: string, text: string): string {
 }
 
 export async function loginDevinCliHook(_callbacks: OAuthController): Promise<string> {
-	return readDevinCliCredentials(DEVIN_CLI_CREDENTIALS_PATH);
+	const candidates = devinCliCredentialPaths();
+	for (const candidate of candidates) {
+		try {
+			return readDevinCliCredentials(candidate);
+		} catch (error) {
+			// A present-but-invalid file is the user's real problem; a missing
+			// one just means this platform's location does not exist yet.
+			if (!(error instanceof AIError.OAuthError) || error.kind !== "configuration") throw error;
+		}
+	}
+	throw new AIError.OAuthError(
+		`No Devin CLI credentials found (probed: ${candidates.join(", ")}). Run \`devin auth login\` once, then retry this login.`,
+		{ kind: "configuration", provider: "devin-cli" },
+	);
 }
