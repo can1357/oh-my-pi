@@ -142,7 +142,14 @@ describe("job renderer task-result preview", () => {
 					op: "wait",
 					jobs: [
 						{ id: "WakeJob", type: "bash", status: "running", label: "build", durationMs: 100, progress: "wake" },
-						{ id: "AmbientJob", type: "bash", status: "running", label: "lint", durationMs: 100, progress: "ambient" },
+						{
+							id: "AmbientJob",
+							type: "bash",
+							status: "running",
+							label: "lint",
+							durationMs: 100,
+							progress: "ambient",
+						},
 						{ id: "SilentJob", type: "bash", status: "running", label: "check", durationMs: 100 },
 					],
 				},
