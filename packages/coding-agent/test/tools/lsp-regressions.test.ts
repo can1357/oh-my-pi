@@ -5786,3 +5786,38 @@ describe("ty python lsp", () => {
 		}
 	});
 });
+
+describe("taplo toml lsp", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("routes .toml files to taplo and leaves other extensions alone", () => {
+		const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+		expect(getServersForFile(config, "Cargo.toml").map(([name]) => name)).toContain("taplo");
+		// fileTypes are extension/file-name matches: the TOML server must not
+		// answer for other languages' files.
+		expect(getServersForFile(config, "app.rs").map(([name]) => name)).not.toContain("taplo");
+	});
+
+	it("auto-detects taplo behind each documented root marker when the project-local bin exists", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-taplo-detect-");
+		// $which never succeeds: only the project-local node_modules/.bin can
+		// resolve taplo, so a marker or routing regression cannot hide behind a
+		// globally installed taplo on the test machine.
+		vi.spyOn(piUtils, "$which").mockImplementation(() => null);
+		try {
+			for (const marker of ["taplo.toml", ".taplo.toml"]) {
+				const project = path.join(tempDir.path(), marker.replaceAll(".", "_"));
+				const resolvedTaplo = path.join(project, "node_modules", ".bin", "taplo");
+				await Bun.write(path.join(project, "package.json"), "{}\n");
+				await Bun.write(path.join(project, marker), "");
+				await Bun.write(resolvedTaplo, "#!/bin/sh\n");
+				const config = loadConfig(project);
+				expect(config.servers.taplo?.resolvedCommand).toBe(resolvedTaplo);
+			}
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+});

@@ -5,6 +5,7 @@
 ### Added
 
 - The shell's `cp` builtin accepts macOS's `-c` (clone where possible, else copy; same as `--reflink=auto`).
+- Added a `taplo` language server for TOML files, auto-detected when the `taplo` binary resolves and a `taplo.toml` or `.taplo.toml` root marker is present ([#13599](https://github.com/can1357/oh-my-pi/pull/13599) by [@jpds](https://github.com/jpds))
 
 ### Changed
 

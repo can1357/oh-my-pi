@@ -507,5 +507,12 @@
 		"fileTypes": [".swift"],
 		"rootMarkers": [".swiftlint.yml", ".swiftlint.yaml", "Package.swift", "*.xcodeproj"],
 		"isLinter": true
+	},
+	"taplo": {
+		"command": "taplo",
+		"args": ["lsp", "stdio"],
+		"fileTypes": [".toml"],
+		"rootMarkers": ["taplo.toml", ".taplo.toml"],
+		"warmupTimeoutMs": 2000
 	}
 }

@@ -269,6 +269,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `emmet-language-server`       | HTML, CSS, JSX                | `emmet-language-server`           |
 | `sourcekit-lsp`               | Swift                         | `sourcekit-lsp`                   |
 | `swiftlint`                   | Swift (linter)                | `swiftlint`                       |
+| `taplo`                       | TOML                          | `taplo`                           |
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
 
 Only one TypeScript server is kept per project: when the resolved `tsc` belongs to a TypeScript install without `lib/tsserver.js` (TypeScript 7+), `typescript-native` wins and `typescript-language-server` is dropped, since it cannot drive that install; otherwise `typescript-native` is dropped because older `tsc` rejects `--lsp`.
