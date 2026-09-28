@@ -2,10 +2,22 @@ import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
-const commandResultCache = new Map<string, string>();
+const commandResultCache = new Map<string, { value: string; storedAt: number }>();
 const commandFailureRetryAt = new Map<string, number>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
+
+/**
+ * How long a successful `!command` result may be reused by the caller; omitted
+ * means the process lifetime. Staleness is judged by the reader, not stamped by
+ * the writer: the cache holds one entry per command text, so a rotating-token
+ * caller and a process-lifetime caller can share a command without either
+ * changing what the other sees.
+ */
+export interface CommandValueOptions {
+	/** `0` re-runs the command on every resolution (concurrent resolutions still share one run). */
+	commandTtlMs?: number;
+}
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -13,7 +25,7 @@ export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<stri
 export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
 
 /** Optional bearer-header derivation applied after explicitly configured header layers. */
-export interface ConfigHeaderResolutionOptions {
+export interface ConfigHeaderResolutionOptions extends CommandValueOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
 }
@@ -51,11 +63,11 @@ export function invalidateAllCommandConfigs(): void {
 	commandInFlight.clear();
 }
 
-async function executeCommand(valueConfig: string): Promise<string | undefined> {
+async function executeCommand(valueConfig: string, ttlMs?: number): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
 
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined && (ttlMs === undefined || Date.now() - cached.storedAt < ttlMs)) return cached.value;
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
 
@@ -74,7 +86,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 			} else {
 				commandFailureRetryAt.delete(command);
-				commandResultCache.set(command, result);
+				commandResultCache.set(command, { value: result, storedAt: Date.now() });
 			}
 			return result;
 		})
@@ -99,10 +111,15 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 
 /**
  * Resolve a configuration value. Command values execute asynchronously and
- * successful stdout is cached; environment-backed and literal values stay live.
+ * successful stdout is cached — for the process lifetime, or for
+ * `commandTtlMs` when a caller needs rotation; environment-backed and literal
+ * values stay live.
  */
-export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
-	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
+export async function resolveConfigValue(
+	valueConfig: string,
+	options?: CommandValueOptions,
+): Promise<string | undefined> {
+	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig, options?.commandTtlMs);
 	const envValue = $envExact(valueConfig);
 	return envValue || valueConfig;
 }
@@ -149,13 +166,14 @@ export async function runShellCommand(
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
 	signal?: AbortSignal,
+	options?: CommandValueOptions,
 ): Promise<Record<string, string> | undefined> {
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const next = await untilAborted(signal, () => resolveConfigValue(headers[key], options));
 		if (!next) continue;
 		resolved[key] = next;
 		hasResolved = true;
@@ -182,7 +200,7 @@ export function createConfigHeaderResolver(
 			const next =
 				typeof source === "function"
 					? await untilAborted(signal, () => source(signal))
-					: await resolveConfigHeaders(source, signal);
+					: await resolveConfigHeaders(source, signal, options);
 			signal?.throwIfAborted();
 			if (!next) continue;
 			for (const key in next) {
@@ -192,7 +210,7 @@ export function createConfigHeaderResolver(
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig, options));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
 				hasResolved = true;

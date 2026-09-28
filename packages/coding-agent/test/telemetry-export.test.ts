@@ -130,26 +130,34 @@ describe("initTelemetryExport signals export path", () => {
 			["traces", "./otel-export-probe.ts"],
 			["logs and metrics", "./otel-signals-probe.ts"],
 			["resource attributes", "./otel-resource-probe.ts"],
+			["headers resolver throws", "./otel-headers-failure-probe.ts", "throw"],
+			["header unavailable", "./otel-headers-failure-probe.ts", "missing"],
 		] as const;
 		const results = await Promise.all(
-			probes.map(async ([name, relativePath]) => {
+			probes.map(async ([name, relativePath, ...args]) => {
 				const probe = fileURLToPath(new URL(relativePath, import.meta.url));
-				const proc = Bun.spawn([process.execPath, probe], {
+				const proc = Bun.spawn([process.execPath, probe, ...args], {
 					// Bun otherwise inherits the process's original native environment,
 					// including external OTEL kill-switches removed in beforeEach.
 					env: { ...process.env },
 					stdin: "ignore",
-					stdout: "ignore",
+					stdout: "pipe",
 					stderr: "ignore",
 				});
-				return [name, await proc.exited] as const;
+				// A failing probe explains itself on its `PROBE:` line (`PROBE: BAD_HEADERS ...`).
+				const output = new Response(proc.stdout).text();
+				const exitCode = await proc.exited;
+				const probeLine = (await output).split("\n").find(line => line.startsWith("PROBE:")) ?? "";
+				return [name, `${exitCode} ${probeLine.trim()}`] as const;
 			}),
 		);
 
 		expect(Object.fromEntries(results)).toEqual({
-			traces: 0,
-			"logs and metrics": 0,
-			"resource attributes": 0,
+			traces: "0 PROBE: RECEIVED",
+			"logs and metrics": "0 PROBE: RECEIVED",
+			"resource attributes": "0 PROBE: RECEIVED",
+			"headers resolver throws": "0 PROBE: RECEIVED",
+			"header unavailable": "0 PROBE: RECEIVED",
 		});
 	}, 20_000);
 });

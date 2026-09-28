@@ -39,7 +39,7 @@ import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import type { TelemetrySignalConfig } from "./telemetry-export";
+import { resolveTelemetryHeaders, type TelemetrySignalConfig } from "./telemetry-export";
 
 /**
  * Periodic flush interval. A long-lived `omp` process (the ACP server is
@@ -123,7 +123,10 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 	);
 
 	if (signalConfig.trace) {
-		const exporter = new OTLPTraceExporter();
+		// The header factory runs on every export request: the exporter starts from
+		// the env `OTEL_EXPORTER_OTLP*_HEADERS`, lets `telemetry.otlpHeaders` override
+		// them per key, then forces its required `content-type`.
+		const exporter = new OTLPTraceExporter({ headers: resolveTelemetryHeaders });
 		traceProvider = new NodeTracerProvider({
 			resource,
 			spanProcessors: [new BatchSpanProcessor(exporter)],
@@ -132,7 +135,7 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 	}
 
 	if (signalConfig.metric) {
-		const exporter = new OTLPMetricExporter();
+		const exporter = new OTLPMetricExporter({ headers: resolveTelemetryHeaders });
 		meterProvider = new MeterProvider({
 			resource,
 			readers: [new PeriodicExportingMetricReader({ exporter })],
@@ -142,7 +145,7 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 	}
 
 	if (signalConfig.log) {
-		const exporter = new OTLPLogExporter();
+		const exporter = new OTLPLogExporter({ headers: resolveTelemetryHeaders });
 		logProvider = new LoggerProvider({
 			resource,
 			processors: [new BatchLogRecordProcessor({ exporter })],

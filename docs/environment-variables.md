@@ -633,6 +633,18 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:8000/v1/traces"
 export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer%20$LAMINAR_PROJECT_API_KEY"
 ```
 
+These env headers are read once, when export starts, so they suit static keys but not a token that rotates. For that, set `telemetry.otlpHeaders` in `settings.json`. Its values follow the same contract as models.yml provider headers and MCP headers ([Command-resolved secrets](./models.md#command-resolved-secrets)): a literal, an environment variable name, or `!command` whose stdout is the value. They override the env headers per key on every export request; keys not listed keep their env value.
+
+```json
+{
+  "telemetry.otlpHeaders": { "authorization": "!gcloud auth print-identity-token | sed 's/^/Bearer /'" }
+}
+```
+
+- A `!command` result is reused for `telemetry.otlpHeadersCacheSeconds` (default `60`) across the trace, log, and metric exporters, and concurrent exports share one run; `0` runs the command on every export request. A failing command backs off for 30 seconds; that header is left out of exports (falling back to its env value, if any) and the omission is logged once when it starts.
+- Commands run through the shared config-value resolver: `/bin/sh -c` from the project directory with a 10s timeout and process-tree termination (the native shell on Windows). Output is never written to the log.
+- Nothing runs unless export is actually on: an OTLP endpoint is configured, `telemetry.otlpExportEnabled` is not `false`, and `OTEL_SDK_DISABLED` is not `true`.
+
 ---
 
 ## Security-sensitive variables

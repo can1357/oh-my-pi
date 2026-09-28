@@ -8,7 +8,10 @@
  * registers the providers, drives a log record through the bridged
  * `@oh-my-pi/pi-utils` logger and metric instruments through the agent
  * telemetry hooks, flushes, and exits 0 only if the receiver got a non-empty
- * protobuf POST at both /v1/logs and /v1/metrics.
+ * protobuf POST at both /v1/logs and /v1/metrics, each carrying the
+ * `telemetry.otlpHeaders` value minted by a real `!command` — one run shared by
+ * both exporters within the cache window — and none carrying a configured
+ * header whose `!command` fails (that export goes out without it).
  */
 
 import type { AgentRunCoverage, AgentRunSummary, ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
@@ -20,8 +23,12 @@ import {
 	isTelemetryExportEnabled,
 } from "@oh-my-pi/pi-coding-agent/telemetry-export";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as nodePath from "node:path";
 
 const seen = new Set<string>();
+const headers: Record<string, { authorization: string | null; failing: string | null }> = {};
 const metricPayloads: Uint8Array[] = [];
 
 interface ProtobufField {
@@ -110,6 +117,7 @@ const server = Bun.serve({
 			if (body.byteLength > 0) {
 				if (path.endsWith("/v1/logs")) seen.add("logs");
 				if (path.endsWith("/v1/metrics")) seen.add("metrics");
+				headers[path] = { authorization: req.headers.get("authorization"), failing: req.headers.get("x-failing") };
 			}
 		}
 		return new Response('{"partialSuccess":{}}', {
@@ -123,8 +131,32 @@ const base = `http://localhost:${server.port}`;
 process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${base}/v1/logs`;
 process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = `${base}/v1/metrics`;
 process.env.OTEL_SERVICE_NAME = "oh-my-pi-signals-probe";
+// Real `!command` values through the canonical config resolver: a Bun helper that
+// counts its runs is the token minter, and a command that exits non-zero is a
+// header that must be left out rather than break the export.
+const workDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "omp-otel-signals-"));
+const counterPath = nodePath.join(workDir, "count");
+const helperPath = nodePath.join(workDir, "token.ts");
+fs.writeFileSync(
+	helperPath,
+	[
+		'import * as fs from "node:fs";',
+		"const file = process.argv[2];",
+		"const n = (fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0) + 1;",
+		"fs.writeFileSync(file, String(n));",
+		'console.log("Bearer token-" + n);',
+	].join("\n"),
+);
+// Mixed case on purpose: the env spells it `Authorization`, settings `authorization`.
+// The wire must carry exactly one — the settings value; a duplicate would arrive
+// comma-joined in `Headers.get`, so one exact value proves one header.
+process.env.OTEL_EXPORTER_OTLP_HEADERS = "Authorization=Bearer%20static";
+const otlpHeaders = {
+	authorization: `!"${process.execPath}" "${helperPath}" "${counterPath}"`,
+	"x-failing": `!"${process.execPath}" -e "process.exit(1)"`,
+};
 
-await initTelemetryExport(true);
+await initTelemetryExport(true, { headers: otlpHeaders, commandTtlMs: 60_000 });
 if (!isTelemetryExportEnabled()) {
 	console.error("PROBE: providers did not register");
 	await server.stop(true);
@@ -198,7 +230,26 @@ assertSingleMetricPoint("omp.agent.chat.calls");
 assertSingleMetricPoint("omp.agent.tool.calls");
 assertSingleMetricPoint("omp.agent.tool.duration");
 await server.stop(true);
+const runs = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, "utf8")) : 0;
+fs.rmSync(workDir, { recursive: true, force: true });
 
-const ok = seen.has("logs") && seen.has("metrics");
-console.log(ok ? "PROBE: RECEIVED" : `PROBE: MISSING ${["logs", "metrics"].filter(s => !seen.has(s)).join(",")}`);
-process.exit(ok ? 0 : 1);
+const missing = ["logs", "metrics"].filter(s => !seen.has(s));
+if (missing.length > 0) {
+	console.log(`PROBE: MISSING ${missing.join(",")}`);
+	process.exit(1);
+}
+const problems: string[] = [];
+for (const signal of ["logs", "metrics"]) {
+	const got = headers[`/v1/${signal}`];
+	if (got?.authorization !== "Bearer token-1")
+		problems.push(`${signal}.authorization=${JSON.stringify(got?.authorization)}`);
+	if (got?.failing !== null) problems.push(`${signal}.x-failing=${JSON.stringify(got?.failing)} (want absent)`);
+}
+// Both exporters resolved within one cache window, so the minter ran once.
+if (runs !== 1) problems.push(`command runs=${runs} (want 1)`);
+if (problems.length > 0) {
+	console.log(`PROBE: BAD_HEADERS ${problems.join(" ")}`);
+	process.exit(1);
+}
+console.log("PROBE: RECEIVED");
+process.exit(0);
