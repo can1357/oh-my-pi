@@ -145,6 +145,7 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "0.2.0",
     deps = all_crate_deps(normal = True) + [
+        "//crates/pi-iso",
         "//crates/pi-vfs",
         "//crates/pi-walker",
         "//crates/vendor/brush-core",
