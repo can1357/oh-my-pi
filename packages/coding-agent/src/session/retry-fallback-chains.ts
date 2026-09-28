@@ -12,6 +12,8 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
 
@@ -69,6 +71,13 @@ export interface ServingModel {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether fallback routing, rather than the configured primary, owns it. */
 	isFallback: boolean;
+	/**
+	 * Context window of the attributed model, carried verbatim from
+	 * {@link Model.contextWindow} (`null` when the model declares none), so
+	 * observers size context usage against the model that produced the turn
+	 * instead of the one the run started on.
+	 */
+	contextWindow?: number | null;
 }
 
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
@@ -157,7 +166,7 @@ export function expandDefaultRetryFallbackChains(
 
 /** Resolves configured fallback chains, applying the default chain to named roles. */
 export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
-	const configuredChains = settings.get("retry.fallbackChains");
+	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (!configuredChains || typeof configuredChains !== "object") return {};
 	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
 }
@@ -197,7 +206,7 @@ export function validateRetryFallbackChains(
 	warn: (message: string) => void,
 	options: { isDiscoveryPending?: (provider: string) => boolean } = {},
 ): void {
-	const configuredChains = settings.get("retry.fallbackChains");
+	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (configuredChains === undefined) return;
 	const report = warn;
 	const isDiscoveryPending = options.isDiscoveryPending ?? (() => false);
@@ -288,7 +297,7 @@ export function validateRetryFallbackChains(
 
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
-	return settings.get("retry.fallbackRevertPolicy") === "never" ? "never" : "cooldown-expiry";
+	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */

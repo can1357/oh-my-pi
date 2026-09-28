@@ -284,7 +284,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 **Coordination**
 
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
-- `hub` — message live agents, wait on or cancel background jobs, and supervise long-running processes.
+- `wait` — block until the next background result, peer message, or steering interrupt; message peers and control jobs via `agent://` and `proc://`.
 - `todo` — ordered mutations over the session todo list with phase tracking.
 - `ask` — structured follow-up questions for interactive runs.
 
@@ -535,7 +535,7 @@ await session.prompt("list .ts files");
 
 `omp --mode rpc`
 
-For non-Node embedders, or when you want process isolation. NDJSON commands in, response and event frames out. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer.
+For non-Node embedders, or when you want process isolation. NDJSON commands in, response and event frames out; each prompt ends with its own `prompt_result`. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer; `--no-ui` keeps even extension dialogs off the wire for hosts with no UI.
 
 ```
 $ omp --mode rpc --no-session

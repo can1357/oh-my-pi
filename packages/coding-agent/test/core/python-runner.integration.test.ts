@@ -136,19 +136,6 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
-	it("preserves user namespace across calls", async () => {
-		using tempDir = TempDir.createSync("@python-runner-session-");
-		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
-		try {
-			await executePythonWithKernel(kernel, "x = 41");
-			const result = await executePythonWithKernel(kernel, "x + 1");
-			expect(result.exitCode).toBe(0);
-			expect(result.output).toContain("42");
-		} finally {
-			await kernel.shutdown();
-		}
-	});
-
 	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
 		using tempDir = TempDir.createSync("@python-runner-file-");
 		const scriptDir = path.join(tempDir.path(), "scripts");

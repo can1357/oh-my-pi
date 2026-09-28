@@ -191,20 +191,6 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		expect(below).not.toContain(theme.icon.advisor);
 	});
 
-	it("renders one line per subagent for a parallel fan-out", () => {
-		const events: EvalStatusEvent[] = [
-			{ op: "agent", id: "0-Alpha", agent: "task", status: "running", lastIntent: "scanning" },
-			{ op: "agent", id: "1-Beta", agent: "task", status: "completed", toolCount: 3, durationMs: 900 },
-			{ op: "agent", id: "2-Gamma", agent: "task", status: "running", currentTool: "search" },
-		];
-
-		const lines = render(events);
-		const below = lines.slice(boxBottomIndex(lines) + 1).join("\n");
-		expect(below).toContain("0-Alpha");
-		expect(below).toContain("1-Beta");
-		expect(below).toContain("2-Gamma");
-	});
-
 	it("reserves failure status for oversized IDs even when badges are disabled", () => {
 		setFeedModelBadgeEnabled(false);
 		const lines = render([

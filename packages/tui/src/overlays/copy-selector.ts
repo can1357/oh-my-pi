@@ -18,13 +18,15 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, routeSgrMouseInput, type TUI, truncateToWidth, visibleWidth } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
 import {
-	isUserRequestEntry,
+	recentTranscriptEntries,
+	type SessionMessageEntryLike as SessionMessageEntry,
 	type TranscriptEntryLike as TranscriptEntry,
 	transcriptEntryMessage,
 	userTurnDraft,
 } from "../chat/transcript-entry";
-import type { SessionMessageEntryLike as SessionMessageEntry } from "../chat/transcript-entry";
-import { replaceTabs } from "../render/render-utils";
+import { expandKeyHint, replaceTabs } from "../render/render-utils";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks, extractLinks } from "./copy-targets";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -90,13 +92,6 @@ export interface CopyBlock {
 const BLOCK_PREVIEW_LINES = 12;
 /** The copy picker's outline stroke — green, distinct from the rewind selector's accent. */
 const OUTLINE_COLOR: ThemeColor = "success";
-/**
- * Entries replayed when the picker opens. Replaying a long session's whole
- * branch costs seconds before the first frame (one component built and
- * rendered per entry), and the clipboard target is almost always recent, so
- * the picker starts at this tail and loads the rest on demand (`a`).
- */
-const INITIAL_ENTRIES = 600;
 
 /** A clickable control on a block caption, in composed-column columns. */
 interface ControlRegion {
@@ -130,7 +125,7 @@ export class CopySelectorComponent implements Component {
 		private readonly deps: CopySelectorDeps,
 	) {
 		this.#entries = entries;
-		const tail = recentEntries(entries, INITIAL_ENTRIES);
+		const tail = recentTranscriptEntries(entries);
 		this.#truncated = tail.length < entries.length;
 		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
@@ -374,17 +369,23 @@ export class CopySelectorComponent implements Component {
 				prepared,
 				style: {
 					color: OUTLINE_COLOR,
-					caption: blocks.length > 0 ? `${blocks.length} block${blocks.length === 1 ? "" : "s"} →` : undefined,
+					caption:
+						blocks.length > 0
+							? `${blocks.length} block${blocks.length === 1 ? "" : "s"} ${formatKeyHint("right")}`
+							: undefined,
 				},
 			}).column;
 		}
 
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
-		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
+		const openHint = selectedBlock?.href && this.deps.onOpen ? `  ${formatKeyHint("o")} open` : "";
 		const action = this.deps.actionLabel ?? "copy";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
 		const hint = this.#blocks
-			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter ${action}${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
-			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter ${action}  ${this.#truncated ? "a earlier turns  " : ""}ctrl+o expand  esc close`;
+			? `${this.#blockSelected + 1}/${this.#blocks.length}  ${upDown} block  ${formatKeyHint("left")}/${cancel} back  ${enter} ${action}${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
+			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}${upDown} step  ${blocks.length > 0 ? `${formatKeyHint("right")} blocks  ` : ""}${enter} ${action}  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${cancel} close`;
 		const anchorId = target
 			? this.#blocks
 				? `copy:${target.turnId}:block:${this.#blockSelected}`
@@ -468,27 +469,6 @@ export class CopySelectorComponent implements Component {
 		lines.push("");
 		return { lines, selStart, selEnd };
 	}
-}
-
-/**
- * The trailing slice starting at the last turn initiator at or before
- * `entries.length - limit`: a user message, or a custom message that starts
- * a user-attributed turn (a directly invoked `/skill:` prompt, a collab peer's
- * prompt), the same boundary `ChatTranscriptBuilder` uses.
- *
- * The cut has to land on a turn boundary: the builder drops a tool result
- * whose initiating call was sliced away, so a tail beginning mid-turn renders
- * without its command — and a tail of nothing but orphaned results would
- * leave the picker with no target at all. Scanning backwards keeps the whole
- * final turn instead, and a branch whose last turn is itself longer than
- * `limit` replays in full.
- */
-function recentEntries(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
-	if (entries.length <= limit) return entries;
-	for (let index = entries.length - limit; index > 0; index--) {
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
-	}
-	return entries;
 }
 
 /** Raw multi-line text of a user message (string or text blocks). */

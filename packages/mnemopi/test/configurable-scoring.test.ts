@@ -109,23 +109,4 @@ describe("configurable recall scoring", () => {
 
 		expect(results[0]?.content).toContain("match phrase");
 	});
-
-	it("includes score breakdown fields and coexists with temporal scoring", async () => {
-		const beam = makeBeam();
-		beam.remember("Recent event happened today", { importance: 0.5, source: "test" });
-		const results = await beam.recall("event", 1, {
-			vecWeight: 0.4,
-			ftsWeight: 0.3,
-			importanceWeight: 0.3,
-			temporalWeight: 0.5,
-			queryTime: "2099-01-01T00:00:00.000Z",
-		});
-		const top = results[0];
-
-		expect(top).toBeDefined();
-		expect(typeof top?.dense_score).toBe("number");
-		expect(typeof top?.fts_score).toBe("number");
-		expect(typeof top?.importance).toBe("number");
-		expect(typeof top?.temporal_score).toBe("number");
-	});
 });

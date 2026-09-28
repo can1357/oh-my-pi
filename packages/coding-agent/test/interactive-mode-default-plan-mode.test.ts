@@ -15,6 +15,8 @@ import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/interactive-mode";
 import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
 
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 function makeTool(name: string): AgentTool {
 	return {
 		name,
@@ -67,7 +69,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		Settings.instance.set("startup.quiet", true);
+		cfgStartupQuiet.set(Settings.instance, true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
@@ -169,7 +171,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	});
 
 	it("keeps the welcome banner synchronized across startup and later model switches", async () => {
-		Settings.instance.set("startup.quiet", false);
+		cfgStartupQuiet.set(Settings.instance, false);
 		const settings = Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false });
 		settings.setModelRole("plan", "anthropic/claude-haiku-4-5:high");
 		const created = createHarness(settings);

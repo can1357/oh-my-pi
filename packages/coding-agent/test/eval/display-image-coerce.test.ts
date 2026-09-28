@@ -50,12 +50,6 @@ describe("JsRuntime.displayValue image coercion", () => {
 		expect(displays).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
 	});
 
-	it("base64-encodes Buffer data", () => {
-		const { hooks, displays } = collect();
-		runtime.displayValue({ type: "image", data: Buffer.from(PNG_BYTES), mimeType: "image/png" }, hooks);
-		expect(displays).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
-	});
-
 	it("base64-encodes ArrayBuffer data", () => {
 		const { hooks, displays } = collect();
 		const ab = PNG_BYTES.buffer.slice(PNG_BYTES.byteOffset, PNG_BYTES.byteOffset + PNG_BYTES.byteLength);

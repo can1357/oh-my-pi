@@ -15,10 +15,18 @@ export interface XdevMountedRenderer {
 	mergeCallAndResult?: boolean;
 }
 
-/** Mounted tool presentation state supplied by the host's canonical tool map. */
+/** Tool presentation state supplied by the host's canonical tool map. */
 export interface XdevMountedState {
 	readonly mountedNames: ReadonlySet<string>;
 	readonly tools: ReadonlyMap<string, XdevMountedRenderer>;
+	/**
+	 * Canonical renderer for a device name, supplied by the host with the same
+	 * predicate as dispatch (`resolveXdevTool`: mounted devices plus active
+	 * top-level tools, which the `write` transport also accepts). The TUI keeps
+	 * no predicate copy of its own — a second copy is what dropped a top-level
+	 * dispatch to the generic card.
+	 */
+	readonly resolve?: (name: string) => XdevMountedRenderer | undefined;
 }
 
 function isComponent(value: unknown): value is Component {

@@ -30,7 +30,7 @@ import {
 } from "../render/render-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { OutputMeta } from "./output-meta";
-import type { ConfiguredThinkingLevel } from "../render/render-utils";
+import { type ConfiguredThinkingLevel, expandKeyHint } from "../render/render-utils";
 
 /** Runtime backend that an eval cell dispatches to. */
 export type EvalLanguage = "python" | "js";
@@ -677,7 +677,7 @@ export const evalToolRenderer = {
 						const outputLines = [...outputContent.lines];
 						if (!expanded && outputContent.hiddenCount > 0) {
 							outputLines.push(
-								uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines (ctrl+o to expand)`),
+								uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines (${expandKeyHint()} to expand)`),
 							);
 						}
 						if (statusLines.length > 0) {
@@ -811,7 +811,7 @@ export const evalToolRenderer = {
 					outputLines.push("");
 					const skippedLine = uiTheme.fg(
 						"dim",
-						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (ctrl+o to expand)`,
+						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (${expandKeyHint()} to expand)`,
 					);
 					outputLines.push(truncateToWidth(skippedLine, width));
 				}

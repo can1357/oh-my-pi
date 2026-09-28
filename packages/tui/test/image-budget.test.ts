@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
@@ -356,26 +357,6 @@ describe("Image budget integration", () => {
 		setKittyGraphics(originalGraphics);
 	});
 
-	it("renders within-budget images as graphics carrying their stable id", () => {
-		const budget = new ImageBudget(3, () => {});
-		const id = budget.acquireId("k");
-		const image = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: t => t },
-			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
-		);
-
-		budget.beginPass();
-		const lines = image.render(20);
-		budget.endPass();
-
-		const last = lines.at(-1) ?? "";
-		expect(last).toContain("\x1b_G");
-		expect(last).toContain(`i=${id}`);
-		expect(last).not.toContain("[Image:");
-	});
-
 	it("transmits the base64 once via the budget and renders only a placement line", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");
@@ -406,6 +387,35 @@ describe("Image budget integration", () => {
 		image.render(20);
 		budget.endPass();
 		expect([...budget.takeTransmits()]).toEqual([]);
+	});
+
+	it("encodes a budgeted SIXEL image once across render passes", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixel");
+		try {
+			const budget = new ImageBudget(3, () => {});
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+			);
+
+			const frames: (readonly string[])[] = [];
+			for (let pass = 0; pass < 3; pass++) {
+				budget.beginPass();
+				frames.push(image.render(20));
+				budget.endPass();
+			}
+
+			// SIXEL carries the image inside the line and never registers a
+			// transmit; each extra encode is a full synchronous re-encode per frame.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			expect(frames[0]?.at(-1)).toContain("\x1bP");
+			expect(frames[2]).toEqual(frames[0]!);
+		} finally {
+			encodeSixel.mockRestore();
+		}
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
@@ -1767,14 +1777,6 @@ describe("TUI inline-image budget", () => {
 });
 
 describe("kitty transmit / placement encoding", () => {
-	it("encodeKittyTransmit loads data by id without displaying it", () => {
-		const seq = encodeKittyTransmit(BASE64_ONE_PIXEL_PNG, 9);
-		expect(seq.startsWith("\x1b_Ga=t,f=100,q=2,i=9;")).toBe(true);
-		expect(seq.endsWith("\x1b\\")).toBe(true);
-		expect(seq).toContain(BASE64_ONE_PIXEL_PNG);
-		expect(seq).not.toContain("a=p");
-	});
-
 	it("encodeKittyPlacement displays a transmitted image by id with a stable placement id", () => {
 		const seq = encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 });
 		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\");

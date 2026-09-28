@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolvePrimaryModel, resolveSmolModel } from "@oh-my-pi/pi-coding-agent/commit/model-selection";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function getModelOrThrow(id: string) {
@@ -10,32 +11,16 @@ function getModelOrThrow(id: string) {
 	return model;
 }
 
-function createSettings(modelRoles: Record<string, string>) {
-	return {
-		getModelRole(role: string) {
-			return modelRoles[role];
-		},
-		getStorage() {
-			return undefined;
-		},
-		setModelRole(role: string, value: string) {
-			modelRoles[role] = value;
-		},
-		get(path: string) {
-			if (path === "modelRoles") return modelRoles;
-			return undefined;
-		},
-	} as never;
-}
-
 describe("commit role thinking selection", () => {
 	it("returns explicit thinking for commit and smol roles, including alias overrides", async () => {
 		const defaultModel = getModelOrThrow("claude-sonnet-4-5");
 		const commitModel = getModelOrThrow("claude-opus-4-5");
-		const settings = createSettings({
-			default: `${defaultModel.provider}/${defaultModel.id}:high`,
-			commit: `${commitModel.provider}/${commitModel.id}:low`,
-			smol: "@default:minimal",
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}:high`,
+				commit: `${commitModel.provider}/${commitModel.id}:low`,
+				smol: "@default:minimal",
+			},
 		});
 		const authStorage = createInMemoryAuthStorage();
 		try {

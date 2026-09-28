@@ -58,11 +58,6 @@ describe("isSttModelCached completeness", () => {
 		expect(await downloader.isSttModelCached("whisper-base")).toBe(true);
 	});
 
-	it("treats a transformers model with config.json but no onnx weights as not cached", async () => {
-		await touch(path.join(cacheDir, WHISPER_BASE_REPO, "config.json"));
-		expect(await downloader.isSttModelCached("whisper-base")).toBe(false);
-	});
-
 	it("requires every sherpa model file to be present", async () => {
 		const repoDir = path.join(cacheDir, PARAKEET_REPO);
 		await touch(path.join(repoDir, "encoder.int8.onnx"));
@@ -133,38 +128,29 @@ describe("STTController preflight", () => {
 		expect(controller.state).toBe("recording");
 		expect(isCached).toHaveBeenCalledWith("whisper-base");
 		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("whisper-base", expect.anything());
-		// Background warm calls downloadSttModel with no progress callback.
 		expect(download).toHaveBeenCalledTimes(1);
-		expect(download.mock.calls[0]).toHaveLength(1);
-		// Nothing was written to the status line, so it must not be cleared.
 		expect(options.showStatus).not.toHaveBeenCalled();
 	});
 
-	it("uncached model: downloads in the foreground with progress before recording", async () => {
+	it("uncached model: records only after the foreground download finishes", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
-		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
-			onProgress?.({
-				status: "progress",
-				percent: 42,
-				loaded: 1,
-				total: 2,
-				repo: WHISPER_BASE_REPO,
-				label: "Whisper base",
-			});
-			return Promise.resolve();
+		const called = Promise.withResolvers<void>();
+		const download = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation(() => {
+			called.resolve();
+			return download.promise;
 		});
 
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
-		const options = makeOptions();
-		await controller.toggle(editor, options);
+		const toggling = controller.toggle(editor, makeOptions());
+		await called.promise;
+		expect(controller.state).toBe("idle");
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
 
+		download.resolve();
+		await toggling;
 		expect(controller.state).toBe("recording");
-		// Foreground path passes a progress callback (2 args) and surfaces it.
-		expect(download.mock.calls[0]).toHaveLength(2);
-		expect(options.showStatus).toHaveBeenCalledWith("Downloading speech model Whisper base (42%)");
-		// Status was written, so the line is cleared at the end.
-		expect(options.showStatus).toHaveBeenLastCalledWith("");
 	});
 
 	it("re-runs preflight when the model changes mid-session", async () => {

@@ -535,4 +535,40 @@ describe("Anthropic compaction replay", () => {
 		const keptIndex = wire.findIndex(message => JSON.stringify(message).includes("sig_kept"));
 		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
 	});
+
+	it("keeps an effort change of the turn the block opened behind the compaction block", async () => {
+		const opened: AssistantMessage = {
+			...keptFrom({ message: {} as AssistantMessage }),
+			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
+		};
+		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
+			summaryMessage({ signature: SIGNATURE }),
+			opened,
+			{ role: "user", content: "next", timestamp: 3 },
+		]);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		expect(wire[0]?.content?.[0]).toEqual({ type: "compaction", content: SUMMARY, signature: SIGNATURE });
+		const effortIndex = wire.findIndex(message => message.output_config?.effort === "low");
+		const nextIndex = wire.findIndex(message => JSON.stringify(message).includes('"next"'));
+		expect(effortIndex).toBe(1);
+		expect(nextIndex).toBe(2);
+	});
+
+	it("applies an effort change before a summary replayed as text", async () => {
+		const opened: AssistantMessage = {
+			...keptFrom({ message: {} as AssistantMessage }),
+			requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "low" } },
+		};
+		const request = await captureRequest(preserved, { ...options, thinkingEnabled: true, effort: "low" }, [
+			summaryMessage({ signature: SIGNATURE }, "different-provider"),
+			opened,
+			{ role: "user", content: "next", timestamp: 3 },
+		]);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		expect(JSON.stringify(wire)).not.toContain('"type":"compaction"');
+		expect(wire.findIndex(message => message.output_config?.effort === "low")).toBe(0);
+		expect(JSON.stringify(wire[1])).toContain("<summary>");
+	});
 });

@@ -74,15 +74,14 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ## Flow
 
-1. `ReadTool.execute()` accepts `{ path }`. `file://...` inputs are expanded first with `expandPath()`. `conflict://<N>[/ours|theirs|base|both]` is handled before ordinary URLs; `conflict://*` is write-only.
+1. `ReadTool.execute()` accepts `{ path }`. `file://...` inputs are expanded first with `expandPath()`.
 2. It tries web URL handling via `parseReadUrlTarget()` from `packages/coding-agent/src/tools/fetch.ts`.
    - Plain URL reads call `executeReadUrl()`.
    - URL reads with line selectors fetch/render into the URL cache as needed, then paginate the rendered text locally.
 3. It checks the internal URL router, including built-ins and MCP-advertised schemes.
-   - `local://` resources backed by actual files are promoted into the local-file path so images, conversion, selectors, and snapshots behave like filesystem reads.
-   - `agent://` query extraction (`/path` or `?q=`) bypasses pagination and returns the extracted content directly.
-   - `artifact://` uses a bounded file-backed reader rather than loading the full artifact.
-   - Other internal resources are paginated in memory by `#buildInMemoryTextResult()`.
+   - URLs of file-backed schemes that the router locates to a local file (`local://`, `artifact://`, `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source. An image question (`?q=`) is split off only for `local://` and `attachment://` images; on other schemes `?q=` stays part of the URL.
+   - `agent://` path extraction (`/path`) returns a discrete value that bypasses pagination.
+   - Other internal resources are paginated in memory.
 4. It prefers an existing literal filesystem path before treating selector-looking colons as archive, SQLite, PDF-image, or line-selector syntax.
 5. It tries archive resolution next with `#resolveArchiveReadPath()`.
    - `parseArchivePathCandidates()` recognizes `.tar`, `.tar.gz`, `.tgz`, `.zip`, `.jar`, `.war`, `.ear`, and `.apk` before `:sub/path`.
@@ -227,7 +226,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Internal URLs
 
-- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
+- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
    - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
    - `agent://<id>` reads a subagent's output; `agent://all` is write-only. Bare `history://` lists registered agents and persisted subagents; `history://<id>` reads a transcript.
    - `proc://` lists caller-visible background jobs (including running agents without job rows) and project services; `proc://<id>` returns status and available output/logs without consuming async-result delivery. Service log files are searchable with `grep proc://<id>`.
@@ -236,15 +235,15 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - `history://current/full` exposes the caller's complete current branch when `compaction.experimentalContextManagement` is enabled. It includes original text, tool outputs, entry IDs, and compaction boundaries. Use shared line/raw selectors such as `history://current/full:raw:1-200`; queries, fragments, extra paths, and trailing slashes are rejected. It requires a matching live session owner and never falls back to registry or disk lookup. Bare `history://current` still names an ordinary agent called `current`. See [experimental context windows](../compaction.md#experimental-notes-backed-context-windows).
 - `#handleInternalUrl()` behavior:
    - parses the URL with `parseInternalUrl()` so colons inside the host segment are legal
-   - for `agent://`, treats non-root path extraction or `?q=` extraction as a special no-pagination mode
-   - routes `artifact://` through a bounded artifact-file reader and large-output workflow hints
-   - otherwise paginates the resolved text in memory
-   - passes `immutable` through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as artifacts, skills, memory, and agent outputs
-   - sets `ignoreResultLimits: true` for `skill://` so the full skill text is paginated only by explicit selectors, not by the normal default line limit
-- `conflict://` is handled separately from the router. `<path>:conflicts` registers blocks; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, `/base`, or `/both` selects a side. `conflict://*` is write-only.
+   - handles URLs with no local file (virtual, remote, and device schemes, plus located schemes whose target is a directory or missing)
+   - returns discrete values (`shape: "value"`, e.g. `agent://` path extraction) without pagination; otherwise paginates the resolved text in memory
+   - `:img` is rejected here; it requires a file-backed URL
+   - passes `immutable` (defaulted from the scheme spec) through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as artifacts, skills, memory, and agent outputs
+   - sets `ignoreResultLimits: true` for schemes whose spec is `unbounded` (`skill://`) so the full text is paginated only by explicit selectors, not by the normal default line limit
+- `conflict://` blocks are registered by the `<path>:conflicts` selector; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, `/base`, or `/both` selects a side. `conflict://*` is write-only.
 - `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`. Every repository-qualified form also accepts a GitHub Enterprise host prefix (`pr://ghe.example.com/<owner>/<repo>/<N>`), and a host with no dot (`pr://ghe/<owner>/<repo>/<N>`) is recognized in the numbered form. Short forms resolve the host from the session checkout, so an enterprise repo needs no prefix.
 - `memory://` accepts two grammars. `memory://root[/path]` reads file-backed memory artifacts under the project memory root (`memory://root` resolves to the compact startup summary `memory_summary.md`; deeper paths address files such as `MEMORY.md` and `skills/<name>/SKILL.md`, and `memory://root/...` supports glob patterns for `glob`). `memory://<memory-id>` looks up a live Mnemopi memory row by id — working or episodic — and returns the full stored content (not the clipped recall preview) behind a YAML frontmatter header carrying `id`, `bank`, `store`, `memory_type`, `source`, `timestamp`/`created_at`, `importance`, `veracity`, `session_id`, and `metadata`. The id grammar resolves against the calling session: it needs that session on `memory.backend = mnemopi` and searches only its own scoped banks, so a row held by another live session is not reachable; with `hindsight` it returns a corrective pointer (hindsight memories are not addressable), and unknown ids error with a pointer to `recall` for the available ids. This is the read counterpart to `memory_edit update`: read the full row before overwriting a truncated preview.
-- `artifact://<id>` resolves a session artifact as plain text. Selector-paginated reads stream from the backing file at any size, but unbounded `:raw` is blocked above `50 KiB` (`MAX_ARTIFACT_RAW_INLINE_BYTES`) with a workflow notice pointing at bounded ranges (`artifact://<id>:1-3000`, `artifact://<id>:raw:1-3000`) and the backing file path. Bare/non-raw reads stream a bounded default page rather than materializing the whole artifact. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with the same selector and backing-path hints. Path-only consumers (search/grep, bash URL expansion) skip content materialization and work on artifacts of any size.
+- `artifact://<id>` locates the session artifact's backing file and reads it through the filesystem pipeline: reads stream at any size, and unbounded `:raw` follows the located-file raw cap below. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with selector and backing-path hints. Path consumers (search/grep, the bash URL filesystem) use `locate` and work on artifacts of any size.
 
 ### Web URLs
 
@@ -322,7 +321,8 @@ Notes: ...
    - post-resize inline output cap `300 KiB`
 - Unique suffix auto-resolution glob timeout: `5000` ms.
 - File snapshot store holds `256` paths with up to `4` versions each (`DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` in `packages/hashline/src/snapshots.ts`); files over `4 MiB` (`SNAPSHOT_MAX_BYTES`) are not snapshotted.
-- An unbounded `artifact://<id>:raw` read is refused when the artifact exceeds `50 KiB`; use a bounded `:raw:N-M` range.
+- An unbounded `:raw` read of a URL-located file (any file-backed scheme except `unbounded` ones such as `skill://`) is refused above `50 KiB` (`MAX_URL_RAW_INLINE_BYTES`) with a notice naming bounded ranges (`<url>:raw:1-3000`, `<url>:1-3000`) and the backing file path.
+- A numbered page of an immutable URL-located file (for example `artifact://`) over `50 KiB` appends the same backing-file notice; writable schemes (`local://`, `vault://`) never get it, so a write-back cannot persist it. Only `artifact://` pages (`SchemeSpec.artifactStore`) skip the artifact spill; every other URL read spills over `tools.artifactSpillThreshold` like a plain file.
 
 ## Errors
 
@@ -341,7 +341,7 @@ Notes: ...
 - Image oversize/unsupported/invalid cases throw.
 - SQLite parser rejects unsupported parameter combinations early; DB/runtime errors are caught and rethrown as `ToolError(message)`.
 - URL fetch failure does not throw when HTTP fetch succeeds but `response.ok === false`; it returns a failed URL read with `method: "failed"` and explanatory notes.
-- Large unbounded raw artifact reads return a workflow notice rather than loading the artifact into memory.
+- Large unbounded raw reads of URL-located files return that notice rather than loading the file into memory.
 
 ## Notes
 

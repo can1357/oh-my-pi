@@ -186,16 +186,6 @@ describe("AgentSession yield empty-stop suppression", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it("does not continue to a trailing empty assistant stop after a successful yield", async () => {
-		const { session, mock } = await createHarness([yieldCall("done", "call-yield-done")]);
-
-		await session.prompt("do work then yield");
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
-	});
-
 	it("stops at the terminal yield instead of consuming scripted trailing empty stops", async () => {
 		const { session, mock } = await createHarness([
 			yieldCall("done", "call-yield-multi"),

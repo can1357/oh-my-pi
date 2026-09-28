@@ -163,6 +163,10 @@ Custom tools and extension tools can return components from:
 - `isPartial: boolean`
 - `spinnerFrame?: number`
 
+For `renderCall`, the `options` argument also answers the `Theme` API (`fg`,
+`bold`, `symbol`, …), so renderers ported from upstream pi — declared
+`renderCall(args, theme, context)` — keep working unchanged.
+
 These renderers are mounted by `ToolExecutionComponent`.
 
 ## Lifecycle and cancellation

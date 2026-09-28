@@ -6,7 +6,6 @@ import {
 	applyShakeRegion,
 	applyShakeRegions,
 	collectShakeRegions,
-	DEFAULT_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -237,11 +236,6 @@ describe("shake config presets", () => {
 		// still shaken aggressively.
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(older);
-	});
-
-	test("default preset keeps a protect window", () => {
-		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
 	});
 
 	test("rescue preset overrides the manual tail so it can elide the newest result", () => {

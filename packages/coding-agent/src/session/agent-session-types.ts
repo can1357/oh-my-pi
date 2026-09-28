@@ -23,9 +23,11 @@ import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { AgentDefinition } from "../task/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings } from "../config/settings";
+import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -33,6 +35,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { Skill, SkillWarning } from "../extensibility/skills";
@@ -42,6 +45,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SettingsGatedToolDelta } from "./session-tools";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -162,6 +166,8 @@ export interface AgentSessionConfig {
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
+	/** User-authorized model agents inherited from the parent session for nested delegation. */
+	inheritedSessionAgents?: readonly AgentDefinition[];
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
@@ -170,6 +176,8 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
+	deferRetryFallbackValidation?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
@@ -182,6 +190,12 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/**
+	 * Prompt-cache warmer owned by the main agent loop. The session arms it per
+	 * main-loop request, settles it when the agent run finishes, and invalidates
+	 * it when the context changes; side-channel requests never arm it.
+	 */
+	cacheWarmer?: CacheWarmer;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
@@ -233,6 +247,8 @@ export interface AgentSessionConfig {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/** Re-resolves settings-gated tools against live settings; driven by `SessionTools.reconcileBuiltinTools`. */
+	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
@@ -241,8 +257,6 @@ export interface AgentSessionConfig {
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
 	advisorStreamFn?: StreamFn;
-	/** Prefer websocket transport for OpenAI Codex requests when supported. */
-	preferWebsockets?: boolean;
 	/** Shared saved-reset coordinator; defaults process-wide so concurrent Codex/Claude sessions cannot double-spend. Inject a fresh one in tests. */
 	codexResetCoordinator?: CodexAutoRedeemCoordinator;
 	/** Provider payload hook used by the active session request path. */
@@ -333,8 +347,6 @@ export interface AgentSessionConfig {
 	advisorConfigs?: AdvisorConfig[];
 	/** Config problems collected during WATCHDOG.yml discovery. */
 	advisorConfigWarnings?: string[];
-	/** Strip tool descriptions from provider-bound side-request tool specs. */
-	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
@@ -345,6 +357,17 @@ export interface AgentSessionConfig {
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
+	/**
+	 * Whether a leading `/` may run an extension or custom TypeScript command
+	 * locally instead of prompting the agent (default: true). Headless task
+	 * drivers disable it so an assignment is always delivered to the model.
+	 */
+	runCommands?: boolean;
+	/**
+	 * Reject with `PromptDroppedError` when the prompt is dropped before
+	 * reaching the agent, instead of resolving `true` (default: false).
+	 */
+	throwOnDrop?: boolean;
 	/** Image attachments. */
 	images?: ImageContent[];
 	/** Queue behavior while streaming. `"aside"` is non-interrupting — it does not steer/follow-up
@@ -361,6 +384,8 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
+	solutionSpace?: string;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

@@ -2,6 +2,7 @@ export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
 import type { Type } from "@oh-my-pi/omptype";
+import type { AnthropicSlowModeHooks } from "./providers/anthropic-slow-mode";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -59,8 +60,7 @@ export type { AssistantMessageEventStream } from "./utils/event-stream";
 
 /**
  * Ceiling on the output-token count omp requests from any OpenAI-family endpoint
- * (openai-responses, azure/xai responses, and openai-completions). Mirrors
- * Anthropic's {@link CLAUDE_CODE_MAX_OUTPUT_TOKENS}.
+ * (openai-responses, azure/xai responses, and openai-completions).
  *
  * Catalog `maxTokens` frequently reflects a model's context window rather than a
  * given upstream's real per-request output cap. OpenRouter, for instance,
@@ -429,20 +429,10 @@ export interface StreamOptions {
 	credentialId?: number;
 	cacheRetention?: CacheRetention;
 	/**
-	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
-	 *
-	 * This is an ownership flag, not a general provider default: exactly one
-	 * primary agent loop sharing `providerSessionState` should enable it.
-	 * Side-channel and advisor requests must leave it unset.
-	 */
-	anthropicCacheRefresh?: boolean;
-	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches
 	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
-	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
-	anthropicCacheRefreshRequest?: boolean;
 	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the
@@ -529,6 +519,13 @@ export interface StreamOptions {
 	 * Providers can use this to persist transport/session state between turns.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/**
+	 * Source of user steering a provider may deliver into the response it is
+	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket).
+	 * Providers without mid-response input ignore it; unclaimed steering stays
+	 * with the caller for its next request.
+	 */
+	liveSteering?: LiveSteering;
 	/** Canonical Codex compaction classification; ignored by other providers. */
 	codexCompaction?: CodexCompactionRequestContext;
 	/** Codex Code Mode tool exposure snapshot emitted as `tool_namespaces_info` turn metadata; ignored by other providers. */
@@ -624,6 +621,42 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+	/**
+	 * Anthropic fallback credit redemption handle from a prior classifier refusal.
+	 * When present, the Anthropic provider replays the frozen request body and betas with
+	 * the new model and `fallback_credit_token` to redeem prompt cache credit.
+	 */
+	fallbackCreditRedemption?: AnthropicFallbackCreditHandle;
+	/**
+	 * Anthropic subscription usage-limit state machine (wrap-up allowance and
+	 * Claude Code's `/low-priority`). Consulted only for first-party OAuth
+	 * `anthropic` requests: stamps `anthropic-usage-limit: slow` while active,
+	 * observes limit headers, and decides capacity waits.
+	 */
+	anthropicSlowMode?: AnthropicSlowModeHooks;
+}
+
+/**
+ * Caller-owned queue of user steering that a provider pulls from while a
+ * response streams. See {@link StreamOptions.liveSteering}.
+ */
+export interface LiveSteering {
+	/** Resolves once steering may be claimable, or when `signal` aborts. Never consumes input. */
+	wait(signal: AbortSignal): Promise<void>;
+	/** Takes the queued steering as provider messages; `undefined` when none is deliverable now. */
+	claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined>;
+}
+
+/**
+ * Steering taken from a {@link LiveSteering} source. The provider settles it
+ * exactly once; later calls are ignored.
+ */
+export interface LiveSteerClaim {
+	readonly messages: readonly UserMessage[];
+	/** The server owns the input: the caller records it right after the current response. */
+	accept(): void;
+	/** Not delivered: the caller sends the input with its next request. */
+	reject(): void;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -988,6 +1021,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
+	liveSteered?: boolean;
 	/** Timestamp of a client-side history rewrite represented by this message. */
 	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -1119,6 +1154,8 @@ export interface AssistantMessage {
 	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
+	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1457,3 +1494,14 @@ export type AssistantMessageEvent =
 			reason: Extract<StopReason, "aborted" | "error">;
 			error: AssistantMessage;
 	  };
+
+export interface AnthropicFallbackCreditHandle {
+	token: string;
+	prefillClaim?: boolean | null;
+	params: unknown;
+	betas?: readonly string[];
+	betaHeader?: string;
+	expiresAt: number;
+	/** The refused response's content, in `AssistantMessage` block form. */
+	refusedContent?: AssistantMessage["content"];
+}

@@ -342,6 +342,8 @@ export type MessageCreateParams = {
 	 * header: `server-side-fallback-2026-06-01`.
 	 */
 	fallbacks?: FallbackParam[];
+	/** Fallback credit token redeemed from a prior refusal (`fallback-credit-2026-06-01` / `fallback-credit-2026-07-01`). */
+	fallback_credit_token?: string;
 };
 
 export type MessageCreateParamsStreaming = MessageCreateParams & { stream: true };
@@ -452,6 +454,8 @@ export type StopDetails = {
 	type: string;
 	category?: string | null;
 	explanation?: string | null;
+	fallback_credit_token?: string | null;
+	fallback_has_prefill_claim?: boolean | null;
 };
 
 export type MessageDelta = {

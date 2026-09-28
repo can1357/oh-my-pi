@@ -1,20 +1,18 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA, type SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { getSettingsForTab, SETTING_TABS, type SettingTab, TAB_GROUPS } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { all } from "@oh-my-pi/pi-coding-agent/config/registry";
+
+import { getSettingsForTab, SETTING_TABS, TAB_GROUPS } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
+import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 beforeAll(async () => {
 	await initTheme();
 });
-
-interface UiShape {
-	tab: SettingTab;
-	group?: string;
-}
 
 describe("settings layout", () => {
 	beforeEach(async () => {
@@ -28,13 +26,13 @@ describe("settings layout", () => {
 
 	it("every UI setting declares a group registered in TAB_GROUPS for its tab", () => {
 		const violations: string[] = [];
-		for (const path in SETTINGS_SCHEMA) {
-			const ui = (SETTINGS_SCHEMA[path as keyof typeof SETTINGS_SCHEMA] as { ui?: UiShape }).ui;
+		for (const setting of all()) {
+			const ui = setting.ui;
 			if (!ui) continue;
 			if (!ui.group) {
-				violations.push(`${path}: missing ui.group`);
+				violations.push(`${setting.id}: missing ui.group`);
 			} else if (!TAB_GROUPS[ui.tab].includes(ui.group)) {
-				violations.push(`${path}: group "${ui.group}" not in TAB_GROUPS["${ui.tab}"]`);
+				violations.push(`${setting.id}: group "${ui.group}" not in TAB_GROUPS["${ui.tab}"]`);
 			}
 		}
 		expect(violations).toEqual([]);
@@ -63,7 +61,7 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
+		const advisorDependentPaths = ["advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set<string>(advisorDependentPaths);
 		const defs = getSettingsForTab(createSettingsHost().entries, "model").filter(def =>
 			advisorDependentPathSet.has(def.path),
@@ -74,7 +72,7 @@ describe("settings layout", () => {
 			expect(def.condition?.()).toBe(false);
 		}
 
-		Settings.instance.set("advisor.enabled", true);
+		cfgAdvisorEnabled.set(Settings.instance, true);
 
 		for (const def of defs) {
 			expect(def.condition?.()).toBe(true);
@@ -93,7 +91,7 @@ describe("settings layout", () => {
 		expect(defs[0]).toMatchObject({ type: "boolean", label: "Usage-Aware Fallback" });
 		expect(defs[1]?.condition?.()).toBe(false);
 		expect(defs[2]?.condition?.()).toBe(false);
-		Settings.instance.set("retry.usageAwareFallback", true);
+		cfgRetryUsageAwareFallback.set(Settings.instance, true);
 		expect(defs[1]?.condition?.()).toBe(true);
 		expect(defs[2]?.condition?.()).toBe(true);
 	});

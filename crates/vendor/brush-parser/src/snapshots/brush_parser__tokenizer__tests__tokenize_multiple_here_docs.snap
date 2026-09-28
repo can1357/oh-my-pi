@@ -1,0 +1,165 @@
+---
+source: brush-parser/src/tokenizer.rs
+expression: "test_tokenizer(r\"cat <<HERE1 <<HERE2\nSOMETHING\nHERE1\nOTHER\nHERE2\necho after\n\")?"
+---
+TokenizerResult(
+  input: "cat <<HERE1 <<HERE2\nSOMETHING\nHERE1\nOTHER\nHERE2\necho after\n",
+  result: [
+    Word("cat", SourceSpan(
+      start: SourcePosition(
+        index: 0,
+        line: 1,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 3,
+        line: 1,
+        column: 4,
+      ),
+    )),
+    Operator("<<", SourceSpan(
+      start: SourcePosition(
+        index: 4,
+        line: 1,
+        column: 5,
+      ),
+      end: SourcePosition(
+        index: 6,
+        line: 1,
+        column: 7,
+      ),
+    )),
+    Word("HERE1", SourceSpan(
+      start: SourcePosition(
+        index: 6,
+        line: 1,
+        column: 7,
+      ),
+      end: SourcePosition(
+        index: 11,
+        line: 1,
+        column: 12,
+      ),
+    )),
+    Word("SOMETHING\n", SourceSpan(
+      start: SourcePosition(
+        index: 20,
+        line: 2,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 36,
+        line: 4,
+        column: 1,
+      ),
+    )),
+    Word("HERE1", SourceSpan(
+      start: SourcePosition(
+        index: 36,
+        line: 4,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 36,
+        line: 4,
+        column: 1,
+      ),
+    )),
+    Operator("<<", SourceSpan(
+      start: SourcePosition(
+        index: 11,
+        line: 1,
+        column: 12,
+      ),
+      end: SourcePosition(
+        index: 14,
+        line: 1,
+        column: 15,
+      ),
+    )),
+    Word("HERE2", SourceSpan(
+      start: SourcePosition(
+        index: 14,
+        line: 1,
+        column: 15,
+      ),
+      end: SourcePosition(
+        index: 19,
+        line: 1,
+        column: 20,
+      ),
+    )),
+    Word("OTHER\n", SourceSpan(
+      start: SourcePosition(
+        index: 36,
+        line: 4,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 48,
+        line: 6,
+        column: 1,
+      ),
+    )),
+    Word("HERE2", SourceSpan(
+      start: SourcePosition(
+        index: 48,
+        line: 6,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 48,
+        line: 6,
+        column: 1,
+      ),
+    )),
+    Operator("\n", SourceSpan(
+      start: SourcePosition(
+        index: 19,
+        line: 1,
+        column: 20,
+      ),
+      end: SourcePosition(
+        index: 20,
+        line: 2,
+        column: 1,
+      ),
+    )),
+    Word("echo", SourceSpan(
+      start: SourcePosition(
+        index: 48,
+        line: 6,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 52,
+        line: 6,
+        column: 5,
+      ),
+    )),
+    Word("after", SourceSpan(
+      start: SourcePosition(
+        index: 53,
+        line: 6,
+        column: 6,
+      ),
+      end: SourcePosition(
+        index: 58,
+        line: 6,
+        column: 11,
+      ),
+    )),
+    Operator("\n", SourceSpan(
+      start: SourcePosition(
+        index: 58,
+        line: 6,
+        column: 11,
+      ),
+      end: SourcePosition(
+        index: 59,
+        line: 7,
+        column: 1,
+      ),
+    )),
+  ],
+)

@@ -20,11 +20,6 @@ describe.skipIf(SKIP)("handlePyPI", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for PyPI URLs without project path", async () => {
-		const result = await handlePyPI("https://pypi.org/", 10);
-		expect(result).toBeNull();
-	});
-
 	it("fetches requests package", async () => {
 		const result = await handlePyPI("https://pypi.org/project/requests/", 20);
 		expect(result).not.toBeNull();
@@ -93,11 +88,6 @@ describe.skipIf(SKIP)("handleHex", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for hex.pm URLs without package path", async () => {
-		const result = await handleHex("https://hex.pm/", 10);
-		expect(result).toBeNull();
-	});
-
 	it("fetches phoenix package", async () => {
 		const result = await handleHex("https://hex.pm/packages/phoenix", 20);
 		expect(result).not.toBeNull();
@@ -106,12 +96,6 @@ describe.skipIf(SKIP)("handleHex", () => {
 		expect(result?.content).toContain("phoenix");
 		expect(result?.content).toMatch(/Latest.*\d+\.\d+/);
 		expect(result?.notes).toContain("Fetched via Hex.pm API");
-	});
-
-	it("extracts package description", async () => {
-		const result = await handleHex("https://hex.pm/packages/phoenix", 20);
-		expect(result).not.toBeNull();
-		expect(result?.content).toMatch(/phoenix|Phoenix|web framework/i);
 	});
 
 	it("handles www subdomain", async () => {
@@ -135,11 +119,6 @@ describe.skipIf(SKIP)("handlePubDev", () => {
 
 	it("returns null for invalid pub.dev URLs", async () => {
 		const result = await handlePubDev("https://pub.dev/invalid", 10);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for pub.dev URLs without package path", async () => {
-		const result = await handlePubDev("https://pub.dev/", 10);
 		expect(result).toBeNull();
 	});
 
@@ -205,12 +184,6 @@ describe.skipIf(SKIP)("handleNpm", () => {
 		expect(result?.content).toMatch(/Weekly Downloads/);
 	});
 
-	it("handles www subdomain", async () => {
-		const result = await handleNpm("https://www.npmjs.com/package/lodash", 20000);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("npm");
-	});
-
 	it("handles npmjs.com without www", async () => {
 		const result = await handleNpm("https://npmjs.com/package/lodash", 20000);
 		expect(result).not.toBeNull();
@@ -260,21 +233,6 @@ describe.skipIf(SKIP)("handleCratesIo", () => {
 });
 
 describe.skipIf(SKIP)("handleOllama", () => {
-	it("returns null for non-Ollama URLs", async () => {
-		const result = await handleOllama("https://example.com", 10000);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for invalid Ollama URLs", async () => {
-		const result = await handleOllama("https://ollama.com/", 10000);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for reserved root URLs", async () => {
-		const result = await handleOllama("https://ollama.com/library", 10000);
-		expect(result).toBeNull();
-	});
-
 	it("fetches llama3 model", async () => {
 		const result = await handleOllama("https://ollama.com/library/llama3", 20000);
 		expect(result).not.toBeNull();

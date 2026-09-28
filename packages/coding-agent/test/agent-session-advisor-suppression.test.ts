@@ -189,8 +189,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 						},
 					],
 				},
-				{ content: [], stopReason: "stop" },
 			],
+			// Any further review stays silent; the advise-only turn above ends
+			// its own review without a follow-up request.
+			handler: () => ({ content: [], stopReason: "stop" }),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -273,8 +275,8 @@ describe("AgentSession advisor auto-resume suppression", () => {
 						},
 					],
 				},
-				{ content: [], stopReason: "stop" },
 			],
+			handler: () => ({ content: [], stopReason: "stop" }),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -304,7 +306,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await session.prompt("yield the final result");
 		expect(await session.waitForAdvisorCatchup(1000)).toBe(true);
 
-		expect(advisorMock.calls).toHaveLength(2);
+		expect(advisorMock.calls).toHaveLength(1);
 		expect(mock.calls).toHaveLength(1);
 		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
 		expect(advisorCards).toHaveLength(1);

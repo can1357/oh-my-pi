@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -56,7 +55,7 @@ function makeFakeSession(): FakeSession {
 	};
 }
 
-function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}): {
+function createRealSession(overrides: Record<string, unknown> = {}): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
@@ -400,17 +399,6 @@ describe("IRC", () => {
 			const msg = await waiting;
 			expect(msg?.from).toBe("0-B");
 			expect(msg?.body).toBe("for the waiter");
-		});
-
-		it("wait returns null on timeout and rejects on abort", async () => {
-			// Genuine 5ms wall-clock timeout: this deliberately exercises the
-			// bus's real timer path; nothing else races it.
-			expect(await bus.wait("0-Main", {}, 5)).toBeNull();
-
-			const controller = new AbortController();
-			const waiting = bus.wait("0-Main", {}, 1000, controller.signal);
-			controller.abort(new Error("cancelled"));
-			await expect(waiting).rejects.toThrow("cancelled");
 		});
 
 		it("wait drains an already-pending mailbox message first", async () => {

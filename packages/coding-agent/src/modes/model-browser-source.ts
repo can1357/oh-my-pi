@@ -3,14 +3,22 @@ import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-res
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 
+import {
+	cfgCycleOrder,
+	cfgDisabledProviders,
+	cfgModelProviderOrder,
+	cfgModelRoleStorage,
+} from "../config/model-settings";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../session/settings";
+
 /** Supply live model-overlay preferences and runtime resolution from the host. */
 export function createModelBrowserSource(settings: Settings): ModelHubSource {
 	return {
 		get defaultThinkingLevel() {
-			return settings.get("defaultThinkingLevel");
+			return cfgDefaultThinkingLevel.get(settings);
 		},
 		get modelProviderOrder() {
-			return settings.get("modelProviderOrder");
+			return cfgModelProviderOrder.get(settings);
 		},
 		get knownRoleIds() {
 			return getKnownRoleIds(settings);
@@ -22,16 +30,16 @@ export function createModelBrowserSource(settings: Settings): ModelHubSource {
 			return settings.getStorage()?.getModelPerf() ?? new Map();
 		},
 		get disabledProviders() {
-			return settings.get("disabledProviders");
+			return cfgDisabledProviders.get(settings);
 		},
 		get fallbackChains() {
-			return settings.get("retry.fallbackChains");
+			return cfgRetryFallbackChains.get(settings);
 		},
 		get modelRoleStorage() {
-			return settings.get("modelRoleStorage");
+			return cfgModelRoleStorage.get(settings);
 		},
 		get cycleOrder() {
-			return settings.get("cycleOrder");
+			return cfgCycleOrder.get(settings);
 		},
 		getModelRole: role => settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),

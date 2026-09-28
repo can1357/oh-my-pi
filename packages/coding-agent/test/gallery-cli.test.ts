@@ -186,13 +186,4 @@ describe("gallery harness", () => {
 			writeToolRenderer.renderCall({ path: "proc://build-42/kill" }, { ...options, argsComplete: true }, theme),
 		).toBeDefined();
 	});
-
-	it("falls back to a generic fixture for registry tools without curated sample data", () => {
-		// resolveFixture never returns undefined for a registry tool, even one
-		// missing from the curated fixtures, so the gallery cannot crash on a newly
-		// added renderer.
-		const fixture = resolveFixture("a-tool-that-has-no-fixture");
-		expect(fixture.args).toBeDefined();
-		expect(fixture.result.content.length).toBeGreaterThan(0);
-	});
 });

@@ -24,6 +24,8 @@ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
+import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+
 /**
  * Matches the plan-approved synthetic-prompt dispatch. `#approvePlan` calls
  * `session.prompt(rendered, { synthetic: true })` exclusively for that case,
@@ -1651,7 +1653,7 @@ describe("InteractiveMode plan review rendering", () => {
 		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
 
 		await mode.handlePlanModeCommand();
-		session.settings.set("plan.autosave", true);
+		cfgPlanAutosave.set(session.settings, true);
 
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
@@ -1678,10 +1680,10 @@ describe("InteractiveMode plan review rendering", () => {
 		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
 
 		await mode.handlePlanModeCommand();
-		session.settings.set("plan.autosave", true);
+		cfgPlanAutosave.set(session.settings, true);
 		const blocker = path.join(tempDir.path(), "blocker");
 		await Bun.write(blocker, "x");
-		session.settings.set("plan.autosaveDir", path.join(blocker, "sub"));
+		cfgPlanAutosaveDir.set(session.settings, path.join(blocker, "sub"));
 
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();

@@ -35,11 +35,12 @@ const CLASS_RE = /^export declare class (\w+)/gm;
 const FUNCTION_RE = /^export declare function (\w+)/gm;
 
 /**
- * The release sentinel answers "which build is this addon?", so it must stay a
- * raw passthrough: a stub there would report presence for an addon that has it
- * not, defeating the loader's own staleness diagnosis.
+ * The release identity export (`__piNativesBuildVersion`, and the legacy
+ * per-release `__piNativesV*` names) answers "which build is this addon?", so
+ * it must stay a raw passthrough: a stub there would report presence for an
+ * addon that has it not, defeating the loader's own staleness diagnosis.
  */
-const VERSION_SENTINEL_NAME_RE = /^__piNativesV/;
+const RELEASE_IDENTITY_NAME_RE = /^__piNatives(?:BuildVersion$|V)/;
 
 interface EnumExport {
 	name: string;
@@ -107,7 +108,7 @@ function buildGeneratedBlock(dts: string): string {
 			// throwing stub on a stale one, so capability probes
 			// (`typeof native.x === "function"`) keep their meaning and only the
 			// stale case gains an actionable failure. See `loader-state.js`.
-			const fallback = VERSION_SENTINEL_NAME_RE.test(name) ? "" : ` ?? missingNativeExport("${name}")`;
+			const fallback = RELEASE_IDENTITY_NAME_RE.test(name) ? "" : ` ?? missingNativeExport("${name}")`;
 			lines.push(`export const ${name} = nativeBindings.${name}${fallback};`);
 		}
 	}

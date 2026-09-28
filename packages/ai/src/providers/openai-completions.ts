@@ -230,9 +230,60 @@ function mergeStoredGeminiSignature(existing: string | undefined, update: Stored
 	return JSON.stringify(merged);
 }
 
+/**
+ * LiteLLM's wire shape for Anthropic thinking: streamed as
+ * `delta.thinking_blocks` (mirrored under
+ * `delta.provider_specific_fields.thinking_blocks`) and required back verbatim,
+ * in order, on the assistant turn that carries `tool_calls` — otherwise the
+ * upstream rejects the turn or LiteLLM silently drops its thinking.
+ * https://docs.litellm.ai/docs/reasoning_content#tool-calling-with-thinking
+ */
+type LiteLLMThinkingBlock =
+	| { type: "thinking"; thinking: string; signature: string }
+	| { type: "redacted_thinking"; data: string };
+
+function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
+	const direct = Reflect.get(delta, "thinking_blocks");
+	if (Array.isArray(direct) && direct.length > 0) return direct;
+	const providerFields = Reflect.get(delta, "provider_specific_fields");
+	if (typeof providerFields !== "object" || providerFields === null) return undefined;
+	const mirrored = Reflect.get(providerFields, "thinking_blocks");
+	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
+}
+
+/**
+ * Rebuilds LiteLLM `thinking_blocks` from a stored assistant turn. Thinking
+ * blocks parsed from `thinking_blocks` keep the raw Anthropic signature as
+ * `thinkingSignature`; blocks parsed from `reasoning_content`-style fields
+ * carry the field name instead and are skipped. `transformMessages` strips
+ * signatures and redacted blocks on cross-model replays, so only the issuing
+ * model ever receives them back.
+ */
+function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): LiteLLMThinkingBlock[] {
+	const blocks: LiteLLMThinkingBlock[] = [];
+	for (const block of content) {
+		if (block.type === "thinking") {
+			const signature = block.thinkingSignature;
+			if (
+				!signature ||
+				signature === "reasoning_content" ||
+				signature === "reasoning" ||
+				signature === "reasoning_text"
+			) {
+				continue;
+			}
+			blocks.push({ type: "thinking", thinking: block.thinking, signature });
+		} else if (block.type === "redactedThinking") {
+			blocks.push({ type: "redacted_thinking", data: block.data });
+		}
+	}
+	return blocks;
+}
+
 type OpenAICompletionsAssistantMessageParam = ChatCompletionAssistantMessageParam &
 	Partial<Record<OpenAICompletionsReasoningField | GeminiMessageThoughtSignatureField, string>> & {
 		reasoning_details?: unknown[];
+		thinking_blocks?: LiteLLMThinkingBlock[];
 	};
 
 type OpenAICompletionsToolMessageParam = ChatCompletionToolMessageParam & {
@@ -1059,37 +1110,68 @@ const streamOpenAICompletionsOnce = (
 					partial: message,
 				});
 			};
-			const appendThinking = (
-				message: AssistantMessage,
-				eventStream: AssistantMessageEventStream,
-				thinking: string,
-				signature?: string,
-			): void => {
-				if (
-					currentBlock?.type !== "thinking" ||
-					(signature !== undefined && currentBlock.thinkingSignature !== signature)
-				) {
-					// Same as appendText: leave toolCall blocks pending so index-only
-					// continuation deltas can still find them.
+			const openThinkingBlock = (signature?: string): ThinkingContent => {
+				// Same as appendText: leave toolCall blocks pending so index-only
+				// continuation deltas can still find them.
+				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
+				const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: signature };
+				currentBlock = block;
+				output.content.push(block);
+				stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });
+				return block;
+			};
+			const appendThinking = (thinking: string, signature?: string): void => {
+				const block =
+					currentBlock?.type === "thinking" &&
+					(signature === undefined || currentBlock.thinkingSignature === signature)
+						? currentBlock
+						: openThinkingBlock(signature);
+				if (signature !== undefined && !block.thinkingSignature) {
+					block.thinkingSignature = signature;
+				}
+				block.thinking += thinking;
+				stream.push({ type: "thinking_delta", contentIndex: blockIndex(block), delta: thinking, partial: output });
+			};
+			// LiteLLM `thinking_blocks` entries each carry a text fragment, a
+			// signature fragment, or a whole redacted block. A signature seals its
+			// block, so text arriving after one opens the next block; signature
+			// fragments concatenate like Anthropic `signature_delta`. The raw
+			// signature lands in `thinkingSignature` for `encodeLiteLLMThinkingBlocks`.
+			let liteLLMThinkingBlock: ThinkingContent | undefined;
+			const appendLiteLLMThinkingBlock = (entry: unknown): void => {
+				if (typeof entry !== "object" || entry === null) return;
+				const type = Reflect.get(entry, "type");
+				if (type === "redacted_thinking") {
+					const data = Reflect.get(entry, "data");
+					if (typeof data !== "string" || data.length === 0) return;
 					if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
-					currentBlock = { type: "thinking", thinking: "", thinkingSignature: signature };
-					message.content.push(currentBlock);
-					eventStream.push({
-						type: "thinking_start",
-						contentIndex: blockIndex(currentBlock),
-						partial: message,
+					currentBlock = undefined;
+					liteLLMThinkingBlock = undefined;
+					output.content.push({ type: "redactedThinking", data });
+					return;
+				}
+				if (type !== "thinking") return;
+				const rawThinking = Reflect.get(entry, "thinking");
+				const rawSignature = Reflect.get(entry, "signature");
+				const thinking = typeof rawThinking === "string" ? rawThinking : "";
+				const signature = typeof rawSignature === "string" ? rawSignature : "";
+				if (!thinking && !signature) return;
+				if (!firstTokenTime) firstTokenTime = performance.now();
+				let block = currentBlock === liteLLMThinkingBlock ? liteLLMThinkingBlock : undefined;
+				if (!block || (thinking && block.thinkingSignature)) {
+					block = openThinkingBlock();
+					liteLLMThinkingBlock = block;
+				}
+				if (thinking) {
+					block.thinking += thinking;
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: blockIndex(block),
+						delta: thinking,
+						partial: output,
 					});
 				}
-				if (signature !== undefined && !currentBlock.thinkingSignature) {
-					currentBlock.thinkingSignature = signature;
-				}
-				currentBlock.thinking += thinking;
-				eventStream.push({
-					type: "thinking_delta",
-					contentIndex: blockIndex(currentBlock),
-					delta: thinking,
-					partial: message,
-				});
+				if (signature) block.thinkingSignature = (block.thinkingSignature ?? "") + signature;
 			};
 
 			const appendTextDelta = (text: string): void => {
@@ -1122,7 +1204,7 @@ const streamOpenAICompletionsOnce = (
 					if (!emittedThinking) return;
 				}
 				if (!firstTokenTime) firstTokenTime = performance.now();
-				appendThinking(output, stream, emittedThinking, signature);
+				appendThinking(emittedThinking, signature);
 			};
 
 			let deepseekStripBuffer = "";
@@ -1308,7 +1390,14 @@ const streamOpenAICompletionsOnce = (
 						}
 					}
 
-					if (foundReasoningField) {
+					// LiteLLM mirrors Anthropic thinking into both `reasoning_content`
+					// and `thinking_blocks`; only the latter carries the signature, so
+					// it wins and the text alias is skipped to avoid duplication.
+					const liteLLMThinkingBlocks = getLiteLLMThinkingBlocksDelta(choice.delta);
+					if (liteLLMThinkingBlocks) {
+						for (const entry of liteLLMThinkingBlocks) appendLiteLLMThinkingBlock(entry);
+						suppressHealedThinking = true;
+					} else if (foundReasoningField) {
 						appendThinkingDelta(
 							foundReasoningDelta,
 							foundReasoningField,
@@ -2365,6 +2454,9 @@ export function convertMessages(
 					}
 				}
 			}
+
+			const liteLLMThinkingBlocks = encodeLiteLLMThinkingBlocks(msg.content);
+			if (liteLLMThinkingBlocks.length > 0) assistantMsg.thinking_blocks = liteLLMThinkingBlocks;
 
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
 			// Replay reasoning_content on assistant turns for backends that validate

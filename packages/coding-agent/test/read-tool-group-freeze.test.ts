@@ -5,6 +5,8 @@ import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-containe
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui";
 
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 /** Minimal transcript block whose finalized state is fixed at construction. */
 class StubBlock implements Component {
 	constructor(private readonly finalized: boolean) {}
@@ -28,7 +30,7 @@ describe("ReadToolGroupComponent transcript freezing", () => {
 	});
 
 	afterEach(() => {
-		settings.clearOverride("tui.hyperlinks");
+		cfgTuiHyperlinks.clearOverride(settings);
 		vi.restoreAllMocks();
 	});
 

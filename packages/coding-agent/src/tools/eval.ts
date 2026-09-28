@@ -10,12 +10,12 @@ import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, getEnabledEvalPreludes } from "../eval/preludes";
+import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -51,6 +51,15 @@ import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
+
+import {
+	cfgEvalAutoBackgroundEnabled,
+	cfgEvalAutoBackgroundThresholdMs,
+	cfgEvalAutoProvision,
+	cfgEvalToolsEnabled,
+} from "../eval/settings";
+import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgToolsMaxTimeout } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -254,8 +263,8 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
-		const doc = prelude.documentation.trim();
-		if (doc) preludes.push({ name: prelude.name, summary: doc.split("\n", 1)[0]! });
+		const summary = evalPreludeSummary(prelude);
+		if (summary) preludes.push({ name: prelude.name, summary });
 	}
 	return prompt.render(evalDescription, {
 		...evalTemplateContext(options),
@@ -358,31 +367,46 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return this.#codeModeDescription(base) ?? base;
 	}
 
+	/**
+	 * `xd://eval/<topic>` docs follow the live prelude set so a prelude announced
+	 * by the mid-session notice is readable before the description catches up.
+	 */
 	docTopics(): Record<string, string> {
-		return getEvalDocTopics(this.#descriptionOptions());
+		return getEvalDocTopics({
+			...this.#descriptionOptions(),
+			preludes: getEnabledEvalPreludes(this.session?.getEvalPreludes?.() ?? []),
+		});
 	}
 
-	/** Live session state feeding both the description and its `xd://eval/<topic>` docs. */
+	/**
+	 * Session state feeding the description. Preludes come from the advertised
+	 * snapshot, not the live set, so toggles never rewrite the cached tool prefix.
+	 */
 	#descriptionOptions(): EvalToolDescriptionOptions {
 		const session = this.session;
 		if (!session) return {};
 		const backends = resolveEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
-			session.settings.get("task.maxRecursionDepth") ?? 2,
+			cfgTaskMaxRecursionDepth.get(session.settings),
 			session.taskDepth ?? 0,
 		);
 		return {
 			py: backends.python,
 			js: backends.js,
 			spawns: depthAllowsSpawning ? (session.getSessionSpawns?.() ?? "*") : false,
-			autoBackgroundEnabled: session.settings.get("eval.autoBackground.enabled"),
-			evalTools: session.settings.get("eval.tools.enabled"),
+			autoBackgroundEnabled: cfgEvalAutoBackgroundEnabled.get(session.settings),
+			evalTools: cfgEvalToolsEnabled.get(session.settings),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
 			waitTool: hasWaitTool(session),
-			preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []),
+			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
-			autoProvision: session.settings.get("eval.autoProvision"),
+			autoProvision: cfgEvalAutoProvision.get(session.settings),
 		};
+	}
+
+	/** Frozen advertised snapshot; sessions without a snapshot owner advertise the live set. */
+	#advertisedPreludes(session: ToolSession): readonly EvalPreludeDefinition[] {
+		return session.getAdvertisedEvalPreludes?.() ?? getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []);
 	}
 
 	/**
@@ -403,7 +427,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				return tool ? [{ name, parameters: (tool as { parameters?: unknown }).parameters }] : [];
 			}),
 		);
-		const preludeDeclarations = getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])
+		const preludeDeclarations = this.#advertisedPreludes(session)
 			.map(definition => definition.codeModeDeclarations?.trim())
 			.filter((declaration): declaration is string => Boolean(declaration))
 			.join("\n\n");
@@ -442,7 +466,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
-				if (this.session.settings.get("eval.autoBackground.enabled")) return undefined;
+				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
 					coordinator: context.coordinator,
@@ -508,7 +532,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cellTimeoutMs =
 			params.timeout === 0
 				? 0
-				: clampTimeout("eval", params.timeout, session.settings.get("tools.maxTimeout")) * 1000;
+				: clampTimeout("eval", params.timeout, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 		const resolved = await resolveBackend(session, cellLanguage, { signal, timeoutMs: cellTimeoutMs });
 		const source = await prepareEvalSource(params, session, signal);
 		if (shadowCell && (source.filename || source.packages?.length || source.environment)) {
@@ -576,14 +600,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const autoBgManager = session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every eval call until a slot frees up.
-		if (!session.settings.get("eval.autoBackground.enabled") || !autoBgManager || autoBgManager.atCapacity) {
+		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
 			return await run(signal, emitToolUpdate);
 		}
 
-		const thresholdMs = Math.max(
-			0,
-			Math.floor(session.settings.get("eval.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS),
-		);
+		const thresholdMs = Math.max(0, Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings)));
 		// The wait budget mirrors #runCells' clamped cell timeout. The cell budget
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case
@@ -591,7 +612,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const clampedCellTimeoutMs =
 			cells[0].timeoutMs === 0
 				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
+				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
@@ -874,7 +895,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const idleTimeoutMs =
 					cell.timeoutMs === 0
 						? undefined
-						: clampTimeout("eval", cell.timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
+						: clampTimeout("eval", cell.timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
 				const idle = idleTimeoutMs === undefined ? undefined : new IdleTimeout(idleTimeoutMs);
 				const combinedSignal =
 					signal && idle

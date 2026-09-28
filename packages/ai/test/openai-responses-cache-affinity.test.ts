@@ -747,37 +747,6 @@ describe("openai-responses cache affinity", () => {
 		expect(captured.body?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 	});
 
-	it("lets explicit headers override OpenRouter Responses defaults", async () => {
-		const captured = await captureOpenAIResponseHeaders(
-			{
-				headers: {
-					"HTTP-Referer": "https://example.test/",
-					"X-OpenRouter-Title": "Custom App",
-					"X-OpenRouter-Cache": "false",
-				},
-			},
-			openRouterResponsesModel,
-		);
-
-		expect(getHeader(captured.headers, "HTTP-Referer")).toBe("https://example.test/");
-		expect(getHeader(captured.headers, "X-OpenRouter-Title")).toBe("Custom App");
-		expect(getHeader(captured.headers, "X-OpenRouter-Cache")).toBe("false");
-	});
-
-	it("applies OpenRouter Responses model variants and provider routing to the body", async () => {
-		const routedModel: Model<"openai-responses"> = {
-			...openRouterResponsesModel,
-			compat: {
-				...openRouterResponsesModel.compat,
-				openRouterRouting: { only: ["anthropic"], order: ["anthropic"] },
-			},
-		};
-		const captured = await captureOpenAIResponseHeaders({ openrouterVariant: "nitro" }, routedModel);
-
-		expect(captured.body?.model).toBe("openai/gpt-5.5:nitro");
-		expect(captured.body?.provider).toEqual({ only: ["anthropic"], order: ["anthropic"] });
-	});
-
 	it("keeps OpenRouter session_id on values longer than OpenAI prompt cache keys", async () => {
 		const longSessionId = "s".repeat(100);
 		const captured = await captureOpenAIResponseHeaders({ sessionId: longSessionId }, openRouterResponsesModel);

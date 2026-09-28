@@ -471,14 +471,6 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 			"success",
 		],
 		[
-			"readMcpResourceExecArgs",
-			buildExecMessage({
-				case: "readMcpResourceExecArgs",
-				value: create(ReadMcpResourceExecArgsSchema, { uri: "file:///nope" }),
-			}),
-			"notFound",
-		],
-		[
 			"recordScreenArgs",
 			buildExecMessage({ case: "recordScreenArgs", value: create(RecordScreenArgsSchema, {}) }),
 			"failure",
@@ -497,26 +489,10 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 			"error",
 		],
 		[
-			"subagentAwaitArgs",
-			buildExecMessage({
-				case: "subagentAwaitArgs",
-				value: create(SubagentAwaitArgsSchema, { agentId: "agent-1", timeoutMs: 10 }),
-			}),
-			"notFound",
-		],
-		[
 			"smartModeClassifierArgs",
 			buildExecMessage({
 				case: "smartModeClassifierArgs",
 				value: create(SmartModeClassifierArgsSchema, { toolCallId: "c1" }),
-			}),
-			"error",
-		],
-		[
-			"canvasDiagnosticsArgs",
-			buildExecMessage({
-				case: "canvasDiagnosticsArgs",
-				value: create(CanvasDiagnosticsArgsSchema, { path: "/a.ts", toolCallId: "c1" }),
 			}),
 			"error",
 		],

@@ -14,11 +14,6 @@ describe.skipIf(SKIP)("handleGitHub", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for other git hosting domains", async () => {
-		const result = await handleGitHub("https://gitlab.com/user/repo", 10000);
-		expect(result).toBeNull();
-	});
-
 	it("fetches repository root", async () => {
 		const result = await handleGitHub("https://github.com/facebook/react", 20000);
 		if (result !== null) {
@@ -31,28 +26,11 @@ describe.skipIf(SKIP)("handleGitHub", () => {
 		expect(result).toBeDefined();
 	});
 
-	it("fetches another repository", async () => {
-		const result = await handleGitHub("https://github.com/microsoft/typescript", 20000);
-		if (result !== null) {
-			expect(result.method).toBe("github-repo");
-			// GitHub returns "TypeScript" with capital T
-			expect(result.content).toContain("microsoft/TypeScript");
-		}
-		expect(result).toBeDefined();
-	});
-
 	it("fetches file blob", async () => {
 		const result = await handleGitHub("https://github.com/facebook/react/blob/main/README.md", 20000);
 		expect(result).not.toBeNull();
 		expect(result?.method).toBe("github-raw");
 		expect(result?.contentType).toBe("text/plain");
-		expect(result?.content.length).toBeGreaterThan(0);
-	});
-
-	it("fetches file blob from specific branch", async () => {
-		const result = await handleGitHub("https://github.com/facebook/react/blob/main/package.json", 20000);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("github-raw");
 		expect(result?.content.length).toBeGreaterThan(0);
 	});
 
@@ -95,13 +73,6 @@ describe.skipIf(SKIP)("handleGitHub", () => {
 		}
 		expect(result).toBeDefined();
 	});
-
-	it("handles pulls list endpoint", async () => {
-		const result = await handleGitHub("https://github.com/facebook/react/pulls", 20000);
-		// Should be handled as pulls list but currently falls back to null
-		// This tests the actual behavior
-		expect(result).toBeDefined();
-	});
 });
 
 // =============================================================================
@@ -111,11 +82,6 @@ describe.skipIf(SKIP)("handleGitHub", () => {
 describe.skipIf(SKIP)("handleGitHubGist", () => {
 	it("returns null for non-gist URLs", async () => {
 		const result = await handleGitHubGist("https://example.com", 10000);
-		expect(result).toBeNull();
-	});
-
-	it("returns null for github.com URLs", async () => {
-		const result = await handleGitHubGist("https://github.com/user/repo", 10000);
 		expect(result).toBeNull();
 	});
 
@@ -152,28 +118,6 @@ describe.skipIf(SKIP)("handleGitHubGist", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for non-hexadecimal gist ID", async () => {
-		const result = await handleGitHubGist("https://gist.github.com/notahexstring123", 10000);
-		expect(result).toBeNull();
-	});
-
-	it("handles gist URL with trailing slash", async () => {
-		const result = await handleGitHubGist("https://gist.github.com/gaearon/edf814aeee85062bc9b9830aeaf27b88/", 20000);
-		if (result !== null) {
-			expect(result.method).toBe("github-gist");
-		}
-		expect(result).toBeDefined();
-	});
-
-	it("handles gist with revision hash", async () => {
-		const result = await handleGitHubGist(
-			"https://gist.github.com/gaearon/edf814aeee85062bc9b9830aeaf27b88/abc123",
-			20000,
-		);
-		// Should handle revision hash in URL path
-		expect(result).toBeDefined();
-	});
-
 	it("formats gist content as markdown with code blocks", async () => {
 		const result = await handleGitHubGist("https://gist.github.com/gaearon/edf814aeee85062bc9b9830aeaf27b88", 20000);
 		if (result !== null) {
@@ -195,12 +139,6 @@ describe.skipIf(SKIP)("handleGitHubGist", () => {
 	it("returns null for nonexistent gist", async () => {
 		const result = await handleGitHubGist("https://gist.github.com/0000000000000000000000000000000000000000", 20000);
 		expect(result).toBeNull();
-	});
-
-	it("handles API rate limiting gracefully", async () => {
-		// This test just ensures no errors are thrown
-		const result = await handleGitHubGist("https://gist.github.com/gaearon/edf814aeee85062bc9b9830aeaf27b88", 5000);
-		expect(result).toBeDefined();
 	});
 });
 

@@ -14,7 +14,7 @@
  * surface extensions use to discover dynamic commands they did not register
  * themselves. Each frontend (interactive-mode, ACP) prepends its own builtins.
  */
-import type { SkillsSettings } from "../../config/settings";
+import type { SkillsSettings } from "../settings";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../../slash-commands/builtin-registry";
 import type { CustomCommandSource, LoadedCustomCommand } from "../custom-commands";
 import { getSkillSlashCommandName, type Skill } from "../skills";

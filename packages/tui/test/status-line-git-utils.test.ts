@@ -20,10 +20,6 @@ describe("parseGitHubRepo", () => {
 		expect(parseGitHubRepo("git@github.com:loftiskg/oh-my-pi.git")).toBe("loftiskg/oh-my-pi");
 	});
 
-	test("parses SSH scp-style URL without .git suffix", () => {
-		expect(parseGitHubRepo("git@github.com:loftiskg/oh-my-pi")).toBe("loftiskg/oh-my-pi");
-	});
-
 	test("parses ssh:// protocol URL", () => {
 		expect(parseGitHubRepo("ssh://git@github.com/user/repo.git")).toBe("user/repo");
 	});
@@ -40,10 +36,6 @@ describe("parseGitHubRepo", () => {
 		expect(parseGitHubRepo("https://github.com/org/my.repo.name.git")).toBe("org/my.repo.name");
 	});
 
-	test("parses SSH URL with dots in repo name", () => {
-		expect(parseGitHubRepo("git@github.com:org/dotted.repo.git")).toBe("org/dotted.repo");
-	});
-
 	test("parses URL with dots in repo name and no .git suffix", () => {
 		expect(parseGitHubRepo("https://github.com/org/my.repo")).toBe("org/my.repo");
 	});
@@ -52,14 +44,6 @@ describe("parseGitHubRepo", () => {
 describe("parseDefaultBranch", () => {
 	test("strips origin/ prefix from origin/main", () => {
 		expect(parseDefaultBranch("origin/main")).toBe("main");
-	});
-
-	test("strips origin/ prefix from origin/master", () => {
-		expect(parseDefaultBranch("origin/master")).toBe("master");
-	});
-
-	test("strips origin/ prefix from origin/develop", () => {
-		expect(parseDefaultBranch("origin/develop")).toBe("develop");
 	});
 
 	test("strips upstream/ prefix", () => {

@@ -5,6 +5,44 @@
 ### Added
 
 - Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
+## [18.4.1] - 2026-09-28
+
+### Added
+
+- Added `resolveCatalogAxes` to `compat/resolve`, which resolves a model's catalog-axis policy without computing its full compat and thinking policy; context-window and catalog-policy lookups now use it, reducing model-catalog load time.
+
+### Fixed
+
+- Fixed `--thinking xhigh` on Amazon Bedrock Grok 4.6 (`us.xai.grok-4.6`, `global.xai.grok-4.6`, `xai.grok-4.6`), which was silently lowered to `high` ([#13515](https://github.com/can1357/oh-my-pi/pull/13515) by [@pgkt04](https://github.com/pgkt04)).
+- Fixed `--thinking xhigh` and `--thinking max` on Amazon Bedrock Claude Opus 5.5, which were silently lowered to `high` ([#13515](https://github.com/can1357/oh-my-pi/pull/13515) by [@pgkt04](https://github.com/pgkt04)).
+- Fixed GitHub Copilot GPT-5.6 and GPT-6 Astra starting on the 1.05M premium context window instead of the default tier ([#13017](https://github.com/can1357/oh-my-pi/pull/13017)).
+- Added Cursor model pricing so usage stats no longer record zero cost for Cursor turns ([#13302](https://github.com/can1357/oh-my-pi/pull/13302) by [@eggpeat](https://github.com/eggpeat)).
+- Devin requests now identify as Devin CLI 3000.11.3 instead of 3000.6.2, the CLI release that routes Fusion pairings ([#13527](https://github.com/can1357/oh-my-pi/pull/13527) by [@will-bogusz](https://github.com/will-bogusz)).
+
+## [18.4.0] - 2026-09-28
+
+### Fixed
+
+- Corrected Cerebras model pricing so cached input tokens are charged at the model’s input rate, consistent with Cerebras billing.
+
+## [18.3.5] - 2026-09-27
+
+### Added
+
+- Added the `openai` web-search grounding for OpenAI API models that support Responses web search (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`) ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `Model.promptCache`, per-retention-tier prompt-cache entry lifetimes in seconds (`short` / `long`), declared per provider through the `prompt-cache` KDL rule (bundled: direct Anthropic, 5 min / 1 h). Custom models and `modelOverrides` opt in with the models.yml `promptCache` key ([#12699](https://github.com/can1357/oh-my-pi/pull/12699) by [@KamijoToma](https://github.com/KamijoToma)).
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added compatibility flags for models that stop output at the context-window limit and models that support steering, including defaults for Claude 4.5+ and GPT-6+ models.
+
+### Fixed
+
+- Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
+- Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
+- Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 
 ## [18.3.0] - 2026-09-24
 

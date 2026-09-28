@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
 import { withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { openCloexecSync } from "@oh-my-pi/pi-utils/fs-open";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
@@ -11,6 +12,8 @@ import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { isAssistantMessageLine } from "./session-entries";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
+/** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
+const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 const utf8Decoder = new TextDecoder("utf-8");
 
 export interface SessionStorageStat {
@@ -213,7 +216,10 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			fs.mkdirSync(dir, { recursive: true });
 		}
 		// Open file once, keep fd for lifetime
-		this.#fd = fs.openSync(fpath, flags === "w" ? "w" : "a");
+		this.#fd = openCloexecSync(
+			fpath,
+			SESSION_WRITE_FLAGS | (flags === "w" ? fs.constants.O_TRUNC : fs.constants.O_APPEND),
+		);
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}
@@ -233,7 +239,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			throw err;
 		}
 		if (live.ino === fs.fstatSync(this.#fd).ino) return;
-		const nextFd = fs.openSync(this.#fpath, "a");
+		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
 		try {
 			fs.closeSync(this.#fd);
@@ -267,10 +273,28 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			try {
 				fs.ftruncateSync(this.#fd, originalSize);
 			} catch (rollbackError) {
-				throw new AggregateError(
-					[toError(writeError), toError(rollbackError)],
-					"Session append failed and its partial bytes could not be rolled back",
-				);
+				// Windows refuses ftruncate on an O_APPEND handle. Reopen without
+				// O_APPEND and verify its identity before rolling back: the path may
+				// now name a different session file after an external replacement.
+				try {
+					const rollbackFd = fs.openSync(this.#fpath, "r+");
+					try {
+						const original = fs.fstatSync(this.#fd);
+						const current = fs.fstatSync(rollbackFd);
+						if (original.dev !== current.dev || original.ino !== current.ino) {
+							throw new Error("Session file was replaced before append rollback");
+						}
+						fs.ftruncateSync(rollbackFd, originalSize);
+					} finally {
+						fs.closeSync(rollbackFd);
+					}
+				} catch (pathRollbackError) {
+					// Keep the write failure visible in the message.
+					throw new AggregateError(
+						[toError(writeError), toError(rollbackError), toError(pathRollbackError)],
+						`Session append failed and its partial bytes could not be rolled back: ${toError(writeError).message}`,
+					);
+				}
 			}
 			throw writeError;
 		}

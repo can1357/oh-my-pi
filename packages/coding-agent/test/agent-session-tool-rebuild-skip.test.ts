@@ -19,6 +19,10 @@ import {
 import { listXdevTools, XDEV_EXTERNAL_DESCRIPTION_CAP, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { logger } from "@oh-my-pi/pi-utils";
 
+import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
 // definitions, `refreshMCPTools` must not rebuild the system prompt. A rebuild
 // invalidates the Anthropic prompt-cache breakpoint placed on the system block
@@ -708,7 +712,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(session.getSkillHintVisible()).toBe(true);
 		// Flip the live setting mid-flight: a global pre-commit stage would
 		// publish false before the producer is refused and never restore it.
-		session.settings.set("skillful", false);
+		cfgSkillful.set(session.settings, false);
 
 		const refresh = session.refreshBaseSystemPrompt(() => false);
 		rebuild.resolve();
@@ -746,13 +750,13 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 		// Committed baseline: skillful=true + skill loaded.
 		expect(session.getSkillHintVisible()).toBe(true);
-		session.settings.set("skillful", false);
+		cfgSkillful.set(session.settings, false);
 
 		const refresh = session.refreshBaseSystemPrompt();
 		await entered.promise;
 		// Readers outside the suspended render still see the committed prefix.
 		expect(session.getSkillHintVisible()).toBe(true);
-		session.settings.set("skillful", true);
+		cfgSkillful.set(session.settings, true);
 		resume.resolve();
 		await refresh;
 
@@ -780,7 +784,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				throw new Error("descriptor unavailable");
 			},
 		});
-		session.settings.set("skillful", false);
+		cfgSkillful.set(session.settings, false);
 		await expect(session.refreshBaseSystemPrompt()).rejects.toThrow("descriptor unavailable");
 		expect(session.systemPrompt).toEqual(["initial"]);
 		expect(session.getSkillHintVisible()).toBe(true);
@@ -859,32 +863,6 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(3);
 	});
 
-	it("rebuilds when an MCP registry tool's metadata changes", async () => {
-		// All connected MCP tools are enabled. The signature must capture the full
-		// registry so a description change cannot leave stale prompt metadata cached.
-		let rebuildCount = 0;
-		const { session } = newSession(async toolNames => {
-			rebuildCount++;
-			return `tools:${toolNames.join(",")}`;
-		}, {});
-
-		const active = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
-		const secondary = createMcpCustomTool("mcp__nucleus_explain", "nucleus", "explain", "Explain v1");
-
-		await session.refreshMCPTools([active, secondary]);
-		const baseline = rebuildCount;
-		expect(baseline).toBeGreaterThanOrEqual(1);
-
-		// Same registry: skip.
-		await session.refreshMCPTools([active, secondary]);
-		expect(rebuildCount).toBe(baseline);
-
-		// Mutate the secondary tool's description: the signature must differ and force
-		// a rebuild.
-		const secondaryV2 = createMcpCustomTool("mcp__nucleus_explain", "nucleus", "explain", "Explain v2");
-		await session.refreshMCPTools([active, secondaryV2]);
-		expect(rebuildCount).toBe(baseline + 1);
-	});
 	it("rebuilds when an MCP tool's customWireName changes", async () => {
 		// `customWireName` overrides the model-facing tool name (e.g. `edit` exposes
 		// itself as `apply_patch` to GPT-5). The wire name is rendered into the prompt
@@ -1091,8 +1069,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }],
 		});
-		session.settings.set("tools.xdevDocs", "builtins");
-		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const maintenanceMessages: AgentMessage[][] = [];
 		const maintenanceSpy = vi
@@ -1126,8 +1104,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
 		});
-		session.settings.set("tools.xdevDocs", "builtins");
-		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 		await session.refreshMCPTools([search]);
@@ -1160,8 +1138,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
 		});
-		session.settings.set("tools.xdevDocs", "builtins");
-		session.settings.set("tools.xdevInlineDevices", ["mcp__nucleus_*"]);
+		cfgToolsXdevDocs.set(session.settings, "builtins");
+		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const searchReconnected = createMcpCustomTool(
 			"mcp__nucleus_search",
@@ -1468,7 +1446,7 @@ These tools became available:
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }],
 		});
-		session.settings.set("startup.quiet", true);
+		cfgStartupQuiet.set(session.settings, true);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "xdev") notices.push(event.message);

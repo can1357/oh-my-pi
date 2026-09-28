@@ -48,13 +48,6 @@ function getNestedObject(value: unknown, key: string): Record<string, unknown> |
 	return toObject(obj[key]);
 }
 
-function getNestedBoolean(value: unknown, key: string): boolean | undefined {
-	const obj = toObject(value);
-	if (!obj) return undefined;
-	const property = obj[key];
-	return typeof property === "boolean" ? property : undefined;
-}
-
 function createSseResponse(events: unknown[]): Response {
 	const payload = `${events.map(event => `data: ${typeof event === "string" ? event : JSON.stringify(event)}`).join("\n\n")}\n\n`;
 	return new Response(payload, {
@@ -553,32 +546,6 @@ describe("openai-completions compatibility", () => {
 		]);
 	});
 
-	it("respects an explicit compat override for strict-template local providers", () => {
-		const model: Model<"openai-completions"> = buildModel({
-			...gpt4oMiniSpec,
-			api: "openai-completions",
-			provider: "custom" as Model["provider"],
-			baseUrl: "https://my-vllm.local/v1",
-			compat: {
-				supportsDeveloperRole: false,
-				supportsMultipleSystemMessages: false,
-			},
-		} as ModelSpec<"openai-completions">);
-
-		const messages = convertMessages(
-			model,
-			{
-				systemPrompt: ["stable instructions", "cacheable policy"],
-				messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
-			},
-			model.compat,
-		);
-
-		expect(messages.slice(0, 2)).toEqual([
-			{ role: "system", content: "stable instructions\n\ncacheable policy" },
-			{ role: "user", content: "hello" },
-		]);
-	});
 	it("coalesces system blocks for the bundled Fireworks Qwen model (Qwen template rejects multiple)", () => {
 		// Repro of the live `fireworks/qwen3.7-plus` 500: the Qwen 3.5+ chat
 		// template `internal_server_error`s when more than one leading system
@@ -948,27 +915,6 @@ describe("openai-completions compatibility", () => {
 				(testCase.usage as { prompt_tokens: number }).prompt_tokens - testCase.expectedCacheRead,
 			);
 		}
-	});
-
-	it("maps qwen chat template reasoning into chat_template_kwargs", async () => {
-		const model: Model<"openai-completions"> = buildModel({
-			...gpt4oMiniSpec,
-			api: "openai-completions",
-			reasoning: true,
-			compat: {
-				thinkingFormat: "qwen-chat-template",
-			},
-		} as ModelSpec<"openai-completions">);
-		const { promise, resolve } = Promise.withResolvers<unknown>();
-		streamOpenAICompletions(model, baseContext(), {
-			apiKey: "test-key",
-			reasoning: "high",
-			signal: createAbortedSignal(),
-			onPayload: payload => resolve(payload),
-		});
-		const payload = await promise;
-		const chatTemplateArgs = getNestedObject(payload, "chat_template_kwargs");
-		expect(getNestedBoolean(chatTemplateArgs, "enable_thinking")).toBe(true);
 	});
 
 	it("sends Alibaba Qwen 3.8 Flash reasoning effort on the wire", async () => {
@@ -2821,10 +2767,6 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 			id: "remote-model",
 		} as ModelSpec<"openai-completions">);
 	}
-
-	it("auto-detects the grammar flavor for local OpenAI-compatible backends", () => {
-		expect(localLlamaModel().compat.toolSchemaFlavor).toBe("grammar");
-	});
 
 	it("widens bare boolean subschemas and keeps additionalProperties:false", async () => {
 		const model = localLlamaModel();

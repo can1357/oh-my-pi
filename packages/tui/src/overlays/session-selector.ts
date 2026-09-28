@@ -38,6 +38,8 @@ import { shortenPath } from "../render/render-utils";
 import { HookSelectorComponent } from "./hook-selector";
 import { bottomBorder, OverlayPanel, row, topBorder } from "../chrome/overlay-box";
 import { MenuSelection, getMenuWindow } from "../components/menu-selection";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { interruptKey } from "../chrome/keybinding-hints";
 
 /**
  * Themed glyph + colored label for a session's lifecycle status, or `undefined`
@@ -615,7 +617,10 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			} else {
 				// "Current folder" scope - hint to try "all"
 				lines.push(
-					truncateToWidth(theme.fg("muted", "No sessions in current folder. Press Tab to view all."), width),
+					truncateToWidth(
+						theme.fg("muted", `No sessions in current folder. Press ${formatKeyHint("tab")} to view all.`),
+						width,
+					),
 				);
 			}
 			return lines;
@@ -1094,7 +1099,12 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/** Blank · keybinding hint · bottom border. Rendered by {@link render}. */
 	#footerLines(width: number): string[] {
 		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
-		const hint = theme.fg("muted", `[Del/⌫ delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
+		// Keys mirror SessionList#handleInput; cancel is `app.interrupt` (raw Escape when unbound).
+		const cancel = interruptKey();
+		const hint = theme.fg(
+			"muted",
+			`[${formatKeyHints(["delete", "backspace"])} delete · ${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
+		);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
 

@@ -30,13 +30,18 @@ import {
 	type DiscoverAuthStorageOptions,
 	discoverAuthStorage as discoverAuthStorageShared,
 	getAuthBrokerTokenFilePath,
+	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
-import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { combine, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
+
+import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
+import { cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
 
@@ -72,8 +77,8 @@ export async function loadEffectiveAuthAccountPolicyConfig(
 ): Promise<AuthAccountPolicyConfig> {
 	const settings = await resolveEffectiveSettings(scope);
 	return loadAuthAccountPolicyConfig({
-		accountPolicies: settings.get("auth.accountPolicies"),
-		usageReservePct: settings.get("retry.usageReservePct"),
+		accountPolicies: cfgAuthAccountPolicies.get(settings),
+		usageReservePct: cfgRetryUsageReservePct.get(settings),
 	});
 }
 
@@ -113,6 +118,86 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 		}
 	});
 	return promise;
+}
+
+/** Settings a long-lived auth storage follows (see {@link createAuthStorageSettingsSync}). */
+const cfgAuthStorageSettings = combine({
+	brokerUrl: cfgAuthBrokerUrl,
+	brokerToken: cfgAuthBrokerToken,
+	accountPolicies: cfgAuthAccountPolicies,
+	usageReservePct: cfgRetryUsageReservePct,
+});
+
+/** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
+export interface AuthStorageSettingsSync {
+	/** Resolves once every change delivered so far has been applied (or logged as failed). */
+	settled(): Promise<void>;
+	/** Stops following settings; session scopes stop on dispose without it. */
+	stop(): void;
+}
+
+/**
+ * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
+ * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
+ * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
+ *   broker with startup precedence (env → config.yml → token file; project layers
+ *   never redirect credentials), and swap the credential store in place when the
+ *   effective connection changed — the next credential resolution uses it.
+ *
+ * Changes apply in order (broker before policies within one change); a failing
+ * change is logged and leaves the current configuration active.
+ */
+export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
+	const settings = "settings" in scope ? scope.settings : scope;
+	const agentDir = settings.getAgentDir();
+	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
+	// Snapshot the connection `authStorage` was opened with, before any edit lands.
+	let activeBroker: Promise<AuthBrokerClientConfig | null> = resolveAuthBrokerConfigShared(resolveOptions).catch(
+		() => null,
+	);
+	let pending: Promise<void> = Promise.resolve();
+
+	const applyPolicies = async () => {
+		try {
+			authStorage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));
+		} catch (error) {
+			logger.warn("Account policy change not applied; keeping the previous policy", { error: String(error) });
+		}
+	};
+
+	const applyBroker = async () => {
+		const previous = await activeBroker;
+		try {
+			// `set()` persists on a debounce; the resolver reads config.yml.
+			await settings.flush();
+			// Drop the CLI memo so later `resolveAuthBrokerConfig()` callers see the edit.
+			cachedConfigPromise = null;
+			cachedConfigKey = null;
+			const next = await resolveAuthBrokerConfigShared(resolveOptions);
+			if (previous?.url === next?.url && previous?.token === next?.token) return;
+			const { store, sourceLabel } = await openAuthCredentialStore({ brokerConfig: next, agentDir });
+			await authStorage.replaceStore(store, { sourceLabel });
+			activeBroker = Promise.resolve(next);
+			logger.info("Auth credential store switched after broker settings change", { source: sourceLabel });
+		} catch (error) {
+			logger.warn("Auth broker change not applied; keeping the current credential store", {
+				error: String(error),
+			});
+		}
+	};
+
+	const stop = cfgAuthStorageSettings.listen(scope, (next, previous) => {
+		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
+		const policiesChanged =
+			next.usageReservePct !== previous.usageReservePct ||
+			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
+		pending = pending.then(async () => {
+			if (brokerChanged) await applyBroker();
+			if (policiesChanged) await applyPolicies();
+		});
+		return pending;
+	});
+	return { settled: () => pending, stop };
 }
 
 /**

@@ -56,6 +56,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
 	type BranchSummaryMessage,
@@ -437,6 +438,25 @@ function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
 }
 
+/**
+ * Replay `xd://<device>` tool-call names under their bare device name. Sessions
+ * saved before the agent loop canonicalized fallback-resolved names persist the
+ * alias, which providers reject as a function name (#13352). Call ids are kept,
+ * so call/result pairing is unchanged.
+ */
+function canonicalizeXdToolCallNames(message: AssistantMessage): AssistantMessage {
+	let content: AssistantMessage["content"] | undefined;
+	for (let i = 0; i < message.content.length; i++) {
+		const block = message.content[i]!;
+		if (block.type !== "toolCall") continue;
+		const name = stripXdUrlPrefix(block.name);
+		if (name === block.name) continue;
+		content ??= message.content.slice();
+		content[i] = { ...block, name };
+	}
+	return content ? { ...message, content } : message;
+}
+
 /** A provider-rejection turn carrying nothing but the error flag: stopReason
  *  "error" with no text, thinking, or tool calls — e.g. a request the provider
  *  rejected before any output (an oversized 413 payload). Persisting it writes an
@@ -495,6 +515,11 @@ function isActionableContent(content: AssistantMessage["content"][number] | unde
 	}
 }
 
+/** Output the user or the agent loop can act on: reasoning alone does not count. */
+function isDeliverableContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	return content?.type === "toolCall" || content?.type === "image" || (content?.type === "text" && hasText(content));
+}
+
 /** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
  *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
  *  than an empty completion, and a `length` stop was cut off mid-output. */
@@ -532,6 +557,17 @@ export function isEmptyAssistantStop(message: Pick<AssistantMessage, "stopReason
 export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
 	return !isEmptyAssistantStop(message) && message.content.some(isActionableContent);
+}
+
+/**
+ * True when the turn emitted text, a tool call, or an image. Stricter than
+ * {@link assistantTurnProducedOutput}: signed reasoning is replay-worthy but
+ * delivers nothing, so length-stop recovery in `checkCompaction` treats a
+ * reasoning-only truncation as budget burned (retry) rather than a truncated
+ * deliverable (keep), and only a delivered turn resets its retry cap.
+ */
+export function assistantTurnDelivered(message: Pick<AssistantMessage, "content">): boolean {
+	return message.content.some(isDeliverableContent);
 }
 
 /** Extract the optional `__queueChipText` field from a CustomMessage's
@@ -1073,18 +1109,24 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
 				return [];
 			}
-			const converted = convertMessageToLlm(source);
+			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
 		case "branchSummary":
 		case "compactionSummary":
 		case "user":
-		case "developer":
-		case "toolResult": {
+		case "developer": {
 			// Core roles share one transformer with agent-core —
 			// duplicating them here is how snapcompact frames once
 			// silently fell off the provider request.
 			const converted = convertMessageToLlm(m);
+			return converted ? [converted] : [];
+		}
+		case "toolResult": {
+			// Same pre-canonicalization history as `canonicalizeXdToolCallNames`;
+			// Gemini replays the result under this name.
+			const toolName = stripXdUrlPrefix(m.toolName);
+			const converted = convertMessageToLlm(toolName === m.toolName ? m : { ...m, toolName });
 			return converted ? [converted] : [];
 		}
 		default:

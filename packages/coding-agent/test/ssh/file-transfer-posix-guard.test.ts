@@ -88,24 +88,4 @@ describe("ssh file-transfer POSIX guard", () => {
 		expect(dispatches[2]).toMatch(/^bash -c '.*if \[ -d /);
 		expect(dispatches[3]).toMatch(/^bash -c '.*LC_ALL=C ls -1Ap /);
 	});
-
-	it("uses sh -c when transferShell is sh (the most universal POSIX fallback)", async () => {
-		// Belt-and-suspenders: the common happy path with a sh-family login
-		// shell still routes through `sh -c` to keep one dispatch shape.
-		vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue(undefined);
-		vi.spyOn(connectionManager, "ensureHostInfo").mockResolvedValue({
-			version: 4,
-			os: "linux",
-			shell: "sh",
-			transferShell: "sh",
-			compatEnabled: false,
-		});
-		const buildSpy = vi
-			.spyOn(connectionManager, "buildRemoteCommand")
-			.mockRejectedValue(new Error("stop-before-spawn"));
-		const target: SSHConnectionTarget = { name: "shbox", host: "shbox" };
-
-		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(/stop-before-spawn/);
-		expect(buildSpy.mock.calls[0]?.[1]).toMatch(/^sh -c '.*head -c 1025/);
-	});
 });

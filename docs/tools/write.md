@@ -43,13 +43,13 @@ Single-shot result.
 
 - Success always returns at least one text block, except that an `xd://` dispatch preserves the mounted tool's own content/error result.
   - Plain file write: `Successfully wrote <chars> bytes to <relative-path>` (the count is `cleanContent.length`, not encoded byte length).
-  - Internal URL write: handler-provided receipt/status text when present; otherwise `Successfully wrote <chars> bytes to <url>`.
+  - Internal URL write: handler-provided receipt/status text when present; otherwise `Successfully wrote <chars> bytes to <url>`. File-backed URL writes (`local://`, `vault://`) name the URL too, never the backing path.
   - Archive write: `Successfully wrote <chars> bytes to <relative-archive-path>:<entry-path>`.
   - SQLite write: one of `Inserted row into <table>`, `Updated row '<key>' in <table>`, `No row updated ...`, `Deleted row ...`, `No row deleted ...`.
   - Conflict resolution: conflict-specific success text, with fresh hashline snapshot headers when applicable. Bulk resolution can return `isError: true` after some files succeeded and others failed.
 - During execution, `onUpdate` may emit `Writing <chars> bytes to <path>...`; `xd://` forwards the mounted tool's updates.
 - If hashline prefixes were copied from `read` output and stripped first, the first text block gets an extra note.
-- In hashline display mode, plain file writes (including ACP bridge writes) and conflict resolutions prepend a fresh `[<relative-path>#TAG]` header so the next `edit` has a current snapshot tag without an extra `read`. Bulk conflict resolutions append a `Snapshots:` block listing one header per successfully written file.
+- In hashline display mode, plain file writes (including ACP bridge writes) and conflict resolutions prepend a fresh `[<relative-path>#TAG]` header (`[<url>#TAG]` for file-backed URL writes) so the next `edit` has a current snapshot tag without an extra `read`. Bulk conflict resolutions append a `Snapshots:` block listing one header per successfully written file.
 - Plain file writes may also return `details.diagnostics` plus `details.meta.diagnostics` when LSP diagnostics-on-write is enabled, and `details.madeExecutable` when a newly written shebang file is chmodded executable.
 - Plain/archive/conflict results set `details.resolvedPath` when backed by a file. SQLite writes additionally set `details.meta.source` to the database file through `sourcePath(...)`. Internal URL writes return empty `details`; device dispatch sets `details.xdev`.
 
@@ -143,9 +143,10 @@ content: ""
 ### Writable internal resources and tool devices
 - `agent://<id>` with non-empty `content` sends a message to that peer (delivery receipt text); `agent://all` broadcasts to visible live peers. This write is read-approved and allowed in plan mode and `deviceOnlyWrite` when messaging is available. `agent://` reads remain output artifacts.
 - `proc://<id>` sends `content` to service stdin (Enter appended unless already newline-terminated); empty content sends Enter, never cancels. `write({ path: "proc://<id>/kill" })` cancels a job or owned subagent, or stops a service; `content` is optional and ignored. `proc://<id>/mode` requires `content` of `persist` or `session` to toggle persistence, or `detached` to restart without a PTY and persist beyond the broker. Proc writes require exec approval and are unavailable in `deviceOnlyWrite` sessions; proc reads do not consume job delivery. `/kill` and `/mode` are write-only.
-- A registered internal handler with a `write` hook owns its resource semantics (for example, `vault://`). `local://` is instead resolved into the session-local artifact sandbox and follows the plain-file path.
+- A registered internal handler with a `write` hook owns its resource semantics (for example, `cfg://`, `agent://`, `proc://`). File-backed schemes (`local://`, `vault://`) have no hook: the router locates the target file (`local://` in the session-local artifact sandbox, `vault://` under the vault root) and the write follows the plain-file path.
 - `xd://` lists/dispatches tool devices mounted behind `write`. Read `xd://<name>` first for its generated input documentation, then pass one JSON object as `content`. The device's own schema, updates, result blocks, error flag, renderer metadata, and approval tier are preserved.
 - Unknown URI-like schemes are refused to prevent silent local-file creation. Use `./scheme://...` only when that filename is intentional.
+- Registered read-only schemes (no write policy: `artifact://`, `skill://`, `history://`, …) are denied at the approval gate (`<scheme>:// URLs are read-only`) without prompting; `edit` and `ast_edit` targets are denied the same way. A trailing line selector on a write, edit, or bash URL target (`local://notes.md:5`) is refused rather than dropped; only `:raw`/`:conflicts` are peeled.
 
 ### Merge-conflict resolution
 - First read `<file>:conflicts`; this registers session-stable ids. `conflict://<N>` replaces only that recorded marker block and rejects stale/missing regions.
@@ -195,6 +196,7 @@ content: ""
 - Missing SQLite DBs surface as `SQLite database '<path>' not found`.
 - SQLite content errors include invalid JSON5, non-object payloads, unknown columns, non-scalar values, empty update objects, composite primary keys, and `WITHOUT ROWID` key lookups.
 - Existing plain files may be rejected by `assertEditableFile()` when they look generated.
+- A file-backed URL write whose target is an existing directory fails with `<scheme>:// URL must resolve to a file: <url>`.
 - URI-like unknown targets and malformed/missing `xd://` devices fail rather than writing local files; mounted devices surface their own schema/tool errors.
 - Empty writes to missing selector-shaped targets and semicolon-joined selector lists are rejected as likely read/write mis-dispatches.
 - Conflict scope writes are read-only; invalid/stale ids, malformed bulk directives, missing `@base`, and stale marker locations surface `ToolError`.

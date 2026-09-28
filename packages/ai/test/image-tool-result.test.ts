@@ -422,23 +422,6 @@ describe("Tool Results with Images", () => {
 			{ retry: 3, timeout: 30000 },
 		);
 
-		/** These two don't work, the model simply won't call the tool, works in pi
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should handle tool result with only image",
-			async () => {
-				const llm = getModel("google-antigravity", "claude-sonnet-4-5");
-				await handleToolWithImageResult(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 });
-
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should handle tool result with text and image",
-			async () => {
-				const llm = getModel("google-antigravity", "claude-sonnet-4-5");
-				await handleToolWithTextAndImageResult(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 });**/
-
 		// Note: gpt-oss-120b-medium does not support images, so not tested here
 	});
 

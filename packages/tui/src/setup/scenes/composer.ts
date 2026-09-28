@@ -6,6 +6,7 @@ import { WizardStep } from "../../components/wizard-step";
 import type { ComposerShape } from "../../overlays/composer-shape-registry";
 import { renderComposerShapePreview } from "../../overlays/composer-shape-preview";
 import { getComposerShapeOptions } from "../../overlays/composer-shape-registry";
+import { editorKey } from "../../chrome/keybinding-hints";
 import { getSelectListTheme, theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
@@ -73,7 +74,10 @@ class ComposerSceneController implements SetupSceneController {
 
 	render(width: number, maxLines?: number): readonly string[] {
 		const intro = new Text(
-			theme.fg("muted", "Select a layout; live preview updates below. Press Enter to confirm."),
+			theme.fg(
+				"muted",
+				`Select a layout; live preview updates below. Press ${editorKey("tui.select.confirm")} to confirm.`,
+			),
 			0,
 			0,
 		);

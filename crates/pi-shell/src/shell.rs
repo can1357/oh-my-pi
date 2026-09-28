@@ -21,6 +21,7 @@ use brush_core::{
 use bytes::Bytes;
 use flume::Sender;
 use pi_builtins::{BuiltinSet, default_builtins};
+use pi_vfs::Fs;
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
@@ -36,7 +37,10 @@ use crate::{
 };
 
 struct ShellSessionCore {
-	shell: BrushShell,
+	shell:      BrushShell,
+	/// Session filesystem; each run installs a cancellation-scoped view of it
+	/// (or of the run's own override) and restores it afterwards.
+	filesystem: Fs,
 }
 
 impl Drop for ShellSessionCore {
@@ -67,19 +71,33 @@ impl ShellAbortState {
 
 fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
 	let requested = std::path::Path::new(cwd);
+	let current = shell.working_dir();
+	if pi_vfs::is_virtual_path(requested) {
+		return current == requested;
+	}
 	if !requested.is_absolute() {
 		return false;
 	}
-	let current = shell.working_dir();
-	current == requested
+	// On Windows the stored dir is already long-form (brush-core expands 8.3
+	// short names on every store), so only the requested spelling needs
+	// expansion for a short-spelled host cwd to match its long spelling.
+	#[cfg(windows)]
+	{
+		current == brush_core::sys::fs::expand_to_long_path(requested)
+	}
+	#[cfg(not(windows))]
+	{
+		current == requested
+	}
 }
 
-fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
+async fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
 	if shell_working_dir_matches(shell, cwd) {
 		return Ok(());
 	}
 	shell
 		.set_working_dir(cwd)
+		.await
 		.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))
 }
 
@@ -88,6 +106,7 @@ struct ShellConfig {
 	session_env:   Option<HashMap<String, String>>,
 	snapshot_path: Option<String>,
 	minimizer:     Option<minimizer::MinimizerConfig>,
+	filesystem:    Fs,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,13 +114,17 @@ pub struct ShellOptions {
 	pub session_env:   Option<HashMap<String, String>>,
 	pub snapshot_path: Option<String>,
 	pub minimizer:     Option<minimizer::MinimizerOptions>,
+	/// Filesystem backing every run of the session (native by default).
+	pub filesystem:    Fs,
 }
 
 struct ShellRunConfig {
-	command:   String,
-	cwd:       Option<String>,
-	env:       Option<HashMap<String, String>>,
-	minimizer: Option<minimizer::MinimizerConfig>,
+	command:    String,
+	cwd:        Option<String>,
+	env:        Option<HashMap<String, String>>,
+	minimizer:  Option<minimizer::MinimizerConfig>,
+	/// Replaces the session filesystem for this run only.
+	filesystem: Option<Fs>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,6 +133,8 @@ pub struct ShellRunOptions {
 	pub cwd:        Option<String>,
 	pub env:        Option<HashMap<String, String>>,
 	pub timeout_ms: Option<u32>,
+	/// Filesystem for this run only; the session filesystem when `None`.
+	pub filesystem: Option<Fs>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -139,6 +164,8 @@ pub struct ShellExecuteOptions {
 	pub timeout_ms:    Option<u32>,
 	pub snapshot_path: Option<String>,
 	pub minimizer:     Option<minimizer::MinimizerOptions>,
+	/// Filesystem backing the command (native by default).
+	pub filesystem:    Fs,
 }
 
 pub type ShellExecuteResult = ShellRunResult;
@@ -153,7 +180,12 @@ impl Shell {
 	#[must_use]
 	pub fn new(options: Option<ShellOptions>) -> Self {
 		let config = match options {
-			None => ShellConfig { session_env: None, snapshot_path: None, minimizer: None },
+			None => ShellConfig {
+				session_env:   None,
+				snapshot_path: None,
+				minimizer:     None,
+				filesystem:    Fs::native(),
+			},
 			Some(opt) => {
 				let minimizer = opt
 					.minimizer
@@ -163,6 +195,7 @@ impl Shell {
 					session_env: opt.session_env,
 					snapshot_path: opt.snapshot_path,
 					minimizer,
+					filesystem: opt.filesystem,
 				}
 			},
 		};
@@ -180,10 +213,11 @@ impl Shell {
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
-			command:   options.command,
-			cwd:       options.cwd,
-			env:       options.env,
-			minimizer: self.config.minimizer.clone(),
+			command:    options.command,
+			cwd:        options.cwd,
+			env:        options.env,
+			minimizer:  self.config.minimizer.clone(),
+			filesystem: options.filesystem,
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -243,9 +277,15 @@ pub async fn execute_shell(
 		session_env:   options.session_env,
 		snapshot_path: options.snapshot_path,
 		minimizer:     minimizer.clone(),
+		filesystem:    options.filesystem,
 	};
-	let run_config =
-		ShellRunConfig { command: options.command, cwd: options.cwd, env: options.env, minimizer };
+	let run_config = ShellRunConfig {
+		command: options.command,
+		cwd: options.cwd,
+		env: options.env,
+		minimizer,
+		filesystem: None,
+	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
 
@@ -275,12 +315,14 @@ pub async fn execute_shell_streams(
 		session_env:   options.session_env,
 		snapshot_path: options.snapshot_path,
 		minimizer:     None,
+		filesystem:    options.filesystem,
 	};
 	let run_config = ShellRunConfig {
-		command:   options.command,
-		cwd:       options.cwd,
-		env:       options.env,
-		minimizer: None,
+		command:    options.command,
+		cwd:        options.cwd,
+		env:        options.env,
+		minimizer:  None,
+		filesystem: None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -538,6 +580,56 @@ const fn normalize_env_key(key: &str) -> &str {
 	key
 }
 
+/// Canonical spelling for a key inherited from the host environment (the
+/// process env or the caller-forwarded session env). Windows env names are
+/// case-insensitive, so a host `Temp` must still surface as `$TEMP` in the
+/// case-sensitive shell. Per-command env keeps the narrower
+/// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
+#[cfg(windows)]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	if key.eq_ignore_ascii_case("TEMP") {
+		"TEMP"
+	} else if key.eq_ignore_ascii_case("TMP") {
+		"TMP"
+	} else if key.eq_ignore_ascii_case("TMPDIR") {
+		"TMPDIR"
+	} else {
+		normalize_env_key(key)
+	}
+}
+
+#[cfg(not(windows))]
+const fn normalize_inherited_env_key(key: &str) -> &str {
+	key
+}
+
+/// Value exported for an inherited (already normalized) env key.
+///
+/// A host `TEMP`/`TMP`/`TMPDIR` may carry an 8.3 profile alias
+/// (`C:\Users\ADMINI~1\...`) while `cd` stores the long form in `PWD`, so
+/// `cd "$TEMP"` would leave the two spellings disagreeing. Absolute temp paths
+/// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
+/// and junctions kept); anything else, or a failed expansion, passes through.
+#[cfg(windows)]
+fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	let path = std::path::Path::new(value);
+	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
+		return std::borrow::Cow::Borrowed(value);
+	}
+	match brush_core::sys::fs::expand_to_long_path(path)
+		.into_os_string()
+		.into_string()
+	{
+		Ok(expanded) => std::borrow::Cow::Owned(expanded),
+		Err(_) => std::borrow::Cow::Borrowed(value),
+	}
+}
+
+#[cfg(not(windows))]
+const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+	std::borrow::Cow::Borrowed(value)
+}
+
 #[cfg(windows)]
 fn merge_path_values(existing: &str, incoming: &str) -> String {
 	let mut merged = Vec::new();
@@ -607,7 +699,7 @@ fn copy_env_into_shell(
 		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
 			continue;
 		};
-		let normalized_key = normalize_env_key(key);
+		let normalized_key = normalize_inherited_env_key(key);
 		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
@@ -618,7 +710,8 @@ fn copy_env_into_shell(
 			});
 			continue;
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
+		let value = inherited_env_value(normalized_key, value);
+		let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 		var.export();
 		shell
 			.env_mut()
@@ -650,11 +743,18 @@ async fn create_session_for_run(
 	spawn_registry: Option<Arc<process::SpawnRegistry>>,
 	cancel_token: Option<CancellationToken>,
 ) -> Result<ShellSessionCore> {
+	// Session setup (snapshot sourcing) belongs to the creating run, so its
+	// provider calls stop with that run's cancellation.
+	let setup_filesystem = match cancel_token.as_ref() {
+		Some(cancel_token) => config.filesystem.with_cancellation(cancel_token.clone()),
+		None => config.filesystem.clone(),
+	};
 	let mut shell = BrushShell::builder()
 		.do_not_inherit_env(true)
 		.profile(ProfileLoadBehavior::Skip)
 		.rc(RcLoadBehavior::Skip)
 		.builtins(default_builtins(BuiltinSet::BashMode))
+		.filesystem(setup_filesystem)
 		.build()
 		.await
 		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
@@ -680,8 +780,8 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive trio additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE, and
-	// `rm`/`mv` have their own switches.
+	// destructive set (`rm`, `mv`, `cp`, `ln`) additionally honors
+	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
 	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
 		let rm_disabled =
@@ -692,8 +792,9 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// ln can clobber existing files via -f; gate it with the destructive set.
-				"ln" => destructive_disabled,
+				// cp overwrites existing files, ln can clobber them via -f; gate
+				// both with the destructive set.
+				"cp" | "ln" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -706,11 +807,14 @@ async fn create_session_for_run(
 
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
-			let normalized_key = normalize_env_key(key);
+			let normalized_key = normalize_inherited_env_key(key);
 			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 				continue;
 			}
-			let mut var = ShellVariable::new(ShellValue::String(value.clone()));
+			// The agent forwards its whole host env here, so temp paths need the
+			// same long-form expansion as the direct host copy above.
+			let value = inherited_env_value(normalized_key, value);
+			let mut var = ShellVariable::new(ShellValue::String(value.into_owned()));
 			var.export();
 			shell
 				.env_mut()
@@ -728,7 +832,7 @@ async fn create_session_for_run(
 		source_snapshot(&mut shell, snapshot_path, spawn_registry, cancel_token).await?;
 	}
 
-	Ok(ShellSessionCore { shell })
+	Ok(ShellSessionCore { shell, filesystem: config.filesystem.clone() })
 }
 
 async fn source_snapshot(
@@ -794,6 +898,59 @@ impl ChainCapture {
 	}
 }
 
+/// Install the run's filesystem — its override, else the session's — scoped
+/// to the run's cancellation, so an aborted run stops waiting on provider
+/// calls while background work keeps the scope it was started under.
+fn install_run_filesystem(
+	session: &mut ShellSessionCore,
+	options: &ShellRunConfig,
+	cancel_token: &CancellationToken,
+) {
+	let filesystem = options
+		.filesystem
+		.as_ref()
+		.unwrap_or(&session.filesystem)
+		.with_cancellation(cancel_token.clone());
+	session.shell.set_filesystem(filesystem);
+}
+
+/// Put the session filesystem back so a run's override never leaks into
+/// later runs.
+fn restore_session_filesystem(session: &mut ShellSessionCore) {
+	let filesystem = session.filesystem.clone();
+	session.shell.set_filesystem(filesystem);
+}
+
+/// Wait for the closes of virtual files the command dropped, so its writes
+/// have settled before the run reports. Cancellation ends the wait, never the
+/// closes themselves.
+async fn drain_dropped_files(
+	shell: &BrushShell,
+	cancel_token: &CancellationToken,
+) -> io::Result<()> {
+	let filesystem = shell.filesystem().clone();
+	tokio::select! {
+		drained = filesystem.drain_closes() => drained,
+		() = cancel_token.cancelled() => Ok(()),
+	}
+}
+
+/// A failed close lost data the command believed written: say so on the
+/// command's stderr and fail a command that otherwise succeeded.
+fn report_close_failure<E>(
+	stderr: &mut fs::File,
+	err: &io::Error,
+	result: &mut std::result::Result<ExecutionResult, E>,
+) {
+	use std::io::Write as _;
+	let _ = writeln!(stderr, "pi-shell: closing a file failed: {err}");
+	if let Ok(exec) = result
+		&& matches!(exec.exit_code, ExecutionExitCode::Success)
+	{
+		exec.exit_code = ExecutionExitCode::GeneralError;
+	}
+}
+
 async fn run_shell_command(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
@@ -801,8 +958,23 @@ async fn run_shell_command(
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
 ) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
+	install_run_filesystem(session, options, &cancel_token);
+	let result =
+		run_shell_command_in_filesystem(session, options, on_chunk, cancel_token, spawn_registry)
+			.await;
+	restore_session_filesystem(session);
+	result
+}
+
+async fn run_shell_command_in_filesystem(
+	session: &mut ShellSessionCore,
+	options: &ShellRunConfig,
+	on_chunk: Option<Sender<String>>,
+	cancel_token: CancellationToken,
+	spawn_registry: Arc<process::SpawnRegistry>,
+) -> Result<(ExecutionResult, Option<MinimizerResult>, Option<String>)> {
 	if let Some(cwd) = options.cwd.as_deref() {
-		set_shell_working_dir_if_changed(&mut session.shell, cwd)?;
+		set_shell_working_dir_if_changed(&mut session.shell, cwd).await?;
 	}
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
@@ -1087,6 +1259,9 @@ async fn run_shell_command_once(
 			.try_clone()
 			.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?,
 	);
+	let mut diagnostics = writer_file
+		.try_clone()
+		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
 	let stderr_file = OpenFile::from(writer_file);
 
 	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
@@ -1136,10 +1311,16 @@ async fn run_shell_command_once(
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let source_info = SourceInfo::from("pi-natives:command");
-	let result = session
+	let mut result = session
 		.shell
 		.run_string(command, &source_info, &params)
 		.await;
+
+	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
+		report_close_failure(&mut diagnostics, &err, &mut result);
+	}
+	// Release the extra writer so the reader can reach EOF.
+	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
 		terminate_background_jobs(&mut session.shell);
@@ -1208,8 +1389,28 @@ async fn run_shell_command_streams(
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
 ) -> Result<(ExecutionResult, Option<String>)> {
+	install_run_filesystem(session, options, &cancel_token);
+	let result = run_shell_command_streams_in_filesystem(
+		session,
+		options,
+		streams,
+		cancel_token,
+		spawn_registry,
+	)
+	.await;
+	restore_session_filesystem(session);
+	result
+}
+
+async fn run_shell_command_streams_in_filesystem(
+	session: &mut ShellSessionCore,
+	options: &ShellRunConfig,
+	streams: StreamSinks,
+	cancel_token: CancellationToken,
+	spawn_registry: Arc<process::SpawnRegistry>,
+) -> Result<(ExecutionResult, Option<String>)> {
 	if let Some(cwd) = options.cwd.as_deref() {
-		set_shell_working_dir_if_changed(&mut session.shell, cwd)?;
+		set_shell_working_dir_if_changed(&mut session.shell, cwd).await?;
 	}
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
@@ -1217,6 +1418,9 @@ async fn run_shell_command_streams(
 	let (stdout_reader, stdout_writer) = pipe_to_files("stdout")?;
 	let (stderr_reader, stderr_writer) = pipe_to_files("stderr")?;
 
+	let mut diagnostics = stderr_writer
+		.try_clone()
+		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
 	let stdout_file = OpenFile::from(stdout_writer);
 	let stderr_file = OpenFile::from(stderr_writer);
 
@@ -1255,10 +1459,16 @@ async fn run_shell_command_streams(
 	let mut command = options.command.clone();
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let source_info = SourceInfo::from("pi-shell:streams");
-	let result = session
+	let mut result = session
 		.shell
 		.run_string(command, &source_info, &params)
 		.await;
+
+	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
+		report_close_failure(&mut diagnostics, &err, &mut result);
+	}
+	// Release the extra writer so the stderr reader can reach EOF.
+	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
 		terminate_background_jobs(&mut session.shell);
@@ -1906,9 +2116,244 @@ mod tests {
 
 	use super::*;
 
+	/// 8.3 short spelling of `path` (`GetShortPathNameW`).
+	#[cfg(windows)]
+	fn short_name_of(path: &std::path::Path) -> std::path::PathBuf {
+		use std::os::windows::ffi::{OsStrExt, OsStringExt};
+		let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+		// SAFETY: `wide` is NUL-terminated; a null buffer with length 0 asks
+		// only for the required size.
+		let needed = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				std::ptr::null_mut(),
+				0,
+			)
+		};
+		assert!(needed > 0, "GetShortPathNameW failed for {}", path.display());
+		let mut buf = vec![0u16; needed as usize];
+		// SAFETY: `wide` is NUL-terminated and `buf` is writable for
+		// `buf.len()` u16s.
+		let written = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				buf.as_mut_ptr(),
+				buf.len() as u32,
+			)
+		};
+		assert!(written > 0, "GetShortPathNameW fill failed for {}", path.display());
+		buf.truncate(written as usize);
+		std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf))
+	}
+
+	#[cfg(windows)]
+	const LONG_DIR_NAME: &str = "pi-shell-long-name-probe";
+
+	/// A fresh directory whose long name has a distinct 8.3 alias, as
+	/// `(guard, long, short)`. `None` when the volume does not generate short
+	/// names, since no spelling split can exist there.
+	#[cfg(windows)]
+	fn short_alias_fixture() -> Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+		let root = tempfile::tempdir().expect("tempdir");
+		let long = root.path().join(LONG_DIR_NAME);
+		std::fs::create_dir(&long).expect("create long-named dir");
+		let short = short_name_of(&long);
+		(short.file_name() != long.file_name()).then_some((root, long, short))
+	}
+
+	/// The shell stores `working_dir` in long form both at construction and on
+	/// `cd`, even when handed the 8.3 short spelling of the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn working_dir_stores_long_form() {
+		let Some((_root, _long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(short.clone())
+			.build()
+			.await
+			.expect("build shell");
+
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"built from {}",
+			short.display()
+		);
+
+		shell
+			.set_working_dir(short.parent().expect("parent"))
+			.await
+			.expect("cd parent");
+		shell
+			.set_working_dir(&short)
+			.await
+			.expect("cd short spelling");
+		assert_eq!(
+			shell.working_dir().file_name(),
+			Some(std::ffi::OsStr::new(LONG_DIR_NAME)),
+			"cd {}",
+			short.display()
+		);
+	}
+
+	/// A temp directory reachable through an 8.3 alias, as
+	/// `(short, long, guard)`. Existing profile aliases survive after new 8.3
+	/// creation is disabled, so the host TEMP is preferred; otherwise a fresh
+	/// alias is made when the volume still creates them.
+	#[cfg(windows)]
+	fn short_temp_fixture()
+	-> Option<(std::path::PathBuf, std::path::PathBuf, Option<tempfile::TempDir>)> {
+		let host_temp = std::env::temp_dir();
+		let expanded_host_temp = brush_core::sys::fs::expand_to_long_path(&host_temp);
+		if host_temp != expanded_host_temp {
+			return Some((host_temp, expanded_host_temp, None));
+		}
+		let (root, long, short) = short_alias_fixture()?;
+		Some((short, brush_core::sys::fs::expand_to_long_path(&long), Some(root)))
+	}
+
+	/// Runs `cd "$TEMP"` and asserts the shell cwd, `PWD`, and every temp var
+	/// share the long spelling `expected`.
+	#[cfg(windows)]
+	async fn assert_cd_temp_matches_pwd(shell: &mut BrushShell, expected: &std::path::Path) {
+		let expected_str = expected.to_string_lossy().into_owned();
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let result = shell
+			.run_string("cd \"$TEMP\"", &SourceInfo::from("pi-shell:test"), &params)
+			.await
+			.expect("cd inherited TEMP");
+		assert_eq!(exit_code(&result), 0);
+		assert_eq!(shell.working_dir(), expected);
+		for key in ["TEMP", "TMP", "TMPDIR", "PWD"] {
+			assert_eq!(shell.env_str(key).as_deref(), Some(expected_str.as_str()), "{key}");
+		}
+	}
+
+	/// Host TEMP/TMP paths must not export the short profile spelling after
+	/// entering the directory.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.working_dir(short.parent().expect("parent").to_path_buf())
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			["TEMP", "TMP", "TMPDIR"]
+				.into_iter()
+				.map(|key| (std::ffi::OsString::from(key), short.as_os_str().to_os_string())),
+		)
+		.expect("inherit temp vars");
+
+		assert_cd_temp_matches_pwd(&mut shell, &expected).await;
+	}
+
+	/// The agent forwards its host env as `session_env`, applied after the
+	/// direct host copy; a short TEMP arriving that way must be expanded too,
+	/// or it overwrites the expanded host value.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn session_env_short_temp_matches_pwd_after_cd() {
+		let Some((short, expected, _guard)) = short_temp_fixture() else {
+			return;
+		};
+		let short_str = short.to_str().expect("utf8 short temp").to_string();
+		let env = ["TEMP", "TMP", "TMPDIR"]
+			.into_iter()
+			.map(|key| (key.to_string(), short_str.clone()))
+			.collect();
+		let config = ShellConfig {
+			session_env:   Some(env),
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create_session");
+
+		assert_cd_temp_matches_pwd(&mut session.shell, &expected).await;
+	}
+
+	/// Windows env names are case-insensitive: a host `Temp`/`Tmp`/`TmpDir`
+	/// must surface as the uppercase names shell scripts read. Relative values
+	/// are not paths to expand and pass through verbatim.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn inherited_temp_keys_fold_to_uppercase() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.build()
+			.await
+			.expect("build shell");
+
+		copy_env_into_shell(
+			&mut shell,
+			[("Temp", "rel\\temp"), ("Tmp", "rel\\tmp"), ("TmpDir", "rel\\tmpdir")]
+				.into_iter()
+				.map(|(key, value)| (key.into(), value.into())),
+		)
+		.expect("inherit temp vars");
+
+		assert_eq!(shell.env_str("TEMP").as_deref(), Some("rel\\temp"));
+		assert_eq!(shell.env_str("TMP").as_deref(), Some("rel\\tmp"));
+		assert_eq!(shell.env_str("TMPDIR").as_deref(), Some("rel\\tmpdir"));
+		assert_eq!(shell.env_str("Temp"), None);
+	}
+
+	/// A host cwd spelled with 8.3 short names matches the stored long form of
+	/// the same directory, so no redundant `set_working_dir` runs.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn short_spelled_cwd_matches_stored_long_form() {
+		let Some((_root, long, short)) = short_alias_fixture() else {
+			return;
+		};
+
+		let shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(long)
+			.build()
+			.await
+			.expect("build shell");
+
+		assert!(
+			shell_working_dir_matches(&shell, &short.to_string_lossy()),
+			"short spelling {} should match stored {}",
+			short.display(),
+			shell.working_dir().display()
+		);
+	}
+
 	#[cfg(unix)]
 	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let session = create_session(&config).await.expect("create_session");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -1947,6 +2392,40 @@ mod tests {
 		.expect("shell execution");
 		let output = rx.try_iter().collect();
 		(result, output)
+	}
+
+	/// Shell initialization must recover when a long-running host's inherited
+	/// working directory is deleted. This runs in a child process because cwd is
+	/// process-global.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shell_initializes_after_process_cwd_is_deleted() {
+		const MARKER: &str = "PI_SHELL_TEST_DELETED_CWD";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::shell_initializes_after_process_cwd_is_deleted",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("temporary cwd");
+		std::env::set_current_dir(dir.path()).expect("enter temporary cwd");
+		std::fs::remove_dir(dir.path()).expect("delete process cwd");
+
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let session = create_session(&config)
+			.await
+			.expect("initialize shell after deleted cwd");
+		let fallback = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
+		assert_eq!(session.shell.working_dir(), fallback);
 	}
 
 	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
@@ -2075,8 +2554,12 @@ mod tests {
 		let mut env = HashMap::new();
 		env.insert("GIT_DIR".to_string(), "/primary/.git".to_string());
 		env.insert("OMP_GIT_ENV_PROBE".to_string(), "kept".to_string());
-		let config =
-			ShellConfig { session_env: Some(env), snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   Some(env),
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 
 		let mut params = session.shell.default_exec_params();
@@ -2533,6 +3016,36 @@ mod tests {
 				.next()
 				.is_some_and(|value| value == pid.to_string())
 		}));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_lists_one_line_per_thread_with_m() {
+		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".
+		let pid = std::process::id().to_string();
+		let (result, output) = execute_captured(format!("ps -M -p {pid}")).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let mut lines = output.lines();
+		let header: Vec<&str> = lines
+			.next()
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect();
+		assert_eq!(header, ["USER", "PID", "TT", "%CPU", "STAT", "PRI", "STIME", "UTIME", "COMMAND"]);
+		let threads: Vec<Vec<&str>> = lines
+			.map(|line| line.split_whitespace().collect())
+			.collect();
+		// The multi-threaded tokio runtime guarantees several threads.
+		assert!(threads.len() > 1, "{output:?}");
+		// USER, TT and COMMAND print only on the first thread line.
+		assert_eq!(threads[0].get(1), Some(&pid.as_str()), "{output:?}");
+		assert!(threads[0].len() >= 9, "{output:?}");
+		for fields in &threads[1..] {
+			assert_eq!(fields.len(), 6, "{output:?}");
+			assert_eq!(fields[0], pid);
+			assert!(fields[1].parse::<f64>().is_ok(), "%CPU: {:?}", fields[1]);
+			#[cfg(target_os = "macos")]
+			assert!(fields[5].contains(':'), "UTIME: {:?}", fields[5]);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -3124,11 +3637,17 @@ mod tests {
 		std::fs::write(root.join("b"), b"same").expect("write b");
 		std::fs::write(root.join("c"), b"different").expect("write c");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 		session
 			.shell
 			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.await
 			.expect("set cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -3160,11 +3679,17 @@ mod tests {
 		let dir = tempfile::tempdir().expect("temp dir");
 		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 		session
 			.shell
 			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.await
 			.expect("set cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -3236,11 +3761,17 @@ mod tests {
 		}
 		std::fs::write(tmp.join("in.txt"), &input).expect("write input");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 		session
 			.shell
 			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.await
 			.expect("set cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -3299,9 +3830,18 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8 temp path");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(tmp_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3342,9 +3882,18 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8 temp path");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(tmp_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3397,11 +3946,17 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 		session
 			.shell
 			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.await
 			.expect("set cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -3422,10 +3977,12 @@ mod tests {
 			"cmp",
 			"combine",
 			"comm",
+			"cp",
 			"cut",
 			"date",
 			"diff",
 			"dirname",
+			#[cfg(unix)]
 			"errno",
 			"fd",
 			"find",
@@ -3524,11 +4081,17 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 		session
 			.shell
 			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.await
 			.expect("set cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
@@ -3597,10 +4160,18 @@ mod tests {
 
 		let mut env = HashMap::new();
 		env.insert("HOME".to_string(), home.to_string_lossy().to_string());
-		let config =
-			ShellConfig { session_env: Some(env), snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   Some(env),
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(cwd_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(cwd_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3637,9 +4208,18 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8 temp path");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(tmp_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3680,9 +4260,18 @@ mod tests {
 		std::fs::write(tmp.join("data.txt"), "l1\nl2\nl3\nl4\nl5\n").expect("write data");
 		let tmp_str = tmp.to_str().expect("utf8 temp path");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(tmp_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3731,9 +4320,18 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8 temp path");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("set cwd");
+		session
+			.shell
+			.set_working_dir(tmp_str)
+			.await
+			.expect("set cwd");
 
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
@@ -3773,9 +4371,14 @@ mod tests {
 		std::fs::write(tmp.join("sub/nested.txt"), "deep\n").expect("nested");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -3874,9 +4477,14 @@ mod tests {
 		std::fs::write(tmp.join("binary.bin"), b"needle\0hidden\n").expect("binary");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -3947,9 +4555,14 @@ mod tests {
 		std::fs::write(tmp.join(".fdignore"), "fdignored-needle.tmp\n").expect("fdignore");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4055,9 +4668,14 @@ mod tests {
 		std::fs::write(tmp.join("z-output.txt"), "from-cwd\n").expect("output seed");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4109,9 +4727,14 @@ mod tests {
 		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4168,9 +4791,14 @@ mod tests {
 		std::fs::write(tmp.join("tree/inner/leaf.txt"), "x").expect("leaf");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4212,9 +4840,14 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4247,9 +4880,14 @@ mod tests {
 		std::fs::write(tmp.join("sub/drop.tmp"), "d").expect("drop");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4334,9 +4972,14 @@ mod tests {
 		std::fs::write(tmp.join("conf.txt"), "x=1\n").expect("conf");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4374,9 +5017,14 @@ mod tests {
 		std::fs::create_dir_all(&tmp).expect("temp dir");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4424,9 +5072,14 @@ mod tests {
 		std::fs::write(tmp.join("in.json"), "{\"name\":\"pi\"}\n").expect("in.json");
 		let tmp_str = tmp.to_str().expect("utf8");
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
-		session.shell.set_working_dir(tmp_str).expect("cwd");
+		session.shell.set_working_dir(tmp_str).await.expect("cwd");
 		let mut params = session.shell.default_exec_params();
 		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
 		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
@@ -4466,7 +5119,12 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_head_stdin_read_is_cancellable() {
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 
 		// Hold the pipe's write end open with no data so `head` blocks reading.
@@ -4515,13 +5173,19 @@ mod tests {
 				.iter()
 				.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
 				.collect();
-			ShellConfig { session_env: Some(map), snapshot_path: None, minimizer: None }
+			ShellConfig {
+				session_env:   Some(map),
+				snapshot_path: None,
+				minimizer:     None,
+				filesystem:    Fs::native(),
+			}
 		};
 
 		let mut default = create_session(&ShellConfig {
 			session_env:   None,
 			snapshot_path: None,
 			minimizer:     None,
+			filesystem:    Fs::native(),
 		})
 		.await
 		.expect("create_session");
@@ -4665,6 +5329,119 @@ mod tests {
 
 		assert_eq!(result.exit_code, Some(1));
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+	}
+
+	/// Builtins share the host process, so a descriptor path must reach the
+	/// command's descriptors rather than the host's: the host's fd 0 is its
+	/// terminal (`cat /dev/stdin` once blocked on the TUI's keystrokes for
+	/// good) and its fd 2 is not the capture pipe. Covers a utility operand,
+	/// a redirect, a utility output file, and `source`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_reach_the_commands_descriptors() {
+		// The first command is the shape that hung the TUI.
+		let command = "for f in $(cat /dev/stdin <<'EOF'\na\nb\nEOF\n); do echo \"$f\"; done\necho \
+		               to-stderr > /dev/stderr\necho via-tee | tee /dev/stderr > /dev/null\nsource \
+		               /dev/stdin <<< 'echo sourced'";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("descriptor paths must not read the host terminal");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\nb\nto-stderr\nvia-tee\nsourced\n");
+	}
+
+	/// A descriptor the shell does not have fails like a closed one, instead
+	/// of reaching whatever the host process holds at that number.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_never_reach_host_only_descriptors() {
+		use std::os::fd::AsRawFd as _;
+
+		let dir = unique_temp_dir("host-fd");
+		let host_path = dir.join("host-only.txt");
+		std::fs::write(&host_path, "host-only\n").expect("write host file");
+		let host_file = std::fs::File::open(&host_path).expect("open host file");
+		let fd = host_file.as_raw_fd();
+		let command =
+			format!("cat /dev/fd/{fd}; echo \"rc=$?\"; cat < /proc/self/fd/{fd}; echo \"rc=$?\"");
+
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+		drop(host_file);
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert!(!output.contains("host-only"), "read a host-only descriptor: {output:?}");
+		assert_eq!(output.matches("rc=1").count(), 2, "both opens should fail: {output:?}");
+	}
+
+	/// `<(…)` operands resolve through the shell's descriptor table, so
+	/// utilities report the name the shell passed and script-file options read
+	/// them too.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn process_substitution_operands_keep_the_shell_fd_name() {
+		let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("process substitution should not hang");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "2 /dev/fd/63\n/dev/fd/63\nfrom-sed\n");
+	}
+
+	/// `sed`'s `w /dev/stdout` writes through sed's own output, as GNU sed
+	/// does: a second open of a redirected stdout truncates it and races the
+	/// primary output at its own offset.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sed_w_dev_stdout_shares_sed_output() {
+		let dir = unique_temp_dir("sed-w-stdout");
+		let command = format!(
+			"cd '{}'; printf 'a\\nb\\n' | sed 'w /dev/stdout' > f; cat f; printf 'c\\n' | sed -n \
+			 's/c/d/w /dev/stdout'",
+			dir.display()
+		);
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(&command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("sed should not hang");
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "a\na\nb\nb\nd\n");
+	}
+
+	/// A descriptor the shell lacks is reported under the name the user
+	/// typed, and `readlink` reads `/dev/stdin` as the symlink it is instead
+	/// of the descriptor behind it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_keep_their_spelling() {
+		let command = "pgrep -F /dev/fd/9; sed 'w /dev/fd/9' <<< x; readlink /dev/stdin <<< x";
+		let (_, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(command, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("closed descriptor paths should fail fast");
+
+		assert!(!output.contains("/dev/fd/-1"), "leaked the placeholder path: {output:?}");
+		assert!(output.contains("cannot read pidfile '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.contains("creating file '/dev/fd/9'"), "output: {output:?}");
+		assert!(output.ends_with("/proc/self/fd/0\n"), "output: {output:?}");
 	}
 
 	#[cfg(unix)]
@@ -5046,7 +5823,12 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 
 		// Build the same kind of session pi-natives uses in production.
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 
 		// Output pipe shared between the brush child and a concurrent reader. The
@@ -5359,7 +6141,12 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let host_sid = unsafe { libc::getsid(0) };
 		assert!(host_sid >= 0, "getsid(0) failed: {}", std::io::Error::last_os_error());
 
-		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
 		let mut session = create_session(&config).await.expect("create_session");
 
 		let (mut reader, writer) = pipe_to_files("e2e-pipe").expect("pipe");

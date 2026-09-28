@@ -726,6 +726,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsReasoningSummary: !isXaiHost,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
+		supportsSteering: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,
@@ -832,6 +833,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
+		supportsSteering: compat.supportsSteering,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,
@@ -1237,6 +1239,15 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
 	const identity = resolveIdentity(spec);
 	const discoveryApi = resolveCascade(buildResolveTarget(spec, identity, providerType)).catalog.discoveryApi;
 	return typeof discoveryApi === "string" ? discoveryApi : spec.api;
+}
+
+/**
+ * Catalog-data axis assignments for one model spec — the `catalog` field of
+ * {@link resolveModelPolicy} without resolving the compat and thinking
+ * policies, which dominate its cost on catalog-wide scans.
+ */
+export function resolveCatalogAxes(spec: ModelSpec<Api>): Record<string, unknown> {
+	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
 }
 
 /**

@@ -12,36 +12,58 @@ beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
 }, 15_000);
 
-const SKIP_TEXT =
-	"Skipped due to pending peer interrupt. Do not count this skipped result as completed work or verification. After the interrupt is handled on the next step, retry the skipped tool if it is still needed.";
+const SKIP_TEXT = "Skipped due to a queued background completion (job or supervised process).";
 
-function renderSkippedEdit(details: unknown): string {
+function renderTool(
+	name: "edit" | "wait",
+	result: { content: Array<{ type: string; text: string }>; details?: unknown; isError?: boolean },
+	options: { expanded?: boolean; rows?: number } = {},
+): string {
 	const tui = new TUI(new VirtualTerminal(120, 20));
-	const component = new ToolExecutionComponent("edit", { path: "hub/src/viewer/session.ts" }, {}, undefined, tui);
-	component.updateResult({ content: [{ type: "text", text: SKIP_TEXT }], details, isError: true }, false);
+	const component = new ToolExecutionComponent(
+		name,
+		name === "edit" ? { path: "hub/src/viewer/session.ts" } : {},
+		{},
+		undefined,
+		tui,
+	);
+	component.updateResult(result, false);
+	component.setExpanded(options.expanded ?? false);
+	component.setTranscriptAllocation(options.rows ?? 20, { tick: 0, now: 0 });
 	return Bun.stripANSI(component.render(120).join("\n"));
 }
 
 describe("mid-turn steering skip rendering", () => {
-	it("renders both pending and in-flight interrupt skips as info, not errors", async () => {
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("dark theme missing");
-		const errorIcon = Bun.stripANSI(formatStatusIcon("error", uiTheme));
-		const infoIcon = Bun.stripANSI(formatStatusIcon("info", uiTheme));
+	it("hides skipped waits in collapsed, expanded, and compact views", () => {
 		const skipDetails = [
 			{ __synthetic: true, source: "interrupt_skipped", executed: false },
 			{ __interrupted: true, source: "interrupt_skipped", execution: "started" },
 		];
 
 		for (const details of skipDetails) {
-			const rendered = renderSkippedEdit(details);
-
-			expect(rendered).toContain(infoIcon);
-			expect(rendered).not.toContain(errorIcon);
-			// The bespoke edit error frame must be gone — a skip is not a failure.
-			expect(rendered).not.toContain("╭");
-			expect(rendered).toContain("Skipped due to pending peer interrupt");
+			const result = { content: [{ type: "text", text: SKIP_TEXT }], details, isError: true };
+			expect(renderTool("wait", result)).toBe("");
+			expect(renderTool("wait", result, { expanded: true })).toBe("");
+			expect(renderTool("wait", result, { rows: 1 })).toBe("");
 		}
+	});
+
+	it("preserves other skipped tool cards and real wait results", async () => {
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("dark theme missing");
+		const infoIcon = Bun.stripANSI(formatStatusIcon("info", uiTheme));
+		const skippedEdit = renderTool("edit", {
+			content: [{ type: "text", text: SKIP_TEXT }],
+			details: { __synthetic: true, source: "interrupt_skipped", executed: false },
+			isError: true,
+		});
+		expect(skippedEdit).toContain(infoIcon);
+
+		const realWait = renderTool("wait", {
+			content: [{ type: "text", text: "No background work to wait for" }],
+			details: { op: "wait", jobs: [] },
+		});
+		expect(realWait).toContain("No background work to wait for");
 	}, 15_000);
 
 	it("still renders a genuine edit failure as an error", async () => {
@@ -49,9 +71,7 @@ describe("mid-turn steering skip rendering", () => {
 		if (!uiTheme) throw new Error("dark theme missing");
 		const errorIcon = Bun.stripANSI(formatStatusIcon("error", uiTheme));
 
-		// A real tool failure carries no synthetic discriminator and must keep the
-		// error styling — the fix only neutralizes benign interrupt skips.
-		const rendered = renderSkippedEdit({});
+		const rendered = renderTool("edit", { content: [{ type: "text", text: SKIP_TEXT }], details: {}, isError: true });
 
 		expect(rendered).toContain(errorIcon);
 	}, 15_000);

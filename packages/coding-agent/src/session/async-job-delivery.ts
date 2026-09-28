@@ -26,6 +26,11 @@ export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
+/**
+ * Tail share of the preview when the link points at a raw capture: tools append
+ * notices (wall time, exit code, timeout) after the captured stream.
+ */
+export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
 export interface AsyncResultEntry {
 	jobId: string;

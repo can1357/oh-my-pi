@@ -139,6 +139,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
+	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -303,11 +304,33 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/**
+	 * The host accepts a prompt plus `max_tokens` beyond the context window and
+	 * ends generation at the window (Anthropic `model_context_window_exceeded`)
+	 * instead of rejecting the request, so callers must not lower the output cap
+	 * to fit the window.
+	 */
+	"stops-output-at-context-window": {
+		key: "stopsOutputAtContextWindow",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"clamp-context-override": { key: "clampContextOverride", set: "catalog", shape: "scalar" },
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
+	/**
+	 * The host bills cache-hit input tokens at the full input rate (no cache
+	 * discount), so the built row's `cacheRead` tracks its live `input` price.
+	 */
+	"cache-read-at-input-rate": {
+		key: "cacheReadAtInputRate",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -318,10 +341,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		key: "webSearch",
 		set: "catalog",
 		shape: "scalar",
-		values: ["gemini", "anthropic", "codex", "xai", "openrouter"],
+		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {
@@ -335,6 +359,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 	},
 	"supports-assistant-prefill": { key: "supportsAssistantPrefill", set: "catalog", shape: "scalar" },
+	/**
+	 * Ordered Anthropic model ids forwarded as the server-side `fallbacks`
+	 * chain when the user opts in. Each must appear in the requested model's
+	 * `allowed_fallback_models` (GET /v1/models/{id}); anything else is a 400.
+	 */
+	"server-side-fallback-models": { key: "serverSideFallbackModels", set: "catalog", shape: "array" },
+	/**
+	 * Anthropic model ids a refusal's `fallback_credit_token` may be redeemed
+	 * on (the refused model's permitted fallback targets). Unordered; a retry
+	 * on any other model cannot redeem the credit.
+	 */
+	"fallback-credit-targets": { key: "fallbackCreditTargets", set: "catalog", shape: "array" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },

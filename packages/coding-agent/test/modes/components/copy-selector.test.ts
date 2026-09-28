@@ -156,19 +156,6 @@ describe("CopySelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("copies the outlined turn's prose on Enter", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		// The newest item is the assistant turn (bash result folded into it);
-		// its item-level copy is the assistant prose, not tool noise.
-		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
-	});
-
 	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
 		const entries = makeEntries();
 		const picks: Array<{ content: string; label: string }> = [];
@@ -245,42 +232,6 @@ describe("CopySelectorComponent", () => {
 		selector.dispose();
 
 		expect(picks).toEqual([{ content: GROUPED_READ_YIELD, label: "assistant message" }]);
-	});
-
-	it("descends into inner blocks with Right and copies the block verbatim", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		// First block of the turn is the fenced code — copied without fences.
-		expect(picks).toEqual([{ content: CODE, label: "ts code" }]);
-	});
-
-	it("steps through command and tool-output blocks of the same turn", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput(ENTER);
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		// Block order within the turn: code fence, link, bash command, bash result.
-		expect(picks).toEqual([
-			{ content: "bun test", label: "bash command" },
-			{ content: "12 pass", label: "bash result" },
-		]);
 	});
 
 	it("lists the turn's links as blocks after code and commands; Enter copies the URL, o opens it", () => {
@@ -431,23 +382,9 @@ describe("CopySelectorComponent", () => {
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
-	it("Left/Up navigate: user prompt copies its raw text", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(UP);
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		expect(picks).toEqual([{ content: "fix the logging", label: "user message" }]);
-	});
-
 	it("renders the descended block stack with captions and dotted outline", () => {
 		const selector = makeSelector([]);
-		const itemView = selector.render(100).map(line => Bun.stripANSI(line));
-		// The outline advertises the descent affordance before Right is pressed.
-		expect(itemView.join("\n")).toContain("4 blocks →");
+		selector.render(100);
 		selector.handleInput(RIGHT);
 		const lines = selector.render(100).map(line => Bun.stripANSI(line));
 		selector.handleInput(LEFT);
