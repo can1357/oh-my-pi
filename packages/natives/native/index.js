@@ -122,6 +122,7 @@ export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExpo
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missingNativeExport("structuredPatchHunks");
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
+export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
 export const supportsLanguage = nativeBindings.supportsLanguage ?? missingNativeExport("supportsLanguage");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");

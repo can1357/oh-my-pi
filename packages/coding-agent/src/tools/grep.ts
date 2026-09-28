@@ -326,15 +326,18 @@ type SearchParams = typeof searchSchema.infer;
 /**
  * Construction-time overrides for callers that are not the model.
  *
- * The model-facing schema deliberately does not grow these: they exist for
- * wire bridges (the Cursor `pi_grep` frame) whose protocol carries an explicit
- * context width and total match cap, and which would otherwise have to drop
- * them. Unset means "use the session settings / built-in caps" — the behavior
- * every model-issued call keeps.
+ * The model-facing schema deliberately does not grow these: Cursor's native
+ * grep frames carry context widths and match caps that the shared tool cannot
+ * accept per call. Unset means "use session settings / built-in caps" for
+ * ordinary model-issued calls.
  */
 export interface GrepToolOptions {
-	/** Overrides `grep.contextBefore`/`grep.contextAfter` for every call on this instance. */
+	/** Overrides both context widths unless the corresponding direction is also supplied. */
 	context?: number;
+	/** Overrides the number of lines before each match. */
+	contextBefore?: number;
+	/** Overrides the number of lines after each match. */
+	contextAfter?: number;
 	/** Caps total surfaced matches. Applied on top of the built-in per-file and file-window caps, never above them. */
 	totalMatchLimit?: number;
 }
@@ -365,15 +368,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly parameters = searchSchema;
 	readonly strict = true;
 
-	readonly #contextOverride?: number;
+	readonly #contextBeforeOverride?: number;
+	readonly #contextAfterOverride?: number;
 	readonly #totalMatchLimit?: number;
 
 	constructor(
 		private readonly session: ToolSession,
 		options?: GrepToolOptions,
 	) {
-		const context = options?.context;
-		this.#contextOverride = context !== undefined ? Math.max(0, Math.floor(context)) : undefined;
+		const before = options?.contextBefore ?? options?.context;
+		const after = options?.contextAfter ?? options?.context;
+		this.#contextBeforeOverride = before !== undefined ? Math.max(0, Math.floor(before)) : undefined;
+		this.#contextAfterOverride = after !== undefined ? Math.max(0, Math.floor(after)) : undefined;
 		const total = options?.totalMatchLimit;
 		this.#totalMatchLimit = total !== undefined ? Math.max(1, Math.floor(total)) : undefined;
 	}
@@ -442,8 +448,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							`or pass a UTF-8 text member.`,
 					);
 				}
-				const normalizedContextBefore = this.#contextOverride ?? cfgGrepContextBefore.get(this.session.settings);
-				const normalizedContextAfter = this.#contextOverride ?? cfgGrepContextAfter.get(this.session.settings);
+				const normalizedContextBefore =
+					this.#contextBeforeOverride ?? cfgGrepContextBefore.get(this.session.settings);
+				const normalizedContextAfter = this.#contextAfterOverride ?? cfgGrepContextAfter.get(this.session.settings);
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");

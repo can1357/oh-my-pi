@@ -486,6 +486,20 @@ describe("CopySelectorComponent", () => {
 		}
 	});
 
+	it("steps Up past the oldest replayed turn into the earlier history", () => {
+		const entries = promptChain(900);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			selector.render(100);
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+			expect(picks).toEqual([{ content: "prompt 0", label: "user message" }]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
 	it("keeps a copyable target when the final turn is longer than the replay cap", () => {
 		// Cutting blindly at `length - limit` would start the tail inside the
 		// tool results, whose calls are gone: the builder drops them and the

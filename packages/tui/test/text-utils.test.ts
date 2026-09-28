@@ -30,6 +30,35 @@ describe("text utils", () => {
 		expect(visibleWidth("\x1b[31mhello\x1b[0m")).toBe(visibleWidth("hello"));
 	});
 
+	it("counts ASCII SGR spans without counting their parameter bytes", () => {
+		expect(visibleWidth("\x1b[m\x1b[1;38;2;255;128;0mhello ~\x1b[;m")).toBe(7);
+		expect(visibleWidth("\x1b[0m\x1b[31m")).toBe(0);
+		const longLine = "\x1b[38;5;123mhello\x1b[0m ".repeat(100);
+		expect(visibleWidth(longLine)).toBe(600);
+	});
+
+	it("preserves native width semantics and corrections after an ASCII SGR prefix", () => {
+		for (const suffix of [
+			"\x1b",
+			"\x1b[",
+			"\x1b[31",
+			"\x1b[31 ",
+			"\x1b[2Ktail",
+			"\x1b[38:2::255:0:0mred",
+			"\x1b]8;;https://example.com\x07link\x1b]8;;\x07",
+			"界",
+			"\r\n",
+			"\x7f",
+		]) {
+			const text = `\x1b[31mASCII\x1b[0m${suffix}`;
+			expect(visibleWidth(text)).toBe(
+				Bun.stringWidth(text, { countAnsiEscapeCodes: false, ambiguousIsNarrow: true }),
+			);
+		}
+		expect(visibleWidth("\x1b[31mASCII\x1b[0m\x1b_payload\x07")).toBe(5);
+		expect(visibleWidth("\x1b[31mASCII\x1b[0m\x1b]66;s=2;Hi\x07")).toBe(9);
+	});
+
 	it("counts a VS16 emoji-presentation symbol as 2 cells", () => {
 		// A default-text-presentation symbol followed by variation-selector-16
 		// (U+FE0F) renders in emoji presentation = 2 cells. The native scanner

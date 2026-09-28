@@ -2,9 +2,28 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the setup wizard's "Web search" tab; the providers scene is now sign-in only, and web search is chosen through the `web` model role like other kind roles.
+
+### Fixed
+
+- Fixed the `@` completion popup showing a `Searching…` placeholder while a refreshed file search is pending; the popup now stays hidden until results arrive, and Escape is no longer swallowed by it
+- Fixed multi-line IME and dictation input (for example, voice input in Ghostty or cmux) being sent as one message per line; it now lands in the prompt as a single multi-line draft, while Enter typed during a UI freeze still submits ([#13378](https://github.com/can1357/oh-my-pi/pull/13378) by [@goransh-walia](https://github.com/goransh-walia))
+
+## [18.4.2] - 2026-09-28
+
+### Changed
+
+- Optimized activity clock rendering by caching timestamp formatting strings
+- Reduced CPU overhead during animated terminal redraws, transcript updates, inline-image bookkeeping, and status-line layout.
+- Reduced per-keystroke CPU in `^` model-mention autocomplete and per-frame CPU while streaming (status line, live transcript blocks, tool cards, frame writes).
+
 ### Fixed
 
 - Fixed the `@` completion popup swallowing Tab and cursor-movement keys while a narrowed filter matched nothing: with no candidate to accept they now fall through to their normal completion and cursor roles instead of being trapped ([#13046](https://github.com/can1357/oh-my-pi/pull/13046) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed the Esc-Esc rewind and fullscreen `/copy` selectors getting stuck at the oldest turn of a long session's recent tail; stepping past it now loads the earlier history
+- Fixed the composer attachment band showing chip `#1` (and other prefix IDs) as still present when only `#10` remained in the prompt ([#13605](https://github.com/can1357/oh-my-pi/issues/13605))
 
 ## [18.4.1] - 2026-09-28
 

@@ -1216,24 +1216,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	invalidatePendingFocus(): void {
 		this.#focusController.invalidatePendingFocus();
 	}
-	/**
-	 * Whether inline mouse capture is opted in. Never throws: the render hot
-	 * path reads this every frame, including in suites (or teardown races)
-	 * where the global singleton is uninitialized or the session carries it
-	 * dead — both fall back to off.
-	 */
-	#isMouseCaptureEnabled(): boolean {
-		try {
-			if (cfgTuiMouse.get(settings) === true) return true;
-		} catch {
-			// Global singleton unavailable; try the mode's own settings below.
-		}
-		try {
-			return cfgTuiMouse.get(this.settings) === true;
-		} catch {
-			return false;
-		}
-	}
 
 	resolveViewportClickCandidates(index: number): string[] {
 		return this.composer.viewportClickCandidates(index);
@@ -1301,6 +1283,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBus?: EventBus;
 	#subagentEventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
+	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
+	#mouseCapture = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
 	#runningSubagentCount = 0;
@@ -1402,20 +1386,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
 		applyHyperlinkSetting();
-		this.ui.setInlineMouseTrackingProvider(() => {
-			const on = this.#isMouseCaptureEnabled();
-			// Dropping capture must also drop the band: with reporting off no
-			// motion event will ever arrive to clear a mid-hover highlight.
-			// The controller cache goes too, or a re-enable plus motion over
-			// the same card would look unchanged and skip restoring the band.
-			if (!on) {
-				this.composer.setHoveredClickId(undefined);
-				// The provider can fire from a synchronous forced render before
-				// init reaches the controller block below.
-				this.#inputController?.clearHoverHighlight();
-			}
-			return on;
-		});
+		// The TUI polls the provider every frame, so it reads a field kept in sync by
+		// subscription rather than resolving the setting per render.
+		// Session settings overlay the global layer and forward its changes.
+		this.#mouseCapture = cfgTuiMouse.get(this.settings);
+		this.#eventBusUnsubscribers.push(
+			cfgTuiMouse.listen(this.settings, on => {
+				this.#mouseCapture = on;
+				// Dropping capture must also drop the band: with reporting off no
+				// motion event will ever arrive to clear a mid-hover highlight.
+				// The controller cache goes too, or a re-enable plus motion over
+				// the same card would look unchanged and skip restoring the band.
+				if (!on) {
+					this.composer.setHoveredClickId(undefined);
+					this.#inputController?.clearHoverHighlight();
+				}
+				this.ui.requestRender();
+			}),
+		);
+		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();

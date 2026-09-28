@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
@@ -487,7 +487,9 @@ export async function buildSkillPromptMessage(
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
-	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
+	// diagnostics to the loader, which already parsed this frontmatter.
+	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
 	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {

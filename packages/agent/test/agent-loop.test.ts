@@ -1561,7 +1561,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(unknownText).toContain("Tool nope not found");
 	});
 
-	it("runs shared tools in parallel and emits completion-ordered results", async () => {
+	it("runs shared tools in parallel and records results in call order", async () => {
 		const toolSchema = type({ value: "string" });
 		const startTimes: Record<string, number> = {};
 		const finishTimes: Record<string, number> = {};
@@ -1632,13 +1632,18 @@ describe("agentLoop with AgentMessage", () => {
 				e.type === "message_start" && e.message.role === "toolResult",
 		);
 		expect(toolResultStarts).toHaveLength(2);
-		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-2");
-		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[0].message as ToolResultMessage).toolCallId).toBe("tool-1");
+		expect((toolResultStarts[1].message as ToolResultMessage).toolCallId).toBe("tool-2");
+		// Live execution events still report the fast call as soon as it settles.
+		expect(events.flatMap(e => (e.type === "tool_execution_end" ? [e.toolCallId] : []))).toEqual([
+			"tool-2",
+			"tool-1",
+		]);
 
 		const turnEndEvent = events.find((e): e is Extract<AgentEvent, { type: "turn_end" }> => e.type === "turn_end");
 		expect(turnEndEvent).toBeDefined();
 		if (!turnEndEvent) return;
-		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-2", "tool-1"]);
+		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-1", "tool-2"]);
 	});
 
 	it("resolves function-form concurrency per call", async () => {
@@ -6148,6 +6153,71 @@ describe("agentLoop streaming snapshots", () => {
 		expect(cloned.str).toBe("hi");
 		expect(cloned.flag).toBe(true);
 		expect(cloned.nul).toBeNull();
+	});
+
+	it("isolates snapshots from providers that mutate streaming arguments in place", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+
+		// Owned-stream / GLM style: the live arguments object and its nested
+		// containers are mutated in place between deltas. `__proto__` arrives as
+		// an own data key the way JSON.parse produces it.
+		const args: Record<string, unknown> = JSON.parse('{"__proto__":{"k":1},"meta":{"tags":["a"]},"content":""}');
+		const toolCall = { type: "toolCall" as const, id: "tc-inplace", name: "noop", arguments: args };
+		const partial = createAssistantMessage([], "toolUse");
+		let advance = (): void => {};
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			if (turn++ > 0) {
+				const done = createAssistantMessage([{ type: "text", text: "ok" }], "stop");
+				stream.push({ type: "start", partial: done });
+				stream.push({ type: "done", reason: "stop", message: done });
+				return stream;
+			}
+			stream.push({ type: "start", partial });
+			const steps: (() => void)[] = [
+				() => {
+					partial.content.push(toolCall);
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+				},
+				...["x", "y", "z"].map(delta => () => {
+					args.content = `${args.content}${delta}`;
+					const meta = args.meta;
+					if (meta && typeof meta === "object" && "tags" in meta && Array.isArray(meta.tags))
+						meta.tags.push(delta);
+					stream.push({ type: "toolcall_delta", contentIndex: 0, delta, partial });
+				}),
+				() => stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial }),
+				() => stream.push({ type: "done", reason: "toolUse", message: partial }),
+			];
+			let step = 0;
+			advance = () => {
+				if (step < steps.length) steps[step++]!();
+			};
+			return stream;
+		};
+
+		const seen: { event: AgentEvent; json: string }[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, streamFn)) {
+			if (event.type === "message_update" && turn === 1) seen.push({ event, json: JSON.stringify(event) });
+			if (
+				(event.type === "message_start" && event.message.role === "assistant") ||
+				event.type === "message_update"
+			) {
+				advance();
+			}
+		}
+
+		expect(seen.length).toBe(5);
+		for (const { event, json } of seen) expect(JSON.stringify(event)).toBe(json);
+		const first = seen[1]!.event;
+		if (first.type !== "message_update" || first.message.role !== "assistant") throw new Error("expected update");
+		const block = first.message.content[0];
+		if (block?.type !== "toolCall") throw new Error("expected toolCall");
+		expect(block.arguments).toEqual({ meta: { tags: ["a", "x"] }, content: "x", ["__proto__"]: { k: 1 } });
+		expect(Object.hasOwn(block.arguments, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(block.arguments)).toBe(Object.prototype);
 	});
 
 	it("shares one immutable snapshot between message and assistantMessageEvent.partial on message_update", async () => {

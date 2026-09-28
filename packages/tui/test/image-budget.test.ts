@@ -268,6 +268,75 @@ describe("ImageBudget", () => {
 		expect(result.suppressed).toEqual([false, false, false]);
 	});
 
+	it("replaces suppression snapshots independently across surfaces and empty passes", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) budget.observe(id);
+			return budget.endPass();
+		};
+
+		expect(observePass([1, 2, 3])).toBe(true);
+		expect(observePass([1, 2, 3])).toBe(false);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([4, 5], true)).toBe(true);
+		expect(observePass([4, 5], true)).toBe(false);
+
+		// Replacing and shrinking the screen prefix must neither retain old ids
+		// nor mutate the independently committed alternate-buffer prefix.
+		expect(observePass([6, 7])).toBe(false);
+		budget.beginPass(true);
+		expect([1, 2, 6, 7].map(id => budget.observe(id))).toEqual([false, false, true, false]);
+		budget.beginPass(true, true);
+		expect([4, 5, 6].map(id => budget.observe(id))).toEqual([true, false, false]);
+
+		budget.beginAltScreenLifecycle();
+		budget.beginPass(true, true);
+		expect(budget.observe(4)).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(true);
+
+		expect(observePass([])).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(false);
+	});
+
+	it("replaces live snapshots without losing the other surface's retirement protection", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) {
+				if (!budget.observe(id)) budget.enqueueTransmit(id, `TX${id}`);
+			}
+			const retry = budget.endPass();
+			if (!retry) budget.limitResidentImages();
+			return retry;
+		};
+
+		expect(observePass([1])).toBe(false);
+		expect(budget.takeTransmits()).toEqual(["TX1"]);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([1, 2], true)).toBe(true);
+		expect(observePass([1, 2], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(budget.takeTransmits()).toEqual(["TX1", "TX2"]);
+
+		// The first pass relaxes the old threshold; the next transmits id 3.
+		expect(observePass([3], true)).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([2]);
+		expect(budget.takeTransmits()).toEqual(["TX3"]);
+		expect(budget.shouldTransmit(1)).toBe(false);
+
+		// Removing the screen frame releases its protection. The next alternate
+		// pass may retire id 1, but must keep its own current graphic, id 3.
+		expect(observePass([])).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([1]);
+		expect(budget.shouldTransmit(1)).toBe(true);
+		expect(budget.shouldTransmit(3)).toBe(false);
+	});
+
 	it("replays the committed live/text split by id during a stable (partial) pass", () => {
 		const budget = new ImageBudget(2, () => {});
 		// Settle to the steady split for 4 images at cap 2: oldest two (ids 1,2)

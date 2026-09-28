@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the Codex image model `openai-codex/gpt-image-1` to `openai-codex/gpt-image-2` to match what the Codex backend runs (`gpt-image-2-codex`); update `image` roles that name the old id.
+
+### Added
+
+- Added the `web-search-model`, `hosted-image`, and `image-model` catalog axes (`Model.webSearchModel`, `hostedImage`, `imageModel`). `web-search` now comes from the model's lineage and API (GPT-5+ Responses, Claude 4+ Messages, Gemini 2+), so proxies and gateways that expose these models inherit it.
+
+## [18.4.2] - 2026-09-28
+
+### Changed
+
+- Improved model cache invalidation efficiency by implementing deep equality checks on cached rows when database version signals change
+- Optimized read-row cache by enabling granular cache-hit logic across concurrent connection handles
+
 ## [18.4.1] - 2026-09-28
 
 ### Added
