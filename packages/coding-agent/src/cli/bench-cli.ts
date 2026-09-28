@@ -42,9 +42,11 @@ import {
 import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
+import { isLocalOpenAICompatBackend } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "../session/settings";
 
 const DEFAULT_PAR = 4;
+const DEFAULT_PAR_LOCAL = 1;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
 const DEFAULT_CACHE_PREFIX_BYTES = 8_192;
 const DEFAULT_CACHE_PAIRS = 1;
@@ -1083,8 +1085,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			? normalizePositiveInteger("max-tokens", command.flags.maxTokens, 1)
 			: undefined;
 	const cacheMaxTokens = cacheMode ? (maxTokensOverride ?? DEFAULT_CACHE_MAX_TOKENS) : undefined;
-	const par =
-		command.flags.par !== undefined ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
+	const parExplicit = command.flags.par !== undefined;
+	const par = parExplicit ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
 	if (detailed && par < 2) throw new Error("--detailed needs --par of at least 2 for its parallel phase");
 	const promptOverride = command.flags.prompt?.trim() || undefined;
 	const explicitPrefillBytes =
@@ -1092,11 +1094,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			? normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES)
 			: undefined;
 	const kinds: readonly BenchChallengeKind[] = profile === "mix" ? CHALLENGE_KINDS : [profile];
-	const steps: BenchStep[] = detailed
-		? detailedSteps(runsPerStep, par)
-		: [{ kinds, runs: runsPerStep, concurrency: par }];
-	const runs = cacheMode ? cachePairs! * 2 : steps.reduce((sum, step) => sum + step.runs, 0);
-	const tableSpec = detailed ? detailedTableSpec(par) : profileTableSpec(kinds);
+	// Steps depend on the per-target local-provider par default resolved below.
+	let steps: BenchStep[];
+	let runs: number;
+	let tableSpec: BenchTableSpec;
 	// Detailed phases each run a single kind under a phase header; only a mixed profile needs per-run kind tags.
 	const tagKind = kinds.length > 1;
 	const random = deps.random ?? Math.random;
@@ -1153,6 +1154,25 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	try {
 		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
+		const localTargets = targets.filter(target => isLocalOpenAICompatBackend(target.model));
+		// A whole run on local providers defaults to par 1: one local KV cache
+		// cannot serve parallel phases without thrash. Mixed runs keep `par`
+		// so every phase reports what it measured; pass --par 1 there to
+		// measure the local models without interference.
+		const effectivePar =
+			!parExplicit && targets.length > 0 && localTargets.length === targets.length ? DEFAULT_PAR_LOCAL : par;
+		steps = detailed ? detailedSteps(runsPerStep, effectivePar) : [{ kinds, runs: runsPerStep, concurrency: par }];
+		runs = cacheMode ? cachePairs! * 2 : steps.reduce((sum, step) => sum + step.runs, 0);
+		tableSpec = detailed ? detailedTableSpec(effectivePar) : profileTableSpec(kinds);
+		if (!cacheMode && !parExplicit && localTargets.length > 0) {
+			writeStderr(
+				chalk.dim(
+					localTargets.length === targets.length
+						? `local provider detected — using --par ${DEFAULT_PAR_LOCAL} for those models (KV cache thrash would dominate with ${DEFAULT_PAR} parallel slots)\n`
+						: `local provider detected (${localTargets.map(t => t.model.id).join(", ")}) — keeping --par ${par} for the mixed run; pass --par 1 to measure the local models alone\n`,
+				),
+			);
+		}
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
 		// otherwise fall back to the configured per-family `tier.*` settings. Each
 		// model resolves its own family's tier below before reaching the wire.
@@ -1299,16 +1319,22 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			// Steps run back to back so one phase's load never skews the next.
 			for (const step of steps) {
 				const { phase } = step;
+				// Plain mode: clamp local models per target. Detailed mode already
+				// planned a single parallel-phase par, so reuse it unchanged.
+				const stepPar =
+					!detailed && !parExplicit && isLocalOpenAICompatBackend(model)
+						? Math.min(step.concurrency, DEFAULT_PAR_LOCAL)
+						: step.concurrency;
 				if (!json && phase) {
 					print(
-						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(`· ${step.concurrency} concurrent · ${step.runs} runs`)}`,
+						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(`· ${stepPar} concurrent · ${step.runs} runs`)}`,
 					);
 				}
 				const finished: BenchRunResult[] = [];
 				const startedAt = now();
 				// Runs finish out of order under concurrency; lines print in index order.
 				let nextToPrint = 0;
-				await runWithConcurrency(step.runs, step.concurrency, async index => {
+				await runWithConcurrency(step.runs, stepPar, async index => {
 					const runIndex = offset + index;
 					const sessionId = runIndex === 0 ? testSessionId : randomSessionId();
 					const challenge = buildBenchChallenge(step.kinds[index % step.kinds.length]!, {
@@ -1343,7 +1369,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					progress.inFlight--;
 					progress.completed++;
 					if (!result.ok) progress.failed++;
-					if (phase) phases[phase] = buildPhaseReport(step.concurrency, finished, now() - startedAt);
+					if (phase) phases[phase] = buildPhaseReport(stepPar, finished, now() - startedAt);
 					row.report = buildModelReport(selector, model, thinking, results, phases);
 					board?.repaint();
 					if (!json) {
@@ -1379,7 +1405,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			...(cacheMode
 				? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } }
 				: detailed
-					? { detailed: { runsPerPhase: runsPerStep, par } }
+					? { detailed: { runsPerPhase: runsPerStep, par: effectivePar } }
 					: { profile }),
 		};
 		if (json) {
