@@ -80,6 +80,9 @@ export function detectKittyUnicodePlaceholdersSupport(terminalId: string, env: N
 	if (force === "1" || force === "true" || force === "on" || force === "yes" || force === "y") return true;
 	if (force === "0" || force === "false" || force === "off" || force === "no" || force === "n") return false;
 	const insideMultiplexer = isInsideTerminalMultiplexer(env);
+	// Zellij 0.45 implements classic Kitty placements but explicitly rejects
+	// Unicode placeholders. Let it intercept and track direct placements instead.
+	if (env.ZELLIJ) return false;
 	if (insideMultiplexer && env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase() === "kitty") return true;
 	if (isInsideHerdr(env)) return false;
 	return terminalId === "kitty" || terminalId === "ghostty" || terminalId === "otty" || terminalId === "rio";
