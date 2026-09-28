@@ -667,6 +667,16 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 	};
 }
 
+/** How a session transition ended, as seen by a settled observer. */
+export interface SessionTransitionOutcome {
+	/**
+	 * The transition restored the previous state instead of keeping the new one.
+	 * A same-file reload does this under an unchanged session id, so an observer
+	 * cannot infer it by comparing ids.
+	 */
+	rolledBack: boolean;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -970,6 +980,8 @@ export class AgentSession implements SettingsScope {
 	#sessionTransitionSettled: Promise<void> | undefined;
 	#resolveSessionTransition: (() => void) | undefined;
 	#sessionTransitionDepth = 0;
+	#sessionTransitionInFlightDepth = 0;
+	#sessionTransitionSettledCallbacks = new Set<(outcome: SessionTransitionOutcome) => void>();
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -5378,6 +5390,7 @@ export class AgentSession implements SettingsScope {
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
+		this.#sessionTransitionSettledCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -8957,7 +8970,7 @@ export class AgentSession implements SettingsScope {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
-		using _transition = this.#beginSessionTransition();
+		using guard = this.#beginSessionTransitionGuard();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
@@ -9017,6 +9030,7 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			guard.commit();
 			// Re-apply the configured selector so the new session does not inherit
 			// the previous session's auto-classified effort: auto stays auto but
 			// restarts at the provisional level; a pinned level re-resolves to itself.
@@ -9093,7 +9107,7 @@ export class AgentSession implements SettingsScope {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
-		using _transition = this.#beginSessionTransition();
+		using guard = this.#beginSessionTransitionGuard();
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
@@ -9148,6 +9162,7 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			guard.commit();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -10345,7 +10360,7 @@ export class AgentSession implements SettingsScope {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
-		using _transition = this.#beginSessionTransition();
+		using guard = this.#beginSessionTransitionGuard();
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -10465,6 +10480,7 @@ export class AgentSession implements SettingsScope {
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
 			this.#syncAgentSessionId(undefined, false);
+			guard.commit();
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
@@ -10617,6 +10633,9 @@ export class AgentSession implements SettingsScope {
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			// A same-file reload restores the transcript under an unchanged id, so
+			// an id comparison cannot detect this. Observers are told the outcome.
+			guard.rollback();
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -10714,7 +10733,7 @@ export class AgentSession implements SettingsScope {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
-		using _transition = this.#beginSessionTransition();
+		using guard = this.#beginSessionTransitionGuard();
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -10783,6 +10802,7 @@ export class AgentSession implements SettingsScope {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			guard.commit();
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -10822,7 +10842,7 @@ export class AgentSession implements SettingsScope {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
-		using _transition = this.#beginSessionTransition();
+		using guard = this.#beginSessionTransitionGuard();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
@@ -10921,6 +10941,7 @@ export class AgentSession implements SettingsScope {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			guard.commit();
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -12452,6 +12473,70 @@ export class AgentSession implements SettingsScope {
 	 */
 	hasExtensionHandlers(eventType: string): boolean {
 		return this.#extensionRunner?.hasHandlers(eventType) ?? false;
+	}
+
+	/**
+	 * Whether a session transition is in flight before its session ID commits.
+	 * Covers every path that mints a new id: `newSession`, fork, `switchSession`,
+	 * and both branching flows (`branch`, `branchFromBtw`).
+	 */
+	get isSessionTransitionInFlight(): boolean {
+		return this.#sessionTransitionInFlightDepth > 0;
+	}
+
+	/**
+	 * Register a callback that runs when a session transition finishes, whichever
+	 * way it went. `commit()` releases the in-flight flag at the id commit so
+	 * post-switch hooks are not blocked, but a later step can still throw and
+	 * restore the previous state; scope exit is the only point where the outcome
+	 * is final.
+	 *
+	 * `rolledBack` is what a same-file reload needs: `switchSession()` on the
+	 * current file restores the transcript under an unchanged session id, so an
+	 * observer comparing ids cannot tell that the state it captured was
+	 * discarded.
+	 */
+	registerSessionTransitionSettledCallback(callback: (outcome: SessionTransitionOutcome) => void): () => void {
+		this.#sessionTransitionSettledCallbacks.add(callback);
+		return () => this.#sessionTransitionSettledCallbacks.delete(callback);
+	}
+
+	#beginSessionTransitionGuard(): { commit(): void; rollback(): void; [Symbol.dispose](): void } {
+		const transition = this.#beginSessionTransition();
+		this.#sessionTransitionInFlightDepth++;
+		let released = false;
+		let rolledBack = false;
+		const release = () => {
+			if (released) return;
+			released = true;
+			if (this.#sessionTransitionInFlightDepth > 0) {
+				this.#sessionTransitionInFlightDepth--;
+			}
+		};
+		return {
+			commit: release,
+			rollback: () => {
+				rolledBack = true;
+			},
+			[Symbol.dispose]: () => {
+				release();
+				try {
+					// Fires for the rollback path too, which is the whole point: the
+					// previous state is restored without any change notification, so
+					// this is the only signal an observer gets that it is over.
+					const outcome: SessionTransitionOutcome = { rolledBack };
+					for (const callback of Array.from(this.#sessionTransitionSettledCallbacks)) {
+						try {
+							callback(outcome);
+						} catch (error) {
+							logger.warn("Session transition settled callback failed", { error: String(error) });
+						}
+					}
+				} finally {
+					transition[Symbol.dispose]();
+				}
+			},
+		};
 	}
 
 	/**

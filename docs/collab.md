@@ -87,6 +87,10 @@ How it works: each room publishes its own private IPC endpoint (a Unix domain so
 
 A missing registry directory means no active hosts. An unreadable or symlinked registry directory is a listing error, not a successful empty result; POSIX also rejects foreign-owned directories. Individual unreachable or malformed host entries are still omitted independently. The CLI exits nonzero for a directory error; `/collab list` displays a sanitized, bounded error and leaves the TUI usable.
 
+### Programmatic hosting
+
+Extensions can start, read, and stop hosting without typing a command: `pi.startCollab({ relayUrl })` (returns `{ link, viewLink, webLink, webViewLink }`, or the existing links when that relay already has a room), `pi.getCollabLinks()`, and `pi.stopCollab()`. Same rules as `/collab` (one room per session, guest sessions refuse), but nothing is printed: the links are credentials and the caller owns keeping them out of logs and transcripts. Interactive TUI only.
+
 ## Link format
 
 Accepted by `/join <link>` and `omp join "<link>"`:
