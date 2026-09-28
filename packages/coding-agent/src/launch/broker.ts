@@ -2439,8 +2439,8 @@ class DaemonBroker {
 					void this.#pollPort(record, record.generation, spec.ready);
 				}
 				if (detached) this.#startDetachedMonitor(record, record.generation);
-				// Recovery may change only a subset of records; avoid rewriting
-				// terminal metadata that already has the current shape.
+				// Recovery may only change a subset of records. In particular, a
+				// terminal record already stored in the current format needs no write.
 				if (JSON.stringify(decoded) !== this.#serializeMetadata(record)) this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {
