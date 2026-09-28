@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an **Account Priority** setting (Settings → Providers → Accounts) to choose which of a provider's logged-in accounts is used first; accounts with the same number share requests, and logging out an account removes its priority entry
+
 ## [18.4.1] - 2026-09-28
 
 ### Changed

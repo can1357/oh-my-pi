@@ -276,6 +276,8 @@ export class InputController {
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
+				// Fullscreen overlays own arrow keys, not the double-tap gesture.
+				if (this.ctx.ui.hasOverlay()) return undefined;
 				if (!this.ctx.focusedAgentId) return undefined;
 				if (!matchesKey(data, "left")) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;

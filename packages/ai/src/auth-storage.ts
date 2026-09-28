@@ -53,6 +53,7 @@ import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export * from "./auth/policy";
 export * from "./auth/store";
 export * from "./auth/types";
 

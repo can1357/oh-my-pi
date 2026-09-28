@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Accounts that share the same `auth.accountPolicies` priority now rotate requests between them instead of always preferring the first stored account
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed

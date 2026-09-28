@@ -3714,6 +3714,65 @@ describe("AuthStorage codex oauth ranking", () => {
 		// pre-meter reader would still see the account blocked.
 		expect(readLegacyCodexSharedBlock(dbPath, creditRow.id)).toBeUndefined();
 	});
+
+	test("equal priorities rotate within a tier for sessionless requests", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			rankingStrategyResolver: () => undefined,
+			usageProviderResolver: () => undefined,
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "a@example.com" }, priority: 2 },
+				{ provider: "openai-codex", account: { email: "b@example.com" }, priority: 1 },
+				{ provider: "openai-codex", account: { email: "c@example.com" }, priority: 1 },
+			],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+
+		expect(await authStorage.keys.get("openai-codex", "tier-block-a")).toBe("api-acct-a");
+		await authStorage.limits.markReached("openai-codex", "tier-block-a", { retryAfterMs: HOUR_MS });
+
+		const picks: string[] = [];
+		for (let index = 0; index < 6; index += 1) {
+			const apiKey = await authStorage.keys.get("openai-codex");
+			if (apiKey) picks.push(apiKey);
+		}
+		expect(picks).toHaveLength(6);
+		expect(picks).not.toContain("api-acct-a");
+		expect(picks.filter(apiKey => apiKey === "api-acct-b")).toHaveLength(3);
+		expect(picks.filter(apiKey => apiKey === "api-acct-c")).toHaveLength(3);
+	});
+
+	test("equal priorities spread sessions within a tier", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			rankingStrategyResolver: () => undefined,
+			usageProviderResolver: () => undefined,
+			accountPolicies: [
+				{ provider: "openai-codex", account: { email: "a@example.com" }, priority: 2 },
+				{ provider: "openai-codex", account: { email: "b@example.com" }, priority: 1 },
+				{ provider: "openai-codex", account: { email: "c@example.com" }, priority: 1 },
+			],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+
+		expect(await authStorage.keys.get("openai-codex", "tier-sessions-block-a")).toBe("api-acct-a");
+		await authStorage.limits.markReached("openai-codex", "tier-sessions-block-a", { retryAfterMs: HOUR_MS });
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "tier-sessions", 150);
+		expect(countFor(counts, "api-acct-b")).toBeGreaterThan(0);
+		expect(countFor(counts, "api-acct-c")).toBeGreaterThan(0);
+		expect(countFor(counts, "api-acct-a")).toBe(0);
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

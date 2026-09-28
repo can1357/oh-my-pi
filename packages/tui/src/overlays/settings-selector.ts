@@ -114,6 +114,10 @@ function createSettingsSelectField(
 	});
 }
 
+function positionMark(n: number): string {
+	return theme.fg("accent", `${String(n).padStart(2)}.`);
+}
+
 /**
  * Submenu for array-of-enum settings: every option is a toggle row. Enter or
  * Space flips membership; ordered lists render 1-based positions and reorder
@@ -163,7 +167,7 @@ class MultiSelectSubmenu extends Container {
 				position === -1
 					? theme.fg("dim", this.#ordered ? " · " : " ○ ")
 					: this.#ordered
-						? theme.fg("accent", `${String(position + 1).padStart(2)}.`)
+						? positionMark(position + 1)
 						: theme.fg("accent", " ● ");
 			return { value: option.value, label: `${mark} ${option.label}`, description: option.description };
 		});
@@ -277,9 +281,12 @@ class MultiSelectSubmenu extends Container {
 			this.#toggle(current);
 			return;
 		}
-		if (this.#ordered && current !== undefined && (data === "\x1b[D" || data === "\x1b[C")) {
-			this.#move(current, data === "\x1b[D" ? -1 : 1);
-			return;
+		if (this.#ordered && current !== undefined) {
+			const direction = matchesKey(data, "left") ? -1 : matchesKey(data, "right") ? 1 : 0;
+			if (direction !== 0) {
+				this.#move(current, direction);
+				return;
+			}
 		}
 		if (this.#ordered && current !== undefined && data.length === 1 && data >= "1" && data <= "9") {
 			this.#placeAt(current, Number(data));
@@ -417,6 +424,187 @@ class ProviderLimitsSubmenu extends Container {
 	}
 }
 
+class AccountPrioritySubmenu extends Container {
+	#host: AccountPriorityHost;
+	#onChange: () => void;
+	#onClose: () => void;
+	readonly #requestRender: (() => void) | undefined;
+	#field: FormField | undefined;
+	#selectList: SelectList | undefined;
+	#providerId: string | undefined;
+	#cursor = 0;
+
+	constructor(host: AccountPriorityHost, onChange: () => void, onClose: () => void, requestRender?: () => void) {
+		super();
+		this.#host = host;
+		this.#onChange = onChange;
+		this.#onClose = onClose;
+		this.#requestRender = requestRender;
+		this.#showProviderList();
+	}
+
+	#currentProvider(): AccountPriorityProvider | undefined {
+		return this.#providerId === undefined
+			? undefined
+			: this.#host.providers().find(provider => provider.id === this.#providerId);
+	}
+
+	#showProviderList(errorMessage?: string): void {
+		this.#providerId = undefined;
+		this.#selectList = undefined;
+		this.clear();
+		const providers = this.#host.providers();
+		const items: SelectItem[] = providers.map(provider => ({
+			value: provider.id,
+			label: provider.label,
+			description: provider.accounts.every(account => account.priority === DEFAULT_ACCOUNT_PRIORITY)
+				? "Round-robin"
+				: provider.accounts.map(account => String(account.priority)).join(" · "),
+		}));
+		if (
+			providers.some(provider => provider.accounts.some(account => account.priority !== DEFAULT_ACCOUNT_PRIORITY))
+		) {
+			items.push({
+				value: "__reset_all",
+				label: "Reset all to round-robin",
+				description: "Set every account back to 1",
+			});
+		}
+		const field = new SelectFormField({
+			theme: formTheme,
+			label: "Account Priority",
+			description:
+				providers.length === 0
+					? "No provider has more than one logged-in OAuth account. Use /login to add another."
+					: "Pick a provider. Higher numbers are used first; accounts with the same number share requests like the default rotation.",
+			items,
+			maxVisible: 12,
+			selectTheme: getSelectListTheme(),
+			hint: `  ${editorKey("tui.select.confirm")} to edit · ${editorKey("tui.select.cancel")} to go back`,
+			onSubmit: value => {
+				if (value === "__reset_all") {
+					this.#resetAll();
+					return;
+				}
+				this.#cursor = 0;
+				this.#showAccountEditor(value);
+				this.#requestRender?.();
+			},
+			onCancel: this.#onClose,
+			requestRender: this.#requestRender,
+		});
+		this.#field = field;
+		if (errorMessage !== undefined) field.setError(errorMessage);
+		this.addChild(field);
+	}
+
+	#resetAll(): void {
+		let saved = false;
+		let error: string | undefined;
+		for (const provider of this.#host.providers()) {
+			if (provider.accounts.every(account => account.priority === DEFAULT_ACCOUNT_PRIORITY)) continue;
+			try {
+				this.#host.save(
+					provider.id,
+					new Map(provider.accounts.map(account => [account.key, DEFAULT_ACCOUNT_PRIORITY] as const)),
+				);
+				saved = true;
+			} catch (err) {
+				error = err instanceof Error ? err.message : String(err);
+				break;
+			}
+		}
+		if (saved) this.#onChange();
+		this.#showProviderList(error);
+		this.#requestRender?.();
+	}
+
+	#showAccountEditor(providerId: string, errorMessage?: string): void {
+		this.#providerId = providerId;
+		this.clear();
+		const provider = this.#currentProvider();
+		if (!provider) {
+			this.#showProviderList(errorMessage);
+			return;
+		}
+		const items = provider.accounts.map((account): SelectItem => ({
+			value: account.key,
+			label: `${positionMark(account.priority)} ${account.label}`,
+		}));
+		const selectList = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+		if (items.length > 0) selectList.setSelectedIndex(Math.min(this.#cursor, items.length - 1));
+		selectList.onSelect = () => {};
+		selectList.onSelectionChange = item => {
+			this.#cursor = provider.accounts.findIndex(account => account.key === item.value);
+		};
+		selectList.onCancel = () => {
+			this.#showProviderList();
+			this.#requestRender?.();
+		};
+		const field = new FormField(selectList, {
+			theme: formTheme,
+			label: provider.label,
+			description: "1 = default rotation. Higher numbers are used first; equal numbers rotate.",
+			hint: `  1-9 set number · ${formatKeyHints(["left", "right"])} lower/raise · ${editorKey("tui.select.cancel")} to go back`,
+		});
+		this.#selectList = selectList;
+		this.#field = field;
+		if (errorMessage !== undefined) field.setError(errorMessage);
+		this.addChild(field);
+	}
+
+	#applyPriority(provider: AccountPriorityProvider, key: string, priority: number): void {
+		const priorities = new Map<string, number>(
+			provider.accounts.map(account => [account.key, account.priority] as const),
+		);
+		priorities.set(key, priority);
+		this.#save(provider.id, priorities);
+	}
+
+	#save(providerId: string, priorities: ReadonlyMap<string, number>): void {
+		try {
+			this.#host.save(providerId, priorities);
+		} catch (error) {
+			this.#rebuild(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		this.#onChange();
+		this.#rebuild();
+	}
+
+	#rebuild(errorMessage?: string): void {
+		if (this.#providerId === undefined) this.#showProviderList(errorMessage);
+		else this.#showAccountEditor(this.#providerId, errorMessage);
+		this.#requestRender?.();
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		this.#field?.routeMouse(event, line, col);
+	}
+
+	handleInput(data: string): void {
+		if (this.#selectList === undefined) {
+			this.#field?.handleInput(data);
+			return;
+		}
+		const provider = this.#currentProvider();
+		const current = provider?.accounts[this.#cursor];
+		if (provider && current && data.length === 1 && data >= "1" && data <= "9") {
+			this.#applyPriority(provider, current.key, Number(data));
+			return;
+		}
+		if (provider && current) {
+			const direction = matchesKey(data, "left") ? -1 : matchesKey(data, "right") ? 1 : 0;
+			if (direction !== 0) {
+				const next = Math.min(9, Math.max(1, current.priority + direction));
+				if (next !== current.priority) this.#applyPriority(provider, current.key, next);
+				return;
+			}
+		}
+		this.#selectList.handleInput(data);
+	}
+}
+
 /** Stable sidebar width derived from the host's complete schema. */
 function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number {
 	let nameWidth = 0;
@@ -437,6 +625,25 @@ function getSettingsTabs(): Tab[] {
 		}),
 		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
 	];
+}
+
+export interface AccountPriorityAccount {
+	key: string;
+	label: string;
+	priority: number;
+}
+
+export const DEFAULT_ACCOUNT_PRIORITY = 1;
+
+export interface AccountPriorityProvider {
+	id: string;
+	label: string;
+	accounts: readonly AccountPriorityAccount[];
+}
+
+export interface AccountPriorityHost {
+	providers(): readonly AccountPriorityProvider[];
+	save(providerId: string, priorities: ReadonlyMap<string, number>): void;
 }
 
 /**
@@ -462,6 +669,7 @@ export interface SettingsRuntimeContext {
 	requestRender?: () => void;
 	/** Live status renderer for composer-shape previews (the session's status line). */
 	composerPreviewStatus?: ComposerPreviewStatusSource;
+	accountPriority?: AccountPriorityHost;
 }
 
 /** Status line settings subset for preview */
@@ -934,6 +1142,22 @@ export class SettingsSelectorComponent implements Component {
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
 				};
 
+			case "accountPriority": {
+				const host = this.#context.accountPriority;
+				if (!host) return null;
+				return {
+					...item,
+					currentValue: this.#formatAccountPriorityValue(currentValue),
+					submenu: (_cv, done) =>
+						new AccountPrioritySubmenu(
+							host,
+							() => this.#callbacks.onChange(def.path, this.#context.settings.get(def.path)),
+							() => done(this.#formatAccountPriorityValue(this.#context.settings.get(def.path))),
+							this.#context.requestRender,
+						),
+				};
+			}
+
 			case "multiselect":
 				return {
 					...item,
@@ -1137,6 +1361,18 @@ export class SettingsSelectorComponent implements Component {
 		const entries = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b));
 		if (entries.length === 0) return "Unlimited";
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
+	}
+
+	#formatAccountPriorityValue(value: unknown): string {
+		if (!Array.isArray(value)) return "round-robin";
+		const providers = new Set<string>();
+		for (const entry of value) {
+			if (!entry || typeof entry !== "object") continue;
+			const { provider, priority } = entry as { provider?: unknown; priority?: unknown };
+			if (typeof provider === "string" && typeof priority === "number") providers.add(provider);
+		}
+		if (providers.size === 0) return "round-robin";
+		return [...providers].sort((left, right) => left.localeCompare(right)).join(", ");
 	}
 
 	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {

@@ -121,8 +121,14 @@ import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
-import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
-import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
+import {
+	cfgAuthAccountPolicies,
+	cfgCycleOrder,
+	cfgDisabledProviders,
+	cfgModelRoleStorage,
+} from "../../config/model-settings";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgRetryUsageReservePct } from "../../session/settings";
+import { createAccountPriorityHost, pruneAccountPolicies } from "../../session/account-priority";
 import {
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
@@ -274,6 +280,14 @@ export class SelectorController {
 					imageBudget: this.ctx.ui.imageBudget,
 					requestRender: () => this.ctx.ui.requestRender(),
 					composerPreviewStatus: this.ctx.statusLine,
+					accountPriority: createAccountPriorityHost(
+						this.ctx.session.modelRegistry.authStorage,
+						settings,
+						id =>
+							loadProviderAuthUi()
+								.getOAuthProviders()
+								.find(provider => provider.id === id)?.name ?? id,
+					),
 				},
 				{
 					onChange: (id, value) => this.handleSettingChange(id, value),
@@ -1888,6 +1902,24 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
+			// A policy whose account is gone makes `removeById` reject; prune it
+			// first. The synchronous `setAccountPolicies` is required because the
+			// settings listener applies changes asynchronously and would race the
+			// removal below.
+			const removing = authStorage.credentials
+				.list(providerId)
+				.find(row => row.id === account.credentialId)?.credential;
+			if (removing?.type === "oauth") {
+				const existingPolicies = cfgAuthAccountPolicies.get(settings);
+				const pruned = pruneAccountPolicies(existingPolicies, providerId, removing);
+				if (pruned.length !== existingPolicies.length) {
+					authStorage.setAccountPolicies({
+						accountPolicies: pruned,
+						defaultReservePct: cfgRetryUsageReservePct.get(settings),
+					});
+					cfgAuthAccountPolicies.set(settings, pruned);
+				}
+			}
 			const removed = await authStorage.credentials.removeById(providerId, account.credentialId);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);

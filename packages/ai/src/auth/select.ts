@@ -73,6 +73,22 @@ export interface CredentialSelectorDeps {
 	strategies: RankingStrategyResolver;
 }
 
+function priorityTierOrder(priorities: readonly number[], start: number): number[] {
+	const tiers = new Map<number, number[]>();
+	for (const [position, priority] of priorities.entries()) {
+		const tier = tiers.get(priority);
+		if (tier) tier.push(position);
+		else tiers.set(priority, [position]);
+	}
+	const order: number[] = [];
+	for (const priority of [...tiers.keys()].sort((left, right) => right - left)) {
+		const tier = tiers.get(priority)!;
+		const size = tier.length;
+		for (let i = 0; i < size; i++) order.push(tier[(start + i) % size]!);
+	}
+	return order;
+}
+
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
 export class CredentialSelector {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
@@ -111,6 +127,13 @@ export class CredentialSelector {
 	#getHashedIndex(sessionId: string, total: number): number {
 		if (total <= 1) return 0;
 		return Bun.hash.xxHash32(sessionId) % total;
+	}
+
+	#nextPriorityRotation(providerKey: string): number {
+		const key = `${providerKey}:priority`;
+		const next = (this.#providerRoundRobinIndex.get(key) ?? -1) + 1;
+		this.#providerRoundRobinIndex.set(key, next);
+		return next;
 	}
 
 	/**
@@ -585,13 +608,12 @@ export class CredentialSelector {
 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
 		const baseRankingOrder = credentials.map((_credential, index) => index);
 		const policyOrder = hasPriorityPolicy
-			? [...baseRankingOrder].sort((leftIndex, rightIndex) => {
-					const leftPriority =
-						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
-					const rightPriority =
-						this.#deps.policies.forCredential(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
-					return rightPriority - leftPriority || leftIndex - rightIndex;
-				})
+			? priorityTierOrder(
+					credentials.map(
+						({ credential }) => this.#deps.policies.forCredential(provider, credential)?.priority ?? 0,
+					),
+					sessionId ? Bun.hash.xxHash32(sessionId) : this.#nextPriorityRotation(providerKey),
+				)
 			: order;
 		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
 		const sessionPreferredRankingPos =

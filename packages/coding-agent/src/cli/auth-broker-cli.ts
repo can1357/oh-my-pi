@@ -32,7 +32,16 @@ import {
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	APP_NAME,
+	getAgentDbPath,
+	getAgentDir,
+	getConfigRootDir,
+	isEnoent,
+	logger,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
@@ -40,6 +49,10 @@ import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+
+import { Settings } from "../config/settings";
+import { cfgAuthAccountPolicies } from "../config/model-settings";
+import { pruneAccountPolicies } from "../session/account-priority";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -299,6 +312,15 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			} finally {
 				rl.close();
 			}
+		}
+		// Drop the provider's account policies with the credentials; a stale
+		// policy would make the next /login of a different account reject.
+		const settings = await Settings.loadIsolated({ agentDir: getAgentDir() });
+		const existingPolicies = cfgAuthAccountPolicies.get(settings);
+		const pruned = pruneAccountPolicies(existingPolicies, providerArg);
+		if (pruned.length !== existingPolicies.length) {
+			cfgAuthAccountPolicies.set(settings, pruned);
+			await settings.flush();
 		}
 		await store.deleteAuthCredentials(providerArg, "logged out by user");
 		process.stdout.write(`Logged out of ${providerArg}\n`);

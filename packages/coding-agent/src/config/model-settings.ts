@@ -46,6 +46,13 @@ export const cfgAuthAccountPolicies = register({
 	id: "auth.accountPolicies",
 	type: "array",
 	default: EMPTY_AUTH_ACCOUNT_POLICIES,
+	ui: {
+		tab: "providers",
+		group: "Accounts",
+		label: "Account Priority",
+		description:
+			"When a provider has several logged-in accounts, choose which to use first. Accounts with the same number rotate.",
+	},
 });
 
 export const cfgEnabledModels = register({
