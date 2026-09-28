@@ -1936,8 +1936,9 @@ function linkifyCodeUrls(line: string): string {
 
 // GitHub issue/PR refs: `owner/repo#N` or bare `#N`, not
 // glued to a word, path, entity, or longer run (`C#3`, `file.ts#4`,
-// `a/b/c#5`, `#6x`, `#0`).
-const GITHUB_REF_REGEX = /(?<![\w./#&-])(?:([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+))?#([1-9]\d{0,9})(?![\w-])/g;
+// `a/b/c#5`, `#6x`, `#0`). A `.`/`..` repo would resolve outside the owner.
+const GITHUB_REF_REGEX =
+	/(?<![\w./#&-])(?:([A-Za-z0-9][A-Za-z0-9-]*\/(?!\.\.?#)[A-Za-z0-9._-]+))?#([1-9]\d{0,9})(?![\w-])/g;
 
 /**
  * Wrap GitHub refs in a plain-text run in OSC 8 links without changing their
