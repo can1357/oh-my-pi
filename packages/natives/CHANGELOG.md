@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ngram word completion losing learned state between sessions on Windows when saving its snapshot ([#13589](https://github.com/can1357/oh-my-pi/issues/13589)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
