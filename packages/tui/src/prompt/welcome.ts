@@ -186,7 +186,8 @@ export class WelcomeComponent implements Component {
 		private modelName: string,
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
-		private lspServers: LspServerInfo[] = [],
+		/** Detected project servers; `null` means LSP is disabled and hides the section. */
+		private lspServers: LspServerInfo[] | null = [],
 	) {}
 	get tip(): string | undefined {
 		this.#nagRoll ??= Math.random();
@@ -272,7 +273,7 @@ export class WelcomeComponent implements Component {
 		this.invalidate();
 	}
 
-	setLspServers(servers: LspServerInfo[]): void {
+	setLspServers(servers: LspServerInfo[] | null): void {
 		this.lspServers = servers;
 		this.invalidate();
 	}
@@ -365,29 +366,6 @@ export class WelcomeComponent implements Component {
 			sessionLines.push("");
 		}
 
-		// LSP servers content
-		const lspLines: string[] = [];
-		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
-		} else {
-			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
-				const icon =
-					server.status === "ready"
-						? theme.styledSymbol("status.enabled", "success")
-						: server.status === "available"
-							? theme.styledSymbol("status.enabled", "dim")
-							: server.status === "connecting"
-								? theme.styledSymbol("status.pending", "muted")
-								: theme.styledSymbol("status.error", "error");
-				const exts = server.fileTypes.slice(0, 3).join(" ");
-				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
-			}
-		}
-		// Pad to the fixed slot count so the box height doesn't depend on server count.
-		while (lspLines.length < WELCOME_LSP_SLOTS) {
-			lspLines.push("");
-		}
-
 		// Right column
 		const rightLines = [
 			` ${theme.bold(theme.fg("accent", "Tips"))}`,
@@ -395,9 +373,7 @@ export class WelcomeComponent implements Component {
 			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
 			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
 			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
-			separator,
-			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
-			...lspLines,
+			...this.#renderLspSection(separator),
 			separator,
 			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
 			...sessionLines,
@@ -450,6 +426,33 @@ export class WelcomeComponent implements Component {
 		lines.push(...this.#renderTip(boxWidth));
 
 		return lines;
+	}
+
+	/** Right-column LSP rows padded to a fixed height; empty when LSP is disabled. */
+	#renderLspSection(separator: string): string[] {
+		if (this.lspServers === null) return [];
+		const lspLines: string[] = [];
+		if (this.lspServers.length === 0) {
+			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
+		} else {
+			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
+				const icon =
+					server.status === "ready"
+						? theme.styledSymbol("status.enabled", "success")
+						: server.status === "available"
+							? theme.styledSymbol("status.enabled", "dim")
+							: server.status === "connecting"
+								? theme.styledSymbol("status.pending", "muted")
+								: theme.styledSymbol("status.error", "error");
+				const exts = server.fileTypes.slice(0, 3).join(" ");
+				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
+			}
+		}
+		// Pad to the fixed slot count so the box height doesn't depend on server count.
+		while (lspLines.length < WELCOME_LSP_SLOTS) {
+			lspLines.push("");
+		}
+		return [separator, ` ${theme.bold(theme.fg("accent", "LSP Servers"))}`, ...lspLines];
 	}
 
 	/**

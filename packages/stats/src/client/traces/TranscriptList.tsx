@@ -6,10 +6,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDurationMs } from "../data/formatters";
+import { EmptyState } from "../ui";
 import type { TraceMarker, TraceSpan, TraceTrack } from "../types";
-import { useSystemTheme } from "../useSystemTheme";
 import { formatOffset } from "./time-scale";
-import { TRACE_THEMES } from "./trace-colors";
+import { useTraceTheme } from "./trace-colors";
 
 export interface TranscriptRow {
 	key: string;
@@ -50,8 +50,7 @@ export function buildTranscriptRows(tracks: TraceTrack[]): TranscriptRow[] {
 }
 
 export function TranscriptList({ tracks, selection, onSelect, search, traceStart }: TranscriptListProps) {
-	const theme = useSystemTheme();
-	const colors = TRACE_THEMES[theme];
+	const colors = useTraceTheme();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [scrollTop, setScrollTop] = useState(0);
 
@@ -83,11 +82,7 @@ export function TranscriptList({ tracks, selection, onSelect, search, traceStart
 	const visible = rows.slice(firstVisible, lastVisible);
 
 	return (
-		<div
-			ref={containerRef}
-			onScroll={event => setScrollTop(event.currentTarget.scrollTop)}
-			className="stats-trace-list"
-		>
+		<div ref={containerRef} onScroll={event => setScrollTop(event.currentTarget.scrollTop)} className="traces-list">
 			<div style={{ height: rows.length * ROW_H, position: "relative" }}>
 				<div style={{ position: "absolute", top: firstVisible * ROW_H, left: 0, right: 0 }}>
 					{visible.map(row => {
@@ -100,37 +95,18 @@ export function TranscriptList({ tracks, selection, onSelect, search, traceStart
 						const chipText = row.span?.kind ?? row.marker?.kind ?? "";
 						const rowContent = (
 							<>
-								<span
-									className="stats-trace-kind"
-									style={{
-										color,
-										background: `${color}1c`,
-									}}
-								>
+								<span className="traces-kind" style={{ "--traces-kind-color": color } as React.CSSProperties}>
 									{chipText}
 								</span>
 								{row.depth > 0 && (
-									<span
-										className="stats-text-muted truncate"
-										style={{ flexShrink: 0, maxWidth: 90, fontSize: 9 }}
-										title={row.track.label}
-									>
+									<span className="traces-row-track mono truncate" title={row.track.label}>
 										{row.track.id}
 									</span>
 								)}
-								<span
-									className="stats-text-primary truncate"
-									style={{ fontSize: 11, minWidth: 0, flexShrink: 1 }}
-								>
-									{label}
-								</span>
-								{detail && (
-									<span className="stats-text-muted truncate" style={{ fontSize: 10, minWidth: 0, flex: 1 }}>
-										{detail}
-									</span>
-								)}
-								<span className="stats-trace-row-meta">
-									{row.span?.isError && <span style={{ color: colors.error }}>error</span>}
+								<span className="traces-row-label truncate">{label}</span>
+								{detail && <span className="traces-row-detail truncate">{detail}</span>}
+								<span className="traces-row-meta num">
+									{row.span?.isError && <span className="tone-bad">error</span>}
 									<span>{duration}</span>
 									<span>{formatOffset(row.time - traceStart)}</span>
 								</span>
@@ -142,25 +118,21 @@ export function TranscriptList({ tracks, selection, onSelect, search, traceStart
 								key={row.key}
 								type="button"
 								onClick={() => onSelect(span.id)}
-								className="stats-trace-row"
+								className="traces-row"
 								data-selected={isSelected ? "true" : "false"}
 								style={indent}
 							>
 								{rowContent}
 							</button>
 						) : (
-							<div key={row.key} className="stats-trace-row stats-trace-row-static" style={indent}>
+							<div key={row.key} className="traces-row" data-static="true" style={indent}>
 								{rowContent}
 							</div>
 						);
 					})}
 				</div>
 			</div>
-			{rows.length === 0 && (
-				<div className="stats-text-muted" style={{ padding: 16, fontSize: 12 }}>
-					No matching events
-				</div>
-			)}
+			{rows.length === 0 && <EmptyState title="No matching events" />}
 		</div>
 	);
 }

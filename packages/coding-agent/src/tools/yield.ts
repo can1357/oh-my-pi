@@ -3,7 +3,13 @@
  *
  * Subagents can call this tool incrementally or terminally depending on `type`.
  */
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+} from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai/types";
 import {
 	dereferenceJsonSchema,
@@ -20,6 +26,41 @@ import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
 
 const YIELD_FORMAT_HINT = 'Submit success as {"data":<your output>} or failure as {"error":"message"}.';
+
+export function resolveYieldReportText(messages: readonly AgentMessage[], toolCallId: string): string | undefined {
+	const current = messages.at(-1);
+	if (current?.role !== "assistant" || ["error", "aborted", "length"].includes(current.stopReason)) return;
+	const calls = current.content.filter(block => block.type === "toolCall");
+	if (calls.length !== 1 || calls[0].name !== "yield" || calls[0].id !== toolCallId) return;
+	const currentText = current.content
+		.filter(block => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+	if (currentText.trim()) return currentText;
+	for (let index = messages.length - 2; index >= 0; index--) {
+		const previous = messages[index];
+		if (previous.role === "developer") {
+			const blocks =
+				typeof previous.content === "string" ? [{ type: "text", text: previous.content }] : previous.content;
+			if (
+				blocks.length &&
+				blocks.every(block => block.type === "text" && block.text.startsWith("<system-reminder>"))
+			)
+				continue;
+		}
+		if (
+			previous.role !== "assistant" ||
+			previous.stopReason !== "stop" ||
+			previous.content.some(block => block.type === "toolCall")
+		)
+			return;
+		const text = previous.content
+			.filter(block => block.type === "text")
+			.map(block => block.text)
+			.join("\n");
+		return text.trim() ? text : undefined;
+	}
+}
 
 export interface YieldDetails {
 	/** Successful result payload, or omitted when `useLastTurn` requests last-turn extraction. */
@@ -387,7 +428,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: unknown,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
@@ -414,7 +455,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		} else {
 			yieldType = parseYieldType(raw.type);
 		}
-		const useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
+		let useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
 		// is validated as a whole at finalization (executor finalizeSubprocessOutput).
@@ -486,9 +527,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			status === "success" &&
 			useLastTurn &&
 			(isIncremental || !this.#hasIncrementalSections) &&
-			this.#session.getLastAssistantText !== undefined
+			(this.#session.getLastAssistantText !== undefined || this.#session.getYieldReportText !== undefined)
 		) {
-			const lastTurnText = this.#session.getLastAssistantText();
+			const resolveReport = !isIncremental && this.#session.getYieldReportText;
+			const lastTurnText = resolveReport ? resolveReport(toolCallId) : this.#session.getLastAssistantText?.();
 			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
 				this.#emptyResultFailures++;
 				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
@@ -510,6 +552,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
 						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
 				);
+			}
+			if (resolveReport) {
+				data = lastTurnText;
+				useLastTurn = false;
 			}
 		}
 		if (status === "success" && !useLastTurn) {

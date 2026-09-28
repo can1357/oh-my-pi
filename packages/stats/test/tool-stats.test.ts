@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/db";
+import { getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
+import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/rollup";
+import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -342,6 +344,84 @@ describe("tool usage stats pipeline", () => {
 		await fs.utimes(sessionFile, bumped, bumped);
 		await syncAllSessions({ workers: 1 });
 		expect(getToolStats()).toEqual(first);
+	});
+
+	it("repairs missing and stale rows during full replay without invalidating retained request IDs", async () => {
+		const file = await writeSessionFile("session.jsonl", { id: "replay" }, [
+			{
+				type: "message",
+				id: "user-1",
+				timestamp: TS1,
+				message: { role: "user", content: "Please inspect the file." },
+			},
+			...buildStandardEntries(),
+			buildAssistantEntry({
+				entryId: "reply",
+				parentId: "user-1",
+				timestamp: TS2,
+				toolCalls: [],
+				totalTokens: 10,
+				outputTokens: 2,
+				costTotal: 0.001,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+		const before = getToolStats();
+		const retained = getRecentRequests()
+			.filter(row => row.entryId !== "asst-1")
+			.map(row => ({ entryId: row.entryId, id: row.id }));
+		// Model an interrupted older replay that advanced its cursor but left removed records behind.
+		const content = await Bun.file(file).text();
+		await fs.appendFile(
+			file,
+			[
+				{
+					type: "message",
+					id: "stale-user",
+					timestamp: TS2,
+					message: { role: "user", content: "Obsolete request." },
+				},
+				buildAssistantEntry({
+					entryId: "stale-reply",
+					parentId: "stale-user",
+					timestamp: TS2,
+					toolCalls: [{ id: "stale-call", name: "read", arguments: READ_ARGS }],
+					totalTokens: 10,
+					outputTokens: 2,
+					costTotal: 0.001,
+				}),
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n") + "\n",
+		);
+		await syncAllSessions({ workers: 1 });
+		await fs.writeFile(file, content);
+		const parsed = await parseSessionFile(file);
+		if (!parsed.parserState) throw new Error("fixture transcript disappeared");
+		setFileOffset(file, parsed.newOffset, parsed.parserState.mtimeMs, parsed.parserState);
+
+		const database = await initDb();
+		database.run("DELETE FROM messages WHERE entry_id = 'asst-1'");
+		database.run("DELETE FROM tool_calls WHERE tool_call_id = 'call-1'");
+		database.run("UPDATE tool_calls SET result_chars = NULL, is_error = NULL WHERE tool_call_id = 'call-2'");
+		database.run("UPDATE user_messages SET model = NULL, provider = NULL");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('session_reconciliation', 'pending')");
+
+		await syncAllSessions({ workers: 1 });
+
+		expect(
+			getRecentRequests()
+				.filter(row => row.entryId !== "asst-1")
+				.map(row => ({ entryId: row.entryId, id: row.id })),
+		).toEqual(retained);
+		expect(getToolStats()).toEqual(before);
+		expect(
+			getFrustrationByModel().map(row => ({
+				model: row.model,
+				provider: row.provider,
+				messages: row.messages,
+			})),
+		).toEqual([{ model: MODEL, provider: PROVIDER, messages: 1 }]);
 	});
 
 	it("collapses provider-polluted tool names and skips nameless calls", async () => {

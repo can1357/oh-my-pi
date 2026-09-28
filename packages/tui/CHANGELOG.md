@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [18.4.1] - 2026-09-28
+
+### Breaking Changes
+
+- Replaced `AgentsHubDeps.setDisabledAgents`/`setOverrides` with `setAgentDisabled(name, { disabled })` and `setAgentOverride(property, name, value)`, so each hub edit persists only the agent it changes; `PropertyKind` is exported ([#13308](https://github.com/can1357/oh-my-pi/pull/13308) by [@Vortex727](https://github.com/Vortex727))
+
+### Changed
+
+- LSP servers section is omitted from the welcome screen when LSP is disabled
+- Usage dashboards and provider cards can show connected accounts with unavailable usage separately from reported quotas, without treating missing reports as unused or unlimited ([#13476](https://github.com/can1357/oh-my-pi/pull/13476) by [@aktanazat](https://github.com/aktanazat)).
+
+### Fixed
+
+- Fixed sessions exiting as if the terminal hung up when it only stopped reading for a few seconds during a very large repaint (a long transcript's replay behind a busy tmux or container attach) ([#13576](https://github.com/can1357/oh-my-pi/pull/13576) by [@sjawhar](https://github.com/sjawhar))
+- Fixed fullscreen overlays rewriting the whole terminal on every change; each frame now repaints only the rows that changed ([#13568](https://github.com/can1357/oh-my-pi/pull/13568) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the armed `/loop` status reading `Loop waiting`, which hid that the next prompt becomes the repeated loop body; it now reads `Loop: next prompt repeats` ([#13435](https://github.com/can1357/oh-my-pi/pull/13435) by [@Dante-dan](https://github.com/Dante-dan)).
+- Reduced memory held by long sessions: committed transcript blocks no longer keep their rendered-row caches ([#13242](https://github.com/can1357/oh-my-pi/pull/13242) by [@iliaal](https://github.com/iliaal)).
+- Fixed the results-limit notice advising `Use limit=` values the tool would clamp straight back; at the hard cap it now reports the reached count alone ([#13263](https://github.com/can1357/oh-my-pi/issues/13263))
+- Fixed the rewind filter finding nothing for query words in scripts without spaces (e.g. Chinese): non-Latin words now match as substrings while Latin words keep whole-word matching ([#13361](https://github.com/can1357/oh-my-pi/pull/13361) by [@jchanghong023](https://github.com/jchanghong023))
+- The Esc-Esc rewind selector opens on the recent tail of long sessions instead of replaying the whole branch; press `a` to load earlier turns ([#12819](https://github.com/can1357/oh-my-pi/pull/12819) by [@lemonleks](https://github.com/lemonleks)).
+- Fixed OSC 8 hyperlinks (file paths, URLs, GitHub refs) rendering as plain text in Herdr panes. Herdr reports `TERM=xterm-256color` without `TERM_PROGRAM`, so its panes were treated as an unknown terminal, although Herdr renders OSC 8 itself and opens links on Ctrl+click. Screen or tmux nested inside a pane still follow their own rules, and `PI_NO_HYPERLINKS=1` still opts out ([#13289](https://github.com/can1357/oh-my-pi/pull/13289) by [@andrebrait](https://github.com/andrebrait)).
+- Fixed native stderr output painting over the TUI on Linux ([#13176](https://github.com/can1357/oh-my-pi/issues/13176)).
+- Fixed heavy lag while output streams with inline images on SIXEL terminals such as Orca: each visible image was re-encoded on every render pass ([#12998](https://github.com/can1357/oh-my-pi/pull/12998) by [@wimjan123](https://github.com/wimjan123))
+- Fixed Kitty-protocol terminals re-encoding every non-PNG image on redelivery and transcript rebuilds ([#13118](https://github.com/can1357/oh-my-pi/issues/13118)).
+- Fixed the Windows Terminal taskbar progress animation restarting every second while the agent works ([#12940](https://github.com/can1357/oh-my-pi/pull/12940)).
+- Fixed resuming a long session freezing the TUI for several seconds; first paint is now spread across frames ([#12933](https://github.com/can1357/oh-my-pi/issues/12933)).
+- The model hub no longer opens a thinking strip or shows the `t` hint for models that cannot reason ([#13112](https://github.com/can1357/oh-my-pi/pull/13112)).
+
+## [18.4.0] - 2026-09-28
+
+### Fixed
+
+- Prevented interrupted wait operations from appearing in the transcript when a queued completion or message is received.
+
 ## [18.3.5] - 2026-09-27
 
 ### Added

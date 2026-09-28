@@ -164,17 +164,6 @@ describe("mergeCursorMcpToolCallArgs", () => {
 });
 
 describe("Cursor MCP exec resolution", () => {
-	it("marks a streamed MCP call already resolved by the exec bridge", () => {
-		const h = newHarness();
-		h.state.resolvedMcpToolCallIds.add("call-resolved");
-
-		startMcpToolCall(h, "mcp__fixture_report", "call-resolved");
-
-		const block = h.output.content[0] as ToolCallState;
-		expect(block[kCursorExecResolved]).toBe(true);
-		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
-	});
-
 	it("does not duplicate an MCP call synthesized from an earlier exec frame", () => {
 		const h = newHarness();
 		synthesizeCursorExecToolCall(h.output, h.stream, h.state, "call-resolved", "web_search", {
@@ -191,6 +180,7 @@ describe("Cursor MCP exec resolution", () => {
 			name: "web_search",
 			arguments: { query: "latest chess news" },
 		});
+		expect((h.output.content[0] as ToolCallState)[kCursorExecResolved]).toBe(true);
 		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
 		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
 	});

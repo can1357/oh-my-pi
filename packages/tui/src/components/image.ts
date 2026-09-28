@@ -3,6 +3,7 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
@@ -765,6 +766,13 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		// Only Kitty images with a budget id transmit their data separately from
+		// the placement; a pending re-transmit (after a purge or history clear)
+		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
+		// itself and never register a transmit, so gating their cache on it would
+		// re-encode the full image on every render pass.
+		const imageId = this.#imageId;
+		const transmitsSeparately = imageProtocol === ImageProtocol.Kitty && imageId != null;
 
 		if (
 			this.#cachedLines &&
@@ -774,7 +782,7 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true)
 		) {
 			return this.#cachedLines;
 		}
@@ -787,7 +795,7 @@ export class Image implements Component {
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,

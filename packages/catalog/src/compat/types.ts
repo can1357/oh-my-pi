@@ -270,6 +270,8 @@ export interface CompiledCursorParameter {
 /** One provider quota-scope table. */
 export interface CompiledQuotaRule {
 	provider: string;
+	/** Tier used when no exact or fallback membership matches. */
+	defaultTier?: string;
 	tiers: { label: string; models: string[] }[];
 	fallbacks: { label: string; substring: string }[];
 }

@@ -73,4 +73,18 @@ describe("WelcomeComponent", () => {
 		expect(plain).toMatch(/DeepSeek V4 [^│]*…/);
 		expect(plain).toContain("Recent sessions");
 	});
+
+	it("hides the LSP section only when LSP is disabled (null), not when no servers were detected", () => {
+		const [empty, disabled] = [[], null].map(servers =>
+			new WelcomeComponent("1.0.0", "model", "provider", [], servers)
+				.render(100)
+				.join("\n")
+				.replace(/\x1b\[[0-9;]*m/g, ""),
+		);
+
+		expect(empty).toContain("No LSP servers");
+		expect(disabled).not.toContain("LSP Servers");
+		expect(disabled).not.toContain("No LSP servers");
+		expect(disabled).toContain("Recent sessions");
+	});
 });

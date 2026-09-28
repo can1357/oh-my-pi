@@ -92,6 +92,34 @@ describe("model mentions", () => {
 		}
 	});
 
+	test("child sessions retain parent model agents and reserve their pseudonyms", async () => {
+		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
+		const task = getBundledAgent("task");
+		if (!task) throw new Error("Missing bundled task agent");
+		const inheritedAgent = { ...task, name: "m1", model: ["b/y"] };
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: models[0], systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Child done"] }] }).stream,
+		});
+		const childSession = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: registry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			inheritedSessionAgents: [inheritedAgent],
+		});
+		try {
+			await childSession.prompt("ask ^a/x");
+			expect(childSession.getSessionAgents().map(candidate => [candidate.name, candidate.model])).toEqual([
+				["m1", ["b/y"]],
+				["m2", ["a/x"]],
+			]);
+		} finally {
+			await childSession.dispose();
+		}
+	});
+
 	test("mid-session tags ride a hidden notice instead of the task description", async () => {
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");
 		const agent = new Agent({

@@ -2,9 +2,30 @@
 
 ## [Unreleased]
 
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed `grep` retaining every matching line until the search finished: the new `onMatches` option streams bounded batches while the search runs, pauses the search while JS catches up, and returns only counts ([#13495](https://github.com/can1357/oh-my-pi/issues/13495))
+- Fixed omp crashing at startup on macOS when built from source with `SDKROOT` set (e.g. via Nix) on a host whose Command Line Tools ship the macOS 27 SDK ([#13168](https://github.com/can1357/oh-my-pi/pull/13168) by [@johnrichardrinehart](https://github.com/johnrichardrinehart)).
+- Hashline edit rejections for a tag issued for another file now name the path the tag belongs to ([#13464](https://github.com/can1357/oh-my-pi/pull/13464) by [@holny](https://github.com/holny)).
+- Fixed the native terminal output pump exiting on temporary nonblocking backpressure ([#13463](https://github.com/can1357/oh-my-pi/pull/13463) by [@hancens1024](https://github.com/hancens1024)).
+- Fixed commits failing on Windows when a repository has commit hooks; hooks now run through `git hook run` ([#13366](https://github.com/can1357/oh-my-pi/pull/13366) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed Windows path stats lacking a file identity, which let `rg` search its own redirected output and made `tail -F` report spurious replacements ([#13367](https://github.com/can1357/oh-my-pi/pull/13367) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed the embedded shell running backtick spans inside a quoted heredoc within a double-quoted command substitution ([#13307](https://github.com/can1357/oh-my-pi/issues/13307)).
+- Fixed native operations to deliver results completed within their timeout and reject results when an abort signal arrives before settlement ([#13209](https://github.com/can1357/oh-my-pi/pull/13209) by [@Komzpa](https://github.com/Komzpa)).
+- Fixed `ulimit` in the embedded shell changing the host process's own resource limits, including from inside `( … )` subshells: limits are now shell state applied only to the external commands the shell spawns ([#13325](https://github.com/can1357/oh-my-pi/issues/13325))
+
+## [18.4.0] - 2026-09-28
+
 ### Added
 
-- Added `expandWindowsLongPath` and `getWindowsShortPath`, which convert Windows paths between long and 8.3 spellings without resolving symlinks or junctions; import them from `@oh-my-pi/pi-natives/path` to load the addon only on first use on Windows ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
+- Added Windows path utilities for converting between long and 8.3 short path spellings without resolving symlinks or junctions. Import them from `@oh-my-pi/pi-natives/path`.
+
+### Fixed
+
+- Fixed the native `xargs` builtin so `-P`/`--max-procs` correctly limits parallel command execution, including GNU-compatible `-P 0` behavior.
+- Improved snapcompact rendering performance for stretched shapes on Windows x64, Intel Macs, and Linux CPUs without AVX2, with no visual changes.
 
 ## [18.3.5] - 2026-09-27
 
@@ -15,7 +36,6 @@
 ### Fixed
 
 - Fixed SmolLM word completion (`spelling.autocomplete: smollm`) being about 25x slower on Windows x64 and Intel Macs; suggestions are unchanged ([#13488](https://github.com/can1357/oh-my-pi/pull/13488) by [@H4vC](https://github.com/H4vC))
-- Fixed snapcompact frames for stretched shapes rendering about 3-4x slower on Windows x64, Intel Macs, and Linux CPUs without AVX2; frames are visually unchanged ([#13496](https://github.com/can1357/oh-my-pi/pull/13496) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.4] - 2026-09-27
 

@@ -1116,7 +1116,8 @@ export class InputController {
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
 				this.ctx.editor.addToHistory(text);
-				this.ctx.editor.setText("");
+				// Enter already cleared the editor synchronously. A later clear here
+				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
@@ -1180,12 +1181,15 @@ export class InputController {
 				// `submitInteractiveInput` dispatches it. Steering matches the
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
-				const submission = this.ctx.startPendingSubmission({
-					text,
-					images,
-					imageLinks: inputImageLinks,
-					streamingBehavior: "steer",
-				});
+				const submission = this.ctx.startPendingSubmission(
+					{
+						text,
+						images,
+						imageLinks: inputImageLinks,
+						streamingBehavior: "steer",
+					},
+					{ clearEditor: false },
+				);
 				// Start titling only after the optimistic row painted, so the local
 				// tiny-title worker's subprocess spawn never blocks the first frame.
 				this.#maybeStartTitleGeneration(text);

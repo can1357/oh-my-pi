@@ -21,7 +21,7 @@ import {
 	type AgentTelemetryConfig,
 	GenAIAttr,
 	GenAIOperation,
-	PiGenAIAttr,
+	OmpGenAIAttr,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core/telemetry";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
@@ -100,7 +100,7 @@ function chatSpans(spans: ReadableSpan[]): ReadableSpan[] {
 }
 
 function spansByOneshotKind(spans: ReadableSpan[], kind: string): ReadableSpan[] {
-	return spans.filter(s => s.attributes[PiGenAIAttr.OneshotKind] === kind);
+	return spans.filter(s => s.attributes[OmpGenAIAttr.OneshotKind] === kind);
 }
 
 function makePreparation(overrides: Partial<CompactionPreparation> = {}): CompactionPreparation {
@@ -142,7 +142,7 @@ describe("compaction oneshot telemetry", () => {
 		expect(historySpan?.attributes[GenAIAttr.RequestModel]).toBe("mock-model");
 		expect(historySpan?.attributes[GenAIAttr.UsageInputTokens]).toBe(215); // input + cacheRead + cacheWrite
 		expect(historySpan?.attributes[GenAIAttr.UsageOutputTokens]).toBe(90);
-		expect(historySpan?.attributes[PiGenAIAttr.AgentStepNumber]).toBe(-1);
+		expect(historySpan?.attributes[OmpGenAIAttr.AgentStepNumber]).toBe(-1);
 		expect(historySpan?.status.code).not.toBe(SpanStatusCode.ERROR);
 	});
 
@@ -199,7 +199,7 @@ describe("compaction oneshot telemetry", () => {
 		const chats = chatSpans(exporter.getFinishedSpans());
 		expect(chats).toHaveLength(1);
 		const span = chats[0];
-		expect(span?.attributes[PiGenAIAttr.OneshotKind]).toBe("compaction_summary");
+		expect(span?.attributes[OmpGenAIAttr.OneshotKind]).toBe("compaction_summary");
 		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
 		// finishChatSpan-only attributes must NOT be set on the failure path.
 		expect(span?.attributes[GenAIAttr.ResponseModel]).toBeUndefined();
@@ -208,7 +208,7 @@ describe("compaction oneshot telemetry", () => {
 });
 
 describe("handoff oneshot telemetry", () => {
-	it("tags generateHandoff with pi.gen_ai.oneshot.kind = handoff and toolChoice = none", async () => {
+	it("tags generateHandoff with omp.gen_ai.oneshot.kind = handoff and toolChoice = none", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValueOnce(makeAssistantMessage("## Goal\nContinue"));
 
 		const telemetry = resolveTelemetry(makeTelemetryConfig(), "session-handoff");
@@ -227,13 +227,13 @@ describe("handoff oneshot telemetry", () => {
 		const chats = chatSpans(exporter.getFinishedSpans());
 		expect(chats).toHaveLength(1);
 		const span = chats[0];
-		expect(span?.attributes[PiGenAIAttr.OneshotKind]).toBe("handoff");
-		expect(span?.attributes[PiGenAIAttr.RequestToolChoice]).toBe("none");
+		expect(span?.attributes[OmpGenAIAttr.OneshotKind]).toBe("handoff");
+		expect(span?.attributes[OmpGenAIAttr.RequestToolChoice]).toBe("none");
 	});
 });
 
 describe("branch summary oneshot telemetry", () => {
-	it("tags generateBranchSummary with pi.gen_ai.oneshot.kind = branch_summary", async () => {
+	it("tags generateBranchSummary with omp.gen_ai.oneshot.kind = branch_summary", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
 			.mockResolvedValueOnce(makeAssistantMessage("branch summary text", makeUsage(50, 30)));
@@ -269,7 +269,7 @@ describe("branch summary oneshot telemetry", () => {
 		const chats = chatSpans(exporter.getFinishedSpans());
 		expect(chats).toHaveLength(1);
 		const span = chats[0];
-		expect(span?.attributes[PiGenAIAttr.OneshotKind]).toBe("branch_summary");
+		expect(span?.attributes[OmpGenAIAttr.OneshotKind]).toBe("branch_summary");
 		expect(span?.attributes[GenAIAttr.UsageInputTokens]).toBe(50);
 		expect(span?.attributes[GenAIAttr.UsageOutputTokens]).toBe(30);
 	});

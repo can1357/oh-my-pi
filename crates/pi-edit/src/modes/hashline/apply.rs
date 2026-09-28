@@ -507,8 +507,18 @@ fn group_variants(
 				let fits = previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
 				if first_essential && fits && indent_columns(trail) > indent_columns(first) {
 					plans.push((None, Some(group.start), 1));
-				} else if baseline && first_essential && indent_columns(trail) == indent_columns(first)
-				{
+				} else if baseline
+					&& first_essential
+					&& indent_columns(trail) == indent_columns(first)
+					&& !parses_cleanly(
+						Some(path),
+						&materialize(lines, &[inserts.clone(), deletes.clone()].concat()).0,
+					) {
+					// Only a replacement that breaks the file on its own leaves the row's
+					// position in question (e.g. a closer swapped for a statement).
+					// Swapping an `if` opener, `case` label, or signature for another of
+					// the same shape parses fine alone, so a parse failure elsewhere in
+					// the batch must not reject it.
 					ambiguous = true;
 				}
 			} else {

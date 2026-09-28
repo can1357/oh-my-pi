@@ -1,4 +1,5 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -392,8 +393,19 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if ("error" in parsed) return usage(parsed.error, runtime);
 
 			await runtime.output("Syncing session files...");
+			// The Frustration page judges through this session's settings and
+			// registry; its cost lands on this session's ledger.
+			const judge = resolveJudge({
+				settings: runtime.settings,
+				registry: runtime.session.modelRegistry,
+				sessionId: runtime.session.sessionId,
+				purpose: "stats_frustration",
+				onUsage: journalJudgmentUsage(runtime.sessionManager),
+				telemetry: runtime.session.agent.telemetry,
+				cache: sharedJudgmentCache(),
+			});
 			try {
-				const result = await launchStatsDashboard(parsed);
+				const result = await launchStatsDashboard(parsed, async () => judge);
 				await runtime.output(result.message);
 			} catch (error) {
 				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
