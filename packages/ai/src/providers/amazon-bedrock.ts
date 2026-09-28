@@ -446,6 +446,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		};
 
 		const blocks = output.content as Block[];
+		const contentIndexByBlockIndex = new Map<number, number>();
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		const region = resolveBedrockRegion(model.id, options);
 
@@ -640,7 +641,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				if (messageType === "exception") {
 					const exceptionType = message.headers[":exception-type"] || "Exception";
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
-					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
+					const errorMessage = payload?.message || PAYLOAD_DECODER.decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
 					throw new AIError.BedrockApiError(text, bedrockStreamExceptionStatus(exceptionType), {
 						code: exceptionType,
@@ -648,7 +649,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
-					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
+					const errorMessage = message.headers[":error-message"] || PAYLOAD_DECODER.decode(message.payload);
 					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, bedrockStreamExceptionStatus(code), {
 						code,
 					});
@@ -673,16 +674,35 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					}
 					case "contentBlockStart": {
 						if (!firstTokenTime) firstTokenTime = performance.now();
-						handleContentBlockStart(payload as ContentBlockStartEvent, blocks, output, stream, sentinelInjected);
+						handleContentBlockStart(
+							payload as ContentBlockStartEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+							sentinelInjected,
+						);
 						break;
 					}
 					case "contentBlockDelta": {
 						if (!firstTokenTime) firstTokenTime = performance.now();
-						handleContentBlockDelta(payload as ContentBlockDeltaEvent, blocks, output, stream);
+						handleContentBlockDelta(
+							payload as ContentBlockDeltaEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+						);
 						break;
 					}
 					case "contentBlockStop": {
-						handleContentBlockStop(payload as ContentBlockStopEvent, blocks, output, stream);
+						handleContentBlockStop(
+							payload as ContentBlockStopEvent,
+							blocks,
+							contentIndexByBlockIndex,
+							output,
+							stream,
+						);
 						break;
 					}
 					case "messageStop": {
@@ -782,18 +802,40 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	return stream;
 };
 
+/** Shared across events: every payload decode is a complete, non-streaming call. */
+const PAYLOAD_DECODER = new TextDecoder();
+
 function safeParsePayload(payload: Uint8Array): unknown {
 	if (payload.length === 0) return {};
 	try {
-		return JSON.parse(new TextDecoder().decode(payload));
+		return JSON.parse(PAYLOAD_DECODER.decode(payload));
 	} catch {
 		return undefined;
 	}
 }
 
+/**
+ * Append a streamed block and index it by Bedrock's `contentBlockIndex`, so
+ * per-delta routing is an O(1) lookup instead of a scan over every block
+ * (quadratic over a long turn). The first block registered for an index wins,
+ * as the first-match scan did. Returns the block's content index.
+ */
+function pushStreamBlock(
+	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
+	block: Block,
+	contentBlockIndex: number,
+): number {
+	const contentIndex = blocks.length;
+	blocks.push(block);
+	if (!contentIndexByBlockIndex.has(contentBlockIndex)) contentIndexByBlockIndex.set(contentBlockIndex, contentIndex);
+	return contentIndex;
+}
+
 function handleContentBlockStart(
 	event: ContentBlockStartEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	sentinelInjected: boolean,
@@ -815,29 +857,29 @@ function handleContentBlockStart(
 			[kStreamingPartialJson]: "",
 			[kStreamingBlockIndex]: index,
 		};
-		output.content.push(block);
-		stream.push({ type: "toolcall_start", contentIndex: blocks.length - 1, partial: output });
+		const contentIndex = pushStreamBlock(blocks, contentIndexByBlockIndex, block, index);
+		stream.push({ type: "toolcall_start", contentIndex, partial: output });
 	}
 }
 
 function handleContentBlockDelta(
 	event: ContentBlockDeltaEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
 	const contentBlockIndex = event.contentBlockIndex;
 	const delta = event.delta;
-	let index = blocks.findIndex(b => b[kStreamingBlockIndex] === contentBlockIndex);
+	let index = contentIndexByBlockIndex.get(contentBlockIndex) ?? -1;
 	let block = blocks[index];
 
 	if (delta?.text !== undefined) {
 		// If no text block exists yet, create one — `handleContentBlockStart` is not sent for text blocks
 		if (!block) {
 			const newBlock: Block = { type: "text", text: "", [kStreamingBlockIndex]: contentBlockIndex };
-			output.content.push(newBlock);
-			index = blocks.length - 1;
-			block = blocks[index];
+			index = pushStreamBlock(blocks, contentIndexByBlockIndex, newBlock, contentBlockIndex);
+			block = newBlock;
 			stream.push({ type: "text_start", contentIndex: index, partial: output });
 		}
 		if (block.type === "text") {
@@ -863,9 +905,8 @@ function handleContentBlockDelta(
 				thinkingSignature: "",
 				[kStreamingBlockIndex]: contentBlockIndex,
 			};
-			output.content.push(newBlock);
-			thinkingIndex = blocks.length - 1;
-			thinkingBlock = blocks[thinkingIndex];
+			thinkingIndex = pushStreamBlock(blocks, contentIndexByBlockIndex, newBlock, contentBlockIndex);
+			thinkingBlock = newBlock;
 			stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
 		}
 
@@ -901,10 +942,11 @@ function handleMetadata(event: MetadataEvent, model: Model<"bedrock-converse-str
 function handleContentBlockStop(
 	event: ContentBlockStopEvent,
 	blocks: Block[],
+	contentIndexByBlockIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
-	const index = blocks.findIndex(b => b[kStreamingBlockIndex] === event.contentBlockIndex);
+	const index = contentIndexByBlockIndex.get(event.contentBlockIndex) ?? -1;
 	const block = blocks[index];
 	if (!block) return;
 

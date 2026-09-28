@@ -850,7 +850,8 @@ export interface SpeculativeToolExecutionConfig {
  * ignored when `block` is true.
  *
  * Set `additionalContext` to attach passive model-visible context to this call.
- * Non-empty values from a tool batch are injected in assistant tool-call order
+ * Non-empty values from a tool batch are injected in assistant tool-call order,
+ * a value identical to an earlier one in the batch only once,
  * after every result settles and before the next provider request. It is
  * dropped when the call is blocked or skipped, or when its final result is an
  * error (including an approval denial raised by the tool's own gate). Within a
