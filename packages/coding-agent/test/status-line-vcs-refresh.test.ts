@@ -44,7 +44,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function makeSession() {
+function makeSession(isStreaming = false) {
 	return {
 		state: { messages: [], model: undefined },
 		messages: [],
@@ -52,7 +52,7 @@ function makeSession() {
 		systemPrompt: [],
 		agent: { state: { tools: [] } },
 		skills: [],
-		isStreaming: false,
+		isStreaming,
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
@@ -205,6 +205,56 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		await Promise.resolve();
 
 		expect(onBranchChange).toHaveBeenCalled();
+		component.dispose();
+	});
+
+	it("does not refetch git status while the session is idle", async () => {
+		let now = 1_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
+		component.updateSettings(gitSegment);
+		component.watchBranch(vi.fn());
+
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(1);
+
+		now += 60_000;
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(1);
+		component.dispose();
+	});
+
+	it("throttles git status refreshes while the session is active", async () => {
+		let now = 1_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession(true), statusLineHost);
+		component.updateSettings(gitSegment);
+		component.watchBranch(vi.fn());
+
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(1);
+
+		now += 1_000;
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(1);
+
+		now += 4_000;
+		component.getTopBorder(80);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(gitControls.statusSummary).toHaveBeenCalledTimes(2);
 		component.dispose();
 	});
 
