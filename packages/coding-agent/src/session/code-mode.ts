@@ -5,7 +5,6 @@
  * eval transport supports the bridge.
  */
 
-import { compareRevision, parseRevision, type ModelIdentity } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 
 /**
@@ -45,8 +44,6 @@ export interface CodeModeResolution {
 }
 
 export interface ResolveCodeModeArgs {
-	provider: string;
-	modelIdentity?: ModelIdentity;
 	toolMode?: string;
 	setting: "off" | "on" | "auto";
 	extraDirectTools?: readonly string[];
@@ -54,20 +51,11 @@ export interface ResolveCodeModeArgs {
 	evalTransportAvailable: boolean;
 }
 
-const AUTO_CODE_MODE_GPT_FLOOR = [5, 6, 0] as const;
-
-function autoCodeModeModel(identity: ModelIdentity | undefined): boolean {
-	if (identity?.class !== "openai" || identity.family !== "gpt" || identity.revision === undefined) return false;
-	const revision = parseRevision(identity.revision);
-	return revision !== undefined && compareRevision(revision, AUTO_CODE_MODE_GPT_FLOOR) >= 0;
-}
-
 export function resolveCodeMode(args: ResolveCodeModeArgs): CodeModeResolution {
 	const active =
 		args.enabledToolNames.includes("eval") &&
 		args.evalTransportAvailable &&
-		(args.setting === "on" ||
-			(args.setting === "auto" && (args.toolMode === "code_mode_only" || autoCodeModeModel(args.modelIdentity))));
+		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
 	if (!active) return { active: false, directToolNames: new Set(args.enabledToolNames) };
 	const direct = new Set<string>();
 	for (const name of args.enabledToolNames) {

@@ -56,6 +56,8 @@ import {
 	cfgProvidersOpenaiCodexCodeMode,
 	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgSkillful,
+	cfgToolsCodeMode,
+	cfgToolsCodeModeDirectTools,
 } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
@@ -632,6 +634,26 @@ export class SessionTools {
 		return evalTool.supportsCodeModeTransport?.() ?? false;
 	}
 
+	#codeModeConfigFor(model: Model | undefined): {
+		setting: "off" | "on" | "auto";
+		extraDirectTools: readonly string[];
+	} {
+		const settings = this.#host.settings;
+		const neutralConfigured = cfgToolsCodeMode.isConfigured(settings);
+		const legacyCodex = !neutralConfigured && model?.provider === "openai-codex";
+		const setting = neutralConfigured
+			? cfgToolsCodeMode.get(settings)
+			: legacyCodex
+				? cfgProvidersOpenaiCodexCodeMode.get(settings)
+				: "off";
+		const extraDirectTools = cfgToolsCodeModeDirectTools.isConfigured(settings)
+			? cfgToolsCodeModeDirectTools.get(settings)
+			: legacyCodex
+				? cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)
+				: [];
+		return { setting, extraDirectTools };
+	}
+
 	/**
 	 * Whether a registry entry came from a built-in factory.
 	 *
@@ -835,18 +857,16 @@ export class SessionTools {
 	/** Whether a model transition crosses a Code Mode presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
-		const setting = cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings);
-		const extraDirectTools = cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings);
-		const resolve = (model: Model | undefined) =>
-			resolveCodeMode({
-				provider: model?.provider ?? "",
-				modelIdentity: model?.identity,
+		const resolve = (model: Model | undefined) => {
+			const { setting, extraDirectTools } = this.#codeModeConfigFor(model);
+			return resolveCodeMode({
 				toolMode: model?.toolMode,
 				setting,
 				extraDirectTools,
 				enabledToolNames,
 				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 			});
+		};
 		const previous = resolve(previousModel);
 		const next = resolve(nextModel);
 		if (previous.active !== next.active) return true;
@@ -1021,12 +1041,11 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
+		const { setting, extraDirectTools } = this.#codeModeConfigFor(this.#host.model());
 		const codeMode = resolveCodeMode({
-			provider: this.#host.model()?.provider ?? "",
-			modelIdentity: this.#host.model()?.identity,
 			toolMode: this.#host.model()?.toolMode,
-			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
-			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
+			setting,
+			extraDirectTools,
 			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});

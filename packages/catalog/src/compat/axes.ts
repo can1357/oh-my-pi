@@ -490,6 +490,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	entitlement: { key: "entitlement", set: "catalog", shape: "object" },
 	/** The native default when the caller picks no effort is thinking off. */
 	"default-reasoning-off": { key: "defaultReasoningOff", set: "catalog", shape: "scalar", values: [true, false] },
+	"tool-mode": { key: "toolMode", set: "catalog", shape: "scalar", values: ["code_mode_only"] },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */
