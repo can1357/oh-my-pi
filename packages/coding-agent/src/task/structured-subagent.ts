@@ -134,8 +134,6 @@ export interface StructuredSubagentRequest {
 	onArtifactsRetained?: (cleanup: () => Promise<void>) => void;
 	/** Task UI agents keep live registry references; eval one-shots normally do not. */
 	keepAlive?: boolean;
-	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
-	shareEvalSession?: boolean;
 	/** Task frontends may inherit LSP; eval frontends normally set this false. */
 	enableLsp?: boolean;
 	/** Explicitly pass false for plan mode or invocation kinds that must not use IRC. */
@@ -562,7 +560,6 @@ function buildExecutorOptions(
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};

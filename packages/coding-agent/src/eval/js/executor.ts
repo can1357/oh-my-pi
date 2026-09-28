@@ -24,7 +24,7 @@ export interface JsExecutorOptions {
 	onStatus?: (event: JsStatusEvent) => void;
 	signal?: AbortSignal;
 	sessionId: string;
-	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
+	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
 	sessionFile?: string;

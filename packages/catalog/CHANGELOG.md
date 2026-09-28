@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.4.2] - 2026-09-28
+
+### Changed
+
+- Improved model cache invalidation efficiency by implementing deep equality checks on cached rows when database version signals change
+- Optimized read-row cache by enabling granular cache-hit logic across concurrent connection handles
+
 ## [18.4.1] - 2026-09-28
 
 ### Added

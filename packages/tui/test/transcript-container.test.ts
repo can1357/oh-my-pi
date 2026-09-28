@@ -242,6 +242,33 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFinalizedBatch(80, 0)?.rows).toEqual(["two", ""]);
 	});
 
+	it("freezes same-length drift in a reused render buffer without changing emitted history", () => {
+		const transcript = new TranscriptContainer();
+		const stableRender = ["one"];
+		const fullRender = ["one", "tail"];
+		const block = new (class extends AppendBlock {
+			override renderTranscriptStableRows(count: number): readonly string[] {
+				return count === stableRender.length ? stableRender : stableRender.slice(0, count);
+			}
+		})(fullRender, stableRender);
+		transcript.addChild(block);
+
+		const emitted = transcript.peekFinalizedBatch(80, 1);
+		if (!emitted) throw new Error("Expected stable history batch");
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+
+		stableRender[0] = "changed";
+		fullRender[0] = "changed";
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["tail"]);
+		expect(emitted.rows).toEqual(["one"]);
+
+		// Restoring the old prefix does not unfreeze publication.
+		stableRender.splice(0, 1, "one", "two");
+		fullRender.splice(0, 2, "one", "two", "tail");
+		block.publish(stableRender);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+	});
+
 	it("emits only the stable current head under row pressure", () => {
 		const transcript = new TranscriptContainer();
 		const head = new Block(["mutable head"], false);
@@ -422,6 +449,26 @@ describe("TranscriptContainer", () => {
 		const batch = transcript.peekFinalizedBatch(80, 1);
 		expect(batch?.rows).toEqual(["old settled", ""]);
 		expect(transcript.renderViewport(80, 1, frame)).toEqual(["fresh live"]);
+	});
+
+	it("never replays a frame's measurements after the block changes outside that frame", () => {
+		const transcript = new TranscriptContainer();
+		const block = new Block(["draft"], false);
+		transcript.addChild(block);
+		const first = { tick: 0, now: 0 };
+		transcript.beginFrame(first);
+		expect(transcript.liveRowCount(80)).toBe(1);
+		expect(transcript.renderViewport(80, 5, first)).toEqual(["draft"]);
+
+		// The viewport closed the frame: a later peek measures the change.
+		block.finalize(["revised", "twice"]);
+		expect(transcript.liveRowCount(80)).toBe(2);
+
+		// A viewport for a different frame discards the open frame's measurements.
+		transcript.beginFrame({ tick: 1, now: 16 });
+		expect(transcript.peekFinalizedBatch(80, 5)).toBeUndefined();
+		block.finalize(["late"]);
+		expect(transcript.renderViewport(80, 5, { tick: 2, now: 32 })).toEqual(["late"]);
 	});
 
 	it("assigns one row per live block until pressure requires aggregation", () => {

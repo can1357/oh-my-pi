@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added `summarizeCodeAsync` for non-blocking source structure summarization on the libuv thread pool
+
 ### Fixed
 
+- Fixed concurrent streaming searches hanging indefinitely or ignoring cancellation while waiting to deliver results to JavaScript.
 - Fixed ngram word completion losing learned state between sessions on Windows when saving its snapshot ([#13589](https://github.com/can1357/oh-my-pi/issues/13589)).
+- Fixed Windows shell pipelines losing their final output when cancelled or timed out (e.g. `yes x | tail -5`): cancelled runs now get a longer grace period to flush before being aborted ([#13365](https://github.com/can1357/oh-my-pi/pull/13365) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.4.1] - 2026-09-28
 

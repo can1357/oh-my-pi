@@ -26,7 +26,14 @@ export class Loader extends Text {
 	#ui: TUI | null = null;
 	#lastSpinnerTick = 0;
 	#layoutSource?: readonly string[];
-	#layout?: readonly { leading: string; content: string; trailing: string }[];
+	#layout?: readonly {
+		leading: string;
+		message: string;
+		trailing: string;
+		spinner: boolean;
+		separator: string;
+		bodyWidth?: number;
+	}[];
 	#layoutFrames: readonly string[];
 	#layoutFrame: string;
 	#trailer?: () => string | undefined;
@@ -72,14 +79,28 @@ export class Loader extends Text {
 		if (source !== this.#layoutSource) {
 			const paddingX = getPaddingX(1);
 			this.#layoutSource = source;
-			this.#layout = source.map(line => {
+			this.#layout = source.map((line, i) => {
 				const clamped = visibleWidth(line) > width ? sliceByColumn(line, 0, width, true) : line;
 				const body = clamped.slice(paddingX);
 				const content = body.trimEnd();
+				const leading = clamped.slice(0, paddingX);
+				const spinner = i === 0 && content.startsWith(this.#layoutFrame);
+				const remainder = spinner ? content.slice(this.#layoutFrame.length) : content;
+				const separator = spinner && remainder.startsWith(" ") ? " " : "";
+				const message = remainder.slice(separator.length);
+				const plainMessage = i === 0 ? Bun.stripANSI(message) : "";
+				// A visible non-whitespace ending makes trimEnd independent of
+				// colorizer ANSI placement. The separator isolates spinner width
+				// from message graphemes; other cases retain whole-body measuring.
+				const stableBodyWidth =
+					plainMessage.length > 0 && plainMessage.trimEnd() === plainMessage && (!spinner || separator === " ");
 				return {
-					leading: clamped.slice(0, paddingX),
-					content,
+					leading,
+					message,
 					trailing: body.slice(content.length),
+					spinner,
+					separator,
+					bodyWidth: stableBodyWidth ? visibleWidth(leading + separator + message) : undefined,
 				};
 			});
 		}
@@ -88,28 +109,27 @@ export class Loader extends Text {
 		// The wrapped text carries one stable representative per frame width.
 		// Same-width frames swap only the visible glyph here; crossing widths
 		// rewraps against the representative selected by #syncText.
-		const sentinel = this.#layoutFrame;
 		const lines = [""];
 		const layout = this.#layout ?? [];
-		for (let i = 0; i < layout.length; i++) {
-			const { leading, content, trailing } = layout[i];
-			if (i === 0 && content.startsWith(sentinel)) {
-				const remainder = content.slice(sentinel.length);
-				const separator = remainder.startsWith(" ") ? " " : "";
-				const message = remainder.slice(separator.length);
-				lines.push(
-					`${leading}${this.spinnerColorFn(frame)}${separator}${message ? this.messageColorFn(message) : ""}${trailing}`,
-				);
-			} else {
-				lines.push(`${leading}${content ? this.messageColorFn(content) : ""}${trailing}`);
+		let coloredSpinner = "";
+		for (const { leading, message, trailing, spinner, separator } of layout) {
+			if (spinner) {
+				coloredSpinner = this.spinnerColorFn(frame);
 			}
+			lines.push(
+				`${leading}${spinner ? coloredSpinner : ""}${separator}${message ? this.messageColorFn(message) : ""}${trailing}`,
+			);
 		}
 		if (this.#trailer && lines.length > 1) {
 			const trailer = this.#trailer();
 			if (trailer) {
 				// Text pads rows to full width; drop that pad before docking right.
 				const body = lines[1].trimEnd();
-				const gap = width - visibleWidth(body) - visibleWidth(trailer);
+				const bodyWidth =
+					layout[0].bodyWidth === undefined
+						? visibleWidth(body)
+						: layout[0].bodyWidth + visibleWidth(coloredSpinner);
+				const gap = width - bodyWidth - visibleWidth(trailer);
 				if (gap >= 2) lines[1] = body + padding(gap) + trailer;
 			}
 		}

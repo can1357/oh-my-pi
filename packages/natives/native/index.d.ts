@@ -1821,8 +1821,9 @@ export interface GrepOptions {
    * Stream results instead of returning them: called on the JS thread with
    * batches (at most 1024 entries, files in no particular order) of what
    * `matches` would hold, while the search runs. A slow callback pauses the
-   * search instead of buffering, every call returns before the promise
-   * settles, and the result then carries counts with empty `matches`.
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
    * A throw rejects the search with it. Incompatible with `maxCount` and
    * `offset`.
    */
@@ -3147,7 +3148,21 @@ export interface SpellingRange {
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */

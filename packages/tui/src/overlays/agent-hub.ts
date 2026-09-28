@@ -102,13 +102,23 @@ function activityGlyph(row: AgentActivityRow): string {
 	}
 }
 
+const ACTIVITY_CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, {
+	hour: "2-digit",
+	minute: "2-digit",
+	second: "2-digit",
+	hour12: false,
+});
+const ACTIVITY_CLOCK_CACHE_LIMIT = 512;
+const activityClockCache = new Map<number, string>();
+
 function activityClock(timestamp: number): string {
-	return new Date(timestamp).toLocaleTimeString(undefined, {
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-		hour12: false,
-	});
+	let text = activityClockCache.get(timestamp);
+	if (text === undefined) {
+		text = ACTIVITY_CLOCK_FORMAT.format(timestamp);
+		if (activityClockCache.size >= ACTIVITY_CLOCK_CACHE_LIMIT) activityClockCache.clear();
+		activityClockCache.set(timestamp, text);
+	}
+	return text;
 }
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {

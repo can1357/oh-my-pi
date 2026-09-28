@@ -44,6 +44,16 @@ describe("context overflow evidence", () => {
 		expect(isContextOverflow(message, 100)).toBe(false);
 		expect(isContextOverflow(message, 99)).toBe(true);
 	});
+
+	it("judges occupancy by contextTokens over per-turn input totals", () => {
+		// Cursor grok-4.7-high turn: summed turn-end input far over the 256k
+		// window, checkpoint context at ~20%.
+		const usage = { input: 458_717, cacheRead: 404_992, cacheWrite: 0, contextTokens: 49_925 };
+		expect(isContextOverflow({ stopReason: "stop", usage }, 256_000)).toBe(false);
+		expect(isContextOverflow({ stopReason: "stop", usage: { ...usage, contextTokens: 256_001 } }, 256_000)).toBe(
+			true,
+		);
+	});
 });
 
 describe("isContextOverflow - model_context_window_exceeded", () => {

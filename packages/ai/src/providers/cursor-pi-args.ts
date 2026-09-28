@@ -25,18 +25,14 @@ import * as path from "node:path";
  * A `pi_read` range composed onto the path as `read`'s inline `:raw:N+K`
  * selector.
  *
- * `read` exposes no range kwargs, so an uncomposed range reads the whole file.
- * `offset` is a 1-indexed start clamped like the reference's
- * `Math.max(0, offset - 1)` over 0-indexed lines; `limit` is a line count.
- * `null` marks a present `limit: 0` — zero lines, which no selector expresses
- * and which must not degrade into a whole-file read.
+ * `read` exposes no range kwargs; `offset` and `limit` are composed onto the
+ * path. A negative offset needs the source line count and is resolved by the
+ * coding-agent bridge before calling this helper. `limit: 0` has no selector
+ * representation and returns `null`.
  *
- * The range is `raw` because a plain `:N+K` deliberately pads with one leading
- * and three trailing context lines: helpful for a human reading a snippet,
- * wrong for a caller that asked for exactly `limit` lines from `offset`. The
- * wire result is an opaque `output` string, so the hashline and line-number
- * gutter that `raw` also drops carry nothing the frame's contract needs.
- * A range-free read keeps the ordinary form — whole-file reads want them.
+ * Range selectors are raw because plain ranges add context lines. Cursor
+ * numbers the returned text itself, so it cannot use read's hashline gutter.
+ * Use [`cursorExecReadPath`] for a range-free read, which also needs `:raw`.
  */
 export function piReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	if (limit !== undefined && Math.floor(limit) <= 0) return null;
@@ -100,14 +96,13 @@ export function cursorRawReadPath(readPath: string): string {
 }
 
 /**
- * Path the edit-owned materialization read should execute.
+ * Raw selector for a Cursor exec read, including edit-owned materialization.
  *
- * Range is composed first (`piReadPath` already uses `:raw` for a range),
- * then a whole-file path is forced onto `:raw`. The caller must drop
- * `offset`/`limit` after this so the bridge's `piReadPath` cannot append a
- * second `:raw` onto the already-composed selector.
+ * Compose a requested window before forcing `:raw` on whole-file reads. The
+ * caller drops `offset`/`limit` after composing so the handler cannot append
+ * another selector.
  */
-export function cursorEditOwnedReadPath(readPath: string, offset?: number, limit?: number): string | null {
+export function cursorExecReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	const ranged = piReadPath(readPath, offset, limit);
 	if (ranged === null) return null;
 	return cursorRawReadPath(ranged);

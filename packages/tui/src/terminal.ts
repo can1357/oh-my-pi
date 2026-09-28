@@ -772,6 +772,10 @@ export class ProcessTerminal implements Terminal {
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	// Upper bound on the pump's backlog: the count its last enqueue or read
+	// reported. Only #safeWrite enqueues and the pump thread only drains, so
+	// the live backlog cannot exceed this until the next enqueue refreshes it.
+	#pumpBacklogBound = 0;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -940,6 +944,7 @@ export class ProcessTerminal implements Terminal {
 		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
 				this.#outputPump = new TtyWriter(1);
+				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
 			}
@@ -2135,19 +2140,27 @@ export class ProcessTerminal implements Terminal {
 		this.#trackCursorVisibility(data);
 		const pump = this.#outputPump;
 		if (pump) {
-			if (pump.dead) {
+			let pending: number;
+			try {
+				pending = pump.write(data);
+			} catch (err) {
+				this.#markTerminalDisconnected("stdout failed", err);
+				return;
+			}
+			// A live enqueue reports at least this chunk's UTF-8 size, never below
+			// its UTF-16 length; a dead pump enqueues nothing and reports only the
+			// remainder it is dropping (soon zero). Only a report that small can
+			// come from a dead pump, so the native `dead` read is skipped otherwise.
+			if ((pending < data.length || data.length === 0) && pump.dead) {
 				this.#markTerminalDisconnected("stdout failed; output pump died");
 				return;
 			}
-			try {
-				// Feed the live backlog to the stall watchdog rather than tripping on
-				// the instantaneous byte count: a single large-but-draining frame (a
-				// resume repaint of many inline images) must open normally, while a
-				// never-draining reader is still torn down (#6854, #10430).
-				this.#trackStdoutBacklog(pump.write(data));
-			} catch (err) {
-				this.#markTerminalDisconnected("stdout failed", err);
-			}
+			this.#pumpBacklogBound = pending;
+			// Feed the live backlog to the stall watchdog rather than tripping on
+			// the instantaneous byte count: a single large-but-draining frame (a
+			// resume repaint of many inline images) must open normally, while a
+			// never-draining reader is still torn down (#6854, #10430).
+			this.#trackStdoutBacklog(pending);
 			return;
 		}
 		// A console-sharing child process may have flipped the console codepage
@@ -2190,8 +2203,19 @@ export class ProcessTerminal implements Terminal {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
+	/**
+	 * With the output pump, a backlog bound at or below
+	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:
+	 * both consumers (the render gate and the stall watchdog) act only on a
+	 * backlog above that level, so the bound already decides them and spares a
+	 * native read on every frame.
+	 */
 	get pendingOutputBytes(): number {
-		if (this.#outputPump) return this.#outputPump.pending();
+		const pump = this.#outputPump;
+		if (pump) {
+			if (this.#pumpBacklogBound > STDOUT_BACKLOG_CLEAR_BYTES) this.#pumpBacklogBound = pump.pending();
+			return this.#pumpBacklogBound;
+		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
 	}
@@ -2296,7 +2320,9 @@ export class ProcessTerminal implements Terminal {
 			if (final === 0x68 /* h */ || final === 0x6c /* l */) break;
 			idx = idx === 0 ? -1 : data.lastIndexOf("\x1b[?25", idx - 1);
 		}
-		if (data.lastIndexOf("\x1b[?1049") > idx) {
+		// Only a switch after the last cursor sequence matters: search that tail
+		// rather than the whole frame.
+		if (data.indexOf("\x1b[?1049", idx + 1) !== -1) {
 			this.#cursorVisible = undefined;
 			return;
 		}
