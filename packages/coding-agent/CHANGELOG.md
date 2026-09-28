@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
-## [18.4.1] - 2026-09-28
+### Added
 
+- Added extension-facing collab hosting methods (`pi.startCollab()`, `pi.getCollabLinks()`, and `pi.stopCollab()`) to start, inspect, and stop live session sharing programmatically without routing through terminal commands ([#9525](https://github.com/can1357/oh-my-pi/pull/9525) by [@jwaldrip](https://github.com/jwaldrip)).
+
+## [18.4.1] - 2026-09-28
 ### Changed
 
 - With LSP disabled (`--no-lsp` or `lsp.enabled: false`), startup skips language-server discovery and warmup, and the welcome screen no longer shows the LSP Servers section
