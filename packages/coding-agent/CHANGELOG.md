@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- ACP clients now receive the live subagent roster as a `notifications/agent_registry` extension notification ([#11302](https://github.com/can1357/oh-my-pi/pull/11302) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Changed
