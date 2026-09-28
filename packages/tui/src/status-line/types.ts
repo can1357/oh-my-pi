@@ -1,10 +1,16 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState } from "@oh-my-pi/pi-wire";
-import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
+import type {
+	ContextLineMode,
+	ContextMetric,
+	StatusLinePreset,
+	StatusLineSegmentId,
+	StatusLineSeparatorStyle,
+} from "./schema";
 import type { ActiveRepoContext, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
-export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+export type { ContextLineMode, ContextMetric, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
 
 /** Context-window occupancy shown by the status line and exposed to extensions. */
 export interface ContextUsage {
@@ -59,6 +65,8 @@ export interface StatusLineSettings {
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
 	contextLine?: ContextLineMode;
+	/** Display percentage or used tokens in context segments and the embedded gauge. */
+	contextMetric?: ContextMetric;
 }
 
 export type EffectiveStatusLineSettings = Required<
@@ -89,6 +97,8 @@ export interface SegmentContext {
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
+	/** Context metric unit; direct renderSegment fixtures omit it and get percentage. */
+	contextMetric?: ContextMetric;
 	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
 	hookStatuses?: readonly string[];
 	planMode: {

@@ -236,7 +236,8 @@ export class FooterComponent implements Component {
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;
 		const autoIndicator = this.#autoCompactEnabled && autoIcon ? ` ${autoIcon}` : "";
-		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens)}${autoIndicator}`;
+		const contextMetric = this.host.getContextMetric?.() ?? "percentage";
+		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens, contextMetric)}${autoIndicator}`;
 		if (contextUsage && contextPercentValue !== null) {
 			const color = getContextUsageThemeColor(getContextUsageLevel(contextPercentValue, contextWindow));
 			contextPercentStr =

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `statusLine.contextMetric` (`percentage` | `tokens`, default `percentage`) to label context usage with used tokens instead of a percentage on the status line gauge, the `context_pct` segment, and the footer, with a "Context Metric" selector under Settings › Appearance › Status Line
+
 ## [18.4.2] - 2026-09-28
 
 ### Added

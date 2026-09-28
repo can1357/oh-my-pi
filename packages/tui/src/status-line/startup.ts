@@ -22,6 +22,7 @@ import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineHost, StatusLineSession } from "./host";
 import {
 	CONTEXT_LINE_MODE_VALUES,
+	STATUS_LINE_CONTEXT_METRIC_VALUES,
 	STATUS_LINE_PRESET_VALUES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
@@ -122,6 +123,7 @@ function isStatusLineSettings(value: unknown): value is StatusLineSettings {
 		(value.separator === undefined || isOneOf(STATUS_LINE_SEPARATOR_VALUES, value.separator)) &&
 		(value.segmentOptions === undefined || isRecord(value.segmentOptions)) &&
 		(value.contextLine === undefined || isOneOf(CONTEXT_LINE_MODE_VALUES, value.contextLine)) &&
+		(value.contextMetric === undefined || isOneOf(STATUS_LINE_CONTEXT_METRIC_VALUES, value.contextMetric)) &&
 		isOptionalBoolean(value.showHookStatus) &&
 		isOptionalBoolean(value.sessionAccent) &&
 		isOptionalBoolean(value.transparent) &&

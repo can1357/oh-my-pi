@@ -25,6 +25,7 @@ import {
 import type { ShapeTarget } from "@oh-my-pi/snapcompact";
 import type {
 	ContextLineMode,
+	ContextMetric,
 	StatusLinePreset,
 	StatusLineSegmentId,
 	StatusLineSeparatorStyle,
@@ -468,6 +469,7 @@ export interface SettingsRuntimeContext {
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
 	contextLine?: ContextLineMode;
+	contextMetric?: ContextMetric;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
@@ -1047,6 +1049,15 @@ export class SettingsSelectorComponent implements Component {
 					contextLine: this.#context.settings.get("statusLine.contextLine") as ContextLineMode,
 				});
 			};
+		} else if (def.path === "statusLine.contextMetric") {
+			onPreview = value => {
+				this.#callbacks.onStatusLinePreview?.({ contextMetric: value as ContextMetric });
+			};
+			onPreviewCancel = () => {
+				this.#callbacks.onStatusLinePreview?.({
+					contextMetric: this.#context.settings.get("statusLine.contextMetric") as ContextMetric,
+				});
+			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
 				model: this.#context.model,
@@ -1314,6 +1325,8 @@ export class SettingsSelectorComponent implements Component {
 	#triggerStatusLinePreview(): void {
 		const statusLineSettings: StatusLinePreviewSettings = {
 			preset: this.#context.settings.get("statusLine.preset") as StatusLinePreset,
+			contextLine: this.#context.settings.get("statusLine.contextLine") as ContextLineMode,
+			contextMetric: this.#context.settings.get("statusLine.contextMetric") as ContextMetric,
 			leftSegments: this.#context.settings.get("statusLine.leftSegments") as StatusLineSegmentId[],
 			rightSegments: this.#context.settings.get("statusLine.rightSegments") as StatusLineSegmentId[],
 			separator: this.#context.settings.get("statusLine.separator") as StatusLineSeparatorStyle,

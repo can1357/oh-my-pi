@@ -3,6 +3,7 @@ import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineSettings } from "./types";
+import type { ContextMetric } from "./schema";
 
 export interface StatusAccountIdentity {
 	accountId?: string;
@@ -78,6 +79,8 @@ export interface FooterSession {
  */
 export interface StatusLineHost<TSession extends StatusLineSession = StatusLineSession> {
 	getSettings(): StatusLineSettings;
+	/** Context usage display unit (`percentage` or used tokens); read by the footer. */
+	getContextMetric?(): ContextMetric;
 	gitEnabled(): boolean;
 	codexResetFireworksEnabled(): boolean;
 	getSettingsRevision(): number;
@@ -96,4 +99,5 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 
 export interface FooterHost {
 	gitEnabled(): boolean;
+	getContextMetric?(): ContextMetric;
 }

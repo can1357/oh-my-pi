@@ -6,6 +6,7 @@ import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
+	STATUS_LINE_CONTEXT_METRIC_VALUES,
 	STATUS_LINE_PRESET_VALUES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
@@ -219,6 +220,23 @@ export const cfgStatusLineContextLine = register({
 				label: "Embedded",
 				description: "Annotated line with the context percentage and window embedded in the gauge",
 			},
+		],
+	},
+});
+
+export const cfgStatusLineContextMetric = register({
+	id: "statusLine.contextMetric",
+	type: "enum",
+	values: STATUS_LINE_CONTEXT_METRIC_VALUES,
+	default: "percentage",
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Context Metric",
+		description: "Show context usage as a percentage or as used tokens",
+		options: [
+			{ value: "percentage", label: "Percent", description: "22.5%/200K" },
+			{ value: "tokens", label: "Tokens", description: "45K/200K" },
 		],
 	},
 });

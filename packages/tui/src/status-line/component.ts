@@ -47,6 +47,7 @@ import type {
 	StatusLineSegmentOptions,
 	StatusLineSettings,
 } from "./types";
+import type { ContextMetric } from "./schema";
 
 const JJ_REFRESH_TTL_MS = 5000;
 const JJ_COMMAND_TIMEOUT_MS = 5_000;
@@ -427,10 +428,26 @@ function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
+/**
+ * Left label of the embedded gauge: the used-context figure in the configured
+ * metric. An unknown percent (`null`, startup prepaint) yields no label — the
+ * gauge then shows the window label alone, matching percentage mode.
+ */
+function embeddedContextUsedLabel(
+	ctx: SegmentContext,
+	metric: ContextMetric,
+	pct: number | null,
+	overflow: boolean,
+): string {
+	if (pct === null) return "";
+	if (metric === "tokens") return formatNumber(ctx.contextTokens);
+	return formatEmbeddedContextPercent(overflow ? pct : Math.min(100, Math.max(0, pct)));
+}
+
 /** Gap width the embedded gauge needs for its labels; an unknown percent (`null`) shows the window label alone. */
-function embeddedContextGaugeMinWidth(percent: number | null, contextWindow: number): number {
-	const percentWidth = percent === null ? 0 : formatEmbeddedContextPercent(percent).length + 2;
-	return percentWidth + formatNumber(contextWindow).length + 2;
+function embeddedContextGaugeMinWidth(usedLabel: string, contextWindow: number): number {
+	const usedWidth = usedLabel ? usedLabel.length + 2 : 0;
+	return usedWidth + formatNumber(contextWindow).length + 2;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -2243,6 +2260,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			width,
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
+			contextMetric: this.#resolveSettings().contextMetric ?? "percentage",
 			hookStatuses: this.#sortedHookStatuses,
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
@@ -2713,7 +2731,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
 		const embeddedContextWidth = embedContext
-			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow)
+			? embeddedContextGaugeMinWidth(
+					// Overflow parity with the pre-change reserve: the raw percent, unclamped.
+					embeddedContextUsedLabel(ctx, effectiveSettings.contextMetric ?? "percentage", ctx.contextPercent, true),
+					ctx.contextWindow,
+				)
 			: 0;
 		const minimumGapWidth = (): number => {
 			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
@@ -2875,6 +2897,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;
 		const mode = effectiveSettings.contextLine ?? "embedded";
+		const metric = effectiveSettings.contextMetric ?? "percentage";
 		const pct = ctx.contextPercent;
 		if (mode === "off" || (pct === null && ctx.contextWindow <= 0)) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
@@ -2883,9 +2906,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// Unknown usage against a known window (startup prepaint) draws the fresh-session
 		// gauge: one lit cell and the window label, no percent.
 		const clampedPct = pct === null ? 0 : Math.min(100, Math.max(0, pct));
-		let percentLabel = "";
+		let usedLabel = "";
 		let windowLabel = "";
-		let percentStart = -1;
+		let usedStart = -1;
 		let windowStart = -1;
 		let scaleWidth = gapWidth;
 		// >100%: usage anchored past the active window (e.g. model switch to a
@@ -2893,14 +2916,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// past the window label — `──200K─120%` with the percent in error color.
 		const percentOverflow = pct !== null && pct > 100;
 		if (embedContext) {
-			const candidatePercent = pct === null ? "" : formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const candidatePercent = embeddedContextUsedLabel(ctx, metric, pct, percentOverflow);
 			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
-				percentLabel = candidatePercent;
+			if (gapWidth >= embeddedContextGaugeMinWidth(candidatePercent, ctx.contextWindow)) {
+				usedLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
-					percentStart = gapWidth - percentLabel.length;
-					windowStart = percentStart - 1 - windowLabel.length;
+					usedStart = gapWidth - usedLabel.length;
+					windowStart = usedStart - 1 - windowLabel.length;
 				} else {
 					windowStart = gapWidth - windowLabel.length - 1;
 				}
@@ -2930,23 +2953,23 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			}
 		}
 
-		if (percentLabel && percentStart < 0) {
-			const maxStart = scaleWidth - percentLabel.length - 1;
+		if (usedLabel && usedStart < 0) {
+			const maxStart = scaleWidth - usedLabel.length - 1;
 			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
-				const end = start + percentLabel.length;
+				const end = start + usedLabel.length;
 				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
 			};
 			for (let distance = 0; distance <= maxStart; distance++) {
 				const left = preferredStart - distance;
 				if (left >= 1 && !overlapsBoundary(left)) {
-					percentStart = left;
+					usedStart = left;
 					break;
 				}
 				if (distance === 0) continue;
 				const right = preferredStart + distance;
 				if (right <= maxStart && !overlapsBoundary(right)) {
-					percentStart = right;
+					usedStart = right;
 					break;
 				}
 			}
@@ -2969,9 +2992,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		for (let i = 0; i < gapWidth; i++) {
 			let color = i < usedCount ? usedColor : unusedColor;
 			let glyph = horizontal;
-			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
+			if (usedStart >= 0 && i >= usedStart && i < usedStart + usedLabel.length) {
 				color = percentOverflow ? overflowColor : usedColor;
-				glyph = percentLabel.charAt(i - percentStart);
+				glyph = usedLabel.charAt(i - usedStart);
 			} else if (i === thresholdIdx) {
 				color = thresholdColor;
 				glyph = thresholdGlyph;

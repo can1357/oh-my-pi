@@ -753,6 +753,7 @@ colorBlindMode: false
 statusLine:
   preset: default # default, minimal, compact, full, nerd, ascii, custom
   separator: powerline-thin
+  contextMetric: percentage # percentage, tokens
   transparent: false
   showHookStatus: true
 
@@ -774,6 +775,7 @@ tui:
 | `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                        |
 | `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
 | `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
+| `statusLine.contextMetric`  | enum    | `percentage`     | `percentage`, `tokens`. Unit for context usage labels (gauge, `context_pct` chip, footer). |
 | `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
@@ -785,7 +787,7 @@ tui:
 | `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
-For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
+For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer. The `context_pct` segment shows `used/window` tokens instead of a percentage when `statusLine.contextMetric: tokens`.
 
 The `path` segment abbreviates the home directory to `~`. On Windows, shared path formatting recognizes both the long home name and its existing 8.3 aliases (such as `ADMINI~1`), including in tool labels and error text. Only the home prefix is abbreviated; remaining path components keep their spelling, and formatting does not change the working directory or environment. Set `statusLine.segmentOptions.path.abbreviate: false` to keep the full path in the status line.
 

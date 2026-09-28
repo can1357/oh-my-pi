@@ -619,7 +619,9 @@ const contextPctSegment: StatusLineSegment = {
 		// A known window with unknown usage (startup prepaint) shows the window alone.
 		const text = theme.fg(
 			color,
-			pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
+			pct === null && window > 0
+				? formatNumber(window)
+				: formatContextUsage(pct, window, ctx.contextTokens, ctx.contextMetric),
 		);
 		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
 

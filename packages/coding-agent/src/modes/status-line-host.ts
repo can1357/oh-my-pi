@@ -11,6 +11,7 @@ import {
 	cfgGitEnabled,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
+	cfgStatusLineContextMetric,
 	cfgStatusLineLeftSegments,
 	cfgStatusLinePreset,
 	cfgStatusLineRightSegments,
@@ -44,7 +45,9 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		transparent: cfgStatusLineTransparent.get(settings),
 		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
 		contextLine: cfgStatusLineContextLine.get(settings),
+		contextMetric: cfgStatusLineContextMetric.get(settings),
 	}),
+	getContextMetric: () => cfgStatusLineContextMetric.get(settings) ?? "percentage",
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
 	// Read per frame: skip the `settings` proxy trap and hit the instance getter directly.

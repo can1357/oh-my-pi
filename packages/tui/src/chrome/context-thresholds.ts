@@ -1,5 +1,6 @@
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/index";
+import type { ContextMetric } from "../status-line/schema";
 export type ContextUsageLevel = "normal" | "warning" | "purple" | "error";
 
 const CONTEXT_WARNING_PERCENT_THRESHOLD = 50;
@@ -55,7 +56,8 @@ export function getContextUsageLevel(contextPercent: number, contextWindow: numb
 }
 
 /**
- * Format context usage as `<percent>%/<window>` when the model window is known.
+ * Format context usage as `<percent>%/<window>` or `<tokens>/<window>` (depending on `metric`)
+ * when the model window is known.
  * Unknown windows render as `<tokens>/?`, because `0.0%/0` suggests a real
  * empty context instead of missing provider metadata.
  */
@@ -63,9 +65,13 @@ export function formatContextUsage(
 	contextPercent: number | null | undefined,
 	contextWindow: number,
 	usedTokens?: number,
+	metric: ContextMetric = "percentage",
 ): string {
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
 		return `${formatNumber(usedTokens ?? 0)}/?`;
+	}
+	if (metric === "tokens") {
+		return `${formatNumber(usedTokens ?? 0)}/${formatNumber(contextWindow)}`;
 	}
 	const pct = contextPercent === null || contextPercent === undefined ? "?" : `${contextPercent.toFixed(1)}%`;
 	return `${pct}/${formatNumber(contextWindow)}`;
