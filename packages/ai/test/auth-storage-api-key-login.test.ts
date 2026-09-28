@@ -5,21 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as devinCliModule from "@oh-my-pi/pi-ai/registry/oauth/devin-cli";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
-
-// The devin-cli hook must never touch the real credentials file here; these
-// cases exercise the login result storage, not the file parsing. Bun test has
-// no vi.hoisted, so the mock delegates through a hoisted function declaration
-// that each case re-points before acting.
-let loginDevinCliHookImpl: () => Promise<string> = async () => "";
-function loginDevinCliHookMock(): Promise<string> {
-	return loginDevinCliHookImpl();
-}
-vi.mock("@oh-my-pi/pi-ai/registry/oauth/devin-cli", () => ({
-	loginDevinCliHook: () => loginDevinCliHookMock(),
-}));
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
@@ -129,7 +118,8 @@ describe("AuthStorage api-key login upsert", () => {
 
 	it("stores a devin-cli login under the store-as provider, not the auth id", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
-		loginDevinCliHookImpl = async () => "sk-ws-01-adopted";
+		const hookSpy = vi.spyOn(devinCliModule, "loginDevinCliHook").mockResolvedValue("sk-ws-01-adopted");
+		expect(hookSpy).toBeDefined();
 
 		await authStorage.oauth.login("devin-cli", {
 			onAuth: () => {},
@@ -144,16 +134,18 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(stored?.credential).toEqual({ type: "api_key", key: "sk-ws-01-adopted", source: "login" });
 	});
 
-	it("returns undefined and stores nothing when a login hook yields an empty key", async () => {
+	it("propagates a devin-cli hook error and stores nothing", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
-		loginDevinCliHookImpl = async () => "";
+		vi.spyOn(devinCliModule, "loginDevinCliHook").mockRejectedValue(
+			new Error("Devin CLI credentials carry no windsurf_api_key."),
+		);
 
-		const identity = await authStorage.oauth.login("devin-cli", {
-			onAuth: () => {},
-			onPrompt: async () => "",
-		});
-
-		expect(identity).toBeUndefined();
+		await expect(
+			authStorage.oauth.login("devin-cli", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			}),
+		).rejects.toThrow(/carry no windsurf_api_key/);
 		expect(countCredentialRows(dbPath, "devin")).toBe(0);
 		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
 	});

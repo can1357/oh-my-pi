@@ -26,46 +26,72 @@ describe("readDevinCliCredentials", () => {
 		const filePath = await writeCredentialsFile(
 			'windsurf_api_key = "sk-ws-01-abc123"\napi_server_url = "https://server.enterprise.windsurf.com"\n',
 		);
-		expect(readDevinCliCredentials(filePath)).toBe("sk-ws-01-abc123");
+		expect(await readDevinCliCredentials(filePath)).toBe("sk-ws-01-abc123");
+	});
+
+	it("returns the key when the API host is server.codeium.com", async () => {
+		const filePath = await writeCredentialsFile(
+			'windsurf_api_key = "sk-ws-01-abc123"\napi_server_url = "https://server.codeium.com"\n',
+		);
+		expect(await readDevinCliCredentials(filePath)).toBe("sk-ws-01-abc123");
 	});
 
 	it("trims whitespace around the key", async () => {
 		const filePath = await writeCredentialsFile('windsurf_api_key = "  sk-ws-01-padded  "\n');
-		expect(readDevinCliCredentials(filePath)).toBe("sk-ws-01-padded");
+		expect(await readDevinCliCredentials(filePath)).toBe("sk-ws-01-padded");
 	});
 
 	it("fails with an actionable error when the file is missing", async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "devin-cli-login-"));
 		const missing = path.join(tempDir, "credentials.toml");
-		expect(() => readDevinCliCredentials(missing)).toThrow(/No Devin CLI credentials found.*devin auth login/s);
+		await expect(readDevinCliCredentials(missing)).rejects.toThrow(
+			/No Devin CLI credentials found.*devin auth login/s,
+		);
+	});
+
+	it("reports unreadable files with their real cause instead of not-found", async () => {
+		const filePath = await writeCredentialsFile('windsurf_api_key = "sk-ws-01-abc123"\n');
+		await fs.chmod(filePath, 0o000);
+		try {
+			await expect(readDevinCliCredentials(filePath)).rejects.toThrow(/unreadable/);
+		} finally {
+			await fs.chmod(filePath, 0o644);
+		}
 	});
 
 	it("reports malformed TOML instead of crashing the parser", async () => {
 		const filePath = await writeCredentialsFile("windsurf_api_key = [not, valid");
-		expect(() => readDevinCliCredentials(filePath)).toThrow(/not valid TOML/);
+		await expect(readDevinCliCredentials(filePath)).rejects.toThrow(/not valid TOML/);
 	});
 
 	it("fails when windsurf_api_key is absent from an otherwise valid file", async () => {
 		const filePath = await writeCredentialsFile('api_server_url = "https://server.enterprise.windsurf.com"\n');
-		expect(() => readDevinCliCredentials(filePath)).toThrow(/carry no windsurf_api_key/);
+		await expect(readDevinCliCredentials(filePath)).rejects.toThrow(/carry no windsurf_api_key/);
 	});
 
 	it("treats an empty windsurf_api_key like an absent one", async () => {
 		const filePath = await writeCredentialsFile('windsurf_api_key = ""\n');
-		expect(() => readDevinCliCredentials(filePath)).toThrow(/carry no windsurf_api_key/);
+		await expect(readDevinCliCredentials(filePath)).rejects.toThrow(/carry no windsurf_api_key/);
+	});
+
+	it("rejects an api_server_url on an unknown host", async () => {
+		const filePath = await writeCredentialsFile(
+			'windsurf_api_key = "sk-ws-01-abc123"\napi_server_url = "https://dev.tenant.example.com"\n',
+		);
+		await expect(readDevinCliCredentials(filePath)).rejects.toThrow(/unknown API host "dev\.tenant\.example\.com"/);
 	});
 
 	it("ignores unrelated keys in the file", async () => {
 		const filePath = await writeCredentialsFile(
 			'api_server_url = "https://server.enterprise.windsurf.com"\nwindsurf_api_key = "sk-ws-01-only-key"\nother_setting = "ignored"\n',
 		);
-		expect(readDevinCliCredentials(filePath)).toBe("sk-ws-01-only-key");
+		expect(await readDevinCliCredentials(filePath)).toBe("sk-ws-01-only-key");
 	});
 });
 
 describe("devinCliCredentialPaths", () => {
-	it("probes the home XDG location first on Unix, then the macOS library fallback", () => {
-		const paths = devinCliCredentialPaths("/home/dev", {});
+	it("probes the home XDG location first on Linux, then the macOS library fallback", () => {
+		const paths = devinCliCredentialPaths("/home/dev", {}, "linux");
 		expect(paths).toEqual([
 			"/home/dev/.local/share/devin/credentials.toml",
 			"/home/dev/Library/Application Support/devin/credentials.toml",
@@ -73,16 +99,19 @@ describe("devinCliCredentialPaths", () => {
 	});
 
 	it("prefers XDG_DATA_HOME over the home location when set", () => {
-		const paths = devinCliCredentialPaths("/home/dev", { XDG_DATA_HOME: "/xdg-data" });
-		expect(paths[0]).toBe("/xdg-data/devin/credentials.toml");
-		expect(paths[1]).toBe("/home/dev/.local/share/devin/credentials.toml");
+		const paths = devinCliCredentialPaths("/home/dev", { XDG_DATA_HOME: "/xdg-data" }, "linux");
+		expect(paths).toEqual([
+			"/xdg-data/devin/credentials.toml",
+			"/home/dev/.local/share/devin/credentials.toml",
+			"/home/dev/Library/Application Support/devin/credentials.toml",
+		]);
 	});
 
 	it("probes APPDATA before the home location on Windows", () => {
 		const paths = devinCliCredentialPaths("C:\\Users\\dev", { APPDATA: "C:\\Users\\dev\\AppData\\Roaming" }, "win32");
 		expect(paths).toEqual([
-			"C:\\Users\\dev\\.local\\share\\devin\\credentials.toml",
 			"C:\\Users\\dev\\AppData\\Roaming\\devin\\credentials.toml",
+			"C:\\Users\\dev\\.local\\share\\devin\\credentials.toml",
 		]);
 	});
 });
