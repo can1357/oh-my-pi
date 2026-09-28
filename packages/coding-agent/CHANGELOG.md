@@ -5,6 +5,7 @@
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
+- Added an optional `settleCell` hook to eval prelude definitions: host calls a cell makes carry that cell in their context (`EvalPreludeContext.cell`), and once the cell finishes, the text the hook returns is appended after the cell's own output, so a prelude can report what a whole cell left behind once instead of once per call
 
 ### Changed
 
