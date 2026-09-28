@@ -16,7 +16,13 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, compact, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { errorText, noteText, toolHead } from "./native-view";
-import type { AgentActivitySnapshot, CoordinationDetails, JobRetuneOutcome, JobRetuneStatus, JobSnapshot } from "./wait";
+import type {
+	AgentActivitySnapshot,
+	CoordinationDetails,
+	JobRetuneOutcome,
+	JobRetuneStatus,
+	JobSnapshot,
+} from "./wait";
 import type { IrcDeliveryReceipt } from "./irc";
 import type { DaemonMonitorWatcher, DaemonSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
@@ -214,7 +220,11 @@ export function renderProcWrite(
 		const title = `Proc ${action} ${safe(id || "…")}`;
 		const daemon = details && "daemon" in details ? details.daemon : undefined;
 		const retuned = details && "op" in details && details.op === "monitor" ? (details.retuned ?? []) : [];
-		const meta = daemon ? daemonMeta(daemon, theme) : (action === "mode" || action === "progress") && content ? [safe(content)] : [];
+		const meta = daemon
+			? daemonMeta(daemon, theme)
+			: (action === "mode" || action === "progress") && content
+				? [safe(content)]
+				: [];
 		if (daemon && details && "action" in details && details.action === "progress") {
 			// wake/ambient/off/no-op must be distinguishable at a glance; details carry the authoritative state.
 			meta.unshift(
@@ -506,7 +516,11 @@ export function describeProcWrite(
 			(progressWrite.progress === "off"
 				? span(progressWrite.detached === false ? "no active monitor" : "monitor off", "muted")
 				: span(`monitor ${safe(progressWrite.progress ?? content ?? "")}`, "accent")),
-		daemon ? daemonMetaText(daemon) : (action === "mode" || action === "progress") && content ? safe(content) : undefined,
+		daemon
+			? daemonMetaText(daemon)
+			: (action === "mode" || action === "progress") && content
+				? safe(content)
+				: undefined,
 	);
 	if (retuned.length > 0) {
 		return {

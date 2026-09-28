@@ -130,7 +130,14 @@ describe("job renderer task-result preview", () => {
 					op: "wait",
 					jobs: [
 						{ id: "WakeJob", type: "bash", status: "running", label: "build", durationMs: 100, progress: "wake" },
-						{ id: "AmbientJob", type: "bash", status: "running", label: "lint", durationMs: 100, progress: "ambient" },
+						{
+							id: "AmbientJob",
+							type: "bash",
+							status: "running",
+							label: "lint",
+							durationMs: 100,
+							progress: "ambient",
+						},
 						{ id: "SilentJob", type: "bash", status: "running", label: "check", durationMs: 100 },
 					],
 				},
@@ -274,7 +281,6 @@ describe("job renderer task-result preview", () => {
 				expect(JSON.stringify(rows[2])).not.toContain('"stopped"');
 			}
 		});
-
 
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {
