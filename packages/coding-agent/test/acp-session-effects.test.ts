@@ -85,7 +85,7 @@ describe("concurrent ACP sessions", () => {
 			sessionDir: launchDir.join("sessions"),
 			authStorage,
 			modelRegistry,
-			parsedArgs: {},
+			parsedArgs: { invalidFlagValues: [] },
 			rawArgs: [],
 			createSession: createAgentSession,
 		});

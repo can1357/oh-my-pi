@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { Fragment, type ReactNode, useMemo, useState } from "react";
+import { formatInteger } from "../data/formatters";
 import { EmptyState } from "./States";
 
 export interface Column<T> {
@@ -154,7 +155,7 @@ export function Table<T>({
 			{limit !== undefined && sorted.length > limit && (
 				<div className="table-more">
 					<span className="micro">
-						{visible.length.toLocaleString()} of {sorted.length.toLocaleString()}
+						{formatInteger(visible.length)} of {formatInteger(sorted.length)}
 					</span>
 					{sorted.length > shown && (
 						<button
