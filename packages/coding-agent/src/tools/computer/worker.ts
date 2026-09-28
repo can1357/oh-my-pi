@@ -29,9 +29,11 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type AxReadOptions,
+	DESKTOP_WINDOW_ID,
 	desktopPoint,
 	describeRosterChanges,
 	diffTree,
+	type InputKind,
 	type InputWindow,
 	ObservationLedger,
 	renderGone,
@@ -96,7 +98,9 @@ export type NativeDesktopSessionFactory = (
 type WindowFilter = { id?: string | number; app?: string; title?: string };
 
 /** Target id of desktop-root input: keys reach the focused window, pointer input the window under it. */
-const DESKTOP_TARGET = "desktop";
+const DESKTOP_TARGET = DESKTOP_WINDOW_ID;
+/** Window input aimed at screenshot pixels; the rest of a window's input is keys. */
+const POINTER_METHODS: Record<string, true> = { click: true, doubleClick: true, move: true, drag: true, scroll: true };
 /**
  * A settling cell reads windows back no sooner than this after its last input,
  * so the app can react. One read per window: a second would retire the refs
@@ -285,7 +289,7 @@ class El {
 	async #input(method: string, label: string, dispatch: () => Promise<void>): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, method);
-		await this.#observer.input(context.signal, this.#observer.windowOf(this.ref), label, dispatch);
+		await this.#observer.input(context.signal, this.#observer.windowOf(this.ref), label, "element", dispatch);
 	}
 
 	async value(): Promise<string | undefined> {
@@ -367,8 +371,10 @@ class Win {
 		this.focused = window.focused;
 	}
 
-	screenshot(options?: ScreenshotOptions): Promise<{ path: string; width: number; height: number }> {
-		return captureScreenshot(this.#session, this.#getContext, this.#observer, this.id, options);
+	async screenshot(options?: ScreenshotOptions): Promise<{ path: string; width: number; height: number }> {
+		const frame = await captureScreenshot(this.#session, this.#getContext, this.#observer, this.id, options);
+		if (!options?.silent) this.#observer.ledger.recordCapture({ id: this.id, pid: this.pid });
+		return frame;
 	}
 
 	/**
@@ -384,11 +390,12 @@ class Win {
 	): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, method);
+		const kind = POINTER_METHODS[method] === true ? "pixel" : "key";
 		if (this.id === DESKTOP_TARGET) {
-			await this.#observer.input(context.signal, undefined, `desktop ${label}`, dispatch, { point });
+			await this.#observer.input(context.signal, undefined, `desktop ${label}`, kind, dispatch, { point });
 			return;
 		}
-		await this.#observer.input(context.signal, { id: this.id, pid: this.pid }, label, dispatch);
+		await this.#observer.input(context.signal, { id: this.id, pid: this.pid }, label, kind, dispatch);
 	}
 
 	click(x: number, y: number, options?: ClickOptions): Promise<void> {
@@ -531,6 +538,7 @@ class InputObserver {
 		signal: AbortSignal,
 		window: InputWindow | undefined,
 		label: string,
+		kind: InputKind,
 		dispatch: () => Promise<void>,
 		root?: { point?: { x: number; y: number } },
 	): Promise<void> {
@@ -545,7 +553,7 @@ class InputObserver {
 			const at = root.point && desktopPoint(this.#desktopDisplays, root.point);
 			if (!root.point || at) window = await this.windowReached(signal, at, roster);
 		}
-		this.ledger.noteInput(window, label);
+		this.ledger.noteInput(window, label, kind, root !== undefined);
 		try {
 			await nativeCall(signal, dispatch);
 		} catch (error) {
@@ -802,8 +810,9 @@ export class ComputerWorkerCore {
 
 	/**
 	 * Re-read each window the cell's input touched and report it against the
-	 * model's last tree. Each window is read once: the native registry keeps one
-	 * previous ref generation, so the refs the model held before the cell stay valid.
+	 * model's last tree, with a fresh screenshot of windows worked by pixels. Each
+	 * window is read once: the native registry keeps one previous ref generation,
+	 * so the refs the model held before the cell stay valid.
 	 */
 	async #settle(
 		session: NativeDesktopSession,
@@ -856,6 +865,24 @@ export class ComputerWorkerCore {
 				);
 			} catch (error) {
 				sections.push(renderUnreadable(touched, window, failure(error)));
+			}
+			// Pixels do not depend on AX: an unreadable surface still gets its frame.
+			// The capture also becomes the window's coordinate frame, so the next
+			// pixel input maps against the image the model now sees.
+			if (touched.screenshot) {
+				try {
+					await captureScreenshot(session, this.#currentRunContext, observer, touched.id);
+				} catch (error) {
+					sections.push(`window ${JSON.stringify(touched.id)}: screenshot failed: ${failure(error)}`);
+				}
+			}
+		}
+		if (pending.desktopScreenshot) {
+			try {
+				await captureScreenshot(session, this.#currentRunContext, observer, DESKTOP_TARGET);
+				sections.push("desktop screenshot below (you last worked the desktop root from pixels)");
+			} catch (error) {
+				sections.push(`desktop screenshot failed: ${failure(error)}`);
 			}
 		}
 		if (roster && pending.rosterBefore) {
@@ -987,8 +1014,7 @@ export class ComputerWorkerCore {
 				const window = (await nativeCall(signal, () => session.listWindows())).find(candidate => candidate.focused);
 				return window ? makeWin(window) : null;
 			},
-			screenshot: (options?: ScreenshotOptions) =>
-				captureScreenshot(session, getContext, observer, DESKTOP_TARGET, options),
+			screenshot: (options?: ScreenshotOptions) => desktopTarget.screenshot(options),
 			click: desktopTarget.click.bind(desktopTarget),
 			doubleClick: desktopTarget.doubleClick.bind(desktopTarget),
 			move: desktopTarget.move.bind(desktopTarget),

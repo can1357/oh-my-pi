@@ -6,10 +6,12 @@ import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/exec
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
+const PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
 /** One settled cell as the counting prelude saw it. */
 type Settled = { calls: number; failed: boolean; output?: string };
 
-/** A prelude that counts its calls per cell and reports the count once the cell settles. */
+/** A prelude that counts its calls per cell and reports the count once the cell settles, with an image after three. */
 function countingPrelude(settled: Settled[]): EvalPreludeDefinition {
 	const calls = new Map<EvalPreludeCell, number>();
 	return {
@@ -28,7 +30,10 @@ function countingPrelude(settled: Settled[]): EvalPreludeDefinition {
 			if (count === undefined) return undefined;
 			calls.delete(cell);
 			settled.push({ calls: count, failed: outcome.failed, output: outcome.output });
-			return { text: `counter: ${count} call(s) this cell` };
+			return {
+				text: `counter: ${count} call(s) this cell`,
+				images: count === 3 ? [{ type: "image", data: PIXEL_PNG, mimeType: "image/png" }] : undefined,
+			};
 		},
 	};
 }
@@ -78,7 +83,7 @@ describe("eval prelude cell settlement", () => {
 		]);
 	});
 
-	it("groups a Python cell's prelude calls under one cell", async () => {
+	it("groups a Python cell's prelude calls under one cell, and shows the image its settle returns", async () => {
 		const settled: Settled[] = [];
 		const tool = new EvalTool(evalSession([countingPrelude(settled)], `prelude-settle-py-${crypto.randomUUID()}`));
 
@@ -86,7 +91,9 @@ describe("eval prelude cell settlement", () => {
 			language: "py",
 			code: "await counter.hit()\nawait counter.hit()\nawait counter.hit()\nprint('cell body')",
 		});
-		expect(text(result)).toBe("cell body\n\ncounter: 3 call(s) this cell");
+		// The settle's image is resized and noted like one the cell displayed itself.
+		expect(text(result)).toMatch(/^cell body\n\ndisplay image 1: .+\n\ncounter: 3 call\(s\) this cell$/);
+		expect(result.content.filter(block => block.type === "image")).toHaveLength(1);
 		expect(settled).toEqual([{ calls: 3, failed: false, output: expect.stringContaining("cell body") }]);
 	});
 

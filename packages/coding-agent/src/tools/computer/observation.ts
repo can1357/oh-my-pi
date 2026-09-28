@@ -39,7 +39,21 @@ export interface TouchedWindow {
 	baseline?: string;
 	/** Options of that read. */
 	options: AxReadOptions;
+	/** The model works this window from pixels, so the report repeats a screenshot (see `InputKind`). */
+	screenshot: boolean;
 }
+
+/**
+ * How an input addressed its target. Pixel input, or a displayed screenshot,
+ * puts a window in pixel mode: its reports carry a fresh screenshot. An
+ * element action in a cell that neither sent pixel input to the window nor
+ * showed the model a screenshot of it takes the window out again. Keys leave
+ * the mode as it is.
+ */
+export type InputKind = "pixel" | "element" | "key";
+
+/** Pseudo-window that holds the pixel mode of desktop-root input. */
+export const DESKTOP_WINDOW_ID = "desktop";
 
 /** Everything one cell's input left for the settle to report. */
 export interface PendingSettle {
@@ -53,6 +67,8 @@ export interface PendingSettle {
 	 * window, whose report carries them; a failure among them is the last entry.
 	 */
 	unattributed: string[];
+	/** The cell sent input to the desktop root, which the model works from pixels: the report adds a desktop screenshot. */
+	desktopScreenshot: boolean;
 	/** Roster captured before the cell's first input; absent when it could not be read. */
 	rosterBefore?: DesktopWindow[];
 	/** When the last input returned (ms since epoch). */
@@ -64,6 +80,10 @@ interface WindowRecord {
 	/** Unelided tree text the model last received. */
 	shown?: string;
 	options: AxReadOptions;
+	/** Pixel mode (see `InputKind`). */
+	pixels: boolean;
+	/** This cell sent pixel input to the window or showed the model a screenshot of it. */
+	pixelsThisCell: boolean;
 }
 
 /**
@@ -252,13 +272,15 @@ export class ObservationLedger {
 	#pids = new Set<number>();
 	#unattributed: string[] = [];
 	#inputs = 0;
+	/** Whether an input since the last settle went to the desktop root. */
+	#rootInput = false;
 	#rosterBefore?: DesktopWindow[];
 	#rosterClaimed = false;
 	#lastInputAt = 0;
 
 	#record(id: string): WindowRecord {
 		let record = this.#windows.get(id);
-		if (!record) this.#windows.set(id, (record = { options: {} }));
+		if (!record) this.#windows.set(id, (record = { options: {}, pixels: false, pixelsThisCell: false }));
 		return record;
 	}
 
@@ -303,6 +325,17 @@ export class ObservationLedger {
 		this.#reads.set(window.id, { window, text, options: { ...options }, sequence: this.#sequence });
 	}
 
+	/**
+	 * The model was shown a screenshot of the window (`desktop` for the root):
+	 * its post-input state is known, and it works the window from pixels.
+	 */
+	recordCapture(window: InputWindow): void {
+		const record = this.#record(window.id);
+		if (window.pid !== undefined) record.pid = window.pid;
+		record.pixels = true;
+		record.pixelsThisCell = true;
+		this.#touched.delete(window.id);
+	}
 	/** Whether no input since the last settle has claimed the roster-before read yet. */
 	get wantsRoster(): boolean {
 		return !this.#rosterClaimed;
@@ -319,11 +352,23 @@ export class ObservationLedger {
 	}
 
 	/**
-	 * An input is being sent. `window` is undefined when the target window is
-	 * unknown (desktop-root input, elements found by position or focus).
+	 * An input is being sent. `window` is the window it reaches, undefined when
+	 * that is unknown. `root` input was sent to the desktop root, whose pixel
+	 * mode it sets or keeps (see `InputKind`) in place of the window's; an
+	 * element action also ends the root's pixel mode unless this cell worked
+	 * the root by pixels.
 	 */
-	noteInput(window: InputWindow | undefined, label: string): void {
+	noteInput(window: InputWindow | undefined, label: string, kind: InputKind, root = false): void {
 		this.#inputs++;
+		if (root) this.#rootInput = true;
+		const target = this.#record(root || !window ? DESKTOP_WINDOW_ID : window.id);
+		if (kind === "pixel") {
+			target.pixels = true;
+			target.pixelsThisCell = true;
+		} else if (kind === "element") {
+			for (const record of [target, this.#record(DESKTOP_WINDOW_ID)])
+				if (!record.pixelsThisCell) record.pixels = false;
+		}
 		if (!window) {
 			this.#unattributed.push(label);
 			return;
@@ -367,6 +412,9 @@ export class ObservationLedger {
 	 * reached the window after the read.
 	 */
 	take(output: string): PendingSettle | undefined {
+		// The cell is over, even one that sent no input: its screenshots no longer keep
+		// pixel mode through the next cell's element input.
+		for (const record of this.#windows.values()) record.pixelsThisCell = false;
 		if (this.#reads.size > 0) {
 			const printedRefs = new Set(Array.from(output.matchAll(/\[ref=(e\d+)\]/g), match => match[1]!));
 			for (const read of this.#reads.values()) {
@@ -386,12 +434,14 @@ export class ObservationLedger {
 				failure,
 				baseline: record?.shown,
 				options: { ...record?.options },
+				screenshot: record?.pixels === true,
 			};
 		});
 		const pending: PendingSettle = {
 			touched,
 			pids: this.#pids,
 			unattributed: this.#unattributed,
+			desktopScreenshot: this.#rootInput && this.#windows.get(DESKTOP_WINDOW_ID)?.pixels === true,
 			rosterBefore: this.#rosterBefore,
 			lastInputAt: this.#lastInputAt,
 		};
@@ -399,6 +449,7 @@ export class ObservationLedger {
 		this.#pids = new Set();
 		this.#unattributed = [];
 		this.#inputs = 0;
+		this.#rootInput = false;
 		this.#rosterBefore = undefined;
 		this.#rosterClaimed = false;
 		return pending;
@@ -424,6 +475,7 @@ export class ObservationLedger {
 			labels,
 			baseline: record?.shown,
 			options: { ...record?.options },
+			screenshot: record?.pixels === true,
 		});
 	}
 }
@@ -479,6 +531,7 @@ export function renderReadBack(readBack: ReadBack): string {
 		const lostMarks = marked(tree) - marked(elided.text);
 		summary += `; ${elided.elidedRows} rows elided to fit (${lostMarks === 0 ? "every changed row kept" : `${lostMarks} changed rows among them`}) — \`win.ax()\`/\`win.find()\` reach them`;
 	}
+	if (touched.screenshot) summary += "; screenshot below";
 	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, elided?.text ?? tree];
 	if (change && change.removed.length > 0) {
 		const shown = change.removed.slice(0, 8).join("; ");
@@ -490,7 +543,8 @@ export function renderReadBack(readBack: ReadBack): string {
 
 /** A touched window whose tree could not be read back. */
 export function renderUnreadable(touched: TouchedWindow, window: DesktopWindow | undefined, message: string): string {
-	return `${windowName(window, touched.id)} after ${describeCause(touched)} — could not be read back through AX: ${message}`;
+	const screenshot = touched.screenshot ? "; screenshot below" : "";
+	return `${windowName(window, touched.id)} after ${describeCause(touched)} — could not be read back through AX: ${message}${screenshot}`;
 }
 
 /** A touched window the roster no longer lists. */

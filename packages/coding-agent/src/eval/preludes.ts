@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { denyError, formatApprovalPrompt, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
@@ -33,6 +34,7 @@ export interface EvalPreludeCell {
 /** What a prelude adds to a cell once it has settled. */
 export interface EvalPreludeSettleReply {
 	text?: string;
+	images?: ImageContent[];
 }
 
 const activePreludeCell = new AsyncLocalStorage<EvalPreludeCell>();
@@ -93,8 +95,9 @@ export interface EvalPreludeDefinition {
 	 * when the cell ended with an error, `output` the text the cell printed and
 	 * its JSON displays (what the model already sees). The text is appended
 	 * whole: unlike the kernel's own output it is not cut at
-	 * `tools.outputMaxColumns`. A hook that throws is
-	 * logged and adds nothing. A cell cancelled while settling ends cancelled.
+	 * `tools.outputMaxColumns`. Images join the cell's displayed images, resized
+	 * and noted like them. A hook that throws is logged and adds nothing. A cell
+	 * cancelled while settling ends cancelled.
 	 */
 	settleCell?(
 		cell: EvalPreludeCell,
