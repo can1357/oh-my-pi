@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `telemetry.otlpHeaders` setting: request headers layered over `OTEL_EXPORTER_OTLP*_HEADERS` per key on every trace, log, and metric export, with values resolved through the same literal / environment-variable / `!command` contract as models.yml and MCP headers — so a rotating bearer token is one line of config. `telemetry.otlpHeadersCacheSeconds` (default 60) controls how long a `!command` value is reused; `!command` config resolution gained the underlying opt-in reuse window.
+
 ## [18.4.1] - 2026-09-28
 
 ### Changed
@@ -67,6 +71,9 @@
 - Fixed multiline pastes splitting into separate submissions after a terminal drops bracketed-paste mode, and text typed right after Enter being erased by the post-submit clear ([#13440](https://github.com/can1357/oh-my-pi/pull/13440) by [@Dante-dan](https://github.com/Dante-dan)).
 - Fixed subagents never compacting when the parent sets `compaction.midTurnEnabled: false`; a subagent's run is a single turn, so subagents keep mid-run compaction on unless a spawn overrides it ([#13212](https://github.com/can1357/oh-my-pi/pull/13212)).
 - Fixed the exit resume hint so the `omp --resume <id>` command prints on its own line, letting triple-click select just the command ([#12748](https://github.com/can1357/oh-my-pi/pull/12748) by [@F0Rextasy](https://github.com/F0Rextasy)).
+### Added
+
+- Added the `telemetry.otlpHeaders` setting: request headers layered over `OTEL_EXPORTER_OTLP*_HEADERS` per key on every trace, log, and metric export, with values resolved through the same literal / environment-variable / `!command` contract as models.yml and MCP headers — so a rotating bearer token is one line of config. `telemetry.otlpHeadersCacheSeconds` (default 60) controls how long a `!command` value is reused; `!command` config resolution gained the underlying opt-in reuse window.
 
 ## [18.4.0] - 2026-09-28
 

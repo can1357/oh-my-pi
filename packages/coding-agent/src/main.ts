@@ -113,7 +113,7 @@ import {
 } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
+import { cfgTelemetryOtlpExportEnabled, telemetryHeadersConfig } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -2109,6 +2109,7 @@ export async function runRootCommand(
 			"initTelemetryExport",
 			initTelemetryExport,
 			cfgTelemetryOtlpExportEnabled.get(settingsInstance),
+			telemetryHeadersConfig(settingsInstance),
 		);
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
