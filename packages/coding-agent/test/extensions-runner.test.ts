@@ -130,6 +130,7 @@ describe("ExtensionRunner", () => {
 			undefined,
 			undefined,
 			undefined,
+			undefined,
 			options => {
 				forwarded = options;
 				return readiness.promise;
