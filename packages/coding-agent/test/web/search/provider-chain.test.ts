@@ -44,7 +44,7 @@ describe("web model role resolution", () => {
 	it("resolves authenticated OpenRouter chat models with web grounding", () => {
 		const authStorage = createInMemoryAuthStorage();
 		storages.add(authStorage);
-		authStorage.setRuntimeApiKey("openrouter", "test-openrouter-key");
+		authStorage.keys.setRuntime("openrouter", "test-openrouter-key");
 		const settings = Settings.isolated();
 		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 		const pool = roleCandidatePool("web", settings, modelRegistry);
@@ -66,6 +66,52 @@ describe("web model role resolution", () => {
 		expect(candidates.slice(0, 2).map(candidate => candidate.model.id)).toEqual(["parallel", "perplexity"]);
 		expect(candidates.slice(0, 2).every(candidate => candidate.explicit === false)).toBe(true);
 		expect(candidates.some(candidate => candidate.model.id === "duckduckgo")).toBe(true);
+	});
+
+	it("admits supported direct OpenAI web models but excludes realtime from candidates", () => {
+		const authStorage = createInMemoryAuthStorage();
+		storages.add(authStorage);
+		authStorage.keys.setRuntime("openai", "test-openai-key");
+		const settings = Settings.isolated();
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+		const openAiCandidates = roleCandidatePool("web", settings, modelRegistry).filter(
+			model => model.provider === "openai",
+		);
+		expect(openAiCandidates.some(model => model.id === "gpt-6-luna")).toBe(true);
+		expect(openAiCandidates.some(model => model.id === "gpt-realtime-2.1")).toBe(false);
+		const candidates = resolveRoleChain("web", settings, openAiCandidates);
+
+		expect(candidates.map(candidate => `${candidate.model.provider}/${candidate.model.id}`)).toEqual([
+			"openai/gpt-6-luna",
+			"openai/gpt-5.6-luna",
+		]);
+		expect(candidates[0]?.explicit).toBe(false);
+	});
+
+	it("exhausts Codex subscription candidates before any API-billed OpenAI candidate", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		storages.add(authStorage);
+		authStorage.keys.setRuntime("openai", "test-openai-key");
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "test-codex-access",
+			refresh: "test-codex-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const settings = Settings.isolated();
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
+		const pool = roleCandidatePool("web", settings, modelRegistry).filter(
+			model => model.provider === "openai-codex" || model.provider === "openai",
+		);
+		const candidates = resolveRoleChain("web", settings, pool);
+
+		const providers = candidates.map(candidate => candidate.model.provider);
+		const lastCodexIndex = providers.lastIndexOf("openai-codex");
+		const firstOpenAiIndex = providers.indexOf("openai");
+
+		expect(lastCodexIndex).toBeGreaterThanOrEqual(0);
+		expect(firstOpenAiIndex).toBeGreaterThan(lastCodexIndex);
+		expect(candidates[firstOpenAiIndex]?.explicit).toBe(false);
 	});
 
 	it("marks configured primaries and configured fallbacks explicit", () => {

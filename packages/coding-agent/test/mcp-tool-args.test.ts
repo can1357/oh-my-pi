@@ -74,6 +74,33 @@ async function createLocalImageContext(
 }
 
 describe("MCP tool arguments", () => {
+	it("forwards nested nullable arguments unchanged to tools/call", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), {
+			name: "nullable_payload",
+			inputSchema: {
+				type: "object",
+				properties: {
+					payload: {
+						type: "object",
+						properties: { keep: { type: "null" } },
+						required: ["keep"],
+					},
+				},
+				required: ["payload"],
+			},
+		});
+
+		await tool.execute("nullable-boundary", { payload: { keep: null } }, undefined, unusedContext);
+
+		expect(calls).toEqual([
+			{
+				method: "tools/call",
+				params: { name: "nullable_payload", arguments: { payload: { keep: null } } },
+			},
+		]);
+	});
+
 	it("omits optional empty placeholders before tools/call", async () => {
 		const calls: CapturedRequest[] = [];
 		const tool = new MCPTool(createCapturedConnection(calls), createSearchToolDefinition());

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
+	type GeneratedImage,
 	generateImage,
 	type ImageGenerationRequest,
 	type ImageGenerationResult,
@@ -52,7 +53,7 @@ interface ImageGenToolDetails {
 	model: string;
 	imageCount: number;
 	imagePaths: string[];
-	images: Array<{ data: string; mimeType: string }>;
+	images: GeneratedImage[];
 	responseText?: string;
 	usage?: ImageGenerationResult["usage"];
 }
@@ -160,12 +161,14 @@ async function buildToolResult(
 	result: ImageGenerationResult,
 ): Promise<AgentToolResult<ImageGenToolDetails, ImageGenParams>> {
 	const imagePaths = await saveImagesToTemp(result.images);
+	// Hosted backends may run a different model than the selected catalog entry; report what actually ran.
+	const ranModel = result.model ?? model.id;
 	if (imagePaths.length === 0) {
 		return {
 			content: [{ type: "text", text: `No image data returned.${result.text ? `\n\n${result.text}` : ""}` }],
 			details: {
 				provider: model.provider,
-				model: model.id,
+				model: ranModel,
 				imageCount: 0,
 				imagePaths: [],
 				images: [],
@@ -174,14 +177,20 @@ async function buildToolResult(
 			},
 		};
 	}
-	const lines = [`Provider: ${model.provider}`, `Model: ${model.id}`, `Generated ${imagePaths.length} image(s):`];
-	for (const imagePath of imagePaths) lines.push(`  ${imagePath}`);
+	const modelLine =
+		ranModel === model.id ? `Model: ${ranModel}` : `Model: ${ranModel} (catalog entry ${model.provider}/${model.id})`;
+	const lines = [`Provider: ${model.provider}`, modelLine, `Generated ${imagePaths.length} image(s):`];
+	for (const [index, imagePath] of imagePaths.entries()) {
+		const { size, quality } = result.images[index] ?? {};
+		const meta = [size, quality && `quality ${quality}`].filter(Boolean).join(", ");
+		lines.push(meta ? `  ${imagePath} (${meta})` : `  ${imagePath}`);
+	}
 	if (result.text) lines.push("", result.text.trim());
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
 		details: {
 			provider: model.provider,
-			model: model.id,
+			model: ranModel,
 			imageCount: result.images.length,
 			imagePaths,
 			images: result.images,

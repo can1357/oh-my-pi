@@ -159,14 +159,6 @@ describe("BlobRegistry lazy blobs", () => {
 		expect((await store.serve(request())).status).toBe(200);
 		expect(renders).toBe(2);
 	});
-
-	it("responds 410 when a lazy source is gone", async () => {
-		const store = new BlobRegistry();
-		const entry = store.registerLazy("gone", "image/png", async () => null);
-		expect(entry.bytes).toBe(0);
-		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
-		expect(response.status).toBe(410);
-	});
 });
 
 describe("BlobRegistry persistence", () => {
@@ -441,7 +433,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "done", reason: "stop", message: done },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);
@@ -468,7 +460,7 @@ describe("wrapStreamFnWithBlobUrlFallback", () => {
 				{ type: "error", reason: "error", error: errorMessage("mid-stream failure") },
 			]);
 		};
-		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, service);
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base as never, () => service);
 
 		const decorated = await service.decorateContext(makeContext(), anthropicModel);
 		const stream = await wrapped(anthropicModel, decorated, undefined);

@@ -189,6 +189,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 					id: msgId,
 					code,
 					cwd: opts?.cwd,
+					filename: opts?.filename,
 					env: opts?.env,
 					silent: opts?.silent ?? false,
 					storeHistory: opts?.storeHistory ?? !(opts?.silent ?? false),

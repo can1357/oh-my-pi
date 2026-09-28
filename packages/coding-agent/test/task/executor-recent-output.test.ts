@@ -187,6 +187,7 @@ function createScriptedSession(
 		prompt: async () => {
 			await script(emit);
 			emittedGate.resolve();
+			return true;
 		},
 		abort: async () => {
 			aborted = true;

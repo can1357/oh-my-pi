@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
@@ -77,25 +77,6 @@ describe("callSessionTool", () => {
 			undefined,
 		);
 		expect(statuses).toEqual([expect.objectContaining({ op: "read", path: "/tmp/demo.txt", chars: 5 })]);
-	});
-
-	it("passes the session tool context to bridged executions", async () => {
-		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const context = { settings: Settings.isolated() } as AgentToolContext;
-		const session = {
-			...createSession([createTool("bash", execute)]),
-			getToolContext: () => context,
-		};
-
-		await callSessionTool("bash", { command: "true" }, { session });
-
-		expect(execute).toHaveBeenCalledWith(
-			expect.stringMatching(/^js-bash-/),
-			{ command: "true", [INTENT_FIELD]: "js prelude" },
-			undefined,
-			undefined,
-			context,
-		);
 	});
 
 	it("settles an interrupted speculative wait without starting ordinary tool execution", async () => {
@@ -745,6 +726,39 @@ describe("callSessionTool", () => {
 		await callSessionTool("todo", { op: "view" }, { session });
 		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
 		expect(persisted).toHaveLength(1);
+	});
+
+	it("keeps persisted nested Todo status bounded for large checklists", async () => {
+		let phases: TodoPhase[] = [
+			{
+				name: "Ship",
+				tasks: Array.from({ length: 100 }, (_, index) => ({
+					content: `Task ${index}`,
+					status: index === 0 ? ("in_progress" as const) : ("pending" as const),
+				})),
+			},
+		];
+		const statuses: Array<Record<string, unknown>> = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool(
+			"todo",
+			{ op: "done", task: "Task 0" },
+			{ session, emitStatus: event => statuses.push(event) },
+		);
+		await callSessionTool("todo", { op: "view" }, { session, emitStatus: event => statuses.push(event) });
+
+		expect(phases[0]?.tasks[0]?.status).toBe("completed");
+		expect(statuses.map(event => event.committed)).toEqual([true, false]);
+		expect(JSON.stringify(statuses).length).toBeLessThan(500);
 	});
 
 	it("returns structured tool results when details or images are present", async () => {

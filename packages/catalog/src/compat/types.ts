@@ -270,6 +270,8 @@ export interface CompiledCursorParameter {
 /** One provider quota-scope table. */
 export interface CompiledQuotaRule {
 	provider: string;
+	/** Tier used when no exact or fallback membership matches. */
+	defaultTier?: string;
 	tiers: { label: string; models: string[] }[];
 	fallbacks: { label: string; substring: string }[];
 }
@@ -552,6 +554,10 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
+	orgScopedIdentity?: boolean;
+	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
+	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */
 	nativeAuthApis?: string[];
 	available?: boolean;

@@ -1,5 +1,6 @@
 auth "openai-codex" {
 	name "ChatGPT Plus/Pro (Codex Subscription)"
+	org-scoped-identity #true
 	login "oauth-code" {
 		client-id "app_EMoamEEZ73f0CkXaXp7hrann"
 		authorize-url "https://auth.openai.com/oauth/authorize"

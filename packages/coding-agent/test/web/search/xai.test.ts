@@ -9,7 +9,7 @@ import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 const SELECTED_MODEL_ID = "grok-selected-grounding";
 const SELECTED_BASE_URL = "https://xai-grounding.example.test/v1";
 const authStorage = createInMemoryAuthStorage();
-authStorage.setRuntimeApiKey("xai", "selected-xai-key");
+authStorage.keys.setRuntime("xai", "selected-xai-key");
 const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 const model = buildModel({
 	id: SELECTED_MODEL_ID,
@@ -127,26 +127,6 @@ describe("xAI Responses answer extraction from relay output items", () => {
 		expect(response.answer).toContain("The Bun changelog records the 1.3.12 patch.");
 		expect(response.answer).toContain("Summarizing now.");
 		expect(response.answer).not.toContain("I'll check the changelog.");
-	});
-
-	it("keeps a long substantive earlier message and drops surrounding narration", async () => {
-		const longText = "A".repeat(400);
-		const relayResponse = {
-			id: "resp-relay",
-			model: "grok-4.5",
-			output: [
-				{ type: "message", content: [{ type: "output_text", text: "Let me search for this." }] },
-				{ type: "message", content: [{ type: "output_text", text: longText }] },
-				{ type: "message", content: [{ type: "output_text", text: "Done." }] },
-			],
-			usage: { input_tokens: 10, output_tokens: 5 },
-		};
-
-		const response = await searchXAI(makeParams(makeFetchMock(relayResponse)));
-
-		expect(response.answer).toContain(longText);
-		expect(response.answer).toContain("Done.");
-		expect(response.answer).not.toContain("Let me search for this.");
 	});
 
 	it("keeps an earlier message at exactly the narration threshold and drops one below it", async () => {

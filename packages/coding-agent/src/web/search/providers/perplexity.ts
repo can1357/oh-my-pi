@@ -979,7 +979,7 @@ export class PerplexityProvider extends SearchProvider {
 	 * see {@link isExplicitlyAvailable}.
 	 */
 	isAvailable(authStorage: AuthStorage): boolean {
-		return !!$env.PERPLEXITY_COOKIES?.trim() || authStorage.hasAuth("perplexity");
+		return !!$env.PERPLEXITY_COOKIES?.trim() || authStorage.keys.source("perplexity") !== undefined;
 	}
 
 	/**

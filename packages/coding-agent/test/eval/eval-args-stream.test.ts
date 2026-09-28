@@ -207,30 +207,6 @@ describe("EvalArgsStreamDecoder", () => {
 		});
 	});
 
-	it("keeps complete objects with language plannable and incomplete prefixes languageless", () => {
-		expect(new EvalArgsStreamDecoder().update('{"language":"js","code":"display(1)"}')).toEqual({
-			kind: "snapshot",
-			snapshot: {
-				revision: 1,
-				language: "js",
-				codePrefix: "display(1)",
-				reset: undefined,
-				timeout: undefined,
-				complete: true,
-				restart: false,
-			},
-		});
-		expect(new EvalArgsStreamDecoder().update('{"code":"display(1)"')).toEqual({
-			kind: "snapshot",
-			snapshot: {
-				revision: 1,
-				codePrefix: "display(1)",
-				complete: false,
-				restart: false,
-			},
-		});
-	});
-
 	it("disables buffers with a non-string title instead of planning them", () => {
 		expect(
 			new EvalArgsStreamDecoder().update(

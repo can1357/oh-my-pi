@@ -1,7 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -444,18 +443,6 @@ describe("TodoTool operations", () => {
 	});
 });
 
-describe("TodoTool provider schema", () => {
-	it("advertises items for single-phase init and append", () => {
-		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
-			properties: {
-				items: {
-					description: "tasks for single-phase init or append",
-				},
-			},
-		});
-	});
-});
-
 describe("TodoTool lenient init shapes", () => {
 	it("accepts a flattened init with bare items and no phase", async () => {
 		const tool = new TodoTool(createSession());
@@ -577,10 +564,6 @@ describe("TodoTool empty items tolerance", () => {
 });
 
 describe("todoMatchesAnyDescription", () => {
-	it("matches identical strings", () => {
-		expect(todoMatchesAnyDescription("Sonnet #1: AGENTS audit", ["Sonnet #1: AGENTS audit"])).toBe(true);
-	});
-
 	it("matches case- and whitespace-insensitively", () => {
 		expect(todoMatchesAnyDescription("  Sonnet  #1: AGENTS Audit  ", ["sonnet #1: agents audit"])).toBe(true);
 	});

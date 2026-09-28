@@ -13,7 +13,9 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import { getDefault, type Settings } from "../config/settings";
+import type { Setting } from "../config/registry";
+import type { Settings } from "../config/settings";
+
 import {
 	type OutputSummary,
 	type TruncationResult,
@@ -22,11 +24,19 @@ import {
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { renderError } from "./tool-errors";
+import {
+	cfgToolsArtifactHeadBytes,
+	cfgToolsArtifactSpillThreshold,
+	cfgToolsArtifactTailBytes,
+	cfgToolsArtifactTailLines,
+	cfgToolsOutputMaxColumns,
+} from "./settings";
 
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
-	resultLimit?: number;
+	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263). */
+	resultLimit?: number | { reached: number; suggestion?: number | null };
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
@@ -304,7 +314,11 @@ export class OutputMetaBuilder {
 			this.matchLimit(limits.matchLimit);
 		}
 		if (limits.resultLimit !== undefined) {
-			this.resultLimit(limits.resultLimit);
+			if (typeof limits.resultLimit === "number") {
+				this.resultLimit(limits.resultLimit);
+			} else {
+				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion);
+			}
 		}
 		if (limits.headLimit !== undefined) {
 			this.headLimit(limits.headLimit);
@@ -315,10 +329,14 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add result limit notice. No-op if reached <= 0. */
-	resultLimit(reached: number, suggestion = reached * 2): this {
+	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. */
+	resultLimit(reached: number, suggestion?: number | null): this {
 		if (reached <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, resultLimit: { reached, suggestion } };
+		const resolved = suggestion === null ? undefined : (suggestion ?? reached * 2);
+		this.#meta.limits = {
+			...this.#meta.limits,
+			resultLimit: { reached, ...(resolved !== undefined ? { suggestion: resolved } : {}) },
+		};
 		return this;
 	}
 
@@ -359,6 +377,12 @@ export class OutputMetaBuilder {
 	/** Add internal URL source info (skill://, agent://, artifact://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
+		return this;
+	}
+
+	/** Mark the output as a bounded page of session artifact storage its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
+	pagedSource(): this {
+		this.#meta.pagedSource = true;
 		return this;
 	}
 
@@ -419,17 +443,12 @@ const kUnwrappedExecute = Symbol("OutputMeta.UnwrappedExecute");
 
 /** Resolved artifact spill config sourced from the session settings (or schema defaults). */
 function getSpillConfig(s: Settings | undefined) {
-	type Path =
-		| "tools.artifactSpillThreshold"
-		| "tools.artifactTailBytes"
-		| "tools.artifactTailLines"
-		| "tools.artifactHeadBytes";
-	const get = <P extends Path>(path: P) => s?.get(path) ?? getDefault(path);
+	const get = (setting: Setting<number>) => (s ? setting.get(s) : setting.default);
 	return {
-		threshold: get("tools.artifactSpillThreshold") * 1024,
-		tailBytes: get("tools.artifactTailBytes") * 1024,
-		tailLines: get("tools.artifactTailLines"),
-		headBytes: get("tools.artifactHeadBytes") * 1024,
+		threshold: get(cfgToolsArtifactSpillThreshold) * 1024,
+		tailBytes: get(cfgToolsArtifactTailBytes) * 1024,
+		tailLines: get(cfgToolsArtifactTailLines),
+		headBytes: get(cfgToolsArtifactHeadBytes) * 1024,
 	};
 }
 
@@ -468,7 +487,7 @@ export function resolveInlineByteCapBudget(s: Settings | undefined): number {
  * line-buffer post-processing, so one setting controls both surfaces.
  */
 export function resolveOutputMaxColumns(s: Settings | undefined): number {
-	return s?.get("tools.outputMaxColumns") ?? getDefault("tools.outputMaxColumns");
+	return s ? cfgToolsOutputMaxColumns.get(s) : cfgToolsOutputMaxColumns.default;
 }
 
 /**
@@ -491,16 +510,10 @@ async function spillLargeResultToArtifact(
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
 
-	// Reading an artifact already addresses recoverable full output. Spilling that
-	// read would only create a redundant artifact containing another artifact's
-	// page (and can repeat indefinitely on subsequent reads).
-	if (
-		toolName === "read" &&
-		existingMeta?.source?.type === "internal" &&
-		existingMeta.source.value.startsWith("artifact://")
-	) {
-		return result;
-	}
+	// A bounded page of artifact storage its source URL re-reads with `:N-M` is already
+	// recoverable. Spilling it would only create a redundant artifact holding another
+	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
+	if (existingMeta?.pagedSource) return result;
 
 	// Measure total text content
 	const textParts: string[] = [];

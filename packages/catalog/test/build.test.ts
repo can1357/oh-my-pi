@@ -433,6 +433,39 @@ describe("xAI Responses reasoning-effort suppression", () => {
 		expect(model.thinking?.efforts).not.toContain(Effort.Max);
 	});
 
+	it("exposes the grok-4.7 low..xhigh ladder on xai-oauth and paid xai", () => {
+		for (const provider of ["xai-oauth", "xai"] as const) {
+			const model = buildModel(grokResponsesSpec("grok-4.7", provider));
+			expect(model.compat.supportsReasoningEffort).toBe(true);
+			expect(model.compat.omitReasoningEffort).toBe(false);
+			expect(model.thinking?.efforts).toEqual([
+				Effort.Minimal,
+				Effort.Low,
+				Effort.Medium,
+				Effort.High,
+				Effort.XHigh,
+			]);
+			expect(model.thinking?.efforts).not.toContain(Effort.Max);
+			// xhigh is native on 4.6+ (docs.x.ai reasoning): only minimal clamps to low.
+			expect(model.compat.reasoningEffortMap).toEqual({ minimal: "low" });
+		}
+	});
+
+	it("prices paid grok-4.7 at the 2x long-context tier", () => {
+		const model = buildModel({
+			...grokResponsesSpec("grok-4.7", "xai"),
+			cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+		});
+		expect(model.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			inputThresholdInclusive: true,
+			input: 4,
+			output: 12,
+			cacheRead: 1,
+			cacheWrite: 0,
+		});
+	});
+
 	it("lets the grok-4.6 allowlist beat a stale cached omitReasoningEffort flag", () => {
 		const model = buildModel({
 			...grokResponsesSpec("grok-4.6"),
@@ -860,6 +893,67 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).compat;
 		expect(openrouterResponses.supportsObfuscationOptOut).toBe(false);
 		expect(openrouterResponses.wireModelIdMode).toBe("openrouter");
+	});
+});
+
+describe("local OpenAI-compat output clamp", () => {
+	it.each([
+		["llama.cpp", "llama.cpp", "http://127.0.0.1:8080/v1"],
+		["lm-studio", "lm-studio", "http://127.0.0.1:1234/v1"],
+		["named vllm even on a public URL", "vllm", "https://vllm.example.com/v1"],
+		["ollama", "ollama", "http://127.0.0.1:11434/v1"],
+		["custom loopback", "custom", "http://127.0.0.1:8080/v1"],
+		["custom RFC1918", "custom", "http://192.168.1.10:8080/v1"],
+		["custom .local", "custom", "http://box.local:8080/v1"],
+	] as const)("enables clampOutputToModelMax for %s", (_label, provider, baseUrl) => {
+		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(true);
+	});
+
+	it.each([
+		["LiteLLM loopback", "litellm", "http://127.0.0.1:4000/v1"],
+		["remote custom", "custom", "https://api.example.com/v1"],
+		["official OpenAI", "openai", "https://api.openai.com/v1"],
+	] as const)("leaves clampOutputToModelMax off for %s", (_label, provider, baseUrl) => {
+		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(false);
+	});
+
+	it("enables clampOutputToModelMax for local Responses hosts", () => {
+		expect(
+			resolveModelPolicy(responsesSpec({ provider: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1" })).compat
+				.clampOutputToModelMax,
+		).toBe(true);
+		expect(
+			resolveModelPolicy(responsesSpec({ provider: "custom", baseUrl: "http://10.0.0.8:8080/v1" })).compat
+				.clampOutputToModelMax,
+		).toBe(true);
+	});
+
+	it("uses providerType when clamping aliased Responses backends", () => {
+		expect(
+			resolveModelPolicy(
+				responsesSpec({
+					provider: "workbench",
+					providerType: "llama.cpp",
+					baseUrl: "https://vllm.example.com/v1",
+				}),
+			).compat.clampOutputToModelMax,
+		).toBe(true);
+		expect(
+			resolveModelPolicy(
+				responsesSpec({
+					provider: "workbench",
+					providerType: "litellm",
+					baseUrl: "http://127.0.0.1:4000/v1",
+				}),
+			).compat.clampOutputToModelMax,
+		).toBe(false);
+	});
+
+	it("leaves clampOutputToModelMax off for LiteLLM Responses even on loopback", () => {
+		expect(
+			resolveModelPolicy(responsesSpec({ provider: "litellm", baseUrl: "http://127.0.0.1:4000/v1" })).compat
+				.clampOutputToModelMax,
+		).toBe(false);
 	});
 });
 

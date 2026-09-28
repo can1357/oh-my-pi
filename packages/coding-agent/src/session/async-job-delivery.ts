@@ -26,6 +26,11 @@ export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
+/**
+ * Tail share of the preview when the link points at a raw capture: tools append
+ * notices (wall time, exit code, timeout) after the captured stream.
+ */
+export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
 export interface AsyncResultEntry {
 	jobId: string;
@@ -75,6 +80,16 @@ export function renderStructuredJson(structured: StructuredSubagentOutput): stri
 	return truncateMiddle(serialized, { maxBytes: ASYNC_PREVIEW_MAX_CHARS }).content;
 }
 
+/**
+ * Headline for the delivery's "Structured output:" line. `unavailable` means
+ * no payload was ever validated (the run failed before yielding, or the
+ * schema itself was unusable) — never a schema verdict, so it must not read
+ * as "schema unavailable"/"schema invalid".
+ */
+export function structuredStatusLabel(status: StructuredSubagentOutput["status"]): string {
+	return status === "unavailable" ? "unavailable" : `schema ${status}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -99,6 +114,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			structuredJson,
 			hasStructuredData,
 			schemaStatus: structured?.status,
+			schemaStatusLabel: structured ? structuredStatusLabel(structured.status) : undefined,
 			schemaError: structured?.error,
 			schemaValid: structured?.status === "valid",
 		};

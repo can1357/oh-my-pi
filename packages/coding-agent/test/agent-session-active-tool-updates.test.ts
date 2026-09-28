@@ -68,7 +68,7 @@ describe("AgentSession.activeToolExecutionUpdates cache lifecycle", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		return new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),

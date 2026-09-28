@@ -10,6 +10,7 @@
  */
 
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { isUsageLimitExhausted } from "../auth/usage-report";
 import {
 	buildXAICliBillingUrl,
 	extractXAIAccessTokenSubject,
@@ -17,6 +18,7 @@ import {
 	getXAICliBillingHeaders,
 } from "../registry/oauth/xai-oauth";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -26,7 +28,7 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER_ID = "xai-oauth";
 const BILLING_SOURCE = "cli-chat-proxy.grok.com/v1/billing";
@@ -438,5 +440,33 @@ export const xaiOauthUsageProvider: UsageProvider = {
 			},
 			raw,
 		};
+	},
+};
+
+/**
+ * Ranks SuperGrok accounts by weekly credits (or unified monthly included quota).
+ * xAI reports no short window, so the meter maps to `secondary`, which drives drain ranking.
+ */
+export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
+	scopeLimits(report) {
+		// Spent credits/included quota keeps serving on the on-demand cap; only hard-block
+		// the credential once no on-demand headroom remains.
+		const onDemand = report.limits.find(limit => limit.id === `${PROVIDER_ID}:on-demand`);
+		if (onDemand && !isUsageLimitExhausted(onDemand)) return [];
+		return report.limits.filter(
+			limit => limit.id === `${PROVIDER_ID}:credits:1w` || limit.id === `${PROVIDER_ID}:included:1mo`,
+		);
+	},
+	findWindowLimits(report) {
+		const credits = report.limits.find(limit => limit.id === `${PROVIDER_ID}:credits:1w`);
+		const included = report.limits.find(limit => limit.id === `${PROVIDER_ID}:included:1mo`);
+		return {
+			secondary: credits ?? included,
+		};
+	},
+	windowDefaults: {
+		// Inert: findWindowLimits never reports a primary window.
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: WEEK_MS,
 	},
 };

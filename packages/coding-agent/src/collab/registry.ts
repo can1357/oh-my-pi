@@ -7,7 +7,8 @@
  * shareable URL. The registry exposes two contracts over that endpoint:
  *
  * - `snapshot`: non-capability metadata (identity, session, cwd, model,
- *   participants, relay/attention state) suitable for listing and polling;
+ *   participants, relay/attention/activity state) suitable for listing and
+ *   polling;
  * - `link`: one browser URL for one exact host generation and access level,
  *   rejected when the generation moved or the access level is not published.
  *
@@ -78,6 +79,18 @@ export interface CollabHostSnapshot {
 	relayConnected: boolean;
 	/** Whether a host-side question is waiting for an answer a writable guest could give. */
 	inputRequired: boolean;
+	/**
+	 * Whether the session is running a turn: streaming a response or executing
+	 * tools. A poller watching this fall from `true` to `false` sees the host
+	 * stop working while it is still published, which no other field reports —
+	 * disappearing from discovery means the process died or became unreachable,
+	 * not that the agent finished.
+	 *
+	 * `null` when the host does not report it (an omp older than this field).
+	 * Unknown is not idle: a consumer must not read the absence as a session
+	 * that stopped.
+	 */
+	busy: boolean | null;
 	/** Highest access the registry will hand out for this host. */
 	access: CollabAccess;
 }
@@ -222,6 +235,12 @@ function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
 	if (typeof host.participants !== "number") return null;
 	if (typeof host.relayConnected !== "boolean") return null;
 	if (typeof host.inputRequired !== "boolean") return null;
+	// `busy` was added after the protocol version shipped, and the version is a
+	// hard gate on both sides: bumping it would make every host invisible to a
+	// differently versioned lister on the same machine. So an older host's
+	// snapshot simply omits the field, and a missing one reads as unknown
+	// (`null`) rather than rejecting an otherwise healthy host.
+	if (host.busy !== undefined && host.busy !== null && typeof host.busy !== "boolean") return null;
 	if (!isAccess(host.access)) return null;
 	return {
 		instanceId: host.instanceId,
@@ -235,6 +254,7 @@ function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
 		participants: host.participants,
 		relayConnected: host.relayConnected,
 		inputRequired: host.inputRequired,
+		busy: typeof host.busy === "boolean" ? host.busy : null,
 		access: host.access,
 	};
 }

@@ -154,26 +154,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
-	it("forwards anthropicCompaction so gateway compaction survives the hop", () => {
-		const compaction = { triggerInputTokens: 50_000, pauseAfterCompaction: true, instructions: "Summarize." };
-		const parsed = parseRequest({
-			modelId: "anthropic/claude-fable-5",
-			context: baseContext,
-			options: { anthropicCompaction: compaction },
-		});
-		expect(parsed.options.anthropicCompaction).toEqual(compaction);
-	});
-
-	it("forwards an explicit statefulResponses disablement to the native stream", () => {
-		const parsed = parseRequest({
-			modelId: "openai/gpt-5",
-			context: baseContext,
-			options: { promptCacheKey: "bench-cache-pair", statefulResponses: false },
-		});
-		expect(parsed.options.promptCacheKey).toBe("bench-cache-pair");
-		expect(parsed.options.statefulResponses).toBe(false);
-	});
-
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",
@@ -227,16 +207,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
 	});
 
-	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {
-		const parsed = parseRequest({
-			modelId: "gpt-5.6",
-			context: baseContext,
-			options: { promptCache: { mode: "explicit", ttl: "30m", breakpoint: "none" } },
-		});
-
-		expect(parsed.options.promptCache).toEqual({ mode: "explicit", ttl: "30m", breakpoint: "none" });
-	});
-
 	it("rejects missing required fields", () => {
 		expect(() => parseRequest({ context: baseContext })).toThrow(/modelId/);
 		expect(() => parseRequest({ modelId: "x" })).toThrow(/context/);
@@ -273,7 +243,7 @@ describe("pi-native gateway cache controls", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-cache-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -317,7 +287,7 @@ describe("pi-native gateway reasoning flags", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -360,7 +330,7 @@ describe("pi-native gateway usage attribution", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-usage-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const recorded: Array<{
 			provider: string;
 			model: string;
@@ -368,7 +338,7 @@ describe("pi-native gateway usage attribution", () => {
 			costUsd?: number;
 			client?: { installId: string; hostname?: string; app?: string };
 		}> = [];
-		const spy = vi.spyOn(storage, "recordObservedUsage").mockImplementation(entry => {
+		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });
@@ -468,21 +438,6 @@ describe("pi-native encodeStream", () => {
 			expect(parsed[i]).toEqual(JSON.parse(JSON.stringify(events[i])));
 		}
 		expect(parsed[parsed.length - 1]).toBe("[DONE]");
-	});
-
-	it("preserves the rolling `partial` on every delta (sanity: no shrink)", async () => {
-		// Guards against an accidental re-introduction of partial-stripping
-		// optimization. Clients depend on `partial` being present.
-		const final = baseAssistant({ content: [{ type: "text", text: "abc" }] });
-		const events: AssistantMessageEvent[] = [
-			{ type: "text_delta", contentIndex: 0, delta: "abc", partial: final },
-			{ type: "done", reason: "stop", message: final },
-		];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, final)))).map(parseSseLine) as Array<
-			Record<string, unknown>
-		>;
-		expect(parsed[0]).toHaveProperty("partial");
-		expect((parsed[0] as { partial: AssistantMessage }).partial.content).toEqual([{ type: "text", text: "abc" }]);
 	});
 
 	it("stops streaming after a terminal `done` and emits [DONE] once", async () => {

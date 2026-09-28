@@ -293,6 +293,21 @@ describe("auth grammar", () => {
 		expect(compiled.providers[0]?.nativeAuthApis).toEqual(["bedrock-converse-stream", "openai-responses"]);
 	});
 
+	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "X"\n\torg-scoped-identity #false\n\toauth-token-env "X_OAUTH" "X_BACKUP"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]?.orgScopedIdentity).toBe(false);
+		expect(compiled.providers[0]?.oauthTokenEnv).toEqual(["X_OAUTH", "X_BACKUP"]);
+		expect(() => compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\toauth-token-env\n}' }])).toThrow(
+			/auth\/x\.kdl:3.*malformed value/,
+		);
+	});
+
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
 		const compiled = compileAuth([
 			{

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { getProjectDir, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
@@ -8,7 +8,7 @@ import {
 } from "../autolearn/managed-skills";
 import { skillCapability } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import type { SkillsSettings } from "../config/settings";
+import type { SkillsSettings } from "./settings";
 import { type Skill as CapabilitySkill, isUserSourceEnabled, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
@@ -124,6 +124,8 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/** Disabled extension ids (`disabledExtensions`); `skill:<name>` entries hide those skills. */
+	disabledExtensions?: string[];
 	/**
 	 * Session-local extension roots. Post-startup reloads pass their live
 	 * session value so explicit roots, discovery mode, and configured
@@ -485,7 +487,9 @@ export async function buildSkillPromptMessage(
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
-	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
+	// diagnostics to the loader, which already parsed this frontmatter.
+	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
 	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {

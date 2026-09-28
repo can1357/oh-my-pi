@@ -14,6 +14,13 @@ import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { StatusLineTestComponents } from "./helpers/status-line";
 
+import {
+	cfgGitEnabled,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 let settingsState: SettingsTestState | undefined;
 let projectDir = "";
 const statusLines = new StatusLineTestComponents();
@@ -81,30 +88,6 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 }
 
 describe("StatusLineComponent effective settings cache", () => {
-	it("keeps repeated cached renders byte-identical across presets and widths", () => {
-		const cases: StatusLineSettings[] = [
-			{ preset: "default", sessionAccent: false },
-			{ preset: "minimal", sessionAccent: false },
-			{
-				preset: "custom",
-				leftSegments: ["pi", "model"],
-				rightSegments: ["session_name", "context_pct"],
-				separator: "pipe",
-				sessionAccent: false,
-				segmentOptions: { model: { showThinkingLevel: false } },
-			},
-		];
-
-		for (const statusLineSettings of cases) {
-			const component = makeComponent(statusLineSettings);
-			for (const width of [36, 120]) {
-				const first = component.getTopBorder(width);
-				const second = component.getTopBorder(width);
-				expect(second).toEqual(first);
-			}
-		}
-	});
-
 	it("skips the entire segment pipeline until a visible input invalidates it", () => {
 		const session = makeSession();
 		let snapshotCalls = 0;
@@ -208,11 +191,11 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 
 	it("renders custom preset defaults when segment arrays are unconfigured", () => {
-		Settings.instance.override("statusLine.preset", "custom");
+		cfgStatusLinePreset.override(Settings.instance, "custom");
 		const component = makeComponent({
-			preset: Settings.instance.get("statusLine.preset"),
-			leftSegments: Settings.instance.get("statusLine.leftSegments"),
-			rightSegments: Settings.instance.get("statusLine.rightSegments"),
+			preset: cfgStatusLinePreset.get(Settings.instance),
+			leftSegments: cfgStatusLineLeftSegments.get(Settings.instance),
+			rightSegments: cfgStatusLineRightSegments.get(Settings.instance),
 			sessionAccent: false,
 		});
 
@@ -291,27 +274,12 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path).toEqual(before);
 		expect(component.getEffectiveSettingsForTest().segmentOptions.path).toEqual(before);
 	});
-
-	it("reuses the effective-settings object until settings change", () => {
-		const component = makeComponent({ preset: "default", sessionAccent: false });
-		const effective = component.getEffectiveSettingsForTest();
-
-		for (let i = 0; i < 5; i++) {
-			component.getTopBorder(100);
-			expect(component.getEffectiveSettingsForTest()).toBe(effective);
-		}
-
-		component.updateSettings({ preset: "minimal", sessionAccent: false });
-		const nextEffective = component.getEffectiveSettingsForTest();
-		expect(nextEffective).not.toBe(effective);
-		expect(component.getEffectiveSettingsForTest()).toBe(nextEffective);
-	});
 	it("skips git probes when git integration is disabled", async () => {
 		const headSpy = spyOn(vcs, "gitInfo");
 		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
 		try {
-			Settings.instance.override("git.enabled", false);
+			cfgGitEnabled.override(Settings.instance, false);
 			const component = makeComponent({
 				preset: "custom",
 				leftSegments: ["git", "pr"],

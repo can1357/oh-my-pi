@@ -57,12 +57,20 @@ if "__omp_prelude_loaded__" not in globals():
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
 
+    def _omp_url_roots() -> dict:
+        """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            return {}
+        return roots if isinstance(roots, dict) else {}
+
     def _should_delegate_read(path: str | Path) -> bool:
-        return (
-            isinstance(path, str)
-            and _OMP_INTERNAL_URL_RE.match(path) is not None
-            and not path.lower().startswith("local://")
-        )
+        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root."""
+        if not isinstance(path, str):
+            return False
+        match = _OMP_INTERNAL_URL_RE.match(path)
+        return match is not None and match.group(1).lower() not in _omp_url_roots()
 
     def _read_line_selector(offset: int, limit: int | None) -> str | None:
         if offset <= 1 and limit is None:
@@ -81,22 +89,18 @@ if "__omp_prelude_loaded__" not in globals():
     def _resolve_omp_path(path: str | Path) -> Path:
         """Map a helper path to a real filesystem Path.
 
-        A `scheme://…` whose scheme has an injected on-disk root (e.g.
-        `local://`, via PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it
-        lands where `read local://…` resolves — not a literal `local:/`
-        directory under the cwd (which `Path("local://x")` collapses to). Plain
-        paths pass through unchanged; any other `scheme://` is rejected."""
+        A `scheme://…` whose scheme has an injected on-disk root (via
+        PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it lands where
+        `read scheme://…` resolves — not a literal `scheme:/` directory under
+        the cwd (which `Path("scheme://x")` collapses to). Plain paths pass
+        through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
             return Path(path)
         match = _OMP_INTERNAL_URL_RE.match(path)
         if not match:
             return Path(path)
         scheme = match.group(1).lower()
-        try:
-            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
-        except (ValueError, TypeError):
-            roots = {}
-        root = roots.get(scheme) if isinstance(roots, dict) else None
+        root = _omp_url_roots().get(scheme)
         if not root:
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
@@ -752,12 +756,11 @@ if "__omp_prelude_loaded__" not in globals():
 
         def send(self, message):
             return _bridge_call(
-                "hub",
+                "write",
                 {
-                    "op": "send",
-                    "to": self.id,
-                    "message": str(message),
-                    "i": "agent handle",
+                    "path": self.handle,
+                    "content": str(message),
+                    "i": "Messaging agent",
                 },
             )
 
@@ -879,17 +882,18 @@ if "__omp_prelude_loaded__" not in globals():
     class JudgmentBatch:
         """Host-owned bulk judgment run. Pull settled items with ``await drain()`` across as many cells as needed."""
 
-        __slots__ = ("id", "total")
+        __slots__ = ("id", "total", "intent")
 
-        def __init__(self, id, total):
+        def __init__(self, id, total, intent):
             self.id = id
             self.total = total
+            self.intent = intent
 
         def _call(self, op, **args):
             return _bridge_call("__judge_batch__", {"op": op, "id": self.id, **args})
 
         def status(self):
-            """Snapshot: ``done``, ``total``, ``failed``, ``running``, ``model``, ``elapsedS``."""
+            """Snapshot: ``intent``, ``done``, ``total``, ``failed``, ``running``, ``model``, ``elapsedS``."""
             return self._call("status")
 
         async def drain(self, timeout=None):
@@ -937,15 +941,32 @@ if "__omp_prelude_loaded__" not in globals():
     def _judge_batch_from(result):
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("judge_batch() did not return a batch")
-        return JudgmentBatch(result["id"], int(result.get("total") or 0))
+        return JudgmentBatch(
+            result["id"],
+            int(result.get("total") or 0),
+            result.get("intent") or "Judging",
+        )
 
-    def judge_batch(states, questions, *, concurrency=None, retries=None, min_ok=None):
+    def judge_batch(
+        states,
+        questions,
+        *,
+        concurrency=None,
+        retries=None,
+        min_ok=None,
+        intent=None,
+    ):
         """Judge every state with the same ``questions`` on the host; returns a ``JudgmentBatch`` to drain across cells.
 
-        ``states`` is ``{key: state}`` or a list (keys are indices). Item failures land in
-        ``JudgmentItem.error``; only a run that dies wholesale raises from ``drain()``.
+        ``states`` is ``{key: state}`` or a list (keys are indices). ``intent`` is an
+        optional nonempty progress/job label. Item failures land in ``JudgmentItem.error``;
+        only a run that dies wholesale raises from ``drain()``.
         """
         _check_questions(questions)
+        if intent is not None and (
+            not isinstance(intent, str) or not intent.strip()
+        ):
+            raise TypeError("judge_batch() intent must be a non-empty string")
         if isinstance(states, dict):
             items = [{"key": key, "state": state} for key, state in states.items()]
         elif isinstance(states, (list, tuple)):
@@ -959,6 +980,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["retries"] = int(retries)
         if min_ok is not None:
             args["minOk"] = int(min_ok)
+        if intent is not None:
+            args["intent"] = intent
         return _judge_batch_from(_bridge_call("__judge_batch__", args))
 
     def _attach_judge_batch(id):

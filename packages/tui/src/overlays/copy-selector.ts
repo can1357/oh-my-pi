@@ -18,13 +18,15 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, routeSgrMouseInput, type TUI, truncateToWidth, visibleWidth } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
 import {
-	isUserRequestEntry,
+	recentTranscriptEntries,
+	type SessionMessageEntryLike as SessionMessageEntry,
 	type TranscriptEntryLike as TranscriptEntry,
 	transcriptEntryMessage,
 	userTurnDraft,
 } from "../chat/transcript-entry";
-import type { SessionMessageEntryLike as SessionMessageEntry } from "../chat/transcript-entry";
-import { replaceTabs } from "../render/render-utils";
+import { expandKeyHint, replaceTabs } from "../render/render-utils";
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks, extractLinks } from "./copy-targets";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -49,19 +51,37 @@ export interface CopySelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-	/** The outlined content was chosen — copy it. `label` feeds the status line. */
-	onPick: (content: string, label: string) => void;
+	/** Replaces the "Copy" header when the picker is reused for another purpose. */
+	title?: string;
+	/** Verb shown for the pick action in hints and block controls (default "copy"). */
+	actionLabel?: string;
+	/**
+	 * The outlined content was chosen — copy it. `label` feeds the status line;
+	 * `source` names the transcript entry (and inner block, when descended) it came from.
+	 */
+	onPick: (content: string, label: string, source: CopyPickSource) => void;
 	/** `o` on a link block — open `href` with the system opener. Absent: `o` is ignored. */
 	onOpen?: (href: string, label: string) => void;
 	onCancel: () => void;
 }
 
+/** Where picked content came from in the transcript. */
+export interface CopyPickSource {
+	entry: TranscriptEntry;
+	/** The inner block, when the pick happened in the descended block view. */
+	block?: CopyBlock;
+}
+
 /** One copyable inner block of a transcript turn. */
-interface CopyBlock {
+export interface CopyBlock {
 	/** Short kind label ("code · ts", "bash command", "read result", …). */
 	label: string;
 	/** Exact text placed on the clipboard. */
 	content: string;
+	/** Transcript entry that produced this block. */
+	entry: TranscriptEntry;
+	/** Markdown code/quote block, or a bash/eval tool-call command. */
+	kind?: "code" | "quote" | "command";
 	/** Highlight language for the block preview. */
 	language?: string;
 	/** Set for link blocks: the URL `o` opens. `content` is the same URL. */
@@ -72,13 +92,6 @@ interface CopyBlock {
 const BLOCK_PREVIEW_LINES = 12;
 /** The copy picker's outline stroke — green, distinct from the rewind selector's accent. */
 const OUTLINE_COLOR: ThemeColor = "success";
-/**
- * Entries replayed when the picker opens. Replaying a long session's whole
- * branch costs seconds before the first frame (one component built and
- * rendered per entry), and the clipboard target is almost always recent, so
- * the picker starts at this tail and loads the rest on demand (`a`).
- */
-const INITIAL_ENTRIES = 600;
 
 /** A clickable control on a block caption, in composed-column columns. */
 interface ControlRegion {
@@ -112,7 +125,7 @@ export class CopySelectorComponent implements Component {
 		private readonly deps: CopySelectorDeps,
 	) {
 		this.#entries = entries;
-		const tail = recentEntries(entries, INITIAL_ENTRIES);
+		const tail = recentTranscriptEntries(entries);
 		this.#truncated = tail.length < entries.length;
 		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
@@ -245,13 +258,13 @@ export class CopySelectorComponent implements Component {
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			if (this.#blocks) {
 				const block = this.#blocks[this.#blockSelected];
-				if (block) this.deps.onPick(block.content, block.label);
+				if (block) this.deps.onPick(block.content, block.label, { entry: block.entry, block });
 				return;
 			}
 			const target = this.#targets[this.#selected];
 			if (!target) return;
 			const item = targetCopy(target, this.#blocksFor(target));
-			this.deps.onPick(item.content, item.label);
+			this.deps.onPick(item.content, item.label, { entry: target.entries[0]! });
 			return;
 		}
 		// Page/home/end/shift+arrow scrolling without moving the selection.
@@ -283,7 +296,7 @@ export class CopySelectorComponent implements Component {
 			if (block.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
 			return;
 		}
-		this.deps.onPick(block.content, block.label);
+		this.deps.onPick(block.content, block.label, { entry: block.entry, block });
 	}
 
 	#moveVertical(delta: -1 | 1): void {
@@ -303,6 +316,11 @@ export class CopySelectorComponent implements Component {
 				return;
 			}
 			index += delta;
+		}
+		// Stepping above the replayed tail continues into the earlier history.
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#moveVertical(delta);
 		}
 	}
 
@@ -356,16 +374,23 @@ export class CopySelectorComponent implements Component {
 				prepared,
 				style: {
 					color: OUTLINE_COLOR,
-					caption: blocks.length > 0 ? `${blocks.length} block${blocks.length === 1 ? "" : "s"} →` : undefined,
+					caption:
+						blocks.length > 0
+							? `${blocks.length} block${blocks.length === 1 ? "" : "s"} ${formatKeyHint("right")}`
+							: undefined,
 				},
 			}).column;
 		}
 
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
-		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
+		const openHint = selectedBlock?.href && this.deps.onOpen ? `  ${formatKeyHint("o")} open` : "";
+		const action = this.deps.actionLabel ?? "copy";
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
 		const hint = this.#blocks
-			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
-			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  ${this.#truncated ? "a earlier turns  " : ""}ctrl+o expand  esc close`;
+			? `${this.#blockSelected + 1}/${this.#blocks.length}  ${upDown} block  ${formatKeyHint("left")}/${cancel} back  ${enter} ${action}${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
+			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}${upDown} step  ${blocks.length > 0 ? `${formatKeyHint("right")} blocks  ` : ""}${enter} ${action}  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${cancel} close`;
 		const anchorId = target
 			? this.#blocks
 				? `copy:${target.turnId}:block:${this.#blockSelected}`
@@ -373,7 +398,9 @@ export class CopySelectorComponent implements Component {
 			: undefined;
 		return {
 			header: [
-				`${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on the clipboard")}`,
+				this.deps.title
+					? theme.bold(this.deps.title)
+					: `${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on the clipboard")}`,
 			],
 			body: {
 				lines: composed.lines,
@@ -409,7 +436,7 @@ export class CopySelectorComponent implements Component {
 			const selected = index === this.#blockSelected;
 			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
 			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
-				{ action: "copy", text: `${theme.cmd.copy} copy` },
+				{ action: "copy", text: `${theme.cmd.copy} ${this.deps.actionLabel ?? "copy"}` },
 			];
 			if (block.href && this.deps.onOpen) controls.push({ action: "open", text: `${theme.cmd.share} open` });
 			const controlsWidth = controls.reduce((sum, control) => sum + visibleWidth(control.text) + 2, 0);
@@ -449,27 +476,6 @@ export class CopySelectorComponent implements Component {
 	}
 }
 
-/**
- * The trailing slice starting at the last turn initiator at or before
- * `entries.length - limit`: a user message, or a custom message that starts
- * a user-attributed turn (a directly invoked `/skill:` prompt, a collab peer's
- * prompt), the same boundary `ChatTranscriptBuilder` uses.
- *
- * The cut has to land on a turn boundary: the builder drops a tool result
- * whose initiating call was sliced away, so a tail beginning mid-turn renders
- * without its command — and a tail of nothing but orphaned results would
- * leave the picker with no target at all. Scanning backwards keeps the whole
- * final turn instead, and a branch whose last turn is itself longer than
- * `limit` replays in full.
- */
-function recentEntries(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
-	if (entries.length <= limit) return entries;
-	for (let index = entries.length - limit; index > 0; index--) {
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
-	}
-	return entries;
-}
-
 /** Raw multi-line text of a user message (string or text blocks). */
 function rawUserText(message: Extract<SessionMessageEntry["message"], { role: "user" }>): string {
 	if (typeof message.content === "string") return message.content;
@@ -497,16 +503,18 @@ function toolResultText(message: Extract<SessionMessageEntry["message"], { role:
 		.trim();
 }
 
-function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
+function pushMarkdownBlocks(blocks: CopyBlock[], text: string, entry: TranscriptEntry): void {
 	for (const block of extractBlocks(text)) {
 		if (block.kind === "code") {
 			blocks.push({
 				label: block.lang ? `${block.lang} code` : "code",
 				content: block.code,
+				entry,
+				kind: "code",
 				language: block.lang || undefined,
 			});
 		} else {
-			blocks.push({ label: "quote", content: block.text });
+			blocks.push({ label: "quote", content: block.text, entry, kind: "quote" });
 		}
 	}
 	// Links follow the message's blocks. The preview shows the whole URL on one
@@ -515,6 +523,7 @@ function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
 		blocks.push({
 			label: link.text !== link.href ? `link${theme.sep.dot}${link.text}` : "link",
 			content: link.href,
+			entry,
 			href: link.href,
 		});
 	}
@@ -528,10 +537,10 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 		if (!message) continue;
 		switch (message.role) {
 			case "user":
-				pushMarkdownBlocks(blocks, rawUserText(message));
+				pushMarkdownBlocks(blocks, rawUserText(message), entry);
 				break;
 			case "assistant": {
-				pushMarkdownBlocks(blocks, assistantVisibleText(message));
+				pushMarkdownBlocks(blocks, assistantVisibleText(message), entry);
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
 					const command = commandFromToolCall(content);
@@ -539,6 +548,8 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 						blocks.push({
 							label: command.kind === "bash" ? "bash command" : "eval code",
 							content: command.code,
+							entry,
+							kind: "command",
 							language: command.language,
 						});
 					}
@@ -547,16 +558,16 @@ function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 			}
 			case "toolResult": {
 				const text = toolResultText(message);
-				if (text) blocks.push({ label: `${message.toolName} result`, content: text });
+				if (text) blocks.push({ label: `${message.toolName} result`, content: text, entry });
 				break;
 			}
 			case "bashExecution":
-				blocks.push({ label: "command", content: message.command, language: "bash" });
-				if (message.output.trim()) blocks.push({ label: "output", content: message.output });
+				blocks.push({ label: "command", content: message.command, entry, language: "bash" });
+				if (message.output.trim()) blocks.push({ label: "output", content: message.output, entry });
 				break;
 			case "pythonExecution":
-				blocks.push({ label: "eval code", content: message.code, language: "python" });
-				if (message.output.trim()) blocks.push({ label: "output", content: message.output });
+				blocks.push({ label: "eval code", content: message.code, entry, language: "python" });
+				if (message.output.trim()) blocks.push({ label: "output", content: message.output, entry });
 				break;
 			default:
 				break;

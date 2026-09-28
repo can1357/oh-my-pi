@@ -55,6 +55,8 @@ import { canonicalizeMessage } from "../chat/thinking-display";
 import { resolveAssistantErrorPresentation } from "../chat/transcript-render-helpers";
 import { OverlayPanel, PanelDivider } from "../chrome/overlay-box";
 import { TreeView, type TreeRow } from "../components/tree-view";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { editorKeys, interruptKey } from "../chrome/keybinding-hints";
 
 /** Filter mode for tree display */
 type FilterMode = TreeFilterMode;
@@ -523,7 +525,9 @@ class TreeList implements Component {
 				lines.push(truncateToWidth(theme.fg("muted", `(0/0)${this.#getFilterLabel()}`), width));
 			} else if (this.#searchQuery.length > 0) {
 				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.#searchQuery}"`), width));
-				lines.push(truncateToWidth(theme.fg("muted", "Press Backspace to clear the search"), width));
+				lines.push(
+					truncateToWidth(theme.fg("muted", `Press ${formatKeyHint("backspace")} to clear the search`), width),
+				);
 				lines.push(truncateToWidth(theme.fg("muted", `(0/${totalCount})${this.#getFilterLabel()}`), width));
 			} else {
 				const filterLabel = this.#getFilterLabel().trim() || "[default]";
@@ -533,7 +537,15 @@ class TreeList implements Component {
 						width,
 					),
 				);
-				lines.push(truncateToWidth(theme.fg("muted", "Press Alt+A to show all, Alt+D for default"), width));
+				lines.push(
+					truncateToWidth(
+						theme.fg(
+							"muted",
+							`Press ${formatKeyHint("alt+a")} to show all, ${formatKeyHint("alt+d")} for default`,
+						),
+						width,
+					),
+				);
 				lines.push(truncateToWidth(theme.fg("muted", `(0/${totalCount})${this.#getFilterLabel()}`), width));
 			}
 			return lines;
@@ -1010,7 +1022,8 @@ class LabelInput implements Component {
 		const lines: string[] = [];
 		lines.push(truncateToWidth(theme.fg("muted", "Label (empty to remove):"), width));
 		lines.push(...this.#input.render(width));
-		lines.push(truncateToWidth(theme.fg("dim", "enter: save  esc: cancel"), width));
+		const cancel = interruptKey();
+		lines.push(truncateToWidth(theme.fg("dim", `${formatKeyHint("enter")}: save  ${cancel}: cancel`), width));
 		return lines;
 	}
 
@@ -1068,7 +1081,17 @@ export class TreeSelectorComponent extends OverlayPanel {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					[
+						`${formatKeyHint("enter")}: switch.`,
+						`${formatKeyHints(["alt+up", "alt+down"])}: previous/next turn.`,
+						`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} (${formatKeyHints(["left", "right"])}): page.`,
+						`${formatKeyHints(["home", "end"])}: first/last item.`,
+						`${formatKeyHint("shift+enter")}: summarize & switch.`,
+						`${formatKeyHint("shift+l")}: label.`,
+						`${formatKeyHint("ctrl+o")}: filter.`,
+						`${formatKeyHints(["alt+d", "alt+t", "alt+u", "alt+l", "alt+a"])}: filter.`,
+						"Type to search",
+					].join(" "),
 				),
 				0,
 				0,

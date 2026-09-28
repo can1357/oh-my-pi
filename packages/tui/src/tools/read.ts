@@ -1,10 +1,12 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
 import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
+import * as os from "node:os";
 import * as path from "node:path";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { RenderResultOptions, ToolActivityContext, ToolActivitySummary, ToolRenderer } from "./renderer";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
@@ -16,6 +18,10 @@ import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "..
 
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
+import { renderProcRead, type ProcReadDetails } from "./proc-render";
+import { renderCfgRead, type CfgReadDetails } from "./cfg-render";
+import type { CardToolResult } from "./result-card";
+import { type InternalUrlSchemeSpec, internalUrlSchemeSpec, splitUrlScheme } from "./url-scheme-host";
 
 /** Read result metadata retains truncation statistics, not a second copy of the body. */
 export type ReadTruncationStats = Omit<TruncationResult, "content">;
@@ -23,6 +29,8 @@ export type ReadTruncationStats = Omit<TruncationResult, "content">;
 /** Display metadata for file and URL reads. */
 export interface ReadToolDetails {
 	kind?: "file" | "url";
+	proc?: ProcReadDetails;
+	cfg?: CfgReadDetails;
 	/** Filesystem hyperlink target resolved by the executing tool. */
 	displayTarget?: string;
 	truncation?: ReadTruncationStats;
@@ -75,36 +83,6 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
-// Schemes whose host grammar is identifier-shaped, so any trailing
-// `:<selector-chunk>` is unambiguously a read-tool selector. `mcp://` is
-// excluded because mcp resource URIs may legitimately contain colons. `ssh://`
-// is included despite an optional `:port`; `splitInternalUrlSel` skips the peel
-// for an `ssh://host:port` that has no `/path`, so the port colon is never
-// mistaken for a selector (a real ssh selector trails the `/path`, e.g.
-// `ssh://h/f:1-5`).
-const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
-	agent: true,
-	artifact: true,
-	issue: true,
-	history: true,
-	local: true,
-	memory: true,
-	omp: true,
-	pr: true,
-	rule: true,
-	security: true,
-	skill: true,
-	ssh: true,
-	vault: true,
-};
-// Schemes whose resource URIs are server-defined and may legitimately end
-// with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
-// `McpProtocolHandler` resolves by exact URI match (`r.uri === uri`), so
-// peeling syntactically can make valid resources unreachable. Keep these
-// schemes opaque; selector support for them needs a resolver-aware path that
-// tries the exact URI before interpreting any suffix as a read selector.
-const OPAQUE_RESOURCE_SCHEMES: ReadonlySet<string> = new Set(["mcp"]);
-const INTERNAL_URL_SCHEME_RE = /^([a-z][a-z0-9+.-]*):\/\//i;
 /** Split a filesystem path from its trailing read selector. */
 export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
 	const colon = rawPath.lastIndexOf(":");
@@ -148,30 +126,28 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
  * clean URL to the protocol handler and surface selector errors via parseSel
- * instead of as misleading "host invalid" errors from the handler. Schemes
- * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.
+ * instead of as misleading "host invalid" errors from the handler.
+ *
+ * Only schemes whose spec declares `lines` selectors peel; server-defined URIs
+ * (`opaque`), selector-free schemes, and unregistered schemes pass through
+ * verbatim. `specOf` defaults to the installed scheme host, so nothing peels
+ * before a host is installed.
  *
  * Falls back to the input unchanged when nothing matches.
  */
+export function splitInternalUrlSel(
+	rawPath: string,
+	specOf: (scheme: string) => InternalUrlSchemeSpec | undefined = internalUrlSchemeSpec,
+): { path: string; sel?: string } {
+	const url = splitUrlScheme(rawPath);
+	if (!url) return { path: rawPath };
+	const spec = specOf(url.scheme);
+	if (spec?.selectors !== "lines") return { path: rawPath };
+	// With no `/path` after the authority, a trailing `:N` is the port
+	// (ssh://host:2222), not a read selector.
+	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
-export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
-	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
-	if (!schemeMatch) return { path: rawPath };
-	const scheme = schemeMatch[1].toLowerCase();
-	// Opaque schemes (mcp://, etc.) carry server-defined resource URIs that may
-	// legitimately end in selector-shaped tails. Forward verbatim — see
-	// OPAQUE_RESOURCE_SCHEMES.
-	if (OPAQUE_RESOURCE_SCHEMES.has(scheme)) return { path: rawPath };
-	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
-
-	const schemeEnd = schemeMatch[0].length;
-	// ssh:// authority carries an optional `:port`; with no `/path` after the
-	// authority, a trailing `:NNNN` is the port, not a read selector
-	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
-	// (artifact://5:1-50) still peel, so this guard is ssh-specific.
-	if (scheme === "ssh" && rawPath.indexOf("/", schemeEnd) === -1) {
-		return { path: rawPath };
-	}
+	const schemeEnd = rawPath.length - url.rest.length;
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {
@@ -215,10 +191,77 @@ export interface ReadRenderArgs {
 	raw?: boolean;
 }
 
-const INTERNAL_URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** Transcript card for reads of a scheme with its own UI (process table, settings tree). */
+interface ReadUrlCard {
+	/** Activity label, e.g. `Process · web`. */
+	readonly label: string;
+	/** Activity detail when the URL names no target. */
+	readonly rootDetail: string;
+	/** Result details field whose presence identifies this card. */
+	readonly detailsKey: "proc" | "cfg";
+	/** Pending call card when `result` is undefined, else the finished result card. */
+	render(
+		url: string,
+		target: string,
+		result: CardToolResult | undefined,
+		details: ReadToolDetails | undefined,
+		options: RenderResultOptions,
+		uiTheme: Theme,
+	): Component;
+}
+
+/** Read cards keyed by URL scheme. */
+const READ_URL_CARDS: Record<string, ReadUrlCard> = {
+	proc: {
+		label: "Process",
+		rootDetail: "jobs & services",
+		detailsKey: "proc",
+		render: (_url, target, result, details, options, uiTheme) =>
+			renderProcRead(target, result, details?.proc, options, uiTheme),
+	},
+	cfg: {
+		label: "Config",
+		rootDetail: "all settings",
+		detailsKey: "cfg",
+		render: (url, _target, result, details, options, uiTheme) =>
+			renderCfgRead(splitInternalUrlSel(url).path, result, details?.cfg, options, uiTheme),
+	},
+};
+
+/**
+ * Card that renders a read of `rawPath` with the text after `scheme://` as its target.
+ * Result details identify the card before the URL scheme does.
+ */
+function readUrlCard(rawPath: string, details?: ReadToolDetails): { card: ReadUrlCard; target: string } | undefined {
+	const url = splitUrlScheme(rawPath);
+	const target = url?.rest ?? "";
+	if (details) {
+		for (const scheme in READ_URL_CARDS) {
+			const card = READ_URL_CARDS[scheme];
+			if (details[card.detailsKey] !== undefined) return { card, target };
+		}
+	}
+	if (!url || !Object.hasOwn(READ_URL_CARDS, url.scheme)) return undefined;
+	return { card: READ_URL_CARDS[url.scheme], target };
+}
+
+// A scheme-less host followed by a slash can be a web target. Do not force a
+// file: link onto it; explicit relative paths (./host/path) remain filesystem paths.
+const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?)\//i;
+
+/** Local file a pending read/write input points at, before the tool resolves it:
+ * expands `~` and drops archive-member / SQLite-row selectors so the link opens
+ * the containing file. */
+export function pendingFileLinkPath(inputPath: string): string {
+	const expanded = inputPath.replace(/^~(?=$|[\\/])/, os.homedir());
+	if (!expanded.includes(":")) return path.resolve(expanded);
+	const archive = parseArchivePathCandidates(expanded).find(candidate => candidate.archivePath !== expanded);
+	const sqlite = expanded.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);
+	return path.resolve(archive?.archivePath ?? sqlite?.[1] ?? expanded);
+}
 
 function splitReadRenderPath(rawPath: string): { path: string; sel?: string } {
-	if (INTERNAL_URL_LIKE_RE.test(rawPath)) {
+	if (splitUrlScheme(rawPath)) {
 		const internal = splitInternalUrlSel(rawPath);
 		if (internal.sel) return internal;
 	}
@@ -256,8 +299,14 @@ function formatReadPathLink(
 	const plainDisplayPath = options.suffixResolution
 		? shortenPath(options.suffixResolution.to)
 		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
-	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
-	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath;
+	// Calls render before the tool has resolved a filesystem target. Preserve
+	// protocol resources as plain text, but resolve direct relative file paths
+	// so terminals receive an explicit file: link rather than guessing HTTPS.
+	const inputPath =
+		basePath && !splitUrlScheme(basePath) && !BARE_WEB_HOST_RE.test(basePath)
+			? pendingFileLinkPath(basePath)
+			: undefined;
+	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
 	const linkOptions = line !== undefined ? { line } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;
@@ -266,9 +315,19 @@ function formatReadPathLink(
 
 /** Render file, image, and URL reads in the transcript. */
 export const readToolRenderer = {
+	activitySummary(args: unknown, _context: ToolActivityContext): ToolActivitySummary {
+		const input = args as ReadRenderArgs | undefined;
+		const rawPath =
+			typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : "";
+		const routed = readUrlCard(rawPath);
+		if (routed) return { label: routed.card.label, detail: routed.target || routed.card.rootDetail };
+		return { label: "Read", detail: shortenPath(rawPath) };
+	},
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		const routed = readUrlCard(rawPath);
+		if (routed) return routed.card.render(rawPath, routed.target, undefined, undefined, _options, uiTheme);
 		if (isReadableUrlPath(rawPath)) {
 			return renderReadUrlCall({ path: rawPath, raw: args.raw }, _options, uiTheme);
 		}
@@ -296,6 +355,9 @@ export const readToolRenderer = {
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		const baseRawPathForKind =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+		const routed = readUrlCard(baseRawPathForKind, result.details);
+		if (routed)
+			return routed.card.render(baseRawPathForKind, routed.target, result, result.details, options, uiTheme);
 		if (urlDetails?.kind === "url" || isReadableUrlPath(baseRawPathForKind)) {
 			return renderReadUrlResult(
 				result as {

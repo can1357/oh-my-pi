@@ -41,7 +41,7 @@ function rerankModel(provider: string, id: string, api: Api = "openrouter-rerank
 async function boot(): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-rerank-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("openrouter", "openrouter-secret");
 	const model = rerankModel("openrouter", "cohere/rerank-v3.5");
 	const wrongApi = rerankModel("openrouter", "not-rerank-wire", "openrouter");
 	const upstream: UpstreamRequest[] = [];
@@ -98,7 +98,7 @@ describe("auth-gateway POST /v1/rerank", () => {
 	it("normalizes documents, passes top_n, echoes requested documents, and records usage", async () => {
 		harness = await boot();
 		const observed: Array<{ provider: string; model: string; costUsd?: number; client?: { app?: string } }> = [];
-		vi.spyOn(harness.storage, "recordObservedUsage").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
 		const response = await fetch(`${harness.url}/v1/rerank`, {
 			method: "POST",
 			headers: headers(),

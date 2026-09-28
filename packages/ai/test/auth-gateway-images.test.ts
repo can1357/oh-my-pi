@@ -33,7 +33,7 @@ async function withGateway(
 ): Promise<void> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-images-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	for (const model of models) storage.setRuntimeApiKey(model.provider, `key-${model.provider}`);
+	for (const model of models) storage.keys.setRuntime(model.provider, `key-${model.provider}`);
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: ["gateway-token"],
@@ -184,8 +184,8 @@ describe("auth gateway images", () => {
 			);
 		};
 		await withGateway([model], fetchStub, async (url, storage) => {
-			const recorded: Parameters<AuthStorage["recordObservedUsage"]>[0][] = [];
-			vi.spyOn(storage, "recordObservedUsage").mockImplementation(entry => recorded.push(entry));
+			const recorded: Parameters<AuthStorage["usage"]["observe"]>[0][] = [];
+			vi.spyOn(storage.usage, "observe").mockImplementation(entry => recorded.push(entry));
 			const response = await gatewayRequest(
 				url,
 				"/v1/images",

@@ -13,8 +13,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { getSessionRollups, getToolCallCountsBySession, isScheduledCatalogModel } from "./db";
+import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
 	SessionSummary,
@@ -113,6 +114,15 @@ interface PendingToolCall {
 	argsPreview?: string;
 	assistantEntryId: string;
 	modelEnd: number;
+}
+
+/** Background job opened by an async-running tool result. */
+interface PendingBackgroundJob {
+	jobId: string;
+	start: number;
+	label: string;
+	entryId?: string;
+	end?: number;
 }
 
 /** Task tool result row, used to place subagent spans on the parent track. */
@@ -280,8 +290,8 @@ function scanTranscript(
 	const pendingTools: PendingToolCall[] = [];
 	const toolStarts = new Map<string, ToolStartFact>();
 	const toolResults = new Map<string, { end: number; isError: boolean; entryId?: string; toolName: string }>();
-	const backgroundOpens: Array<{ jobId: string; start: number; label: string; entryId?: string }> = [];
-	const asyncCloses = new Map<string, number>();
+	const backgroundJobs: PendingBackgroundJob[] = [];
+	const activeBackgroundJobs = new Map<string, PendingBackgroundJob>();
 	const turns: Array<{ time: number; label: string; entryId?: string }> = [];
 	const taskResults: TaskResultFact[] = [];
 
@@ -467,12 +477,14 @@ function scanTranscript(
 				"jobId" in asyncInfo &&
 				typeof asyncInfo.jobId === "string"
 			) {
-				backgroundOpens.push({
+				const job: PendingBackgroundJob = {
 					jobId: asyncInfo.jobId,
 					start: end,
 					label: headText(`${msg.toolName ?? "tool"} job`, LABEL_MAX),
 					entryId: entry.id,
-				});
+				};
+				backgroundJobs.push(job);
+				activeBackgroundJobs.set(job.jobId, job);
 			}
 			if (msg.toolName === "task" && Array.isArray(details?.results)) {
 				for (const result of details.results) {
@@ -499,7 +511,10 @@ function scanTranscript(
 			if (closeAt !== undefined && Array.isArray(jobs)) {
 				for (const job of jobs) {
 					if (!job || typeof job !== "object" || !("jobId" in job) || typeof job.jobId !== "string") continue;
-					if (!asyncCloses.has(job.jobId)) asyncCloses.set(job.jobId, closeAt);
+					const targetJob = activeBackgroundJobs.get(job.jobId);
+					if (!targetJob || targetJob.end !== undefined) continue;
+					targetJob.end = closeAt;
+					activeBackgroundJobs.delete(job.jobId);
 				}
 			}
 			continue;
@@ -549,19 +564,18 @@ function scanTranscript(
 		spans.push(span);
 	}
 
-	// Background spans: opened by an async-running tool result, closed by async-result delivery.
-	for (const open of backgroundOpens) {
-		const close = asyncCloses.get(open.jobId);
-		const end = close ?? (lastChainTs || open.start);
+	// Background spans: opened by an async-running tool result, closed by the async-result delivery.
+	for (const [backgroundIndex, job] of backgroundJobs.entries()) {
+		const end = job.end ?? (lastChainTs || job.start);
 		const span: TraceSpan = {
-			id: `${trackId}:bg:${open.jobId}`,
+			id: `${trackId}:bg:${backgroundIndex}:${job.jobId}`,
 			kind: "background",
-			start: open.start,
-			end: Math.max(open.start, end),
-			label: open.label,
+			start: job.start,
+			end: Math.max(job.start, end),
+			label: job.label,
 		};
-		if (open.entryId) span.entryId = open.entryId;
-		if (close === undefined) span.unterminated = true;
+		if (job.entryId) span.entryId = job.entryId;
+		if (job.end === undefined) span.unterminated = true;
 		spans.push(span);
 	}
 
@@ -1056,17 +1070,22 @@ function basenameTimestamp(base: string): number | undefined {
 // poll is pure syscall churn. TTL is deliberately short so a just-created
 // session appears within seconds.
 let diskRootsMemo:
-	| { atMs: number; limit: number; roots: Array<{ file: string; mtimeMs: number; startedAt: number }> }
+	| {
+			atMs: number;
+			sessionsDir: string;
+			limit: number;
+			roots: Array<{ file: string; mtimeMs: number; startedAt: number }>;
+	  }
 	| undefined;
 const DISK_ROOTS_TTL_MS = 5_000;
 
 async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtimeMs: number; startedAt: number }>> {
 	const now = Date.now();
+	const sessionsDir = getSessionsDir();
 	const memo = diskRootsMemo;
-	if (memo && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
+	if (memo && memo.sessionsDir === sessionsDir && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
 		return memo.roots.slice(0, limit);
 	}
-	const sessionsDir = getSessionsDir();
 	let projects: string[] = [];
 	try {
 		projects = await fs.readdir(sessionsDir);
@@ -1098,7 +1117,7 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 		}),
 	);
 	roots.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	if (roots.length <= 1000) diskRootsMemo = { atMs: Date.now(), limit, roots };
+	if (roots.length <= 1000) diskRootsMemo = { atMs: Date.now(), sessionsDir, limit, roots };
 	return roots.slice(0, limit);
 }
 
@@ -1107,8 +1126,9 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
  * transcript (subagents, advisors) into its root row.
  */
 export async function listSessionSummaries(limit = 100, q?: string): Promise<SessionSummary[]> {
+	// The Traces page may be the first thing a dashboard serves.
+	await initDb();
 	const sessionsDir = getSessionsDir();
-	const toolCounts = getToolCallCountsBySession();
 	const byRoot = new Map<string, SummaryFold>();
 
 	for (const row of getSessionRollups()) {
@@ -1139,7 +1159,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 			byRoot.set(rootFile, fold);
 		}
 		fold.requests += row.requests;
-		fold.toolCalls += toolCounts.get(row.sessionFile) ?? 0;
+		fold.toolCalls += row.toolCalls;
 		if (isChild) fold.subagents++;
 		if (row.startedAt < fold.startedAt) fold.startedAt = row.startedAt;
 		if (row.endedAt > fold.endedAt) fold.endedAt = row.endedAt;

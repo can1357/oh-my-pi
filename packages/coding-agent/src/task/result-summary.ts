@@ -50,6 +50,11 @@ export function formatTaskResultSummary(
 				? "completed"
 				: `failed (exit ${result.exitCode})`;
 	const output = formatResultOutputFallback(result);
+	// The preview prefers `output` over `stderr`, so a run that failed after
+	// streaming prose (provider stream error, missing yield) would otherwise
+	// show only the half-written text and no reason. Aborts carry their own
+	// <abort-reason>; an empty output already previews the error itself.
+	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
 	const truncated = outputCharCount > FULL_OUTPUT_THRESHOLD && result.outputPath !== undefined;
 	const preview = truncated ? previewHead(output) : output;
@@ -65,6 +70,7 @@ export function formatTaskResultSummary(
 		status,
 		duration: formatDuration(options.totalDurationMs),
 		abortReason: result.aborted ? result.abortReason : undefined,
+		error,
 		resumable,
 		preview,
 		truncated,

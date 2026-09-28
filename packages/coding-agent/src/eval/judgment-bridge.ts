@@ -23,7 +23,13 @@ import type {
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { type ChainJudge, journalJudgmentUsage, resolveJudge } from "../judgment";
+import {
+	type ChainJudge,
+	type JudgmentUsage,
+	journalJudgmentUsage,
+	resolveJudge,
+	sharedJudgmentCache,
+} from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type EvalCompletionBridgeOptions, evalRequestSlots } from "./completion-bridge";
@@ -160,16 +166,34 @@ export function toEvalJudgmentResult(result: JudgmentResult<Questions>): EvalJud
 	return { answers, model: `${result.provider}/${result.model}` };
 }
 
-/** Resolve the judge role chain for a bridge call's session; `purpose` labels its cost on the session ledger. */
-export function sessionJudge(options: Pick<EvalCompletionBridgeOptions, "session">, purpose: string): ChainJudge {
+/**
+ * Resolve the judge role chain for a bridge call's session; `purpose` labels its
+ * cost on the session ledger. `onUsage` additionally observes every attempt
+ * (retries and failures included) alongside the ledger.
+ */
+export function sessionJudge(
+	options: Pick<EvalCompletionBridgeOptions, "session">,
+	purpose: string,
+	onUsage?: (usage: JudgmentUsage) => void,
+): ChainJudge {
 	const { session } = options;
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
+	const journal = journalJudgmentUsage(session.sessionManager);
 	return resolveJudge({
 		settings: session.settings,
 		registry,
 		sessionId: session.getSessionId?.() ?? undefined,
-		onUsage: journalJudgmentUsage(session.sessionManager, purpose),
+		purpose,
+		telemetry: session.getTelemetry?.(),
+		cache: sharedJudgmentCache(),
+		onUsage:
+			onUsage && journal
+				? usage => {
+						journal(usage);
+						onUsage(usage);
+					}
+				: (onUsage ?? journal),
 	});
 }
 

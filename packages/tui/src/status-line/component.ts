@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
 import { getNextTimeBasedPricingTransition } from "@oh-my-pi/pi-catalog/models";
 import type { Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
-import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -25,6 +25,7 @@ import type {
 	StatusLineHost,
 	StatusLineSession,
 } from "./host";
+import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
@@ -35,6 +36,7 @@ import {
 	detectCodexResetFireworks,
 } from "../overlays/codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
@@ -53,6 +55,18 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
+
+/**
+ * Providers whose subscription quota is a single monthly bucket, so their
+ * `monthly`/`30d` window is the one the usage segment must show. Providers that
+ * merely report a monthly side-counter (GitHub Copilot's premium requests) stay
+ * out: their monthly row is not the session quota.
+ */
+const MONTHLY_SUBSCRIPTION_PROVIDERS: Record<string, true> = {
+	"alibaba-token-plan": true,
+	cursor: true,
+	"opencode-go": true,
+};
 
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
@@ -79,7 +93,7 @@ function normalizeUsageScopeValue(value: unknown): string | undefined {
  * be present and equal or a workspace sibling can mutate this account's
  * baseline.
  */
-function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
+function reportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
 	const accountId = normalizeUsageScopeValue(identity.accountId);
 	const email = normalizeUsageScopeValue(identity.email);
@@ -234,61 +248,69 @@ interface ContextUsageMemo {
 	tokenizerRef: unknown;
 	usedTokens: number;
 	contextWindow: number;
+	/** The session reported `percent: null`: usage is unknown, so no percent is shown. */
+	percentUnknown: boolean;
 	systemPromptRef: readonly string[] | undefined;
 	toolsRef: readonly any[] | undefined;
 	skillsRef: readonly any[] | undefined;
 }
 
-interface StatusLineExternalInputs {
-	themeRef: unknown;
-	themeEpoch: number;
-	projectDir: string;
-	sessionRef: StatusLineSession;
-	sessionFile: string | undefined;
-	sessionSettingsRef: unknown;
-	sessionSettingsRevision: number;
-	globalSettingsRevision: number;
-	stateRef: unknown;
-	stateMessagesRef: readonly AgentMessage[];
-	stateMessagesLength: number;
-	stateLastMessageRef: AgentMessage | undefined;
-	stateLastMessageContentRef: unknown;
-	messagesRef: readonly AgentMessage[];
-	messagesLength: number;
-	lastMessageRef: AgentMessage | undefined;
-	lastMessageRole: string | undefined;
-	lastMessageTimestamp: number;
-	lastMessageContentSize: number;
-	lastMessageBlockCount: number;
-	lastMessageUsageTotal: number;
-	lastMessageStopReason: string | undefined;
-	modelRef: unknown;
-	sessionModelRef: unknown;
-	sessionModelId: string | undefined;
-	sessionModelContextWindow: Model["contextWindow"] | undefined;
-	modelId: string | undefined;
-	modelName: string | undefined;
-	modelProvider: string | undefined;
-	modelContextWindow: Model["contextWindow"] | undefined;
-	modelThinking: Model["thinking"];
-	thinkingLevel: unknown;
-	modelCostRef: unknown;
-	contextUsageRevision: number;
-	systemPromptRef: unknown;
-	systemPromptLength: number;
-	systemPromptContentSize: number;
-	toolsRef: readonly unknown[] | undefined;
-	toolsLength: number;
-	toolSchemaMetadataRevision: number;
-	tokenizerRef: unknown;
-	skillsRef: unknown;
-	skillsLength: number;
-	sessionName: string | undefined;
-	sessionId: string | undefined;
-	isStreaming: boolean | undefined;
-	isAutoThinking: boolean | undefined;
-	isFastModeActive: boolean;
-	compactionSpeculation: unknown;
+/**
+ * Snapshot of the cheap external inputs a cached bar depends on. Mutable and
+ * refilled in place: the per-frame cache probe writes into a recycled
+ * instance instead of allocating a fresh ~50-field object every frame.
+ */
+class StatusLineExternalInputs {
+	themeRef: unknown = undefined;
+	themeEpoch = 0;
+	projectDir = "";
+	sessionRef: StatusLineSession | undefined = undefined;
+	sessionFile: string | undefined = undefined;
+	sessionSettingsRef: unknown = undefined;
+	sessionSettingsRevision = 0;
+	globalSettingsRevision = 0;
+	stateRef: unknown = undefined;
+	stateMessagesRef: readonly AgentMessage[] = EMPTY_MESSAGES;
+	stateMessagesLength = 0;
+	stateLastMessageRef: AgentMessage | undefined = undefined;
+	stateLastMessageContentRef: unknown = undefined;
+	messagesRef: readonly AgentMessage[] = EMPTY_MESSAGES;
+	messagesLength = 0;
+	lastMessageRef: AgentMessage | undefined = undefined;
+	lastMessageRole: string | undefined = undefined;
+	lastMessageTimestamp = 0;
+	lastMessageContentSize = 0;
+	lastMessageBlockCount = 0;
+	lastMessageUsageTotal = 0;
+	lastMessageStopReason: string | undefined = undefined;
+	modelRef: unknown = undefined;
+	sessionModelRef: unknown = undefined;
+	sessionModelId: string | undefined = undefined;
+	sessionModelContextWindow: Model["contextWindow"] | undefined = undefined;
+	modelId: string | undefined = undefined;
+	modelName: string | undefined = undefined;
+	modelProvider: string | undefined = undefined;
+	modelContextWindow: Model["contextWindow"] | undefined = undefined;
+	modelThinking: Model["thinking"] = undefined;
+	thinkingLevel: unknown = undefined;
+	modelCostRef: unknown = undefined;
+	contextUsageRevision = 0;
+	systemPromptRef: unknown = undefined;
+	systemPromptLength = 0;
+	systemPromptContentSize = 0;
+	toolsRef: readonly unknown[] | undefined = undefined;
+	toolsLength = 0;
+	toolSchemaMetadataRevision = 0;
+	tokenizerRef: unknown = undefined;
+	skillsRef: unknown = undefined;
+	skillsLength = 0;
+	sessionName: string | undefined = undefined;
+	sessionId: string | undefined = undefined;
+	isStreaming: boolean | undefined = undefined;
+	isAutoThinking: boolean | undefined = undefined;
+	isFastModeActive = false;
+	anthropicSlowModeLabel: string | undefined = undefined;
+	compactionSpeculation: unknown = undefined;
 }
 
 interface CachedStatusLine {
@@ -298,7 +320,6 @@ interface CachedStatusLine {
 	availableWidth: number;
 	renderRevision: number;
 	inputRevision: number;
-	placeholders: boolean;
 	previewTitle: string | undefined;
 	externalInputs: StatusLineExternalInputs;
 }
@@ -406,8 +427,10 @@ function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
-function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): number {
-	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+/** Gap width the embedded gauge needs for its labels; an unknown percent (`null`) shows the window label alone. */
+function embeddedContextGaugeMinWidth(percent: number | null, contextWindow: number): number {
+	const percentWidth = percent === null ? 0 : formatEmbeddedContextPercent(percent).length + 2;
+	return percentWidth + formatNumber(contextWindow).length + 2;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -426,6 +449,17 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 }
 
 type StatusLineLayout = "box" | "band" | "plain-full" | "plain-left" | "plain-right";
+
+/**
+ * Git views of immutable `VcsRepo` handles. `asGit()` mints a fresh napi
+ * wrapper around the same backend handle on every call, which the per-frame
+ * branch lookup would otherwise pay each render.
+ */
+const GIT_VIEW = Symbol("status-line.git-view");
+
+interface GitViewTaggedRepo extends VcsRepo {
+	[GIT_VIEW]?: VcsGitRepo | null;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StatusLineComponent
@@ -447,6 +481,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	};
 	#statusLineInputRevision = 0;
 	#statusLineClockTick = 0;
+	/** Reused probe buffer for {@link #readStatusLineExternalInputs}; handed to the new cache entry on a miss. */
+	#externalInputsProbe = new StatusLineExternalInputs();
+	/** `adjustHsv` result for the gauge's threshold tint; pure in its source hex. */
+	#dimmedAccentMemo: { sourceHex: string; hex: string } | undefined;
+	/** Gauge boundary markers; a pure function of the session's compaction settings, model, and window. */
+	#compactionBoundariesMemo:
+		| {
+				sessionRef: StatusLineSession;
+				contextWindow: number;
+				modelRef: unknown;
+				settingsRef: unknown;
+				settingsRevision: number;
+				globalSettingsRevision: number;
+				boundaries: CompactionBoundaries | null;
+		  }
+		| undefined;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
 	#cachedBranch: string | null | undefined = undefined;
@@ -528,6 +578,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
+	#recording = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -567,6 +618,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -922,6 +980,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
+	/** Toggle the `● REC` badge shown while `/record` captures the screen. */
+	setRecording(recording: boolean): void {
+		if (this.#recording === recording) return;
+		this.#recording = recording;
+		this.#invalidateStatusLineRenderCache();
+	}
+
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
 	setCodexResetFireworksHandler(handler: ((event: CodexResetFireworksEvent) => void) | undefined): void {
 		this.#onCodexResetFireworks = handler;
@@ -1037,8 +1102,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const sessionName = sessionAccentEnabled ? this.session.sessionManager?.getSessionName() : undefined;
 		const idleHex = theme.getColorHex("dim");
 		const workingHex =
-			(sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined) ??
-			theme.getColorHex("accent");
+			(sessionName && getSessionAccentHex(sessionName, theme.sessionAccentInputs)) || theme.getColorHex("accent");
 		const now = Date.now();
 		if (working !== this.#brandWorking) {
 			const previousTargetHex = this.#brandWorking ? workingHex : idleHex;
@@ -1234,7 +1298,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
 		if (!repository) return null;
-		const gitRepository = repository.asGit();
+		const taggedRepository: GitViewTaggedRepo = repository;
+		let gitRepository = taggedRepository[GIT_VIEW];
+		if (gitRepository === undefined) {
+			gitRepository = repository.asGit();
+			taggedRepository[GIT_VIEW] = gitRepository;
+		}
 		if (!gitRepository) {
 			if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
 				return this.#cachedJjBranch;
@@ -1452,6 +1521,24 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		})();
 
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
+	}
+
+	/**
+	 * Seed working-tree status from the status line this one replaces (the
+	 * startup bar), so the dirty counts stay on screen instead of blanking until
+	 * this instance's first fetch lands. Normal TTL refreshes follow.
+	 */
+	adoptGitStatus(source: StatusLineComponent): void {
+		if (this.#cachedGitStatusCwd === undefined && source.#cachedGitStatusCwd !== undefined) {
+			this.#cachedGitStatus = source.#cachedGitStatus;
+			this.#cachedGitStatusCwd = source.#cachedGitStatusCwd;
+			this.#gitStatusLastFetch = source.#gitStatusLastFetch;
+		}
+		if (this.#jjStatusLastFetch === 0 && source.#jjStatusLastFetch !== 0) {
+			this.#cachedJjStatus = source.#cachedJjStatus;
+			this.#jjStatusLastFetch = source.#jjStatusLastFetch;
+		}
+		this.#invalidateStatusLineRenderCache();
 	}
 
 	#lookupPr(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
@@ -1756,7 +1843,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// The report boundary above validates the fields this extractor iterates;
 			// optional metadata and credit fields are narrowed again before use.
 			const usageReport = report as UsageReport;
-			if (!codexReportMatchesExactIdentity(usageReport, activeIdentity)) continue;
+			if (!reportMatchesExactIdentity(usageReport, activeIdentity)) continue;
 			matchingReport = usageReport;
 			break;
 		}
@@ -1812,12 +1899,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		const now = Date.now();
+		const resetReports: UsageReport[] = [];
 		const activeModelId = normalizeUsageScopeValue(context.modelId);
 		const activeAntigravityCounter =
 			context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
+		const monthlySubscriptionProvider =
+			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
@@ -1828,6 +1925,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// fetchUsageReports supplies normalized rows; the guards above protect
 			// the unknown session boundary before the account matcher reads metadata.
 			const usageReport = report as UsageReport;
+			if (
+				usageReport.resetCredits &&
+				(!context.identity || reportMatchesExactIdentity(usageReport, context.identity))
+			) {
+				resetReports.push(usageReport);
+			}
 			const limits =
 				provider === "google-antigravity" && activeAntigravityCounter
 					? scopeAntigravityLimitsForModel(usageReport, context)
@@ -1874,10 +1977,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 										: undefined;
 				const windowClass =
 					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-						? "monthly"
-						: undefined);
+					(monthlySubscriptionProvider && (windowId === "monthly" || windowId === "30d") ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
@@ -1915,7 +2015,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		for (const group of scopeGroups.values()) {
 			if (!selectedGroup || group.priority < selectedGroup.priority) selectedGroup = group;
 		}
-		if (!selectedGroup) return null;
+		const resetReport =
+			resetReports.length === 1
+				? resetReports[0]
+				: context.identity
+					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
+					: undefined;
+		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
+		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const resetCredits =
+			resetSummary && resetSummary.bankedCount > 0
+				? {
+						bankedCount: resetSummary.bankedCount,
+						redeemableCount: resetSummary.redeemableCount,
+						expiryHours:
+							resetExpiryMs !== undefined && resetExpiryMs > 0
+								? Math.max(1, Math.ceil(resetExpiryMs / 3_600_000))
+								: undefined,
+						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
+						unavailableReason: resetSummary.unavailableReason,
+					}
+				: undefined;
+		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
 
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let daily: { percent: number; resetMinutes?: number } | undefined;
@@ -1972,8 +2093,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				}
 			}
 		}
-		if (!fiveHour && !daily && !sevenDay && !monthly) return null;
-		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly };
+		if (!fiveHour && !daily && !sevenDay && !monthly && !resetCredits) return null;
+		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly, resetCredits };
 	}
 
 	/**
@@ -2025,6 +2146,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usedTokens = usage?.tokens ?? 0;
 		const contextWindow = usage?.contextWindow ?? modelContextWindow;
 		this.#contextUsageCache = {
+			percentUnknown: usage?.percent === null,
 			messagesRef: messages,
 			length,
 			lastFingerprint,
@@ -2078,7 +2200,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const breakdown = this.getCachedContextBreakdown();
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
-		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
+		let contextPercent: number | null =
+			contextWindow > 0 && !this.#contextUsageCache?.percentUnknown
+				? (breakdown.usedTokens / contextWindow) * 100
+				: null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
@@ -2131,6 +2256,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
 			stream: this.#streamStatus,
+			recording: this.#recording,
 			usageStats,
 			contextPercent,
 			contextTokens,
@@ -2204,8 +2330,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * going through this component's setters. This deliberately uses refs,
 	 * scalars, and string lengths only: no schema estimation, serialization,
 	 * usage aggregation, VCS probing, or segment getters run on a cache hit.
+	 * Fills `target` in place so the per-frame probe allocates nothing.
 	 */
-	#readStatusLineExternalInputs(): StatusLineExternalInputs {
+	#readStatusLineExternalInputs(target: StatusLineExternalInputs): void {
 		const state = this.session.state;
 		const stateMessages = state.messages ?? EMPTY_MESSAGES;
 		const stateLastMessage = stateMessages[stateMessages.length - 1];
@@ -2256,58 +2383,61 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			if (typeof part === "string") systemPromptContentSize += part.length;
 		}
 		const tools = this.session.agent?.state?.tools;
-		return {
-			themeRef: theme,
-			themeEpoch: getThemeEpoch(),
-			projectDir: getProjectDir(),
-			sessionRef: this.session,
-			sessionFile: this.session.sessionFile,
-			sessionSettingsRef: this.host.getSessionSettingsIdentity(this.session),
-			sessionSettingsRevision: this.host.getSessionSettingsRevision(this.session),
-			globalSettingsRevision: this.host.getSettingsRevision(),
-			stateRef: state,
-			stateMessagesRef: stateMessages,
-			stateMessagesLength: stateMessages.length,
-			stateLastMessageRef: stateLastMessage,
-			stateLastMessageContentRef: stateLastMessageContent,
-			messagesRef: messages,
-			messagesLength: messages.length,
-			lastMessageRef: lastMessage,
-			lastMessageRole: lastMessageView?.role,
-			lastMessageTimestamp: lastMessageView?.timestamp ?? 0,
-			lastMessageContentSize,
-			lastMessageBlockCount,
-			lastMessageUsageTotal: lastMessageView?.usage?.totalTokens ?? 0,
-			lastMessageStopReason: lastMessageView?.stopReason,
-			modelRef: model,
-			sessionModelRef: sessionModel,
-			sessionModelId: sessionModel?.id,
-			sessionModelContextWindow: sessionModel?.contextWindow,
-			modelId: model?.id,
-			modelName: model?.name,
-			modelProvider: model?.provider,
-			modelContextWindow: model?.contextWindow,
-			modelThinking: model?.thinking,
-			thinkingLevel: state.thinkingLevel,
-			modelCostRef: model?.cost,
-			contextUsageRevision: this.session.contextUsageRevision ?? 0,
-			systemPromptRef: systemPrompt,
-			systemPromptLength: systemPrompt?.length ?? 0,
-			systemPromptContentSize,
-			toolsRef: tools,
-			toolsLength: tools?.length ?? 0,
-			toolSchemaMetadataRevision: tools ? getToolSchemaMetadataRevision(tools) : 0,
-			tokenizerRef: this.session.agent?.tokenizer,
-			skillsRef: this.session.skills,
-			skillsLength: this.session.skills?.length ?? 0,
-			sessionName: this.session.sessionManager?.getSessionName?.(),
-			sessionId: this.session.sessionManager?.getSessionId?.(),
-			isStreaming: this.session.isStreaming,
-			isAutoThinking: this.session.isAutoThinking,
-			isFastModeActive:
-				typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false,
-			compactionSpeculation: this.session.compactionSpeculation,
-		};
+		const skills = this.session.skills;
+		target.themeRef = theme;
+		target.themeEpoch = getThemeEpoch();
+		target.projectDir = getProjectDir();
+		target.sessionRef = this.session;
+		target.sessionFile = this.session.sessionFile;
+		target.sessionSettingsRef = this.host.getSessionSettingsIdentity(this.session);
+		target.sessionSettingsRevision = this.host.getSessionSettingsRevision(this.session);
+		target.globalSettingsRevision = this.host.getSettingsRevision();
+		target.stateRef = state;
+		target.stateMessagesRef = stateMessages;
+		target.stateMessagesLength = stateMessages.length;
+		target.stateLastMessageRef = stateLastMessage;
+		target.stateLastMessageContentRef = stateLastMessageContent;
+		target.messagesRef = messages;
+		target.messagesLength = messages.length;
+		target.lastMessageRef = lastMessage;
+		target.lastMessageRole = lastMessageView?.role;
+		target.lastMessageTimestamp = lastMessageView?.timestamp ?? 0;
+		target.lastMessageContentSize = lastMessageContentSize;
+		target.lastMessageBlockCount = lastMessageBlockCount;
+		target.lastMessageUsageTotal = lastMessageView?.usage?.totalTokens ?? 0;
+		target.lastMessageStopReason = lastMessageView?.stopReason;
+		target.modelRef = model;
+		target.sessionModelRef = sessionModel;
+		target.sessionModelId = sessionModel?.id;
+		target.sessionModelContextWindow = sessionModel?.contextWindow;
+		target.modelId = model?.id;
+		target.modelName = model?.name;
+		target.modelProvider = model?.provider;
+		target.modelContextWindow = model?.contextWindow;
+		target.modelThinking = model?.thinking;
+		target.thinkingLevel = state.thinkingLevel;
+		target.modelCostRef = model?.cost;
+		target.contextUsageRevision = this.session.contextUsageRevision ?? 0;
+		target.systemPromptRef = systemPrompt;
+		target.systemPromptLength = systemPrompt?.length ?? 0;
+		target.systemPromptContentSize = systemPromptContentSize;
+		target.toolsRef = tools;
+		target.toolsLength = tools?.length ?? 0;
+		target.toolSchemaMetadataRevision = tools ? getToolSchemaMetadataRevision(tools) : 0;
+		target.tokenizerRef = this.session.agent?.tokenizer;
+		target.skillsRef = skills;
+		target.skillsLength = skills?.length ?? 0;
+		target.sessionName = this.session.sessionManager?.getSessionName?.();
+		target.sessionId = this.session.sessionManager?.getSessionId?.();
+		target.isStreaming = this.session.isStreaming;
+		target.isAutoThinking = this.session.isAutoThinking;
+		target.isFastModeActive =
+			typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false;
+		target.anthropicSlowModeLabel =
+			typeof this.session.getAnthropicSlowModeLabel === "function"
+				? this.session.getAnthropicSlowModeLabel()
+				: undefined;
+		target.compactionSpeculation = this.session.compactionSpeculation;
 	}
 
 	#sameStatusLineExternalInputs(left: StatusLineExternalInputs, right: StatusLineExternalInputs): boolean {
@@ -2360,6 +2490,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
+			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
 			left.compactionSpeculation === right.compactionSpeculation
 		);
 	}
@@ -2370,8 +2501,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * clocks, countdowns, and VCS fallback polling advance only at their own
 	 * display/probe cadence.
 	 */
-	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings, placeholders: boolean): number {
-		if (placeholders) return 0;
+	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
 		const meter = this.#meter();
@@ -2400,17 +2530,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return 0;
 	}
 
-	#buildStatusLine(
-		width: number,
-		layout: StatusLineLayout = "box",
-		previewTitle?: string,
-		options?: { readonly placeholders?: boolean },
-	): CachedStatusLine {
+	#buildStatusLine(width: number, layout: StatusLineLayout = "box", previewTitle?: string): CachedStatusLine {
 		const effectiveSettings = this.#resolveSettings();
-		const placeholders = options?.placeholders === true;
-		const externalInputs = this.#readStatusLineExternalInputs();
+		const externalInputs = this.#externalInputsProbe;
+		this.#readStatusLineExternalInputs(externalInputs);
 		const nowMs = Date.now();
-		const clockTick = this.#statusLineClock(nowMs, effectiveSettings, placeholders);
+		const clockTick = this.#statusLineClock(nowMs, effectiveSettings);
 		if (clockTick !== this.#statusLineClockTick) {
 			this.#statusLineClockTick = clockTick;
 			this.#invalidateStatusLineRenderCache();
@@ -2422,14 +2547,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cached.availableWidth === width &&
 			cached.renderRevision === this.#renderRevision &&
 			cached.inputRevision === this.#statusLineInputRevision &&
-			cached.placeholders === placeholders &&
 			cached.previewTitle === previewTitle &&
 			this.#sameStatusLineExternalInputs(cached.externalInputs, externalInputs)
 		) {
 			return cached;
 		}
 
-		const content = this.#renderStatusLine(width, layout, previewTitle, options, nowMs);
+		// The probe now belongs to the new cache entry; later probes need their own buffer.
+		this.#externalInputsProbe = new StatusLineExternalInputs();
+		const content = this.#renderStatusLine(width, layout, previewTitle, nowMs);
 		const result = {
 			content,
 			dimmedContent: this.#dimWhileFocusProxied(content),
@@ -2437,7 +2563,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			availableWidth: width,
 			renderRevision: this.#renderRevision,
 			inputRevision: this.#statusLineInputRevision,
-			placeholders,
 			previewTitle,
 			externalInputs,
 		};
@@ -2460,16 +2585,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * `previewTitle` is a stand-in session title for composer previews; the
 	 * `session_name` segment renders it when the session is unnamed.
 	 */
-	#renderStatusLine(
-		width: number,
-		layout: StatusLineLayout,
-		previewTitle: string | undefined,
-		options: { readonly placeholders?: boolean } | undefined,
-		nowMs: number,
-	): string {
+	#renderStatusLine(width: number, layout: StatusLineLayout, previewTitle: string | undefined, nowMs: number): string {
 		const effectiveSettings = this.#resolveSettings();
 		this.#syncPricingTimer();
-		const placeholders = options?.placeholders === true;
 		const plain = layout !== "box" && layout !== "band";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
@@ -2479,7 +2597,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		const liveCtx = this.#buildSegmentContext(
+		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
@@ -2488,7 +2606,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			nowMs,
 			previewTitle,
 		);
-		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
 		const separatorDef = plain
 			? { left: "·", right: "·" }
 			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
@@ -2540,8 +2657,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const embedContext =
 			!plain &&
 			effectiveSettings.contextLine === "embedded" &&
-			ctx.contextPercent !== null &&
-			ctx.contextPercent !== undefined &&
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
 			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
@@ -2561,17 +2676,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
-				const count = placeholders ? "…" : `${runningBackgroundJobs}`;
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${count}`));
+				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
-			if (subagentBadge) {
-				const content = placeholders ? [theme.icon.agents, "…"].filter(Boolean).join(" ") : subagentBadge;
-				rightParts.unshift(placeholders ? theme.fg("statusLineSubagents", content) : content);
-			}
+			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}
 		const topFillWidth = Math.max(0, width);
-		const left = [...leftParts];
-		const right = [...rightParts];
+		// These arrays are local to this render; overflow handling can mutate them.
+		const left = leftParts;
+		const right = rightParts;
+		const leftWidths = left.map(part => visibleWidth(part));
+		const rightWidths = right.map(part => visibleWidth(part));
 
 		const leftSepWidth = visibleWidth(separatorDef.left);
 		const rightSepWidth = visibleWidth(separatorDef.right);
@@ -2585,23 +2699,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const bandCap = layout === "band" && separatorDef.endCaps && !transparentBg ? theme.sep.powerlineCapLeft : "";
 		const bandCapWidth = visibleWidth(bandCap);
 
-		const groupWidth = (parts: string[], capWidth: number, sepWidth: number): number => {
-			if (parts.length === 0) return 0;
-			const partsWidth = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
-			const sepTotal = Math.max(0, parts.length - 1) * (sepWidth + 2);
+		const groupWidth = (widths: number[], capWidth: number, sepWidth: number): number => {
+			if (widths.length === 0) return 0;
+			const partsWidth = widths.reduce((sum, partWidth) => sum + partWidth, 0);
+			const sepTotal = (widths.length - 1) * (sepWidth + 2);
 			return partsWidth + sepTotal + 2 + capWidth;
 		};
 
-		let leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
-		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+		let leftWidth = groupWidth(leftWidths, leftCapWidth + bandCapWidth, leftSepWidth);
+		let rightWidth = groupWidth(rightWidths, rightCapWidth, rightSepWidth);
 		// Embedded mode removes the standalone context segment before overflow
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
 		const embeddedContextWidth = embedContext
-			? ctx.startupPlaceholder
-				? "…%".length + "…".length + 4
-				: embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow)
 			: 0;
 		const minimumGapWidth = (): number => {
 			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
@@ -2624,23 +2736,27 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			if (nameSegIdx >= 0 && totalWidth() > topFillWidth) {
 				// Badge/job parts were unshifted ahead of the tracked segment ids.
 				const nameIdx = nameSegIdx + (right.length - rightSegIds.length);
-				const currentNameVW = visibleWidth(right[nameIdx]);
+				const currentNameVW = rightWidths[nameIdx];
 				const minNameVW = 8;
 				const shrinkBy = Math.min(Math.max(0, currentNameVW - minNameVW), totalWidth() - topFillWidth);
 				if (shrinkBy > 0) {
 					right[nameIdx] = truncateToWidth(right[nameIdx], currentNameVW - shrinkBy);
-					rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+					const nameWidth = visibleWidth(right[nameIdx]);
+					rightWidth += nameWidth - currentNameVW;
+					rightWidths[nameIdx] = nameWidth;
 				}
 			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
+				const removedWidth = rightWidths[right.length - 1];
 				right.pop();
-				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+				rightWidths.pop();
+				rightWidth = right.length > 0 ? rightWidth - removedWidth - rightSepWidth - 2 : 0;
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
 			const pathIdx = leftSegIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
-				const currentPathVW = visibleWidth(left[pathIdx]);
+				const currentPathVW = leftWidths[pathIdx];
 				const minPathVW = 8; // icon + ellipsis + a few chars
 				const shrinkable = currentPathVW - minPathVW;
 				if (shrinkable > 0) {
@@ -2653,9 +2769,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					});
 					let reRendered = renderSegment("path", pathCtx(newMaxLen));
 					if (reRendered.visible && reRendered.content) {
+						let pathWidth = visibleWidth(reRendered.content);
 						// maxLength governs path text, not icon prefix; iterate to compensate
 						for (let i = 0; i < 8; i++) {
-							const saved = currentPathVW - visibleWidth(reRendered.content);
+							const saved = currentPathVW - pathWidth;
 							if (saved >= shrinkBy) break;
 							const nextMaxLen = Math.max(4, newMaxLen - (shrinkBy - saved));
 							if (nextMaxLen >= newMaxLen) break; // no progress or hit floor
@@ -2663,9 +2780,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 							const adjusted = renderSegment("path", pathCtx(newMaxLen));
 							if (!adjusted.visible || !adjusted.content) break;
 							reRendered = adjusted;
+							pathWidth = visibleWidth(adjusted.content);
 						}
 						left[pathIdx] = reRendered.content;
-						leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
+						leftWidth += pathWidth - currentPathVW;
+						leftWidths[pathIdx] = pathWidth;
 					}
 				}
 			}
@@ -2682,9 +2801,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				const removedWidth = leftWidths[dropIdx];
 				left.splice(dropIdx, 1);
+				leftWidths.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
-				leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
+				leftWidth = left.length > 0 ? leftWidth - removedWidth - leftSepWidth - 2 : 0;
 			}
 		}
 
@@ -2755,11 +2876,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const horizontal = theme.boxRound.horizontal;
 		const mode = effectiveSettings.contextLine ?? "embedded";
 		const pct = ctx.contextPercent;
-		if (mode === "off" || pct === null || pct === undefined) {
+		if (mode === "off" || (pct === null && ctx.contextWindow <= 0)) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
 		}
 
-		const clampedPct = Math.min(100, Math.max(0, pct));
+		// Unknown usage against a known window (startup prepaint) draws the fresh-session
+		// gauge: one lit cell and the window label, no percent.
+		const clampedPct = pct === null ? 0 : Math.min(100, Math.max(0, pct));
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
@@ -2768,14 +2891,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct > 100;
+		const percentOverflow = pct !== null && pct > 100;
 		if (embedContext) {
-			const candidatePercent = ctx.startupPlaceholder
-				? "…%"
-				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = ctx.startupPlaceholder ? "…" : formatNumber(ctx.contextWindow);
-			const minimumLabelWidth = candidatePercent.length + candidateWindow.length + 4;
-			if (gapWidth >= minimumLabelWidth) {
+			const candidatePercent = pct === null ? "" : formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const candidateWindow = formatNumber(ctx.contextWindow);
+			if (gapWidth >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
@@ -2837,8 +2957,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const speculationColor = theme.getFgAnsi("muted");
 		const overflowColor = theme.getFgAnsi("error");
 		const rawAccentHex = accentHex ?? theme.getColorHex("borderAccent");
-		const dimmedAccentHex = adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 });
-		const thresholdColor = getSessionAccentAnsi(dimmedAccentHex) ?? usedColor;
+		let dimmedAccent = this.#dimmedAccentMemo;
+		if (dimmedAccent?.sourceHex !== rawAccentHex) {
+			dimmedAccent = { sourceHex: rawAccentHex, hex: adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 }) };
+			this.#dimmedAccentMemo = dimmedAccent;
+		}
+		const thresholdColor = getSessionAccentAnsi(dimmedAccent.hex) ?? usedColor;
 
 		let out = "\x1b[49m";
 		let activeColor = "";
@@ -2869,17 +2993,66 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	/** Auto-compaction boundary percents, or null when unavailable (disabled, no window). */
 	#compactionBoundaries(contextWindow: number): CompactionBoundaries | null {
-		const model = this.session.state?.model ?? this.session.model;
+		const session = this.session;
+		const model = session.state?.model ?? session.model;
+		const settingsRef = this.host.getSessionSettingsIdentity(session);
+		const settingsRevision = this.host.getSessionSettingsRevision(session);
+		const globalSettingsRevision = this.host.getSettingsRevision();
+		const memo = this.#compactionBoundariesMemo;
+		if (
+			memo &&
+			memo.sessionRef === session &&
+			memo.contextWindow === contextWindow &&
+			memo.modelRef === model &&
+			memo.settingsRef === settingsRef &&
+			memo.settingsRevision === settingsRevision &&
+			memo.globalSettingsRevision === globalSettingsRevision
+		) {
+			return memo.boundaries;
+		}
 		try {
-			return this.host.computeCompactionBoundaries(this.session, contextWindow, model);
+			const boundaries = this.host.computeCompactionBoundaries(session, contextWindow, model);
+			this.#compactionBoundariesMemo = {
+				sessionRef: session,
+				contextWindow,
+				modelRef: model,
+				settingsRef,
+				settingsRevision,
+				globalSettingsRevision,
+				boundaries,
+			};
+			return boundaries;
 		} catch {
 			return null;
 		}
 	}
 
-	/** Render startup ellipses inside each segment's normal icon, color, and static chrome. */
-	renderStartupPlaceholder(width: number, layout: StatusLineLayout): string {
-		return this.#buildStatusLine(width, layout, undefined, { placeholders: true }).content;
+	/**
+	 * Wire this bar into `editor` for a composer layout: the matching top-border
+	 * provider, the autocomplete probe, and the standalone bottom-bar placement.
+	 * Callers re-run it whenever the composer shape changes.
+	 */
+	attachToEditor(
+		editor: Pick<Editor, "isAutocompleteActive" | "setTopBorderProvider" | "setTopBorder">,
+		style: Pick<ComposerStyle, "statusAttachment" | "bottomBar" | "bottomBarGap">,
+	): void {
+		this.setAutocompleteActiveProbe(() => editor.isAutocompleteActive());
+		switch (style.statusAttachment) {
+			case "top-border":
+				editor.setTopBorderProvider(availableWidth => this.getTopBorder(availableWidth));
+				break;
+			case "top-band":
+				editor.setTopBorderProvider(availableWidth => this.getBandTopBorder(availableWidth));
+				break;
+			case "top-rule-chip":
+				editor.setTopBorderProvider(availableWidth => this.getStandaloneTopBorder(availableWidth));
+				break;
+			case "none":
+				editor.setTopBorderProvider(undefined);
+				editor.setTopBorder(undefined);
+				break;
+		}
+		this.setComposerStyle(style);
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {

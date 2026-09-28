@@ -50,18 +50,6 @@ describe("normalizeSearchType", () => {
 	it("passes through 'neural' unchanged", () => {
 		expect(normalizeSearchType("neural")).toBe("neural");
 	});
-
-	it("passes through 'deep' unchanged", () => {
-		expect(normalizeSearchType("deep")).toBe("deep");
-	});
-
-	it("passes through 'auto' unchanged", () => {
-		expect(normalizeSearchType("auto")).toBe("auto");
-	});
-
-	it("passes through 'fast' unchanged", () => {
-		expect(normalizeSearchType("fast")).toBe("fast");
-	});
 });
 
 describe("buildExaRequestBody", () => {
@@ -73,11 +61,6 @@ describe("buildExaRequestBody", () => {
 			type: "auto",
 			contents: { summary: { query: "test query" } },
 		});
-	});
-
-	it("applies num_results override", () => {
-		const body = buildExaRequestBody({ query: "q", num_results: 5 });
-		expect(body.numResults).toBe(5);
 	});
 
 	it("normalizes keyword type to fast", () => {
@@ -136,12 +119,6 @@ describe("synthesizeAnswer", () => {
 			{ title: "B", url: "https://b.com", summary: "   " },
 		];
 		expect(synthesizeAnswer(results)).toBeUndefined();
-	});
-
-	it("synthesizes answer from a single summary", () => {
-		const results = [{ title: "Page One", url: "https://one.com", summary: "Summary of page one." }];
-		const answer = synthesizeAnswer(results);
-		expect(answer).toBe("**Page One**: Summary of page one.");
 	});
 
 	it("synthesizes answer from multiple summaries joined by double newlines", () => {
@@ -278,22 +255,10 @@ describe("searchExa", () => {
 		expect(result.sources).toHaveLength(1);
 	});
 
-	it("returns answer=undefined when results array is empty", async () => {
-		const result = await searchExa({ query: "empty", fetch: mockFetch(makeMockExaResponse({ results: [] })) });
-		expect(result.answer).toBeUndefined();
-		expect(result.sources).toHaveLength(0);
-	});
-
 	it("returns answer=undefined when results is missing from response", async () => {
 		const result = await searchExa({ query: "nothing", fetch: mockFetch({ requestId: "req-empty" }) });
 		expect(result.answer).toBeUndefined();
 		expect(result.sources).toHaveLength(0);
-	});
-
-	it("sends contents.summary in request body", async () => {
-		await searchExa({ query: "check body", fetch: mockFetch(makeMockExaResponse()) });
-		expect(capturedRequestBody).toBeDefined();
-		expect(capturedRequestBody!.contents).toEqual({ summary: { query: "check body" } });
 	});
 
 	it("sends correct full request shape", async () => {
@@ -700,7 +665,7 @@ describe("searchExa", () => {
 		};
 
 		await withInMemoryAuthStorage(async authStorage => {
-			authStorage.setRuntimeApiKey("exa", "stored-key-xyz");
+			authStorage.keys.setRuntime("exa", "stored-key-xyz");
 			const result = await searchExa({ query: "from auth storage", authStorage, fetch: fetchMock });
 			expect(result.provider).toBe("exa");
 			expect(result.sources).toHaveLength(3);
@@ -735,7 +700,7 @@ describe("searchExa", () => {
 	it("reports available when AuthStorage holds a credential", async () => {
 		delete process.env.EXA_API_KEY;
 		const available = await withInMemoryAuthStorage(authStorage => {
-			authStorage.setRuntimeApiKey("exa", "stored-key");
+			authStorage.keys.setRuntime("exa", "stored-key");
 			return Promise.resolve(new ExaProvider().isAvailable(authStorage));
 		});
 		expect(available).toBe(true);

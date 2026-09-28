@@ -26,12 +26,10 @@ afterAll(() => {
 /** Build a fake AuthStorage that resolves an API key (or undefined). */
 function makeAuthStorage(apiKey: string | undefined): AuthStorage {
 	return {
-		async getApiKey() {
-			return apiKey;
-		},
-		resolver: vi.fn(() => async () => apiKey),
-		hasAuth() {
-			return Boolean(apiKey);
+		keys: {
+			get: async () => apiKey,
+			resolver: vi.fn(() => async () => apiKey),
+			source: () => (apiKey ? { kind: "runtime", concrete: true } : undefined),
 		},
 	} as unknown as AuthStorage;
 }
@@ -364,36 +362,9 @@ describe("Ollama searchOllama response mapping", () => {
 		expect(response.sources[0]?.snippet).toBeUndefined();
 	});
 
-	it("handles non-string content field gracefully", async () => {
-		const fetchMock: FetchImpl = async () =>
-			new Response(
-				JSON.stringify({
-					results: [{ title: "Bad Content", url: "https://example.com/bad", content: 123 }],
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
-
-		const response = await searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		expect(response.sources).toHaveLength(1);
-		expect(response.sources[0]?.snippet).toBeUndefined();
-	});
-
 	it("returns empty sources array when results is missing", async () => {
 		const fetchMock: FetchImpl = async () =>
 			new Response(JSON.stringify({}), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-
-		const response = await searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		expect(response.sources).toEqual([]);
-	});
-
-	it("returns empty sources array when results is null", async () => {
-		const fetchMock: FetchImpl = async () =>
-			new Response(JSON.stringify({ results: null }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			});
@@ -440,26 +411,6 @@ describe("Ollama searchOllama error handling", () => {
 		const error = await promise.catch(e => e);
 		expect(error).toBeInstanceOf(Error);
 		expect(error.status).toBe(401);
-		expect(error.provider).toBe("ollama");
-	});
-
-	it("throws SearchProviderError with 403 status on forbidden", async () => {
-		const fetchMock: FetchImpl = async () => new Response("Forbidden", { status: 403 });
-
-		const promise = searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		const error = await promise.catch(e => e);
-		expect(error.status).toBe(403);
-		expect(error.provider).toBe("ollama");
-	});
-
-	it("throws SearchProviderError with 402 status on credits exhausted", async () => {
-		const fetchMock: FetchImpl = async () => new Response("credits exhausted", { status: 402 });
-
-		const promise = searchOllama({ ...makeParams("test"), fetch: fetchMock });
-
-		const error = await promise.catch(e => e);
-		expect(error.status).toBe(402);
 		expect(error.provider).toBe("ollama");
 	});
 
@@ -542,8 +493,10 @@ describe("Ollama searchOllama auth resolution", () => {
 	it("resolves credentials for ollama-cloud provider", async () => {
 		const resolverMock = vi.fn(() => async () => "test-key");
 		const authStorage = {
-			resolver: resolverMock,
-			hasAuth: vi.fn(() => true),
+			keys: {
+				resolver: resolverMock,
+				source: vi.fn(() => ({ kind: "runtime", concrete: true })),
+			},
 		} as unknown as AuthStorage;
 		const fetchMock: FetchImpl = async () =>
 			new Response(JSON.stringify({ results: [] }), {

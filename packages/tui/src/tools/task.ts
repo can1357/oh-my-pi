@@ -42,7 +42,7 @@ import { framedToolCard } from "../render/tool-card";
 import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
-import { assembleYieldResult } from "./task-yield-assembly";
+import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
 interface TaskRenderContext {
@@ -98,8 +98,13 @@ function normalizeFindings(value: unknown): FindingDetails[] {
 	return findings;
 }
 
-/** Reviewer output declares `findings` as an array, so a lone finding section still assembles as a list. */
-const REVIEWER_ARRAY_LABELS: ReadonlySet<string> = new Set(["findings"]);
+/** Reviewer output shapes: `findings` is an array (a lone finding still assembles as a list); the verdict fields are scalars. */
+const REVIEWER_SECTION_SHAPES: YieldSectionShapes = new Map([
+	["findings", "array"],
+	["overall_correctness", "scalar"],
+	["explanation", "scalar"],
+	["confidence", "scalar"],
+]);
 
 function extractIncrementalReviewResult(
 	items: RenderYieldItem[],
@@ -110,7 +115,7 @@ function extractIncrementalReviewResult(
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
 		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_ARRAY_LABELS);
+	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -553,7 +558,7 @@ function createAssignmentSectionRenderer(
 }
 
 /**
- * Build the shared-context section (the `# Goal / # Constraints` background a
+ * Build the shared-context section (the `# Goal / # Contract` background a
  * batch call hands every subagent). Rendered like the assignment brief so the
  * shared background stays visible for the whole task lifecycle.
  */
@@ -636,6 +641,18 @@ function renderDescriptionLines(description: string, prefix: string, width: numb
 	return wrapTextWithAnsi(description, contentWidth).map(line => `${boundedPrefix}${theme.fg("dim", line)}`);
 }
 
+/** `routed:` note from a `before_subagent_spawn` model replacement; empty when unrouted. */
+function renderRouteLine(route: string | undefined, continuePrefix: string, maxWidth: number, theme: Theme): string[] {
+	if (!route) return [];
+	return [
+		truncateTaskRow(
+			`${continuePrefix}${theme.fg("dim", `routed: ${replaceTabs(sanitizeText(route))}`)}`,
+			maxWidth,
+			"",
+		),
+	];
+}
+
 /**
  * Render streaming progress for a single agent.
  */
@@ -688,6 +705,7 @@ function renderAgentProgress(
 	if (fullDescription && !row.descriptionShown) {
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
+	lines.push(...renderRouteLine(progress.resolvedModelRoute, continuePrefix, maxWidth, theme));
 
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
@@ -1029,6 +1047,7 @@ function renderAgentResult(
 	if (fullDescription && !description) {
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
+	lines.push(...renderRouteLine(result.resolvedModelRoute, continuePrefix, maxWidth, theme));
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
 
@@ -1712,6 +1731,8 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -1737,6 +1758,8 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -1858,6 +1881,8 @@ export interface AgentProgress {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
+	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
@@ -1935,6 +1960,8 @@ export interface SingleResult {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
+	resolvedModelRoute?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;

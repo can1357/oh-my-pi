@@ -98,7 +98,7 @@ function createHost(
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => ({ restored: false }),
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => false,
@@ -119,7 +119,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
 		// Live-role resolution (#liveRetryRoleHint) filters by provider auth;
 		// pin a runtime key so the test does not depend on host env credentials.
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistrySettings = Settings.isolated();
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: modelRegistrySettings });
 	});
@@ -1139,6 +1139,111 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
 			expect(messages).toHaveLength(1);
+			expect(continues).toEqual([]);
+		});
+	});
+
+	// A stream that dies after text rendered cannot be replayed (duplicated
+	// output) and has no tool calls for the preserved-turn continuation, so the
+	// session used to stop on "Anthropic stream stalled while waiting for the
+	// next event". It must keep the partial turn and continue after it.
+	describe("mid-stream transport failure after committed text", () => {
+		function stalledTextTurn(
+			content: AssistantMessage["content"] = [{ type: "text", text: "Here is the first half of the answ" }],
+			errorMessage = "Anthropic stream stalled while waiting for the next event",
+		): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.errorMessage = errorMessage;
+			message.errorId = AIError.create(AIError.Flag.Transient);
+			return message;
+		}
+
+		function continuationHost(message: AssistantMessage, textOutputCommitted = true) {
+			const messages: AgentMessage[] = [message];
+			const continues: string[] = [];
+			const host = createHost(model, modelRegistry, { messages, textOutputCommitted });
+			host.agent = {
+				state: { messages },
+				appendMessage: (appended: AgentMessage) => messages.push(appended),
+			} as never;
+			host.scheduleAgentContinue = options => continues.push(options.source);
+			return { host, messages, continues };
+		}
+
+		it("keeps the partial turn and continues with a resume reminder", () => {
+			const message = stalledTextTurn();
+			const { host, messages, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+
+			expect(messages[0]).toBe(message);
+			const reminder = messages[1];
+			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
+			const text =
+				typeof reminder.content === "string"
+					? reminder.content
+					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain("Continue exactly where it stopped");
+			expect(text).toContain("Attempt #1/3");
+			expect(continues).toEqual(["stream-stall-continue"]);
+		});
+
+		it("also resumes HTTP/2 resets, premature closes, and sockets closed mid-body", () => {
+			for (const errorMessage of [
+				"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
+				"OpenAI responses stream closed before a terminal response event was received",
+				"The socket connection was closed unexpectedly before the response completed",
+			]) {
+				const message = stalledTextTurn(undefined, errorMessage);
+				const { host, continues } = continuationHost(message);
+				expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
+				expect(continues).toEqual(["stream-stall-continue"]);
+			}
+		});
+
+		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
+			const message = stalledTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
+			expect(continues).toHaveLength(3);
+
+			recovery.resetForNewPrompt();
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+		});
+
+		it("leaves uncommitted text, tool turns, other errors, and disabled retry to the error path", () => {
+			const cases: Array<[AssistantMessage, boolean]> = [
+				[stalledTextTurn(), false],
+				[
+					stalledTextTurn([
+						{ type: "text", text: "Reading it now" },
+						{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } },
+					]),
+					true,
+				],
+				[stalledTextTurn([{ type: "thinking", thinking: "Unshown reasoning" }]), true],
+				[stalledTextTurn(undefined, "500 Internal Server Error"), true],
+			];
+			for (const [message, committed] of cases) {
+				const { host, messages, continues } = continuationHost(message, committed);
+				expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(false);
+				expect(messages).toHaveLength(1);
+				expect(continues).toEqual([]);
+			}
+
+			const message = stalledTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+			recovery.setAutoRetryEnabled(false);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
 			expect(continues).toEqual([]);
 		});
 	});

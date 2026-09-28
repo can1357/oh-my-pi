@@ -116,7 +116,7 @@ describe("AgentSession thinking-loop retry", () => {
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 

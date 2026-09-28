@@ -81,8 +81,8 @@ describe("issue #6162 fresh launch default role from models.yml discovery provid
 		// The configured provider's key resolves the role model; a competing
 		// bundled provider key would otherwise win the startup fallback via
 		// `pickDefaultAvailableModel`.
-		authStorage.setRuntimeApiKey("my-provider", "test-provider-key");
-		authStorage.setRuntimeApiKey("openai", "test-openai-key");
+		authStorage.keys.setRuntime("my-provider", "test-provider-key");
+		authStorage.keys.setRuntime("openai", "test-openai-key");
 
 		// Fresh registry: no cached my-provider catalog on disk, so the static
 		// catalog the SDK resolves against at startup is empty for the provider.

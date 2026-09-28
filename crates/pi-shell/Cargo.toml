@@ -16,6 +16,7 @@ workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 pi-builtins.workspace = true
+pi-vfs.workspace = true
 brush-core.workspace = true
 brush-parser.workspace = true
 clap.workspace = true
@@ -40,4 +41,5 @@ windows-sys.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"

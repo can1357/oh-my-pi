@@ -41,6 +41,16 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
+import {
+	cfgBrowserCdpUrl,
+	cfgBrowserCmux,
+	cfgBrowserHeadless,
+	cfgBrowserIdleCloseSec,
+	cfgBrowserRelay,
+	cfgBrowserRelayUrl,
+} from "./browser/settings";
+import { cfgToolsMaxTimeout } from "./settings";
+
 export type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 
 /** First-use boundary for the generated Playwright ARIA evaluator bundle. */
@@ -151,7 +161,7 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 		}
 		return { kind: "spawned", path: exe, args };
 	}
-	const relayUrl = session.settings.get("browser.relayUrl");
+	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
 	if (app?.relay) {
@@ -164,22 +174,22 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	// app options win.
 	if (app?.relay !== false) {
 		const relayKind = resolveRelayKind({
-			settingEnabled: session.settings.get("browser.relay"),
+			settingEnabled: cfgBrowserRelay.get(session.settings),
 			url: relayUrl,
 		});
 		if (relayKind) return relayKind;
 	}
-	const configuredCdpUrl = session.settings.get("browser.cdpUrl")?.trim();
+	const configuredCdpUrl = cfgBrowserCdpUrl.get(session.settings)?.trim();
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
 	const cmuxKind = resolveCmuxKind({
-		settingEnabled: session.settings.get("browser.cmux"),
+		settingEnabled: cfgBrowserCmux.get(session.settings),
 	});
 	if (cmuxKind) {
 		return cmuxKind;
 	}
-	const headless = params.headed === undefined ? session.settings.get("browser.headless") : !params.headed;
+	const headless = params.headed === undefined ? cfgBrowserHeadless.get(session.settings) : !params.headed;
 	return {
 		kind: "headless",
 		headless,
@@ -233,7 +243,7 @@ export async function restartBrowserForModeChange(): Promise<void> {
 function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
 	const ownerId = session.getSessionId?.() ?? undefined;
 	if (!ownerId) return Promise.resolve(0);
-	const idleSec = session.settings.get("browser.idleCloseSec");
+	const idleSec = cfgBrowserIdleCloseSec.get(session.settings);
 	if (!(idleSec > 0)) {
 		cancelIdleCloseForOwner(ownerId);
 		return Promise.resolve(0);
@@ -258,7 +268,7 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const timeoutSeconds = clampTimeout("browser", parsed.timeout, session.settings.get("tools.maxTimeout"));
+		const timeoutSeconds = clampTimeout("browser", parsed.timeout, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };

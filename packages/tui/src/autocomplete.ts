@@ -6,6 +6,14 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
+/**
+ * How long an `@` fuzzy search may run before the immediate-directory prefix
+ * listing is reported through `onPartial`. Fuzzy walks of normal repos finish
+ * well under this, so they never flash an interim list; huge roots (a volume
+ * of sibling projects) take seconds and would otherwise show nothing new.
+ */
+const AT_PARTIAL_DELAY_MS = 150;
+
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
@@ -164,6 +172,17 @@ export function subsequenceMatch(query: string, target: string): boolean {
 	return qi === query.length;
 }
 
+/**
+ * Whether an `@` file completion `value` still fits the live `@` token.
+ * The editor narrows a stale `@` list with this while a fresh search runs;
+ * mirrors the subsequence filter `getSuggestions` applies to fuzzy results.
+ */
+export function atCompletionMatches(token: string, value: string): boolean {
+	const query = parsePathPrefix(token).rawPrefix.replaceAll("\\", "/").toLowerCase();
+	const target = parsePathPrefix(value).rawPrefix.replace(/"$/, "").toLowerCase();
+	return subsequenceMatch(query, target);
+}
+
 /** Ranked-tier subsequence score (100/80/60/40−gaps·5); higher is better, 0 is no match. */
 export function subsequenceScore(query: string, target: string): number {
 	if (query.length === 0) return 1;
@@ -220,12 +239,16 @@ export interface SlashCommand {
 }
 
 export interface AutocompleteProvider {
-	/** Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts. */
+	/**
+	 * Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts.
+	 * Slow providers MAY report interim suggestions through `onPartial` before resolving; the resolved value supersedes them.
+	 */
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
 		signal?: AbortSignal,
+		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
 	): Promise<{
 		items: AutocompleteItem[];
 		prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -573,6 +596,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		cursorLine: number,
 		cursorCol: number,
 		signal?: AbortSignal,
+		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
@@ -668,16 +692,27 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				if (items.length === 0) return null;
 				return { items, prefix: atPrefix };
 			}
-			const suggestions =
-				rawPrefix.length > 0
-					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal })
-					: await this.#getFileSuggestions("@");
-			if (suggestions.length === 0 && rawPrefix.length > 0) {
+			if (rawPrefix.length === 0) {
+				const items = await this.#getFileSuggestions("@");
+				return items.length > 0 ? { items, prefix: atPrefix } : null;
+			}
+			const fuzzy = this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal });
+			if (onPartial) {
+				const settled = await Promise.race([
+					fuzzy.then(() => true),
+					Bun.sleep(AT_PARTIAL_DELAY_MS).then(() => false),
+				]);
+				if (!settled) {
+					const listing = await this.#getFileSuggestions(atPrefix);
+					if (listing.length > 0 && !signal?.aborted) onPartial({ items: listing, prefix: atPrefix });
+				}
+			}
+			const suggestions = await fuzzy;
+			if (suggestions.length === 0) {
 				const fallback = await this.#getFileSuggestions(atPrefix);
 				if (fallback.length === 0) return null;
 				return { items: fallback, prefix: atPrefix };
 			}
-			if (suggestions.length === 0) return null;
 
 			return {
 				items: suggestions,

@@ -8,6 +8,7 @@ import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
+import { clickElement, fillViaHandle } from "./interactions";
 import { RunOutput } from "./run-output";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
@@ -204,25 +205,50 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			},
 		);
 	};
+	/**
+	 * Wait for an actionable match without Puppeteer's `Locator` preconditions:
+	 * those wait on animation-frame and IntersectionObserver callbacks a
+	 * backgrounded headless tab never delivers (#12892).
+	 */
+	const actionHandle = async (label: string, selector: string, signal: AbortSignal): Promise<ElementHandle> => {
+		const handle = await untilAborted(signal, () =>
+			frame.waitForSelector(hooks.normalizeSelector(selector), {
+				timeout: hooks.actionOpMs,
+				visible: true,
+				signal,
+			}),
+		);
+		if (!handle) throw new ToolError(`${label} matched no visible element`);
+		return handle;
+	};
 	return {
 		click: selector =>
 			hooks.op(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
-				signal =>
-					untilAborted(signal, () =>
-						frame.locator(hooks.normalizeSelector(selector)).setTimeout(hooks.actionOpMs).click({ signal }),
-					),
+				async signal => {
+					const label = `frame.click(${JSON.stringify(selector)})`;
+					const handle = await actionHandle(label, selector, signal);
+					try {
+						await clickElement(handle, label, signal);
+					} finally {
+						await handle.dispose().catch(() => undefined);
+					}
+				},
 				selectorOptions(selector),
 			),
 		fill: (selector, value) =>
 			hooks.op(
 				`frame.fill(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
-				signal =>
-					untilAborted(signal, () =>
-						frame.locator(hooks.normalizeSelector(selector)).setTimeout(hooks.actionOpMs).fill(value, { signal }),
-					),
+				async signal => {
+					const handle = await actionHandle(`frame.fill(${JSON.stringify(selector)})`, selector, signal);
+					try {
+						await fillViaHandle(handle, value, signal);
+					} finally {
+						await handle.dispose().catch(() => undefined);
+					}
+				},
 				selectorOptions(selector),
 			),
 		type: (selector, text) =>

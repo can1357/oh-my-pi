@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { ModelDownloadActivity } from "../downloads/model-downloads";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -11,9 +12,9 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { tinyModelEnvKey, tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
-import { isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
+import { getTtsLocalModelSpec, isTtsLocalModelKey, type TtsLocalModelKey } from "./models";
 import type { TtsProgressEvent, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
 
 /** Decoded PCM returned by a local synthesis request. */
@@ -190,8 +191,11 @@ export class TtsClient {
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
 	#progressListeners = new Set<(event: TtsProgressEvent) => void>();
+	#downloads = new ModelDownloadActivity(modelKey => getTtsLocalModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
 	#refed = false;
+	/** {@link tinyModelEnvKey} the current worker was spawned under. */
+	#workerEnvKey: string | undefined;
 	#spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound>;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> = spawnTtsWorker) {
@@ -344,7 +348,7 @@ export class TtsClient {
 		this.#unsubscribeError?.();
 		this.#unsubscribeError = null;
 		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+			this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, "tts worker terminated");
 			if (pending.kind === "synthesize") pending.resolve(null);
 			else if (pending.kind === "download") pending.resolve(false);
 			else pending.channel.close();
@@ -359,9 +363,15 @@ export class TtsClient {
 	}
 
 	#ensureWorker(): RefCountedWorkerHandle<TtsWorkerInbound, TtsWorkerOutbound> {
-		if (this.#worker) return this.#worker;
+		const envKey = tinyModelEnvKey();
+		if (this.#worker) {
+			if (this.#workerEnvKey === envKey || this.#pending.size > 0) return this.#worker;
+			// Device/dtype changed while idle: retire the worker so the respawn uses the new env.
+			void this.terminate();
+		}
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
+		this.#workerEnvKey = envKey;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		return worker;
@@ -436,21 +446,22 @@ export class TtsClient {
 			return;
 		}
 		logger.debug("tts: worker returned error", { error: message.error });
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "synthesize") pending.resolve(null);
 		else if (pending.kind === "download") pending.resolve(false);
 		else pending.channel.fail(new Error(message.error));
 		void this.terminate();
 	}
 
-	#emitProgress(event: TtsProgressEvent): void {
+	#emitProgress(event: TtsProgressEvent, error?: string): void {
+		this.#downloads.observe(event, error);
 		for (const listener of this.#progressListeners) listener(event);
 	}
 
 	#handleWorkerError(error: Error): void {
 		logger.warn("tts: worker error", { error: error.message });
 		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+			this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error.message);
 			if (pending.kind === "synthesize") pending.resolve(null);
 			else if (pending.kind === "download") pending.resolve(false);
 			else pending.channel.fail(error);

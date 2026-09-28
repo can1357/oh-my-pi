@@ -11,6 +11,7 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_NAME = `interactions-${crypto.randomUUID()}`;
+const STARVED_TAB_NAME = `starved-${crypto.randomUUID()}`;
 let tempDir = "";
 let uploadPath = "";
 
@@ -122,9 +123,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
 			const highlight = await invoke({
 				action: "run",
 				name: TAB_NAME,
-				code: `const pending = tab.highlight("#highlight", { duration: 100 });
-// This integration test must observe the real page timer while the helper remains pending.
-await Bun.sleep(20);
+				code: `const pending = tab.highlight("#highlight", { duration: 1000 });
+// The overlay is injected asynchronously and removed once the helper's
+// host-side hold elapses, so wait for the node instead of sampling the count.
+await tab.waitForSelector("[data-omp-highlight-overlay]", { timeout: 5000 });
 const during = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
 await pending;
 const after = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
@@ -144,4 +146,51 @@ return { during, after };`,
 			await invoke({ action: "close", name: TAB_NAME, kill: true }).catch(() => undefined);
 		}
 	}, 30_000);
+
+	// Backgrounded headless tabs deliver no animation frames, which stalls every
+	// Puppeteer `Locator` precondition (viewport/stability/enabled) forever.
+	// Virtual time pinned at "pause" reproduces that state deterministically.
+	test("fills page and frame selectors on a tab that produces no animation frames", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const starvedHtml = `<!doctype html><input id="q" value="stale"><div id="editable" contenteditable>stale</div>
+<iframe id="inner" srcdoc='<!doctype html><input id="deep" value="stale"><button id="go" onclick="this.dataset.clicked=1">Go</button>'></iframe>`;
+		const context = { session, toolCallId: "browser-starved" };
+		await prelude.invoke(
+			{ action: "open", name: STARVED_TAB_NAME, url: `data:text/html,${encodeURIComponent(starvedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: STARVED_TAB_NAME,
+					code: `await tab.waitFor("#inner");
+const cdp = await page.createCDPSession();
+await cdp.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+await tab.fill("#q", "typed");
+const inner = await tab.frame("#inner");
+await inner.fill("#deep", "nested");
+await tab.fill("#editable", "replaced");
+await inner.click("#go");
+return {
+	page: await tab.value("#q"),
+	frame: await inner.value("#deep"),
+	editable: await tab.text("#editable"),
+	clicked: await inner.attr("#go", "data-clicked"),
+};`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<{ page: string; frame: string; editable: string; clicked: string }>(result)).toEqual({
+				page: "typed",
+				frame: "nested",
+				editable: "replaced",
+				clicked: "1",
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: STARVED_TAB_NAME, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
 });

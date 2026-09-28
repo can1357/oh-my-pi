@@ -10,6 +10,7 @@ import {
 	DisplayOption,
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
+	type Metadata,
 	MetadataSchema,
 	ModelDimensionKind,
 } from "./devin-proto";
@@ -323,54 +324,76 @@ export async function fetchDevinModels(
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+	const fetchImpl = discoveryFetch(options.fetch);
+
+	const fetchCatalog = async (metadata: Metadata): Promise<ModelSpec<"devin-agent">[] | null> => {
+		try {
+			const request = create(GetCliModelConfigsRequestSchema, { metadata });
+			// `toBinary` always allocates a fresh ArrayBuffer-backed view; the DOM
+			// `BodyInit` typing just cannot see that through its ArrayBufferLike signature.
+			const body = toBinary(GetCliModelConfigsRequestSchema, request) as Uint8Array<ArrayBuffer>;
+			const response = await fetchImpl(requestUrl, {
+				method: "POST",
+				headers: {
+					"content-type": "application/proto",
+					"connect-protocol-version": "1",
+					accept: "*/*",
+				},
+				body,
+				signal,
+			});
+			if (!response.ok) return null;
+
+			const decoded = decodeDevinUnaryMessage(
+				GetCliModelConfigsResponseSchema,
+				new Uint8Array(await response.arrayBuffer()),
+			);
+			return decoded ? normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl) : null;
+		} catch {
+			return null;
+		}
+	};
 
 	try {
-		const request = create(GetCliModelConfigsRequestSchema, {
-			metadata: create(MetadataSchema, {
-				...devinDiscoveryMetadata(options.apiKey),
-				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
-			}),
+		const nativeMetadata = create(MetadataSchema, {
+			...devinDiscoveryMetadata(options.apiKey),
+			supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
 		});
-		// `toBinary` always allocates a fresh ArrayBuffer-backed view; the DOM
-		// `BodyInit` typing just cannot see that through its ArrayBufferLike signature.
-		const body = toBinary(GetCliModelConfigsRequestSchema, request) as Uint8Array<ArrayBuffer>;
-
-		const headers: Record<string, string> = {
-			"content-type": "application/proto",
-			"connect-protocol-version": "1",
-			accept: "*/*",
-		};
-
-		const fetchImpl = discoveryFetch(options.fetch);
-		const response = await fetchImpl(requestUrl, { method: "POST", headers, body, signal });
-		if (!response.ok) {
-			return null;
+		const nativeModels = await fetchCatalog(nativeMetadata);
+		const nativeIsSeedOnly =
+			nativeModels !== null &&
+			nativeModels.length > 0 &&
+			nativeModels.every(model => model.id === "swe-1-6" || model.id === "swe-1-6-fast");
+		if (nativeModels !== null && nativeModels.length > 0 && !nativeIsSeedOnly) {
+			return nativeModels;
 		}
 
-		const decoded = decodeDevinUnaryMessage(
-			GetCliModelConfigsResponseSchema,
-			new Uint8Array(await response.arrayBuffer()),
-		);
-		if (!decoded) {
-			return null;
-		}
-		const models = normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
-		if (models.length === 0) {
-			// The backend gates the native catalog on the pinned CLI identity; an
-			// empty-but-200 response is the failure signature of a stale version
-			// pin (there is no explicit error). Treat it as failed discovery so
-			// the static seed survives, and leave a trail for diagnosis. Apply
-			// this after filtering because a response containing only disabled or
-			// internal configs is equally unusable.
-			logger.warn("Devin returned an empty native model catalog; the pinned CLI identity may be stale", {
+		// Legacy Windsurf Enterprise seats expose their full credential-scoped
+		// roster only to the editor identity and raw windsurf_api_key. Native
+		// chisel discovery returns the two-row fallback seed for those seats.
+		const legacyMetadata = create(MetadataSchema, {
+			apiKey: options.apiKey ?? "",
+			ideName: "windsurf",
+			ideVersion: "3.2.23",
+			extensionName: "windsurf",
+			extensionVersion: "1.48.2",
+			locale: "en",
+		});
+		const legacyModels = await fetchCatalog(legacyMetadata);
+		const models =
+			legacyModels !== null && (nativeModels === null || legacyModels.length > nativeModels.length)
+				? legacyModels
+				: nativeModels;
+		if (models === null || models.length === 0) {
+			// The backend gates the native catalog on the pinned client identity;
+			// an empty-but-200 response is the failure signature of a stale pin.
+			logger.warn("Devin returned an empty model catalog; the pinned client identities may be stale", {
 				metadata: devinDiscoveryMetadata(undefined),
 			});
 			return null;
 		}
 
 		return models;
-	} catch {
-		return null;
 	} finally {
 		clearTimeout(timer);
 	}
@@ -430,6 +453,51 @@ function devinModelSpec(
 	return spec;
 }
 
+/**
+ * Lead chat uid of a Fusion pairing `fusion-<lead>[-fast]-sidekick-<sidekick>`.
+ * An exact live lead uid wins, so leads whose own uid ends in `-fast`
+ * (`swe-1-6-fast`) route as written. Otherwise `-fast` selects the lead's
+ * priority lane when the server lists one, then the standard lane.
+ *
+ * Returns `undefined` for uids that are not pairings and `null` for pairings
+ * whose lead is not live: the composite uid itself is never servable.
+ */
+function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>): string | null | undefined {
+	if (!uid.startsWith("fusion-")) return undefined;
+	const cut = uid.indexOf("-sidekick-");
+	if (cut <= "fusion-".length) return undefined;
+	const lead = uid.slice("fusion-".length, cut);
+	if (liveUids.has(lead)) return lead;
+	if (lead.endsWith("-fast")) {
+		const base = lead.slice(0, -"-fast".length);
+		if (liveUids.has(`${base}-priority`)) return `${base}-priority`;
+		if (liveUids.has(base)) return base;
+	}
+	return null;
+}
+
+/**
+ * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
+ * paired by the native client), so the limits and pricing a caller budgets
+ * against are the lead's, not the composite card's.
+ */
+function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
+	spec.requestModelId = lead.id;
+	spec.reasoning = lead.reasoning;
+	spec.input = lead.input;
+	spec.supportsTools = lead.supportsTools;
+	spec.cost = lead.cost;
+	spec.contextWindow = lead.contextWindow;
+	spec.maxTokens = lead.maxTokens;
+	if (lead.compat?.supportsParallelToolCalls) {
+		spec.compat = { ...spec.compat, supportsParallelToolCalls: true };
+	} else if (spec.compat?.supportsParallelToolCalls) {
+		const { supportsParallelToolCalls: _, ...rest } = spec.compat;
+		if (Object.keys(rest).length > 0) spec.compat = rest;
+		else delete spec.compat;
+	}
+}
+
 function normalizeDevinModels(
 	configs: readonly ClientModelConfig[],
 	baseUrlOverride: string | undefined,
@@ -438,6 +506,11 @@ function normalizeDevinModels(
 	const specs: ModelSpec<"devin-agent">[] = [];
 	const seen = new Set<string>();
 	const lanes = new Map<string, DevinFamilyLane>();
+	const liveConfigs = new Map<string, ClientModelConfig>();
+	for (const config of configs) {
+		const uid = config.modelUid.trim();
+		if (!config.disabled && uid && !liveConfigs.has(uid)) liveConfigs.set(uid, config);
+	}
 
 	for (const config of configs) {
 		if (config.disabled) {
@@ -459,7 +532,16 @@ function normalizeDevinModels(
 		// `fusion-sidekick-*`) that are themselves valid chat uids. Only the
 		// former take the `AssignModel` path — sending a composite uid there 404s.
 		const isAssignModelRouter = isRouter && (config.modelInfo?.harnessUids.length ?? 0) === 0;
-		specs.push(devinModelSpec(config, uid, baseUrl, isAssignModelRouter));
+		// Fusion pairings are orchestrated by the native client: it runs the lead
+		// model as an ordinary chat uid and pairs a sidekick locally. The server
+		// has no provider for the composite uid itself (`permission_denied: no API
+		// providers are available`), so the chat request carries the lead uid and
+		// a pairing without a live lead is not listed.
+		const lead = devinFusionLeadUid(uid, liveConfigs);
+		if (lead === null) continue;
+		const spec = devinModelSpec(config, uid, baseUrl, isAssignModelRouter);
+		if (lead !== undefined) routeDevinFusionLead(spec, devinModelSpec(liveConfigs.get(lead)!, lead, baseUrl, false));
+		specs.push(spec);
 		// A router is a server-side dispatcher, not an effort tier: it stays a
 		// standalone model even when upstream files it under a family.
 		if (!isRouter) {

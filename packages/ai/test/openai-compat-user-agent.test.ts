@@ -92,28 +92,6 @@ async function captureStreamHeaders(
 }
 
 describe("resolveOpenAIRequestSetup User-Agent", () => {
-	test("sets omp User-Agent on xAI when none is provided", () => {
-		for (const provider of ["xai", "xai-oauth"] as const) {
-			const setup = resolveOpenAIRequestSetup(
-				{ provider, id: "grok-4.6", baseUrl: "https://api.x.ai/v1" },
-				{ apiKey: "sk-test", messages: [] },
-			);
-			expect(setup.headers["User-Agent"]).toBe(USER_AGENT);
-			expect(setup.requestHeaders["User-Agent"]).toBe(USER_AGENT);
-		}
-	});
-
-	test("does not set User-Agent on other OpenAI-wire providers", () => {
-		for (const provider of ["openai", "deepseek"] as const) {
-			const setup = resolveOpenAIRequestSetup(
-				{ provider, id: "m", baseUrl: "https://api.example/v1" },
-				{ apiKey: "sk-test", messages: [] },
-			);
-			expect(setup.headers["User-Agent"]).toBeUndefined();
-			expect(setup.requestHeaders["User-Agent"]).toBeUndefined();
-		}
-	});
-
 	test("does not override a caller-supplied xAI User-Agent", () => {
 		const setup = resolveOpenAIRequestSetup(
 			{

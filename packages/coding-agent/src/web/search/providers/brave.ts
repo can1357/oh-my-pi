@@ -168,7 +168,7 @@ async function callBraveSearch(
 /** Execute Brave web search. */
 export async function searchBrave(params: BraveSearchParams): Promise<SearchResponse> {
 	const numResults = Math.floor(clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS));
-	const keyOrResolver: ApiKey = params.authStorage.resolver("brave", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("brave", {
 		sessionId: params.sessionId,
 	});
 	const { response, requestId } = await withAuth(keyOrResolver, key => callBraveSearch(key, params), {
@@ -205,7 +205,7 @@ export class BraveProvider extends SearchProvider {
 	readonly label = "Brave";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("brave") || !!getEnvApiKey("brave");
+		return authStorage.keys.source("brave") !== undefined || !!getEnvApiKey("brave");
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

@@ -10,6 +10,8 @@ import type { ExportThemeNames } from "./args";
 import templateCssPath from "./template.css" with { type: "file" };
 import templateHtmlPath from "./template.html" with { type: "file" };
 import templateJsPath from "./template.js" with { type: "file" };
+import highlightJsPath from "./vendor/highlight.min.js" with { type: "file" };
+import markedJsPath from "./vendor/marked.min.js" with { type: "file" };
 // Pre-built React tool renderers: built by `gen:tool-views` (`bun run gen:tool-views`),
 // run automatically by root `prepare` on install and by `prepack` at publish.
 import toolViewsJsPath from "./tool-views.generated.js" with { type: "file" };
@@ -24,13 +26,15 @@ export function resolveBundledHtmlAssetPath(assetPath: string, moduleDir: string
 	return path.resolve(moduleDir, assetPath);
 }
 
-/** Compose the standalone export template: minified CSS, tool renderers, and viewer JS inlined. */
+/** Compose the standalone export template with every style and script inlined. */
 export function getTemplate(): string {
 	if (cachedTemplate) return cachedTemplate;
 	const templateCss = fs.readFileSync(resolveBundledHtmlAssetPath(templateCssPath), "utf8");
 	const templateHtml = fs.readFileSync(resolveBundledHtmlAssetPath(templateHtmlPath as unknown as string), "utf8");
 	const templateJs = fs.readFileSync(resolveBundledHtmlAssetPath(templateJsPath), "utf8");
 	const toolViewsJs = fs.readFileSync(resolveBundledHtmlAssetPath(toolViewsJsPath), "utf8");
+	const markedJs = fs.readFileSync(resolveBundledHtmlAssetPath(markedJsPath), "utf8");
+	const highlightJs = fs.readFileSync(resolveBundledHtmlAssetPath(highlightJsPath), "utf8");
 	const minifiedCss = templateCss
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\s+/g, " ")
@@ -40,6 +44,8 @@ export function getTemplate(): string {
 	// CSS/JS are not interpreted as substitution patterns.
 	cachedTemplate = templateHtml
 		.replace("<template-css/>", () => `<style>${minifiedCss}</style>`)
+		.replace("<template-marked/>", () => `<script>${markedJs}</script>`)
+		.replace("<template-highlight/>", () => `<script>${highlightJs}</script>`)
 		.replace("<template-tool-views/>", () => `<script>${toolViewsJs}</script>`)
 		.replace("<template-js/>", () => `<script>${templateJs}</script>`);
 	return cachedTemplate;

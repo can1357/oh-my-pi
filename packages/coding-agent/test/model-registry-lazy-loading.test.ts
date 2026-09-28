@@ -87,12 +87,12 @@ describe("ModelRegistry lazy bundled composition", () => {
 			tempDirs.push(tempDir);
 			const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 			authStorages.push(authStorage);
-			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			authStorage.keys.setRuntime("anthropic", "test-key");
 			if (maskTypeSafeEnvAuth) {
-				const hasAuth = authStorage.hasAuth.bind(authStorage);
+				const source = authStorage.keys.source.bind(authStorage.keys);
 				spies.push(
-					spyOn(authStorage, "hasAuth").mockImplementation(provider =>
-						provider === "typesafe" ? false : hasAuth(provider),
+					spyOn(authStorage.keys, "source").mockImplementation((provider, options) =>
+						provider === "typesafe" ? undefined : source(provider, options),
 					),
 				);
 			}

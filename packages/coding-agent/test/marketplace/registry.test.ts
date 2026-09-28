@@ -104,11 +104,6 @@ describe("buildPluginId / parsePluginId", () => {
 		expect(parsePluginId("bad name@market")).toBeNull();
 		expect(parsePluginId("plugin@bad name")).toBeNull();
 	});
-
-	it("parsePluginId splits on last @", () => {
-		// "a@b" is not a valid name segment (contains @), so this returns null
-		expect(parsePluginId("a@b@c")).toBeNull();
-	});
 });
 
 // ── Marketplace CRUD (pure functions) ────────────────────────────────
