@@ -1,5 +1,5 @@
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ChevronsDown } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
@@ -7,6 +7,7 @@ import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
+import { useTranscriptScroll } from "./use-transcript-scroll";
 import "./transcript.css";
 
 export interface TranscriptProps {
@@ -36,11 +37,6 @@ interface TailLock {
 export function followTranscriptTail(element: ScrollGeometry, lock: TailLock, force = false): void {
 	if (force) lock.current = true;
 	if (lock.current) element.scrollTop = element.scrollHeight;
-}
-
-/** Re-derive the lock from current scroll geometry (locked within 40px of the bottom). */
-export function updateTranscriptTailLock(element: ScrollGeometry, lock: TailLock): void {
-	lock.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
 }
 
 function Row({
@@ -261,6 +257,49 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 	}
 }, entryRowEqual);
 
+function JumpPill({ visible, onJump }: { visible: boolean; onJump: () => void }): ReactNode {
+	const skipExit = useRef(false);
+	const [mounted, setMounted] = useState(visible);
+	const [leaving, setLeaving] = useState(false);
+
+	useEffect(() => {
+		if (visible) {
+			skipExit.current = false;
+			setMounted(true);
+			setLeaving(false);
+			return;
+		}
+		if (skipExit.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+			skipExit.current = false;
+			setMounted(false);
+			setLeaving(false);
+			return;
+		}
+		setLeaving(true);
+	}, [visible]);
+
+	if (!mounted) return null;
+
+	return (
+		<button
+			type="button"
+			className={`tr-jump${leaving ? " tr-jump--out" : ""}`}
+			onClick={() => {
+				skipExit.current = true;
+				onJump();
+			}}
+			onAnimationEnd={() => {
+				if (!leaving) return;
+				setMounted(false);
+				setLeaving(false);
+			}}
+		>
+			<ChevronsDown size={15} aria-hidden />
+			Scroll to current
+		</button>
+	);
+}
+
 /**
  * Rows mounted at the tail. Large sessions carry thousands of entries; mounting
  * all of them makes every streamed token re-reconcile and re-lay-out the whole
@@ -292,20 +331,20 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		return map;
 	}, [visible]);
 
-	const rootRef = useRef<HTMLDivElement | null>(null);
-	const lockRef = useRef(true);
+	const isCompact = compact === true;
+	const { rootRef, contentRef, lockRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
+		!isCompact,
+		entries,
+		stream,
+		activeTools,
+		working,
+	);
 	/**
 	 * First visible row and its offset from the viewport top, captured before
 	 * mounting earlier rows. Restoring against the row, not the total height
 	 * delta, stays exact when the same commit also appends live entries.
 	 */
 	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
-
-	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
-	useEffect(() => {
-		const el = rootRef.current;
-		if (el !== null) followTranscriptTail(el, lockRef);
-	}, [entries, stream, activeTools, working]);
 
 	// A `live` transition (initial connect or reconnect) jumps to the latest message
 	// regardless of the prior scroll position. Absent for the agent drawer's compact transcript.
@@ -328,9 +367,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	const showEarlier = (): void => {
 		const el = rootRef.current;
-		if (el === null || start === 0 || prependRef.current !== null) return;
+		const content = contentRef.current;
+		if (el === null || content === null || start === 0 || prependRef.current !== null) return;
 		const top = el.getBoundingClientRect().top;
-		for (const row of el.children) {
+		for (const row of content.children) {
 			if (row.classList.contains("tr-earlier")) continue;
 			const rect = row.getBoundingClientRect();
 			if (rect.bottom <= top) continue;
@@ -367,14 +407,16 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	// While the snapshot downloads the banner reports progress; an empty transcript isn't "no activity".
 	const settled = phase === undefined || phase === "live";
 
-	return (
+	const scroller = (
 		<div
 			ref={rootRef}
-			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
+			className={`tr-root${isCompact ? " tr-root--compact" : ""}`}
+			tabIndex={isCompact ? undefined : -1}
+			aria-label={isCompact ? undefined : "Transcript"}
 			onScroll={() => {
 				const el = rootRef.current;
 				if (el === null) return;
-				updateTranscriptTailLock(el, lockRef);
+				onScroll();
 				// Back at the bottom: drop the pin so the window trims to the tail again.
 				if (lockRef.current) {
 					if (pinnedStart !== null) setPinnedStart(null);
@@ -384,49 +426,60 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
 			}}
 		>
-			{settled && entries.length === 0 && stream === null && !working && (
-				<div className="tr-empty">no activity yet</div>
-			)}
-			{start > 0 && (
-				<button type="button" className="tr-earlier" onClick={showEarlier}>
-					show {start.toLocaleString("en-US")} earlier
-				</button>
-			)}
-			{visible.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
-			))}
-			{stream !== null && (
-				<Row kind="assistant" gutter="agent">
-					<AssistantBody
-						message={stream}
-						results={results}
-						active={activeTools}
-						pending={!streamDone}
-						host={host}
-					/>
-				</Row>
-			)}
-			{tailTools.length > 0 && (
-				<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
-					{tailTools.map(tool => (
-						<ToolCard
-							key={tool.toolCallId}
-							toolCallId={tool.toolCallId}
-							name={tool.toolName}
-							intent={tool.intent}
-							args={tool.args}
-							running
-							partialResult={tool.partialResult}
+			<div ref={contentRef} className="tr-content">
+				{settled && entries.length === 0 && stream === null && !working && (
+					<div className="tr-empty">no activity yet</div>
+				)}
+				{start > 0 && (
+					<button type="button" className="tr-earlier" onClick={showEarlier}>
+						show {start.toLocaleString("en-US")} earlier
+					</button>
+				)}
+				{visible.map(entry => (
+					<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
+				))}
+				{stream !== null && (
+					<Row kind="assistant" gutter="agent">
+						<AssistantBody
+							message={stream}
+							results={results}
+							active={activeTools}
+							pending={!streamDone}
 							host={host}
 						/>
-					))}
-				</Row>
-			)}
-			{working && stream === null && activeTools.size === 0 && (
-				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
-				</Row>
-			)}
+					</Row>
+				)}
+				{tailTools.length > 0 && (
+					<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
+						{tailTools.map(tool => (
+							<ToolCard
+								key={tool.toolCallId}
+								toolCallId={tool.toolCallId}
+								name={tool.toolName}
+								intent={tool.intent}
+								args={tool.args}
+								running
+								partialResult={tool.partialResult}
+								host={host}
+							/>
+						))}
+					</Row>
+				)}
+				{working && stream === null && activeTools.size === 0 && (
+					<Row kind="assistant" gutter="agent">
+						<div className="tr-shimmer">thinking…</div>
+					</Row>
+				)}
+			</div>
+		</div>
+	);
+
+	if (isCompact) return scroller;
+
+	return (
+		<div className="tr-shell">
+			{scroller}
+			<JumpPill visible={showJump} onJump={jumpToBottom} />
 		</div>
 	);
 }
