@@ -834,6 +834,47 @@ describe("AuthStorage codex oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-preferred", "api-acct-other");
 	});
 
+	test("re-routes automatic session pins after a live priority edit", async () => {
+		if (!store) throw new Error("test setup failed");
+		const policies = (first: number, second: number) => ({
+			accountPolicies: [
+				{ provider: "openai-codex", account: { accountId: "acct-first" }, priority: first },
+				{ provider: "openai-codex", account: { accountId: "acct-second" }, priority: second },
+			],
+			defaultReservePct: 10,
+		});
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			...policies(10, 1),
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-first", "first@example.com") },
+			{ type: "oauth", ...createCredential("acct-second", "second@example.com") },
+		]);
+		for (const accountId of ["acct-first", "acct-second"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+				}),
+			);
+		}
+		const first = authStorage.oauth.accounts("openai-codex").find(account => account.accountId === "acct-first");
+		if (!first) throw new Error("expected first account");
+		expect(await authStorage.keys.get("openai-codex", "priority-edit-auto")).toBe("api-acct-first");
+		expect(authStorage.sessions.pin("openai-codex", "priority-edit-explicit", first.credentialId)).toBe(true);
+
+		authStorage.setAccountPolicies(policies(1, 10));
+		expect(await authStorage.keys.get("openai-codex", "priority-edit-auto")).toBe("api-acct-second");
+		expect(await authStorage.keys.get("openai-codex", "priority-edit-explicit")).toBe("api-acct-first");
+
+		// An edit that leaves no strictly higher tier keeps the warm pin.
+		authStorage.setAccountPolicies(policies(5, 5));
+		expect(await authStorage.keys.get("openai-codex", "priority-edit-auto")).toBe("api-acct-second");
+	});
+
 	test("reports reserve health for usage-capable OAuth without a ranking strategy", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {

@@ -5,6 +5,7 @@
 ### Changed
 
 - Accounts that share the same `auth.accountPolicies` priority now rotate requests between them instead of always preferring the first stored account
+- Changing `auth.accountPolicies` priorities mid-session now moves running sessions to an available higher-priority account on their next request; explicit `/session pin` choices and same-priority pins stay put
 
 ## [18.4.1] - 2026-09-28
 

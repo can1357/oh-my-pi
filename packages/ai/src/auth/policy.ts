@@ -1,4 +1,5 @@
 import * as AIError from "../error";
+import type { StoredCredential } from "./pool";
 import type {
 	AuthAccountPolicies,
 	AuthAccountPolicy,
@@ -158,5 +159,18 @@ export class AccountPolicies {
 	/** Return the configured policy for a stored OAuth credential. */
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
+	}
+
+	/**
+	 * Hash of the priority each stored account resolves to, keyed by durable row id.
+	 * Session pins record it so a later priority edit is detectable as a change.
+	 */
+	priorityFingerprint(provider: string, entries: readonly StoredCredential[]): number {
+		const assigned: string[] = [];
+		for (const { id, credential } of entries) {
+			const priority = this.forCredential(provider, credential)?.priority;
+			if (priority !== undefined) assigned.push(`${id}:${priority}`);
+		}
+		return Bun.hash.xxHash32(assigned.sort().join(";"));
 	}
 }

@@ -596,10 +596,29 @@ export class CredentialSelector {
 			sessionPreferredCanRefreshOrUse &&
 			!this.#deps.blocks.isBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
 		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
+		// A priority edit since the automatic pin was recorded re-ranks once: the pin yields
+		// only to an unblocked account in a strictly higher priority tier. Same-tier pins stay,
+		// and the next successful resolve records the current fingerprint.
+		const priorityOf = (credential: OAuthCredential): number =>
+			this.#deps.policies.forCredential(provider, credential)?.priority ?? 0;
+		const sessionPinPolicyFingerprint =
+			sessionCredential?.type === "oauth" ? sessionCredential.policyFingerprint : undefined;
+		const priorityEvictsPin =
+			!sessionPinIsExplicit &&
+			sessionPreferredCredential !== undefined &&
+			sessionPinPolicyFingerprint !== undefined &&
+			sessionPinPolicyFingerprint !==
+				this.#deps.policies.priorityFingerprint(provider, this.#deps.pool.entries(provider)) &&
+			credentials.some(
+				({ credential, index }) =>
+					priorityOf(credential) > priorityOf(sessionPreferredCredential) &&
+					!this.#deps.blocks.isBlocked(provider, providerKey, index, blockScopes),
+			);
 		const shouldRank =
 			checkUsage &&
 			(!sessionPreferredIsAvailable ||
 				!sessionPreferredIsWarm ||
+				priorityEvictsPin ||
 				hasPlanRequirement ||
 				(policyReserveEnabled && !sessionPinIsExplicit));
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
@@ -671,6 +690,7 @@ export class CredentialSelector {
 		// to evict it, and only while a sibling is confirmed outside reserve.
 		if (
 			!hasPlanRequirement &&
+			!priorityEvictsPin &&
 			sessionPreferredCandidate > 0 &&
 			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !reserveWouldEvictBeforePreflight))
 		) {
@@ -803,6 +823,7 @@ export class CredentialSelector {
 			!preflightFailures.has(preferredCandidate) &&
 			sessionPreferredIsWarm &&
 			!sessionPinIsExplicit &&
+			!priorityEvictsPin &&
 			!reserveWouldEvictAfterPreflight
 		) {
 			const preferredIndex = candidates.indexOf(preferredCandidate);
@@ -825,7 +846,12 @@ export class CredentialSelector {
 		// unenforced and the pin is not known-ineligible) so an active session never
 		// silently migrates accounts mid-conversation; blocked, exhausted, or
 		// known-ineligible pins still fall through to the ranked sibling.
-		if (hasPlanRequirement && sessionPreferredCandidate > 0 && !reserveWouldEvictAfterPreflight) {
+		if (
+			hasPlanRequirement &&
+			sessionPreferredCandidate > 0 &&
+			!priorityEvictsPin &&
+			!reserveWouldEvictAfterPreflight
+		) {
 			const preferred = candidates[sessionPreferredCandidate]!;
 			const planEligibility = planGate?.(preferred.usage);
 			if (planEligibility === true || (!enforcePlanRequirement && planEligibility !== false)) {
@@ -1049,7 +1075,15 @@ export class CredentialSelector {
 				}
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
-			this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+			this.#deps.affinity.record(
+				provider,
+				sessionId,
+				"oauth",
+				selection.index,
+				undefined,
+				false,
+				this.#deps.policies.priorityFingerprint(provider, this.#deps.pool.entries(provider)),
+			);
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);

@@ -16,6 +16,11 @@ export type SessionCredential = {
 	lastUsedAtMs?: number;
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
+	/**
+	 * `AccountPolicies.priorityFingerprint` when this pin was last selected; a mismatch
+	 * lets a priority edit re-rank an automatic pin. Absent on restored/legacy pins.
+	 */
+	policyFingerprint?: number;
 };
 
 /** Session → credential affinity (pins), persisted in the store cache. */
@@ -60,6 +65,7 @@ export class SessionAffinity implements SessionsApi {
 		index: number,
 		lastUsedAtMs?: number,
 		explicit = false,
+		policyFingerprint?: number,
 	): void {
 		if (!sessionId) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
@@ -76,6 +82,7 @@ export class SessionAffinity implements SessionsApi {
 			credentialId,
 			lastUsedAtMs: nowMs,
 			...(isExplicit ? { explicit: true as const } : {}),
+			...(policyFingerprint !== undefined ? { policyFingerprint } : {}),
 		};
 		sessionMap.set(sessionId, sessionCredential);
 		this.#sessionLastCredential.set(provider, sessionMap);
@@ -142,6 +149,7 @@ export class SessionAffinity implements SessionsApi {
 					credentialId: val.credentialId,
 					lastUsedAtMs: val.lastUsedAtMs,
 					...(val.explicit === true ? { explicit: true } : {}),
+					...(typeof val.policyFingerprint === "number" ? { policyFingerprint: val.policyFingerprint } : {}),
 				};
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
@@ -247,6 +255,7 @@ export class SessionAffinity implements SessionsApi {
 				credential.index,
 				credential.lastUsedAtMs,
 				credential.explicit === true,
+				credential.policyFingerprint,
 			);
 			inherited += 1;
 		}
