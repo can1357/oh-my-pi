@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
-	applySessionParseResult,
+	applySessionParseResults,
 	completeSessionSync,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
@@ -29,6 +29,7 @@ import {
 	getToolTimeSeries,
 	initDb,
 	markSessionBackfillsComplete,
+	type ParsedSession,
 	prepareSessionSync,
 } from "./db";
 import {
@@ -57,6 +58,9 @@ import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
 
 const STATS_SYNC_LOCK_RETRY_MS = 25;
 const STATS_SYNC_LOCK_WAIT_MS = 60 * 60 * 1000;
+// Bound queued results by both file count and derived rows; never hold a SQLite transaction across I/O.
+const SYNC_BATCH_FILES = 64;
+const SYNC_BATCH_ROWS = 4096;
 
 /**
  * Serialize stats ingestion and archive reconciliation across processes.
@@ -77,7 +81,7 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
  * Progress event emitted after each session file is fully processed.
  * `current` is the number of files completed (skipped + parsed),
  * `total` is the size of the work set. `processed` is the running total
- * of inserted rows.
+ * of inserted rows. Parsed files are reported only after their batch commits.
  */
 export interface SyncProgress {
 	current: number;
@@ -224,7 +228,8 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  *
  * `workers: 1` parses inline. Larger pools fan parsing out across workers
  * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
- * the calling thread so the single SQLite handle stays uncontended.
+ * the calling thread. Bounded batches commit rows and cursors atomically without
+ * holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
  * bar walks at a steady rate).
  */
@@ -253,12 +258,9 @@ async function syncAllSessionsLocked(
 	let completed = 0;
 	let cursor = 0;
 	let reconcile = false;
-	const finish = () => {
-		completeSessionSync(reconcile);
-		markSessionBackfillsComplete();
-		return { processed: totalProcessed, files: filesProcessed, reconcile };
-	};
-	if (files.length === 0) return finish();
+	let pending: ParsedSession[] = [];
+	let pendingRows = 0;
+	let failed = false;
 
 	const report = (sessionFile: string) => {
 		completed++;
@@ -269,6 +271,27 @@ async function syncAllSessionsLocked(
 			sessionFile,
 		});
 	};
+
+	const flush = () => {
+		if (pending.length === 0) return;
+		const batch = pending;
+		const applied = applySessionParseResults(batch);
+		pending = [];
+		pendingRows = 0;
+		totalProcessed += applied.processed;
+		filesProcessed += applied.files;
+		reconcile ||= applied.reconcile;
+		// Report only durable progress: callbacks may interrupt the sync.
+		for (const { sessionFile } of batch) report(sessionFile);
+	};
+
+	const finish = () => {
+		flush();
+		completeSessionSync(reconcile);
+		markSessionBackfillsComplete();
+		return { processed: totalProcessed, files: filesProcessed, reconcile };
+	};
+	if (files.length === 0) return finish();
 
 	const processFile = async (
 		sessionFile: string,
@@ -283,9 +306,10 @@ async function syncAllSessionsLocked(
 		try {
 			fileStats = await fs.promises.stat(sessionFile);
 		} catch {
-			report(sessionFile);
+			if (!failed) report(sessionFile);
 			return;
 		}
+		if (failed) return;
 		const lastModified = fileStats.mtimeMs;
 		const stored = getFileOffset(sessionFile);
 		if (
@@ -302,15 +326,16 @@ async function syncAllSessionsLocked(
 		const unknownIdentity = stored !== null && !stored.parserState;
 		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
 		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+		if (failed) return;
 		if (unknownIdentity && result.parserState) result.reset = true;
-		const applied = applySessionParseResult(sessionFile, result, replay || !stored?.parserState);
-		const inserted = applied.processed;
-		if (applied.reconcile) reconcile = true;
-		if (inserted > 0) {
-			totalProcessed += inserted;
-			filesProcessed++;
-		}
-		report(sessionFile);
+		pending.push({ sessionFile, result, rebuild: replay || !stored?.parserState });
+		pendingRows +=
+			result.stats.length +
+			result.userStats.length +
+			result.userLinks.length +
+			result.toolCalls.length +
+			result.toolResults.length;
+		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
@@ -324,21 +349,30 @@ async function syncAllSessionsLocked(
 	const poolSize = Math.min(files.length, requestedWorkers);
 
 	const handles: WorkerHandle[] = [];
-	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
 	async function drain(handle: WorkerHandle): Promise<void> {
-		while (true) {
-			const idx = cursor++;
-			if (idx >= files.length) return;
-			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset, parserState, replay) =>
-				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
-			);
+		try {
+			while (!failed) {
+				const idx = cursor++;
+				if (idx >= files.length) return;
+				const sessionFile = files[idx];
+				await processFile(sessionFile, (file, fromOffset, parserState, replay) =>
+					dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
+				);
+			}
+		} catch (error) {
+			failed = true;
+			throw error;
 		}
 	}
 
 	try {
-		await Promise.all(handles.map(drain));
+		for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
+		// Drain in-flight work before releasing the sync lock, even after a failed batch.
+		const results = await Promise.allSettled(handles.map(drain));
+		for (const result of results) {
+			if (result.status === "rejected") throw result.reason;
+		}
 	} finally {
 		for (const handle of handles) handle.worker.terminate();
 	}
