@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed Gemini and Antigravity responses reporting negative input tokens and negative cost when upstream omitted `promptTokenCount` or reported more cached tokens than the prompt
+- Fixed a 401 on a stored credential giving up after one sibling switch, so a valid stored API key or account was never tried when two or more stale siblings existed; 401s now rotate through every distinct sibling ([#13555](https://github.com/can1357/oh-my-pi/issues/13555))
 - Fixed native judge responses without token counts producing non-finite usage and cost ([#13490](https://github.com/can1357/oh-my-pi/issues/13490)).
 - Fixed credential rotation failing with a drained account's multi-hour quota error when a healthy sibling was blocked for only a few seconds (such as a Cloud Code Assist capacity 429); rotation now waits out sibling blocks of up to 5 seconds, abortable via `signal`, and retries the freed credential ([#13270](https://github.com/can1357/oh-my-pi/issues/13270))
 - Fixed Cursor turn usage and cost reporting only streamed output tokens; turns now use Cursor's final input, cache-read, cache-write, and reasoning counters ([#13082](https://github.com/can1357/oh-my-pi/issues/13082))

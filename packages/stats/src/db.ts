@@ -606,7 +606,7 @@ export function getFileOffset(
 ): { offset: number; lastModified: number; parserState?: SessionParserState } | null {
 	if (!db) return null;
 
-	const stmt = db.prepare("SELECT offset, last_modified, parser_state FROM file_offsets WHERE session_file = ?");
+	const stmt = db.query("SELECT offset, last_modified, parser_state FROM file_offsets WHERE session_file = ?");
 	const row = stmt.get(sessionFile) as
 		| { offset: number; last_modified: number; parser_state: string | null }
 		| undefined;
@@ -634,62 +634,85 @@ export function setFileOffset(
 ): void {
 	if (!db) return;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified, parser_state)
 		VALUES (?, ?, ?, ?)
 	`);
 	stmt.run(sessionFile, offset, lastModified, parserState ? JSON.stringify(parserState) : null);
 }
 
-export function applySessionParseResult(
-	sessionFile: string,
-	result: ParseSessionResult,
-	rebuild = false,
-): { processed: number; reconcile: boolean } {
-	const parserState = result.parserState;
-	if (!db || !parserState) return { processed: 0, reconcile: false };
+/** Parsed transcript queued by the sync loop for an atomic database batch. */
+export interface ParsedSession {
+	sessionFile: string;
+	result: ParseSessionResult;
+	rebuild: boolean;
+}
+
+/** Commit derived rows, reconciliation state, and cursors together; a failed batch rolls back in full. */
+export function applySessionParseResults(sessions: ParsedSession[]): {
+	processed: number;
+	files: number;
+	reconcile: boolean;
+} {
+	if (!db) return { processed: 0, files: 0, reconcile: false };
 	const database = db;
 	return database.transaction(() => {
-		let reconcile = result.reset ?? false;
-		if (result.reset || rebuild) {
-			const retainedMessages = new Set(result.stats.map(row => JSON.stringify([row.entryId, row.timestamp])));
-			const retainedUsers = new Set(result.userStats.map(row => JSON.stringify([row.entryId, row.timestamp])));
-			const retainedTools = new Set(
-				result.toolCalls.map(row => JSON.stringify([row.entryId, row.timestamp, row.toolCallId])),
-			);
-			const messages = database
-				.prepare("SELECT entry_id, timestamp FROM messages WHERE session_file = ?")
-				.all(sessionFile) as {
-				entry_id: string;
-				timestamp: number;
-			}[];
-			const users = database
-				.prepare("SELECT entry_id, timestamp FROM user_messages WHERE session_file = ?")
-				.all(sessionFile) as { entry_id: string; timestamp: number }[];
-			const tools = database
-				.prepare("SELECT entry_id, timestamp, tool_call_id FROM tool_calls WHERE session_file = ?")
-				.all(sessionFile) as { entry_id: string; timestamp: number; tool_call_id: string }[];
-			// A removed owner may have surviving fork copies skipped earlier in this pass.
-			reconcile ||=
-				messages.some(row => !retainedMessages.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
-				users.some(row => !retainedUsers.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
-				tools.some(row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])));
-			database.prepare("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
-			database.prepare("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
-			database.prepare("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
+		let processed = 0;
+		let files = 0;
+		let reconcile = false;
+		for (const { sessionFile, result, rebuild } of sessions) {
+			const parserState = result.parserState;
+			if (!parserState) continue;
+			reconcile ||= result.reset ?? false;
+			if (result.reset || rebuild) {
+				const messages = database
+					.query<{ entry_id: string; timestamp: number }, [string]>(
+						"SELECT entry_id, timestamp FROM messages WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				const users = database
+					.query<{ entry_id: string; timestamp: number }, [string]>(
+						"SELECT entry_id, timestamp FROM user_messages WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				const tools = database
+					.query<{ entry_id: string; timestamp: number; tool_call_id: string }, [string]>(
+						"SELECT entry_id, timestamp, tool_call_id FROM tool_calls WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				// Only replacements can remove a dedupe owner; fresh files need no retained-row sets.
+				if (!reconcile && (messages.length > 0 || users.length > 0 || tools.length > 0)) {
+					const retainedMessages = new Set(result.stats.map(row => JSON.stringify([row.entryId, row.timestamp])));
+					const retainedUsers = new Set(result.userStats.map(row => JSON.stringify([row.entryId, row.timestamp])));
+					const retainedTools = new Set(
+						result.toolCalls.map(row => JSON.stringify([row.entryId, row.timestamp, row.toolCallId])),
+					);
+					// A removed owner may have surviving fork copies skipped earlier in this pass.
+					reconcile =
+						messages.some(row => !retainedMessages.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+						users.some(row => !retainedUsers.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+						tools.some(
+							row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])),
+						);
+				}
+				if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
+				if (users.length > 0) database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
+				if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
+			}
+			if (result.stats.length > 0) insertMessageStats(result.stats);
+			if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
+			if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
+			if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+			if (result.toolResults.length > 0) updateToolResults(result.toolResults);
+			setFileOffset(sessionFile, result.newOffset, parserState.mtimeMs, parserState);
+			const count = result.stats.length + result.userStats.length;
+			processed += count;
+			if (count > 0) files++;
 		}
 		if (reconcile) {
-			database
-				.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')")
-				.run();
+			database.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')").run();
 		}
-		if (result.stats.length > 0) insertMessageStats(result.stats);
-		if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
-		if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
-		if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-		if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-		setFileOffset(sessionFile, result.newOffset, parserState.mtimeMs, parserState);
-		return { processed: result.stats.length + result.userStats.length, reconcile };
+		return { processed, files, reconcile };
 	})();
 }
 
@@ -720,7 +743,7 @@ export function completeSessionSync(reconcile: boolean): void {
 export function insertMessageStats(stats: MessageStatsInput[]): number {
 	if (!db || stats.length === 0) return 0;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		INSERT INTO messages (
 			session_file, entry_id, folder, model, provider, api, timestamp,
 			duration, ttft, stop_reason, error_message,
@@ -1731,7 +1754,7 @@ export function markSessionBackfillsComplete(): void {
 export function insertUserMessageStats(stats: UserMessageStats[]): number {
 	if (!db || stats.length === 0) return 0;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		INSERT OR IGNORE INTO user_messages (
 			session_file, entry_id, folder, timestamp, model, provider,
 			chars, words, yelling, profanity, anguish,
@@ -1787,7 +1810,7 @@ export function insertUserMessageStats(stats: UserMessageStats[]): number {
 export function updateUserMessageLinks(links: UserMessageLink[]): number {
 	if (!db || links.length === 0) return 0;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		UPDATE user_messages
 		   SET model = ?, provider = ?
 		 WHERE session_file = ? AND entry_id = ? AND model IS NULL
@@ -1993,7 +2016,7 @@ export function getBehaviorByModel(cutoff?: number | null): BehaviorModelStats[]
 export function insertToolCalls(calls: ToolCallStats[]): number {
 	if (!db || calls.length === 0) return 0;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		INSERT OR IGNORE INTO tool_calls (
 			session_file, entry_id, tool_call_id, folder, tool_name,
 			model, provider, timestamp, agent_type, calls_in_turn, args_chars
@@ -2044,7 +2067,7 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
 export function updateToolResults(links: ToolResultLink[]): number {
 	if (!db || links.length === 0) return 0;
 
-	const stmt = db.prepare(`
+	const stmt = db.query(`
 		UPDATE tool_calls
 		SET result_chars = ?, is_error = ?
 		WHERE session_file = ? AND tool_call_id = ? AND result_chars IS NULL
