@@ -165,6 +165,9 @@
 - Fixed multiline pastes splitting into separate submissions after a terminal drops bracketed-paste mode, and text typed right after Enter being erased by the post-submit clear ([#13440](https://github.com/can1357/oh-my-pi/pull/13440) by [@Dante-dan](https://github.com/Dante-dan)).
 - Fixed subagents never compacting when the parent sets `compaction.midTurnEnabled: false`; a subagent's run is a single turn, so subagents keep mid-run compaction on unless a spawn overrides it ([#13212](https://github.com/can1357/oh-my-pi/pull/13212)).
 - Fixed the exit resume hint so the `omp --resume <id>` command prints on its own line, letting triple-click select just the command ([#12748](https://github.com/can1357/oh-my-pi/pull/12748) by [@F0Rextasy](https://github.com/F0Rextasy)).
+### Fixed
+
+- Clarified agent guidance for waits interrupted by background completions: account for the completion notice, then retry only if still blocked on results that will not be pushed ([#9373](https://github.com/can1357/oh-my-pi/pull/9373) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.4.0] - 2026-09-28
 

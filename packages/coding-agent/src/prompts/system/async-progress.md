@@ -15,4 +15,5 @@ Waiting on a condition? One sleeping async `until` loop; AVOID repeated tool pol
 Progress: 200 ms batches, 10-event burst, then 1 permit/2 s per source; suppressed events stay in the full artifact. Truncated batches show bounded `<head>`/`<tail>` and link `artifact://<id>`. Wake-ups share one session budget; ambient adds no progress-triggered model turns.
 {{chattyGuidance}}
 Wake progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling `proc://`, no `wait` for wake progress, no tailing files; end the turn. Ending a turn to await a wake is NOT a yield.
+`Skipped due to a queued background completion` means the interrupted tool did NOT finish (it may not have started). Handle the completion notice; NEVER count the skip or another job's result as the skipped work or its verification. Still blocked on results that will not be pushed? Retry the skipped `wait`. Otherwise continue useful work, or end the turn for a pending wake; NEVER `wait` for a completion already delivered.
 </async-progress>
