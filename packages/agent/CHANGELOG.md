@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed auto-compaction with the `remote` method failing on long Codex/OpenAI sessions with "Remote compaction input exceeds the context window" ([#13611](https://github.com/can1357/oh-my-pi/issues/13611))
+- Fixed code the agent had already read disappearing from context when a later read of the same file returned only a summary, a truncated page, or an error ([#13642](https://github.com/can1357/oh-my-pi/pull/13642) by [@poweroftrue](https://github.com/poweroftrue))
 
 ## [18.4.2] - 2026-09-28
 
