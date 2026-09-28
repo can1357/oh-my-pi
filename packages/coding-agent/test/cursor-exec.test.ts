@@ -1449,6 +1449,7 @@ function newBlockState(): BlockState {
 		firstTokenTime: undefined,
 		openToolCalls: new Map<string, ToolCallState>(),
 		resolvedMcpToolCallIds: new Set<string>(),
+		execDedupeMap: new Map(),
 		setTextBlock: b => {
 			textBlock = b;
 		},

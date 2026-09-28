@@ -938,6 +938,11 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			["responses", responsesClose],
 			["Codex responses", codexClose],
 			["Cursor", cursorClose],
+			["Cursor keepalive PING timeout", "Cursor HTTP/2 keepalive PING timed out"],
+			[
+				"Cursor GOAWAY",
+				"Cursor HTTP/2 GOAWAY received (code NGHTTP2_ENHANCE_YOUR_CALM / 11, lastStreamID 0, streamId 1)",
+			],
 		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],

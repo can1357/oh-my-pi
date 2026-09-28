@@ -3,10 +3,18 @@ import http2 from "node:http2";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
+	AgentRunRequest,
 	ConversationStep,
 	CursorRule,
+	DeleteResult,
+	DiagnosticsResult,
+	GrepResult,
+	LsResult,
+	McpResult,
 	McpToolDefinition,
+	ReadResult,
 	RequestedModel_ModelParameterbytes,
+	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import {
 	AgentClientMessageSchema,
@@ -186,6 +194,7 @@ import type {
 	CursorToolResultHandler,
 	ImageContent,
 	Message,
+	AssistantMessageEvent,
 	Model,
 	StreamFunction,
 	StreamOptions,
@@ -342,6 +351,24 @@ const rotatedConversationIds = new Map<string, string>();
 const successfulRotatedConversationIds = new Set<string>();
 const freshRotatedConversationIds = new Set<string>();
 
+export interface CursorTransportTunables {
+	keepalivePingIntervalMs: number;
+	keepalivePingTimeoutMs: number;
+	initialBackoffMs: number;
+	maxBackoffMs: number;
+	maxTransportRetries: number;
+	maxNoProgressResumes: number;
+}
+
+export const cursorTransportTunables: CursorTransportTunables = {
+	keepalivePingIntervalMs: 10_000,
+	keepalivePingTimeoutMs: 20_000,
+	initialBackoffMs: 1_000,
+	maxBackoffMs: 8_000,
+	maxTransportRetries: 3,
+	maxNoProgressResumes: 2,
+};
+
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
 	conversationId?: string;
@@ -371,6 +398,7 @@ interface CursorGrpcRequest {
 	requestBytes: Uint8Array;
 	blobStore: Map<string, Uint8Array>;
 	conversationState: ConversationStateStructure;
+	runRequest?: AgentRunRequest;
 }
 
 interface CursorTransportRequest extends CursorGrpcRequest {
@@ -572,6 +600,58 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	const { $typeName: _, ...rest } = record;
 	return rest;
 }
+function getNghttp2ErrorCodeName(code: number): string {
+	switch (code) {
+		case http2.constants.NGHTTP2_NO_ERROR:
+			return "NGHTTP2_NO_ERROR";
+		case http2.constants.NGHTTP2_PROTOCOL_ERROR:
+			return "NGHTTP2_PROTOCOL_ERROR";
+		case http2.constants.NGHTTP2_INTERNAL_ERROR:
+			return "NGHTTP2_INTERNAL_ERROR";
+		case http2.constants.NGHTTP2_FLOW_CONTROL_ERROR:
+			return "NGHTTP2_FLOW_CONTROL_ERROR";
+		case http2.constants.NGHTTP2_SETTINGS_TIMEOUT:
+			return "NGHTTP2_SETTINGS_TIMEOUT";
+		case http2.constants.NGHTTP2_STREAM_CLOSED:
+			return "NGHTTP2_STREAM_CLOSED";
+		case http2.constants.NGHTTP2_FRAME_SIZE_ERROR:
+			return "NGHTTP2_FRAME_SIZE_ERROR";
+		case http2.constants.NGHTTP2_REFUSED_STREAM:
+			return "NGHTTP2_REFUSED_STREAM";
+		case http2.constants.NGHTTP2_CANCEL:
+			return "NGHTTP2_CANCEL";
+		case http2.constants.NGHTTP2_COMPRESSION_ERROR:
+			return "NGHTTP2_COMPRESSION_ERROR";
+		case http2.constants.NGHTTP2_CONNECT_ERROR:
+			return "NGHTTP2_CONNECT_ERROR";
+		case http2.constants.NGHTTP2_ENHANCE_YOUR_CALM:
+			return "NGHTTP2_ENHANCE_YOUR_CALM";
+		case http2.constants.NGHTTP2_INADEQUATE_SECURITY:
+			return "NGHTTP2_INADEQUATE_SECURITY";
+		case http2.constants.NGHTTP2_HTTP_1_1_REQUIRED:
+			return "NGHTTP2_HTTP_1_1_REQUIRED";
+		default:
+			return `NGHTTP2_ERROR_${code}`;
+	}
+}
+
+async function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) {
+		throw new AIError.AbortError();
+	}
+	if (ms <= 0) return;
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const onAbort = () => {
+		clearTimeout(timer);
+		reject(new AIError.AbortError());
+	};
+	const timer = setTimeout(() => {
+		signal?.removeEventListener("abort", onAbort);
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	await promise;
+}
 
 function streamCursorWithWireMode(
 	model: Model<"cursor-agent">,
@@ -604,22 +684,11 @@ function streamCursorWithWireMode(
 			timestamp: timing?.timestamp ?? Date.now(),
 		};
 
-		// Declared outside the `try` because BOTH exits must drain it: an exec
+		// Declared outside the attempt loop because BOTH exits must drain it: an exec
 		// handler decoded from the last chunk can still be running when the
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
-		// A dispatch can spawn another (a handler that decodes a nested frame), so
-		// re-check rather than awaiting one snapshot. Each dispatch already
-		// swallows its own rejection, so this only waits.
-		//
-		// The wait is bounded by the abort signal: exec handlers have no
-		// cancellation contract (the coding-agent bridge invokes `tool.execute`
-		// with no signal), so a hung or long-running tool would otherwise hold
-		// the terminal event hostage after the user already gave up on the turn.
-		// Once aborted, the Agent finalizes from the abort error and discards
-		// late results regardless, so skipping the rest of the drain loses
-		// nothing that could still be delivered.
 		let abortSettled: Promise<void> | undefined;
 		const drainInFlightDispatches = async (): Promise<void> => {
 			const signal = options?.signal;
@@ -637,44 +706,12 @@ function streamCursorWithWireMode(
 			}
 		};
 
-		let h2Client: http2.ClientHttp2Session | null = null;
-		let h2Request: http2.ClientHttp2Stream | null = null;
-		let heartbeatTimer: NodeJS.Timeout | null = null;
-		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
-		const h2Completion = Promise.withResolvers<void>();
-		let h2Settled = false;
-		let sawTurnEnded = false;
-		let endStreamError: Error | null = null;
 		// Blocks the discovered-id retry once the turn produced observable output or
 		// ran a side effect (streamed content/tool call, exec bridge, permission
 		// reply). Pure keepalive heartbeats never set it, so a `not_found` that
 		// arrives after a heartbeat but before any real work still falls back.
 		let sawProgressOrSideEffect = false;
-		// Reachable from the catch: a stream that dies mid-turn must still close
-		// and pair the blocks it left open, and `state` itself is scoped to the
-		// try below.
 		let openBlockState: BlockState | undefined;
-		const settleH2 = (error?: unknown): void => {
-			if (h2Settled) return;
-			h2Settled = true;
-			if (error !== undefined) {
-				h2Completion.reject(error);
-				return;
-			}
-			if (endStreamError) {
-				h2Completion.reject(endStreamError);
-				return;
-			}
-			if (!sawTurnEnded) {
-				h2Completion.reject(
-					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
-						kind: "incomplete-stream",
-					}),
-				);
-				return;
-			}
-			h2Completion.resolve();
-		};
 
 		// Hoisted out of the try block: the #8345 rotation in the catch path
 		// needs both ids, and the catch block cannot see try-scoped consts.
@@ -682,6 +719,30 @@ function streamCursorWithWireMode(
 		let conversationId: string | undefined;
 		let usageState: UsageState | undefined;
 		let serializedFallbackWireModelId: string | undefined;
+
+		// Transport resume is only safe at a checkpoint boundary: once content
+		// reaches the consumer after the latest server checkpoint, resuming from
+		// that checkpoint would stream it a second time. Every content producer
+		// funnels through `stream.push`, so observe it there instead of threading
+		// a flag through each block helper.
+		let contentPushedSinceLastCheckpoint = false;
+		const originalPush = stream.push.bind(stream);
+		stream.push = (event: AssistantMessageEvent) => {
+			if (
+				event.type === "text_start" ||
+				event.type === "text_delta" ||
+				event.type === "thinking_start" ||
+				event.type === "thinking_delta" ||
+				event.type === "toolcall_start" ||
+				event.type === "toolcall_delta"
+			) {
+				contentPushedSinceLastCheckpoint = true;
+			}
+			return originalPush(event);
+		};
+
+		const execDedupeMap = new Map<string, Promise<unknown>>();
+
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -706,9 +767,8 @@ function streamCursorWithWireMode(
 				},
 				wireMode,
 			);
-			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
-			conversationStateCache.set(conversationId, conversationState);
+			conversationStateCache.set(conversationId, builtRequest.conversationState);
 			const requestContextTools = buildMcpToolDefinitions(
 				context.tools,
 				model.requiresCursorToolSchemaProjection === true,
@@ -717,62 +777,10 @@ function streamCursorWithWireMode(
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
-			// Caller headers are additive, and are spread FIRST so the protocol
-			// framing, auth, and request id below always win. Cursor built this map
-			// from scratch and never read `options.headers`, so tracing/attribution
-			// headers set by a caller (or a `before_provider_headers` extension) were
-			// silently dropped here while working on other providers.
-			//
-			// Two classes are stripped because node's http2 client THROWS on them
-			// rather than ignoring them, which would turn a harmless header into a
-			// dead request: pseudo-headers, which belong to the transport, and the
-			// HTTP/1 connection-specific headers HTTP/2 forbids outright
-			// (ERR_HTTP2_INVALID_CONNECTION_HEADERS). `te` needs no filtering here —
-			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
-			// set below re-applies over anything a caller sent.
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
-			const requestHeaders = {
-				...callerHeaders,
-				":method": "POST",
-				":path": requestPath,
-				"content-type": "application/connect+proto",
-				"connect-protocol-version": "1",
-				te: "trailers",
-				authorization: `Bearer ${apiKey}`,
-				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
-				"x-cursor-client-type": "cli",
-				"x-request-id": crypto.randomUUID(),
-			};
-			const debugSession = isRequestDebugEnabled()
-				? await createRequestDebugSession({
-						protocol: "http2",
-						method: "POST",
-						url: new URL(requestPath, baseUrl).toString(),
-						headers: requestHeaders,
-						bodyBase64: Buffer.from(requestBytes).toString("base64"),
-					})
-				: undefined;
 
-			const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
-			if (proxyUrl) {
-				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: options?.signal,
-					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
-				});
-				h2Client = http2.connect(baseUrl, {
-					createConnection: () => tlsSocket,
-				});
-			} else {
-				h2Client = http2.connect(baseUrl);
-			}
-			h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+			const originalRequestId = crypto.randomUUID();
 
-			h2Request = h2Client.request(requestHeaders);
-
-			stream.push({ type: "start", partial: output });
-
-			let pendingBuffer: Buffer = Buffer.alloc(0);
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentToolCall: ToolCallState | null = null;
@@ -791,6 +799,7 @@ function streamCursorWithWireMode(
 				},
 				openToolCalls: new Map<string, ToolCallState>(),
 				resolvedMcpToolCallIds,
+				execDedupeMap,
 				get firstTokenTime() {
 					return firstTokenTime;
 				},
@@ -811,166 +820,471 @@ function streamCursorWithWireMode(
 			};
 			openBlockState = state;
 
-			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
-				conversationStateCache.set(conversationId!, checkpoint);
-			};
+			let latestCheckpoint: ConversationStateStructure | undefined;
+			let consecutiveNoCheckpointResumes = 0;
+			let retryCount = 0;
+			let attemptMode: "initial" | "resend" | "resume" = "initial";
 
-			h2Request.on("response", headers => {
-				debugResponseLogPromise = debugSession?.openResponseLog(
-					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
-					headers,
-				);
-			});
+			stream.push({ type: "start", partial: output });
 
-			h2Request.on("data", (chunk: Buffer) => {
-				if (debugResponseLogPromise) {
-					void debugResponseLogPromise.then(log => {
-						log?.write(chunk);
-					});
-				}
-				// Steady state drains fully per chunk; alias the fresh h2 chunk instead
-				// of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
+			while (true) {
+				let h2Client: http2.ClientHttp2Session | null = null;
+				let h2Request: http2.ClientHttp2Stream | null = null;
+				let heartbeatTimer: NodeJS.Timeout | null = null;
+				let keepalivePingTimer: NodeJS.Timeout | null = null;
+				let keepaliveAckTimer: NodeJS.Timeout | null = null;
+				let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
+				const h2Completion = Promise.withResolvers<void>();
+				let h2Settled = false;
+				let sawTurnEnded = false;
+				let endStreamError: Error | null = null;
+				let checkpointReceivedThisAttempt = false;
 
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
-					if (flags & CONNECT_END_STREAM_FLAG) {
-						const endError = parseConnectEndStream(messageBytes);
-						if (endError) {
-							endStreamError = endError;
-							h2Request?.close();
-						}
-						continue;
+				const clearKeepaliveTimers = () => {
+					if (keepalivePingTimer) {
+						clearInterval(keepalivePingTimer);
+						keepalivePingTimer = null;
 					}
+					if (keepaliveAckTimer) {
+						clearTimeout(keepaliveAckTimer);
+						keepaliveAckTimer = null;
+					}
+				};
 
+				// The bidi request's writable side is never ended, so every attempt
+				// exit must close the stream and session explicitly or the HTTP/2
+				// connection outlives the turn.
+				const closeTransport = (): void => {
 					try {
-						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
-						const interaction =
-							serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
-						const interactionCase = interaction?.message?.case;
-						// A heartbeat is a pure keepalive `processInteractionUpdate` ignores;
-						// every other frame is progress or a side effect that must block the
-						// discovered-id retry.
-						if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
-						const isTurnEnded = interactionCase === "turnEnded";
-						// Dispatch is fire-and-forget so the socket keeps draining while a
-						// handler runs, but the promise is tracked: `done` must not be
-						// pushed while an exec handler is still resolving, or the Agent
-						// drains its Cursor result buffer before the handler reserved its
-						// entry and the call is left unpaired. Awaited after
-						// `h2Completion` below.
-						const dispatch = handleServerMessage(
-							serverMessage,
-							output,
-							stream,
-							state,
-							blobStore,
-							h2Request!,
-							options?.execHandlers,
-							options?.onToolResult,
-							usageState!,
-							requestContextTools,
-							requestContextRules,
-							onConversationCheckpoint,
-							options?.externalToolExecutor,
-						).catch(error => {
-							log("error", "handleServerMessage", { error: String(error) });
-						});
-						inFlightDispatches.add(dispatch);
-						void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+						h2Request?.close();
+					} catch {}
+					try {
+						h2Client?.close();
+					} catch {}
+				};
 
-						// Application completion is not protocol success; wait for a clean HTTP/2 end.
-						if (isTurnEnded) {
-							sawTurnEnded = true;
-						}
-					} catch (e) {
-						log("error", "parseServerMessage", { error: String(e) });
+				const closeDebugLog = async (): Promise<void> => {
+					const log = await debugResponseLogPromise;
+					await log?.close();
+				};
+
+				const settleH2 = (error?: unknown): void => {
+					if (h2Settled) return;
+					h2Settled = true;
+					clearKeepaliveTimers();
+					if (heartbeatTimer) {
+						clearInterval(heartbeatTimer);
+						heartbeatTimer = null;
 					}
-				}
-			});
+					if (error !== undefined) {
+						h2Completion.reject(error);
+						return;
+					}
+					if (endStreamError) {
+						h2Completion.reject(endStreamError);
+						return;
+					}
+					if (!sawTurnEnded) {
+						h2Completion.reject(
+							new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
+								kind: "incomplete-stream",
+							}),
+						);
+						return;
+					}
+					h2Completion.resolve();
+				};
 
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
-					return;
-				}
-				const heartbeatMessage = create(AgentClientMessageSchema, {
-					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
-				});
-				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
-			};
-
-			const closeDebugLog = async (): Promise<void> => {
-				const log = await debugResponseLogPromise;
-				await log?.close();
-			};
-
-			h2Request.on("trailers", trailers => {
-				const status = trailers["grpc-status"];
-				const msg = trailers["grpc-message"];
-				if (status && status !== "0" && !endStreamError) {
-					endStreamError = new AIError.ProviderResponseError(
-						`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-						{ kind: "envelope" },
-					);
-				}
-			});
-
-			h2Request.on("end", () => {
-				void closeDebugLog()
-					.then(() => settleH2())
-					.catch(error => settleH2(error));
-			});
-
-			h2Request.on("error", error => {
-				const mapped = mapH2TransportError(error, baseUrl);
-				void closeDebugLog().finally(() => settleH2(mapped));
-			});
-
-			if (options?.signal) {
-				options.signal.addEventListener("abort", () => {
-					h2Request?.close();
+				const onAbort = () => {
+					try {
+						h2Request?.close();
+					} catch {}
+					try {
+						h2Client?.destroy();
+					} catch {}
 					void closeDebugLog().finally(() => {
 						settleH2(new AIError.AbortError());
 					});
-				});
+				};
+
+				if (options?.signal?.aborted) {
+					throw new AIError.AbortError();
+				}
+				options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+				try {
+					const attemptRequestId = retryCount === 0 ? originalRequestId : crypto.randomUUID();
+					const requestHeaders = {
+						...callerHeaders,
+						":method": "POST",
+						":path": requestPath,
+						"content-type": "application/connect+proto",
+						"connect-protocol-version": "1",
+						te: "trailers",
+						authorization: `Bearer ${apiKey}`,
+						"x-ghost-mode": "true",
+						"x-cursor-client-version": CURSOR_CLIENT_VERSION,
+						"x-cursor-client-type": "cli",
+						"x-request-id": attemptRequestId,
+						"x-original-request-id": originalRequestId,
+					};
+
+					let requestBytes: Uint8Array;
+					if (attemptMode === "resume" && latestCheckpoint) {
+						const resumedRunRequest = create(AgentRunRequestSchema, {
+							...(builtRequest.runRequest ?? {
+								modelDetails: create(ModelDetailsSchema, {
+									modelId: resolveCursorWireModel(model, options?.wireModelId, wireMode).modelId,
+									displayModelId: model.id,
+									displayName: model.name,
+								}),
+								conversationId,
+							}),
+							conversationState: latestCheckpoint,
+							action: create(ConversationActionSchema, {
+								action: {
+									case: "resumeAction",
+									value: create(ResumeActionSchema, {}),
+								},
+							}),
+						});
+						const resumedClientMessage = create(AgentClientMessageSchema, {
+							message: { case: "runRequest", value: resumedRunRequest },
+						});
+						requestBytes = toBinary(AgentClientMessageSchema, resumedClientMessage);
+					} else {
+						requestBytes = builtRequest.requestBytes;
+					}
+
+					const debugSession = isRequestDebugEnabled()
+						? await createRequestDebugSession({
+								protocol: "http2",
+								method: "POST",
+								url: new URL(requestPath, baseUrl).toString(),
+								headers: requestHeaders,
+								bodyBase64: Buffer.from(requestBytes).toString("base64"),
+							})
+						: undefined;
+
+					const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
+					if (proxyUrl) {
+						const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
+							signal: options?.signal,
+							timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+						});
+						h2Client = http2.connect(baseUrl, {
+							createConnection: () => tlsSocket,
+						});
+					} else {
+						h2Client = http2.connect(baseUrl);
+					}
+
+					h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+
+					h2Client.on("goaway", (errorCode: number, lastStreamID: number) => {
+						const streamId = h2Request?.id ?? 1;
+						const isGraceful = errorCode === http2.constants.NGHTTP2_NO_ERROR && streamId <= lastStreamID;
+						if (isGraceful) {
+							logger.debug("Cursor HTTP/2 received graceful GOAWAY", {
+								errorCode,
+								lastStreamID,
+								streamId,
+							});
+							return;
+						}
+						const codeName = getNghttp2ErrorCodeName(errorCode);
+						const goawayError = new AIError.ProviderResponseError(
+							`Cursor HTTP/2 GOAWAY received (code ${codeName} / ${errorCode}, lastStreamID ${lastStreamID}, streamId ${streamId})`,
+							{ kind: "incomplete-stream" },
+						);
+						settleH2(goawayError);
+						try {
+							h2Client?.destroy();
+						} catch {}
+					});
+
+					h2Request = h2Client.request(requestHeaders);
+
+					let pendingBuffer: Buffer = Buffer.alloc(0);
+
+					const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
+						latestCheckpoint = checkpoint;
+						contentPushedSinceLastCheckpoint = false;
+						checkpointReceivedThisAttempt = true;
+						conversationStateCache.set(conversationId!, checkpoint);
+					};
+
+					h2Request.on("response", headers => {
+						debugResponseLogPromise = debugSession?.openResponseLog(
+							`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
+							headers,
+						);
+					});
+
+					h2Request.on("data", (chunk: Buffer) => {
+						if (debugResponseLogPromise) {
+							void debugResponseLogPromise.then(log => {
+								log?.write(chunk);
+							});
+						}
+						pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
+
+						while (pendingBuffer.length >= 5) {
+							const flags = pendingBuffer[0];
+							const msgLen = pendingBuffer.readUInt32BE(1);
+							if (pendingBuffer.length < 5 + msgLen) break;
+
+							const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
+							pendingBuffer = pendingBuffer.subarray(5 + msgLen);
+
+							if (flags & CONNECT_END_STREAM_FLAG) {
+								const endError = parseConnectEndStream(messageBytes);
+								if (endError) {
+									endStreamError = endError;
+									h2Request?.close();
+								}
+								continue;
+							}
+
+							try {
+								const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+								const interaction =
+									serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
+								const interactionCase = interaction?.message?.case;
+								if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
+								const isTurnEnded = interactionCase === "turnEnded";
+
+								const dispatch = handleServerMessage(
+									serverMessage,
+									output,
+									stream,
+									state,
+									blobStore,
+									h2Request!,
+									options?.execHandlers,
+									options?.onToolResult,
+									usageState!,
+									requestContextTools,
+									requestContextRules,
+									onConversationCheckpoint,
+									options?.externalToolExecutor,
+								).catch(error => {
+									log("error", "handleServerMessage", { error: String(error) });
+								});
+								inFlightDispatches.add(dispatch);
+								void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+
+								if (isTurnEnded) {
+									sawTurnEnded = true;
+								}
+							} catch (e) {
+								log("error", "parseServerMessage", { error: String(e) });
+							}
+						}
+					});
+
+					const sendHeartbeat = () => {
+						if (!h2Request || h2Request.closed) {
+							return;
+						}
+						const heartbeatMessage = create(AgentClientMessageSchema, {
+							message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
+						});
+						const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+						h2Request.write(frameConnectMessage(heartbeatBytes));
+					};
+
+					h2Request.on("trailers", trailers => {
+						const status = trailers["grpc-status"];
+						const msg = trailers["grpc-message"];
+						if (status && status !== "0" && !endStreamError) {
+							endStreamError = new AIError.ProviderResponseError(
+								`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
+								{ kind: "envelope" },
+							);
+						}
+					});
+
+					h2Request.on("end", () => {
+						void closeDebugLog()
+							.then(() => settleH2())
+							.catch(error => settleH2(error));
+					});
+
+					h2Request.on("error", error => {
+						const mapped = mapH2TransportError(error, baseUrl);
+						void closeDebugLog().finally(() => settleH2(mapped));
+					});
+
+					const pingInterval = cursorTransportTunables.keepalivePingIntervalMs;
+					const pingTimeout = cursorTransportTunables.keepalivePingTimeoutMs;
+
+					const sendPing = () => {
+						if (!h2Client || h2Client.closed || h2Client.destroyed || h2Settled) {
+							clearKeepaliveTimers();
+							return;
+						}
+						if (keepaliveAckTimer) return;
+						keepaliveAckTimer = setTimeout(() => {
+							keepaliveAckTimer = null;
+							if (h2Settled) return;
+							const pingTimeoutError = new AIError.ProviderResponseError(
+								"Cursor HTTP/2 keepalive PING timed out",
+								{ kind: "incomplete-stream" },
+							);
+							settleH2(pingTimeoutError);
+							try {
+								h2Client?.destroy();
+							} catch {}
+						}, pingTimeout);
+
+						try {
+							h2Client.ping(err => {
+								if (keepaliveAckTimer) {
+									clearTimeout(keepaliveAckTimer);
+									keepaliveAckTimer = null;
+								}
+								if (err && !h2Settled) {
+									const pingFailedError = new AIError.ProviderResponseError(
+										`Cursor HTTP/2 keepalive PING failed: ${err.message}`,
+										{ kind: "incomplete-stream" },
+									);
+									settleH2(pingFailedError);
+									try {
+										h2Client?.destroy();
+									} catch {}
+								}
+							});
+						} catch (err) {
+							if (keepaliveAckTimer) {
+								clearTimeout(keepaliveAckTimer);
+								keepaliveAckTimer = null;
+							}
+							if (!h2Settled) {
+								settleH2(
+									new AIError.ProviderResponseError(
+										`Cursor HTTP/2 keepalive PING error: ${err instanceof Error ? err.message : String(err)}`,
+										{ kind: "incomplete-stream" },
+									),
+								);
+							}
+						}
+					};
+
+					h2Request.write(frameConnectMessage(requestBytes));
+					heartbeatTimer = setInterval(sendHeartbeat, 5000);
+					keepalivePingTimer = setInterval(sendPing, pingInterval);
+
+					await h2Completion.promise;
+
+					if (conversationId && baseConversationId && conversationId !== baseConversationId) {
+						successfulRotatedConversationIds.add(conversationId);
+						freshRotatedConversationIds.delete(conversationId);
+					}
+					await drainInFlightDispatches();
+
+					endCurrentTextBlock(output, stream, state);
+					endCurrentThinkingBlock(output, stream, state);
+					flushOpenToolCalls(output, stream, state);
+
+					calculateCost(model, output.usage, output.timestamp);
+
+					output.duration = performance.now() - startTime;
+					if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+					stream.push({
+						type: "done",
+						reason: output.stopReason as "stop" | "length" | "toolUse",
+						message: output,
+					});
+					stream.end();
+					closeTransport();
+					return;
+				} catch (attemptError) {
+					clearKeepaliveTimers();
+					if (heartbeatTimer) {
+						clearInterval(heartbeatTimer);
+						heartbeatTimer = null;
+					}
+					await closeDebugLog();
+					closeTransport();
+
+					const isValidationError = attemptError instanceof AIError.ValidationError;
+					const isCallerAbort = options?.signal?.aborted || attemptError instanceof AIError.AbortError;
+					const isAfterTurnEnded = sawTurnEnded;
+					const isConnectEndStream = endStreamError !== null || attemptError instanceof ConnectEndStreamError;
+					const isGrpcTrailerError =
+						attemptError instanceof Error && attemptError.message.startsWith("gRPC error");
+
+					if (isValidationError || isCallerAbort || isAfterTurnEnded || isConnectEndStream || isGrpcTrailerError) {
+						throw attemptError;
+					}
+
+					const maxRetries = cursorTransportTunables.maxTransportRetries;
+					if (retryCount >= maxRetries) {
+						logger.debug("cursor transport retry limit reached", { retryCount, maxRetries });
+						throw attemptError;
+					}
+
+					if (attemptMode === "resume") {
+						if (!checkpointReceivedThisAttempt) {
+							consecutiveNoCheckpointResumes++;
+						} else {
+							consecutiveNoCheckpointResumes = 0;
+						}
+						const maxNoProgress = cursorTransportTunables.maxNoProgressResumes;
+						if (consecutiveNoCheckpointResumes >= maxNoProgress) {
+							logger.debug(
+								"cursor transport retry aborted: consecutive resumes without checkpoint reached limit",
+								{
+									consecutiveNoCheckpointResumes,
+									maxNoProgress,
+								},
+							);
+							throw attemptError;
+						}
+					}
+
+					const hasOpenBlock =
+						state.currentTextBlock !== null ||
+						state.currentThinkingBlock !== null ||
+						state.currentToolCall !== null ||
+						state.openToolCalls.size > 0;
+					let nextMode: "resend" | "resume";
+					if (!sawProgressOrSideEffect && latestCheckpoint === undefined) {
+						nextMode = "resend";
+					} else if (latestCheckpoint !== undefined && !contentPushedSinceLastCheckpoint && !hasOpenBlock) {
+						nextMode = "resume";
+					} else {
+						logger.debug("cursor transport failure not at clean boundary; deferring to session recovery", {
+							hasLatestCheckpoint: latestCheckpoint !== undefined,
+							contentPushedSinceLastCheckpoint,
+							hasOpenBlock,
+							sawProgressOrSideEffect,
+						});
+						throw attemptError;
+					}
+
+					const baseBackoff = cursorTransportTunables.initialBackoffMs;
+					const maxBackoff = cursorTransportTunables.maxBackoffMs;
+					const delayBase = Math.min(baseBackoff * Math.pow(2, retryCount), maxBackoff);
+					const jitter = delayBase * (Math.random() * 0.2);
+					const delay = delayBase + jitter;
+
+					logger.debug("cursor transport retry", {
+						reason: attemptError instanceof Error ? attemptError.message : String(attemptError),
+						attempt: retryCount + 1,
+						delay,
+						mode: nextMode,
+					});
+
+					retryCount++;
+					attemptMode = nextMode;
+
+					await sleepWithSignal(delay, options?.signal);
+				} finally {
+					options?.signal?.removeEventListener("abort", onAbort);
+				}
 			}
-
-			h2Request.write(frameConnectMessage(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
-			await h2Completion.promise;
-			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
-				successfulRotatedConversationIds.add(conversationId);
-				freshRotatedConversationIds.delete(conversationId);
-			}
-			// The transport is done, but a handler decoded from the last chunk may
-			// still be running: exec handlers and `onToolResult` transformers are
-			// async. Pushing `done` now would let the Agent drain its Cursor result
-			// buffer before such a handler reserves its entry, leaving the call
-			// unpaired and stripped from every rebuilt transcript. Each dispatch
-			// already swallows its own rejection, so this only waits.
-			await drainInFlightDispatches();
-
-			endCurrentTextBlock(output, stream, state);
-			endCurrentThinkingBlock(output, stream, state);
-			flushOpenToolCalls(output, stream, state);
-
-			calculateCost(model, output.usage, output.timestamp);
-
-			output.duration = performance.now() - startTime;
-			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({
-				type: "done",
-				reason: output.stopReason as "stop" | "length" | "toolUse",
-				message: output,
-			});
-			stream.end();
 		} catch (error) {
 			const fallbackWireModelId =
 				wireMode === "normalized" &&
@@ -981,13 +1295,6 @@ function streamCursorWithWireMode(
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
-				if (heartbeatTimer) {
-					clearInterval(heartbeatTimer);
-					heartbeatTimer = null;
-				}
-				h2Request?.close();
-				h2Client?.close();
-
 				const fallbackStream = streamCursorWithWireMode(model, context, options, "discovered", {
 					startTime,
 					timestamp: output.timestamp,
@@ -1073,14 +1380,7 @@ function streamCursorWithWireMode(
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			const log = await debugResponseLogPromise;
-			await log?.close();
-			if (heartbeatTimer) {
-				clearInterval(heartbeatTimer);
-				heartbeatTimer = null;
-			}
-			h2Request?.close();
-			h2Client?.close();
+			stream.push = originalPush;
 		}
 	})();
 
@@ -1128,6 +1428,7 @@ export interface BlockState {
 	editOwnedToolCallIds?: Set<string>;
 	/** Edit blocks whose write already persisted a `toolResult`. */
 	pairedEditToolCallIds?: Set<string>;
+	execDedupeMap: Map<string, Promise<unknown>>;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
@@ -1149,6 +1450,38 @@ function markCursorExecResolved(block: CursorExecResolvedCarrier): void {
 
 export interface UsageState {
 	sawTokenDelta: boolean;
+}
+/**
+ * One exec frame's claim on local execution within a turn. After a transport
+ * resume the server re-issues every exec frame still pending in its checkpoint
+ * under the same toolCallId; a replay awaits the first execution's result
+ * instead of running the side effect again. The exec case is part of the key
+ * because a native edit legitimately sends `readArgs` then `writeArgs` under
+ * one toolCallId.
+ */
+interface ExecClaim<T> {
+	/** Result of the earlier execution of this frame; answer with it and skip the handler. */
+	replay?: Promise<T>;
+	/** Settles the claim for later replays; undefined when the frame cannot be deduplicated. */
+	first?: PromiseWithResolvers<T>;
+}
+
+function claimExec<T>(
+	state: BlockState,
+	execCase: NonNullable<ExecServerMessage["message"]["case"]>,
+	serverToolCallId: string | undefined,
+): ExecClaim<T> {
+	if (!serverToolCallId) return {};
+	const key = `${execCase}\0${serverToolCallId}`;
+	const existing = state.execDedupeMap.get(key);
+	// Same key means same exec case, so the stored result has this frame's type.
+	if (existing !== undefined) return { replay: existing as Promise<T> };
+	const first = Promise.withResolvers<T>();
+	// A failed first execution surfaces through its own dispatch; replays that
+	// await the promise still observe the rejection.
+	first.promise.catch(() => {});
+	state.execDedupeMap.set(key, first.promise);
+	return { first };
 }
 
 /** Exported for tests: drives one Cursor server message through the stream (exec waits mark the stream busy). */
@@ -1347,7 +1680,7 @@ async function handleShellStreamArgs(
 	h2Request: http2.ClientHttp2Stream,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-): Promise<void> {
+): Promise<ShellResult> {
 	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
 	const startTs = performance.now();
@@ -1490,6 +1823,7 @@ async function handleShellStreamArgs(
 	sendExecClientStreamClose(h2Request, execMsg);
 
 	log("shellStream", "done", { elapsed: performance.now() - startTs });
+	return sanitizedExecResult;
 }
 
 function sendShellStreamExitFromResult(
@@ -1653,7 +1987,14 @@ async function handleExecServerMessage(
 	switch (execCase) {
 		case "readArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<ReadResult>(state, "readArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "readResult", res);
+				return;
+			}
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
 			// Cursor numbers raw content itself; StrReplace also writes it back.
 			// Neither frame may receive hashline gutters or summarized bodies.
@@ -1685,88 +2026,120 @@ async function handleExecServerMessage(
 						: { path: piReadDisplayPath(args.path, args.offset, args.limit) },
 				);
 			}
-			const { execResult: readResult, toolResult } = await resolveExecHandler(
-				handlerArgs,
-				execHandlers?.read?.bind(execHandlers),
-				editOwned ? undefined : onToolResult,
-				result =>
-					buildReadResultFromToolResult(
-						args.path,
-						result,
-						args.offset !== undefined || args.limit !== undefined || piReadPathHasRange(args.path),
-					),
-				reason => buildReadRejectedResult(args.path, reason),
-				error => buildReadErrorResult(args.path, error),
-				editOwned ? null : { toolCallId: args.toolCallId, toolName: "read" },
-			);
-			let execResult = readResult;
-			// StrReplace writes the returned bytes back. A truncated raw read would
-			// make every replacement below the read limit invisible to the server.
-			if (
-				editOwned &&
-				args.offset === undefined &&
-				args.limit === undefined &&
-				!piReadPathHasRange(args.path) &&
-				toolResult &&
-				!toolResult.isError &&
-				toolResultWasTruncated(toolResult)
-			) {
-				const details = toolResult.details;
-				const source = details && typeof details === "object" && "meta" in details && details.meta;
-				const path = source && typeof source === "object" && "source" in source && source.source;
+			let execResult: ReadResult;
+			try {
+				const { execResult: readResult, toolResult } = await resolveExecHandler(
+					handlerArgs,
+					execHandlers?.read?.bind(execHandlers),
+					editOwned ? undefined : onToolResult,
+					result =>
+						buildReadResultFromToolResult(
+							args.path,
+							result,
+							args.offset !== undefined || args.limit !== undefined || piReadPathHasRange(args.path),
+						),
+					reason => buildReadRejectedResult(args.path, reason),
+					error => buildReadErrorResult(args.path, error),
+					editOwned ? null : { toolCallId: args.toolCallId, toolName: "read" },
+				);
+				execResult = readResult;
+				// StrReplace writes the returned bytes back. A truncated raw read would
+				// make every replacement below the read limit invisible to the server.
 				if (
-					path &&
-					typeof path === "object" &&
-					"type" in path &&
-					path.type === "path" &&
-					"value" in path &&
-					typeof path.value === "string"
+					editOwned &&
+					args.offset === undefined &&
+					args.limit === undefined &&
+					!piReadPathHasRange(args.path) &&
+					toolResult &&
+					!toolResult.isError &&
+					toolResultWasTruncated(toolResult)
 				) {
-					try {
-						const content = await readEditMaterialization(path.value);
-						execResult =
-							content === null
-								? buildReadErrorResult(
-										args.path,
-										`File exceeds ${EDIT_MATERIALIZATION_MAX_BYTES} bytes; StrReplace cannot load it whole. Use a line-range read and a targeted edit instead.`,
-									)
-								: buildReadResultFromToolResult(args.path, {
-										...toolResult,
-										content: [{ type: "text", text: content }],
-										details: { fileSize: Buffer.byteLength(content, "utf8") },
-									});
-					} catch (error) {
-						execResult = buildReadErrorResult(args.path, error instanceof Error ? error.message : String(error));
+					const details = toolResult.details;
+					const source = details && typeof details === "object" && "meta" in details && details.meta;
+					const path = source && typeof source === "object" && "source" in source && source.source;
+					if (
+						path &&
+						typeof path === "object" &&
+						"type" in path &&
+						path.type === "path" &&
+						"value" in path &&
+						typeof path.value === "string"
+					) {
+						try {
+							const content = await readEditMaterialization(path.value);
+							execResult =
+								content === null
+									? buildReadErrorResult(
+											args.path,
+											`File exceeds ${EDIT_MATERIALIZATION_MAX_BYTES} bytes; StrReplace cannot load it whole. Use a line-range read and a targeted edit instead.`,
+										)
+									: buildReadResultFromToolResult(args.path, {
+											...toolResult,
+											content: [{ type: "text", text: content }],
+											details: { fileSize: Buffer.byteLength(content, "utf8") },
+										});
+						} catch (error) {
+							execResult = buildReadErrorResult(
+								args.path,
+								error instanceof Error ? error.message : String(error),
+							);
+						}
+					} else {
+						execResult = buildReadErrorResult(args.path, "Unable to read the complete file for StrReplace");
 					}
-				} else {
-					execResult = buildReadErrorResult(args.path, "Unable to read the complete file for StrReplace");
 				}
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
 			}
 			sendExecClientMessage(h2Request, execMsg, "readResult", execResult);
 			return;
 		}
 		case "lsArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<LsResult>(state, "lsArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "lsResult", res);
+				return;
+			}
 			// Bridge maps `ls` onto the coding-agent `read` tool (see
 			// `CursorExecHandlers.ls` in `pi-coding-agent/src/cursor.ts`); mirror
 			// that here so the synthesized block matches the toolResult's `toolName`.
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", { path: args.path });
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.ls?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildLsResultFromToolResult(args.path, toolResult),
-				reason => buildLsRejectedResult(args.path, reason),
-				error => buildLsErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "read" },
-			);
+			let execResult: LsResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					execHandlers?.ls?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildLsResultFromToolResult(args.path, toolResult),
+					reason => buildLsRejectedResult(args.path, reason),
+					error => buildLsErrorResult(args.path, error),
+					{ toolCallId: args.toolCallId, toolName: "read" },
+				);
+				execResult = outcome.execResult;
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "lsResult", execResult);
 			return;
 		}
 		case "grepArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<GrepResult>(state, "grepArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "grepResult", res);
+				return;
+			}
 			// Cursor's model sometimes emits `grepArgs` with an empty `pattern` and a
 			// non-empty `glob`, expecting grep to list files matching the glob. Reject
 			// that up front with an actionable error so the model retries with a real
@@ -1775,7 +2148,9 @@ async function handleExecServerMessage(
 			// synthesized block has already been persisted with a placeholder pattern.
 			const emptyPatternError = emptyGrepPatternRejection(args.pattern, args.glob);
 			if (emptyPatternError !== null) {
-				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
+				const errorResult = buildGrepErrorResult(emptyPatternError);
+				claim.first?.resolve(errorResult);
+				sendExecClientMessage(h2Request, execMsg, "grepResult", errorResult);
 				return;
 			}
 			// Mirror the coding-agent bridge's arg mapping so live UI (from
@@ -1788,21 +2163,36 @@ async function handleExecServerMessage(
 				case: args.caseInsensitive === true ? false : undefined,
 				skip: piGrepSkip(args.offset),
 			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.grep?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildGrepResultFromToolResult(args, toolResult),
-				reason => buildGrepErrorResult(reason),
-				error => buildGrepErrorResult(error),
-				{ toolCallId: args.toolCallId, toolName: "grep" },
-			);
+			let execResult: GrepResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					execHandlers?.grep?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildGrepResultFromToolResult(args, toolResult),
+					reason => buildGrepErrorResult(reason),
+					error => buildGrepErrorResult(error),
+					{ toolCallId: args.toolCallId, toolName: "grep" },
+				);
+				execResult = outcome.execResult;
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "grepResult", execResult);
 			return;
 		}
 		case "writeArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<WriteResult>(state, "writeArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "writeResult", res);
+				return;
+			}
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
 			// Match the bridge: prefer `fileText`, fall back to decoded `fileBytes`.
 			const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
@@ -1819,47 +2209,77 @@ async function handleExecServerMessage(
 						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
 					}
 				: undefined;
-			const { execResult } = await resolveExecHandler(
-				args,
-				writeHandler,
-				onToolResult,
-				toolResult =>
-					buildWriteResultFromToolResult(
-						{
-							path: args.path,
-							fileText: args.fileText,
-							fileBytes: args.fileBytes,
-							returnFileContentAfterWrite: args.returnFileContentAfterWrite,
-						},
-						toolResult,
-					),
-				reason => buildWriteRejectedResult(args.path, reason),
-				error => buildWriteErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: editOwned ? "edit" : "write" },
-			);
-			if (editOwned) markEditToolCallPaired(state, args.toolCallId);
+			let execResult: WriteResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					writeHandler,
+					onToolResult,
+					toolResult =>
+						buildWriteResultFromToolResult(
+							{
+								path: args.path,
+								fileText: args.fileText,
+								fileBytes: args.fileBytes,
+								returnFileContentAfterWrite: args.returnFileContentAfterWrite,
+							},
+							toolResult,
+						),
+					reason => buildWriteRejectedResult(args.path, reason),
+					error => buildWriteErrorResult(args.path, error),
+					{ toolCallId: args.toolCallId, toolName: editOwned ? "edit" : "write" },
+				);
+				execResult = outcome.execResult;
+				if (editOwned) markEditToolCallPaired(state, args.toolCallId);
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "writeResult", execResult);
 			return;
 		}
 		case "deleteArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<DeleteResult>(state, "deleteArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "deleteResult", res);
+				return;
+			}
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "delete", { path: args.path });
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.delete?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
-				reason => buildDeleteRejectedResult(args.path, reason),
-				error => buildDeleteErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "delete" },
-			);
+			let execResult: DeleteResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					execHandlers?.delete?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
+					reason => buildDeleteRejectedResult(args.path, reason),
+					error => buildDeleteErrorResult(args.path, error),
+					{ toolCallId: args.toolCallId, toolName: "delete" },
+				);
+				execResult = outcome.execResult;
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "deleteResult", execResult);
 			return;
 		}
 		case "shellArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<ShellResult>(state, "shellArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "shellResult", res);
+				return;
+			}
 			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
 			// Match the bridge (`CursorExecHandlers.shell`): map `workingDirectory`
 			// → `cwd`, convert the millisecond budget to bash-tool seconds.
@@ -1868,28 +2288,56 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: shellTimeoutSeconds(args.timeout),
 			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.shell?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
-				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
-				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
-				{ toolCallId: args.toolCallId, toolName: "bash" },
-			);
-			const sanitizedExecResult = sanitizeShellExecResult(execResult);
+			let sanitizedExecResult: ShellResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					execHandlers?.shell?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
+					reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
+					error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
+					{ toolCallId: args.toolCallId, toolName: "bash" },
+				);
+				sanitizedExecResult = sanitizeShellExecResult(outcome.execResult);
+				claim.first?.resolve(sanitizedExecResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
 			return;
 		}
 		case "shellStreamArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<ShellResult>(state, "shellStreamArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const shellResult = await claim.replay;
+				sendShellStreamExitFromResult(h2Request, execMsg, shellResult, true);
+				sendExecClientMessage(h2Request, execMsg, "shellResult", shellResult);
+				sendExecClientStreamClose(h2Request, execMsg);
+				return;
+			}
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
 				timeout: shellTimeoutSeconds(args.timeout),
 			});
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult);
+			try {
+				const sanitizedExecResult = await handleShellStreamArgs(
+					args,
+					execMsg,
+					h2Request,
+					execHandlers,
+					onToolResult,
+				);
+				claim.first?.resolve(sanitizedExecResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			return;
 		}
 		case "backgroundShellSpawnArgs": {
@@ -1936,22 +2384,37 @@ async function handleExecServerMessage(
 		}
 		case "diagnosticsArgs": {
 			const args = execMsg.message.value;
+			const serverToolCallId = args.toolCallId;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+			const claim = claimExec<DiagnosticsResult>(state, "diagnosticsArgs", serverToolCallId);
+			if (claim.replay !== undefined) {
+				const res = await claim.replay;
+				sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", res);
+				return;
+			}
 			// Bridge maps `diagnostics` onto the coding-agent `lsp` tool with
 			// `action: "diagnostics"` and `file: path`.
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "lsp", {
 				action: "diagnostics",
 				file: args.path,
 			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.diagnostics?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildDiagnosticsResultFromToolResult(args.path, toolResult),
-				reason => buildDiagnosticsRejectedResult(args.path, reason),
-				error => buildDiagnosticsErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "lsp" },
-			);
+			let execResult: DiagnosticsResult;
+			try {
+				const outcome = await resolveExecHandler(
+					args,
+					execHandlers?.diagnostics?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildDiagnosticsResultFromToolResult(args.path, toolResult),
+					reason => buildDiagnosticsRejectedResult(args.path, reason),
+					error => buildDiagnosticsErrorResult(args.path, error),
+					{ toolCallId: args.toolCallId, toolName: "lsp" },
+				);
+				execResult = outcome.execResult;
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", execResult);
 			return;
 		}
@@ -1988,6 +2451,11 @@ async function handleExecServerMessage(
 				);
 				return;
 			}
+			const claim = claimExec<McpResult>(state, "mcpArgs", mcpCall.toolCallId);
+			if (claim.replay !== undefined) {
+				sendExecClientMessage(h2Request, execMsg, "mcpResult", await claim.replay);
+				return;
+			}
 			// Without a local MCP handler an external executor — an auth-gateway
 			// client whose own tools Cursor sees as MCP tools — is the one that
 			// runs the call, so the block must reach that client unresolved:
@@ -2016,18 +2484,35 @@ async function handleExecServerMessage(
 					if (!externalHandoff) state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
 				}
 			}
-			const { execResult } = await resolveExecHandler(
-				mcpCall,
-				execHandlers?.mcp?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
-				_reason => (externalHandoff ? buildMcpExternalHandoffResult() : buildMcpToolNotFoundResult(mcpCall)),
-				error => buildMcpErrorResult(error),
-				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
-			);
+			let execResult: McpResult;
+			try {
+				const outcome = await resolveExecHandler(
+					mcpCall,
+					execHandlers?.mcp?.bind(execHandlers),
+					onToolResult,
+					toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
+					_reason => (externalHandoff ? buildMcpExternalHandoffResult() : buildMcpToolNotFoundResult(mcpCall)),
+					error => buildMcpErrorResult(error),
+					execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
+				);
+				execResult = outcome.execResult;
+				claim.first?.resolve(execResult);
+			} catch (err) {
+				claim.first?.reject(err);
+				throw err;
+			}
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
 			return;
 		}
+		// Exec cases without a server-provided toolCallId (e.g. piReadArgs, piBashArgs,
+		// piEditArgs, piWriteArgs, piGrepArgs, piFindArgs, piLsArgs, readMcpResourceExecArgs):
+		// In these protocols the protobuf message does not carry a server-assigned toolCallId;
+		// the client generates a fresh random UUID per call. They are also not tracked in the
+		// server's `pendingToolCalls` checkpoint list. If connection loss occurs after such a
+		// tool runs without a subsequent checkpoint, the clean-boundary check (item 3.b)
+		// prevents a transport resume, deferring safely to session-level recovery. If a
+		// transport resume does occur and the server re-issues one of these frames, we execute
+		// it normally rather than guessing deduplication across disparate IDs.
 		case "listMcpResourcesExecArgs": {
 			// A host holding live MCP connections answers from them; without a
 			// handler the honest answer is an explicit empty success. An
@@ -5677,7 +6162,7 @@ async function buildGrpcRequestForWireMode(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId, runRequest };
 }
 
 /** Builds the normalized Cursor Run request used by transport callers and request inspection hooks. */

@@ -57,6 +57,7 @@ function emptyBlockState(): BlockState {
 		},
 		openToolCalls: new Map(),
 		resolvedMcpToolCallIds: new Set(),
+		execDedupeMap: new Map(),
 		firstTokenTime: undefined,
 		setTextBlock: b => {
 			textBlock = b;

@@ -1292,6 +1292,7 @@ function newBlockState(): BlockState {
 		},
 		openToolCalls: new Map(),
 		resolvedMcpToolCallIds: new Set(),
+		execDedupeMap: new Map(),
 		firstTokenTime: undefined,
 		setTextBlock: b => {
 			textBlock = b;
@@ -1863,5 +1864,54 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(providerSignal?.aborted).toBe(true);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Provider stream stalled while waiting for the next event");
+	});
+});
+
+describe("Cursor exec replay after transport resume", () => {
+	it("surfaces a failed first execution to its dispatch and to a later replay without running it again", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const pairingFailure = new Error("transcript write failed");
+		let pairAttempts = 0;
+		// No `read` handler: the call is rejected and its paired transcript
+		// result goes through `onToolResult`, which fails.
+		const onToolResult = (): ToolResultMessage => {
+			pairAttempts++;
+			throw pairingFailure;
+		};
+		const dispatchRead = () =>
+			handleServerMessage(
+				create(AgentServerMessageSchema, {
+					message: {
+						case: "execServerMessage",
+						value: create(ExecServerMessageSchema, {
+							id: 1,
+							execId: "exec-replay",
+							message: {
+								case: "readArgs",
+								value: create(ReadArgsSchema, { path: "/tmp/replayed", toolCallId: "call-read-replay" }),
+							},
+						}),
+					},
+				}),
+				output,
+				stream,
+				state,
+				new Map(),
+				h2Request,
+				undefined,
+				onToolResult,
+				{ sawTokenDelta: false },
+				[],
+			);
+
+		await expect(dispatchRead()).rejects.toBe(pairingFailure);
+		// Give an unobserved cached rejection a chance to surface before the
+		// replay subscribes; bun fails the test if one does.
+		await Bun.sleep(0);
+		await expect(dispatchRead()).rejects.toBe(pairingFailure);
+		expect(pairAttempts).toBe(1);
 	});
 });
