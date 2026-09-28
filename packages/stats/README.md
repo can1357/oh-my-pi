@@ -5,9 +5,9 @@ Local observability dashboard for AI usage statistics.
 ## Features
 
 - **Session log parsing**: Reads JSONL session logs from `~/.omp/agent/sessions/`
-- **SQLite aggregation**: Efficient stats storage and querying using `bun:sqlite`
-- **Web dashboard**: Real-time metrics visualization with Chart.js
-- **Incremental sync**: Only processes new/modified log entries
+- **SQLite aggregation**: Stats storage in `bun:sqlite`, with hourly rollups so any range queries in milliseconds
+- **Live web dashboard**: Opens instantly, ingests sessions in the background (newest first) and streams progress and updates to the page
+- **Incremental sync**: Only processes new/modified log entries; a watcher re-syncs transcripts as they are written
 
 ## Metrics Tracked
 
@@ -63,7 +63,9 @@ console.log(stats.byModel[0].avgTokensPerSecond);
 | `GET /api/stats/models` | Per-model statistics |
 | `GET /api/stats/folders` | Per-folder/project statistics |
 | `GET /api/stats/timeseries` | Hourly time series data |
-| `GET /api/sync` | Trigger sync and return counts |
+| `GET /api/events` | Server-sent live status: sync progress, data version, rollup backlog |
+| `GET /api/status` | Current live status (same shape as the events) |
+| `POST /api/sync` | Start a background sync; progress arrives on `/api/events` |
 
 ## Data Storage
 
@@ -74,15 +76,11 @@ Synchronization fetches file metadata and saved cursors in bounded batches and o
 
 Full reconciliation replays still scan every transcript. Unchanged transcripts retain their indexed rows while missing or stale records and unfinished links are repaired; modified transcripts are rebuilt. Parsing discards message bodies after extracting statistics rather than retaining entire decoded transcripts.
 
+Range queries read `message_rollup` / `tool_rollup` / `session_rollup`, maintained from the raw tables: triggers mark touched hours and transcripts dirty (from any omp process), and the dashboard re-rolls them newest-first in short transactions. Reads stay exact by aggregating the few dirty hours raw; during an initial build the header shows the indexing backlog.
+
 ## Dashboard
 
-The web dashboard provides:
-
-- Overall metrics cards (requests, API-equivalent estimate, cache rate, cache savings, error rate, duration, tokens/s)
-- Time series chart showing requests and errors over time
-- Per-model breakdown table
-- Per-folder breakdown table
-- Auto-refresh every 30 seconds
+Pages: Overview, Models, Providers, Costs, Requests, Errors, Traces, Tools, Frustration, Projects and Gain. `1`–`6` pick the time range; `g` then a letter jumps to a page. Every page revalidates when the live data version moves, so there is no refresh button.
 
 ## License
 

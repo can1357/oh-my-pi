@@ -3,38 +3,64 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark light" />
 		<title>omp · authentication</title>
 		<style>
 			:root {
-				/* dark, slightly purple-tinted neutrals — never #000 */
-				--ink-0: oklch(0.135 0.018 295);
-				--ink-1: oklch(0.172 0.022 295);
-				--ink-2: oklch(0.21 0.024 295);
-				--ink-4: oklch(0.36 0.024 295);
-				--ink-5: oklch(0.5 0.022 290);
-				--ink-6: oklch(0.66 0.018 290);
-				--ink-7: oklch(0.82 0.014 285);
-				--ink-9: oklch(0.97 0.008 90);
-
-				/* brand: magenta lead, cyan reply */
-				--magenta: oklch(0.7 0.24 340);
-				--iris: oklch(0.62 0.21 295);
-				--cyan: oklch(0.81 0.14 200);
-
-				/* signal */
-				--success: oklch(0.78 0.16 150);
-				--error: oklch(0.66 0.22 25);
-
-				--bg: var(--ink-0);
-				--fg: var(--ink-9);
-				--fg-dim: var(--ink-7);
-				--fg-faint: var(--ink-5);
-				--rule: oklch(1 0 0 / 0.07);
-				--rule-strong: oklch(1 0 0 / 0.14);
-				--accent: var(--magenta);
-				--accent-2: var(--cyan);
-
+				--bg: #000;
+				--card: #0b0b0d;
+				--ink-1: #f4f4f5;
+				--ink-2: #b4b4bb;
+				--ink-3: #7a7a83;
+				--line-1: rgb(255 255 255 / 0.07);
+				--line-2: rgb(255 255 255 / 0.12);
+				--top-lit: rgb(255 255 255 / 0.22);
+				--accent-a: #22d3ee;
+				--accent-b: #f472b6;
+				--accent-gradient: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+				--ok: #4ade80;
+				--ok-soft: rgb(74 222 128 / 0.12);
+				--bad: #f87171;
+				--bad-soft: rgb(248 113 113 / 0.12);
+				--pending: #a1a1aa;
+				--pending-soft: rgb(161 161 170 / 0.12);
+				--glow-a: rgb(34 211 238 / 0.1);
+				--glow-b: rgb(244 114 182 / 0.08);
+				--shadow: 0 30px 60px -20px rgb(0 0 0 / 0.8);
+				--btn-bg: #f4f4f5;
+				--btn-fg: #000;
+				--r-control: 8px;
+				--r-panel: 16px;
+				--sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+				--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 				color-scheme: dark;
+			}
+
+			@media (prefers-color-scheme: light) {
+				:root {
+					--bg: #fafafa;
+					--card: #fff;
+					--ink-1: #111113;
+					--ink-2: #4b4b52;
+					--ink-3: #83838b;
+					--line-1: rgb(0 0 0 / 0.08);
+					--line-2: rgb(0 0 0 / 0.12);
+					--top-lit: rgb(0 0 0 / 0.04);
+					--accent-a: #0891b2;
+					--accent-b: #db2777;
+					--ok: #16a34a;
+					--ok-soft: rgb(22 163 74 / 0.1);
+					--bad: #dc2626;
+					--bad-soft: rgb(220 38 38 / 0.1);
+					--pending: #71717a;
+					--pending-soft: rgb(113 113 122 / 0.1);
+					--glow-a: rgb(8 145 178 / 0.08);
+					--glow-b: rgb(219 39 119 / 0.06);
+					--shadow: 0 20px 50px -24px rgb(0 0 0 / 0.18);
+					--btn-bg: #111113;
+					--btn-fg: #fff;
+					color-scheme: light;
+				}
 			}
 
 			* {
@@ -42,253 +68,239 @@
 			}
 
 			body {
-				font-family:
-					"Geist",
-					ui-sans-serif,
-					system-ui,
-					-apple-system,
-					BlinkMacSystemFont,
-					"Segoe UI",
-					Roboto,
-					sans-serif;
-				background:
-					radial-gradient(ellipse 80vw 60vh at 18% -10%, oklch(0.7 0.24 340 / 0.13), transparent 60%),
-					radial-gradient(ellipse 70vw 70vh at 110% 30%, oklch(0.81 0.14 200 / 0.09), transparent 60%), var(--bg);
-				color: var(--fg);
+				margin: 0;
+				min-height: 100vh;
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				min-height: 100vh;
-				margin: 0;
 				padding: 1.5rem;
+				font-family: var(--sans);
+				background: var(--bg);
+				color: var(--ink-1);
 				-webkit-font-smoothing: antialiased;
-				text-rendering: optimizeLegibility;
 				overflow-x: clip;
 			}
 
-			/* ascii grid backdrop */
-			.grid-bg {
+			/* ambient glow */
+			.glow {
 				position: fixed;
 				inset: 0;
-				background-image:
-					linear-gradient(to right, oklch(1 0 0 / 0.025) 1px, transparent 1px),
-					linear-gradient(to bottom, oklch(1 0 0 / 0.025) 1px, transparent 1px);
-				background-size: 56px 56px;
-				background-position: -1px -1px;
-				mask-image: radial-gradient(ellipse at 50% 30%, #000 30%, transparent 75%);
 				pointer-events: none;
-				z-index: 0;
+				background:
+					radial-gradient(ellipse 50vw 40vh at 38% 30%, var(--glow-a), transparent 70%),
+					radial-gradient(ellipse 50vw 40vh at 64% 64%, var(--glow-b), transparent 70%);
 			}
 
 			.container {
 				position: relative;
-				z-index: 1;
-				background: oklch(0.172 0.022 295 / 0.72);
-				backdrop-filter: blur(16px);
-				-webkit-backdrop-filter: blur(16px);
-				border: 1px solid var(--rule);
-				border-radius: 16px;
-				padding: 2.5rem 2.5rem 2rem;
 				width: 100%;
-				max-width: 420px;
-				text-align: center;
-				box-shadow:
-					0 24px 48px -12px oklch(0 0 0 / 0.55),
-					0 0 0 1px oklch(1 0 0 / 0.03) inset;
-				opacity: 0;
-				transform: translateY(10px);
-				animation: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+				max-width: 400px;
+				padding: 2rem 2rem 1.75rem;
+				background: var(--card);
+				border: 1px solid var(--line-1);
+				border-radius: var(--r-panel);
+				box-shadow: var(--shadow);
+				overflow: hidden;
+				animation: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+			}
+			/* top-lit hairline */
+			.container::before {
+				content: "";
+				position: absolute;
+				top: 0;
+				left: 12%;
+				right: 12%;
+				height: 1px;
+				background: linear-gradient(90deg, transparent, var(--top-lit), transparent);
 			}
 			@keyframes rise {
-				to {
-					opacity: 1;
-					transform: none;
+				from {
+					opacity: 0;
+					transform: translateY(8px);
 				}
 			}
 
-			/* brand header */
 			.brand {
 				display: flex;
 				align-items: center;
-				justify-content: center;
-				gap: 0.5rem;
-				margin-bottom: 2rem;
+				gap: 0.6rem;
+				margin-bottom: 1.75rem;
 			}
-			.brand svg {
-				width: 22px;
-				height: 22px;
+			.omp-mark {
+				flex: none;
+				display: block;
 			}
-			.brand .wordmark {
+			.wordmark {
 				font-size: 13px;
-				font-weight: 500;
+				font-weight: 600;
 				letter-spacing: -0.01em;
-				color: var(--fg);
+			}
+			.wordmark-sub {
+				margin-left: auto;
+				font-family: var(--mono);
+				font-size: 12px;
+				color: var(--ink-3);
 			}
 
-			/* status mark */
-			.mark-wrap {
-				position: relative;
-				width: 72px;
-				height: 72px;
-				margin: 0 auto 1.5rem;
-				display: flex;
+			.status {
+				display: inline-flex;
 				align-items: center;
-				justify-content: center;
+				gap: 0.45rem;
+				padding: 0.22rem 0.6rem 0.22rem 0.5rem;
+				margin-bottom: 1rem;
+				border-radius: 999px;
+				font-size: 12px;
+				font-weight: 500;
+				color: var(--pending);
+				background: var(--pending-soft);
 			}
-			.mark-wrap::before {
-				content: "";
-				position: absolute;
-				inset: 0;
+			.status-dot {
+				width: 7px;
+				height: 7px;
 				border-radius: 50%;
-				background: oklch(1 0 0 / 0.05);
-				z-index: 0;
+				background: currentColor;
 			}
-			.mark {
-				width: 40px;
-				height: 40px;
-				z-index: 2;
+			.status-word {
+				display: none;
 			}
-			.timer-svg {
-				position: absolute;
-				top: -2px;
-				left: -2px;
-				width: 76px;
-				height: 76px;
-				transform: rotate(-90deg);
-				z-index: 1;
-				pointer-events: none;
+			.container:not(.success):not(.error) .status-pending,
+			.success .status-success,
+			.error .status-error {
+				display: inline;
 			}
-			.timer-circle {
-				fill: none;
-				stroke-width: 2;
-				stroke-linecap: round;
-				stroke-dasharray: 226;
-				stroke-dashoffset: 0;
+			.container:not(.success):not(.error) .status-dot {
+				animation: pulse 1.4s ease-in-out infinite;
 			}
-			.countdown .timer-circle {
-				animation: countdown 3s linear forwards;
-			}
-			@keyframes countdown {
-				to {
-					stroke-dashoffset: 226;
+			@keyframes pulse {
+				50% {
+					opacity: 0.35;
 				}
+			}
+			.success .status {
+				color: var(--ok);
+				background: var(--ok-soft);
+			}
+			.error .status {
+				color: var(--bad);
+				background: var(--bad-soft);
 			}
 
 			h1 {
-				font-family: "Fraunces", "Iowan Old Style", Georgia, serif;
-				font-size: 1.6rem;
-				font-weight: 500;
-				letter-spacing: -0.022em;
-				line-height: 1.15;
-				margin: 0 0 0.75rem;
+				margin: 0 0 0.5rem;
+				font-size: 1.35rem;
+				font-weight: 600;
+				letter-spacing: -0.02em;
+				line-height: 1.25;
 				text-wrap: balance;
 			}
 			p {
-				color: var(--fg-dim);
+				margin: 0 0 1.5rem;
+				font-size: 0.9rem;
 				line-height: 1.6;
-				margin: 0 0 1.75rem;
-				font-size: 0.95rem;
+				color: var(--ink-2);
+			}
+			p:last-of-type:not(:has(+ .btn)) {
+				margin-bottom: 0.25rem;
+			}
+			.error p {
+				font-family: var(--mono);
+				font-size: 0.8rem;
+				padding: 0.6rem 0.75rem;
+				border: 1px solid var(--line-1);
+				border-radius: var(--r-control);
+				overflow-wrap: anywhere;
 			}
 
 			.btn {
 				display: inline-flex;
 				align-items: center;
-				gap: 0.5rem;
-				background: var(--fg);
-				color: var(--bg);
-				font-family: inherit;
+				justify-content: center;
+				width: 100%;
+				padding: 0.6rem 1rem;
+				font: inherit;
+				font-size: 0.875rem;
 				font-weight: 500;
-				padding: 0.65rem 1.4rem;
-				border-radius: 8px;
-				text-decoration: none;
-				font-size: 0.9rem;
-				transition:
-					opacity 0.2s,
-					transform 0.2s;
-				cursor: pointer;
+				color: var(--btn-fg);
+				background: var(--btn-bg);
 				border: none;
+				border-radius: var(--r-control);
+				cursor: pointer;
+				transition: opacity 0.15s;
 			}
 			.btn:hover {
-				opacity: 0.88;
-				transform: translateY(-1px);
+				opacity: 0.86;
 			}
-			.btn:active {
-				transform: translateY(0);
+			.btn:focus-visible {
+				outline: 2px solid var(--accent-a);
+				outline-offset: 2px;
 			}
-
-			/* State: success */
-			.success .mark-wrap::before {
-				background: oklch(0.78 0.16 150 / 0.12);
-			}
-			.success .mark {
-				color: var(--success);
-			}
-			.success .timer-circle {
-				stroke: var(--success);
-			}
-			.success .icon-error {
-				display: none;
+			.error .btn {
+				color: var(--ink-1);
+				background: transparent;
+				border: 1px solid var(--line-2);
 			}
 
-			/* State: error */
-			.error .mark-wrap::before {
-				background: oklch(0.66 0.22 25 / 0.12);
+			/* auto-close progress */
+			.timer {
+				position: absolute;
+				left: 0;
+				bottom: 0;
+				height: 2px;
+				width: 100%;
+				background: var(--accent-gradient);
+				transform-origin: left;
+				transform: scaleX(0);
 			}
-			.error .mark {
-				color: var(--error);
+			.countdown .timer {
+				animation: countdown 3s linear forwards;
 			}
-			.error .timer-circle {
-				stroke: var(--error);
-			}
-			.error .icon-success,
-			.error .timer-svg {
-				display: none;
+			@keyframes countdown {
+				from {
+					transform: scaleX(1);
+				}
+				to {
+					transform: scaleX(0);
+				}
 			}
 
 			@media (prefers-reduced-motion: reduce) {
 				.container,
-				.countdown .timer-circle {
-					animation: none;
-				}
-				.container {
-					opacity: 1;
-					transform: none;
+				.countdown .timer,
+				.status-dot {
+					animation: none !important;
 				}
 			}
 		</style>
 	</head>
 	<body>
-		<span aria-hidden="true" class="grid-bg"></span>
+		<span aria-hidden="true" class="glow"></span>
 		<div id="app" class="container">
 			<div class="brand">
-				<svg viewBox="0 0 64 64" aria-hidden="true">
+				<svg class="omp-mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
 					<defs>
-						<linearGradient id="pi-grad" x1="0" y1="0" x2="1" y2="1">
+						<linearGradient id="omp-mark-grad" x1="0" y1="0" x2="1" y2="1">
 							<stop offset="0" stop-color="oklch(0.7 0.24 340)" />
 							<stop offset=".5" stop-color="oklch(0.62 0.21 295)" />
 							<stop offset="1" stop-color="oklch(0.81 0.14 200)" />
 						</linearGradient>
 					</defs>
-					<path fill="url(#pi-grad)" d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z" />
+					<path fill="url(#omp-mark-grad)" d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z" />
 				</svg>
 				<span class="wordmark">omp</span>
+				<span class="wordmark-sub">oauth</span>
 			</div>
 
-			<div class="mark-wrap">
-				<svg class="timer-svg" viewBox="0 0 76 76">
-					<circle class="timer-circle" cx="38" cy="38" r="36"></circle>
-				</svg>
-				<svg class="mark icon-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-				</svg>
-				<svg class="mark icon-error" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-				</svg>
+			<div class="status" role="status">
+				<span aria-hidden="true" class="status-dot"></span>
+				<span class="status-word status-pending">Waiting</span>
+				<span class="status-word status-success">Connected</span>
+				<span class="status-word status-error">Failed</span>
 			</div>
 
 			<h1 id="title">Authentication</h1>
 			<p id="message"></p>
-			<button onclick="window.close()" class="btn">Close Window</button>
+			<button onclick="window.close()" class="btn">Close window</button>
+			<span aria-hidden="true" class="timer"></span>
 		</div>
 
 		<script id="server-state" type="application/json">
@@ -314,7 +326,7 @@
 			if (serverState.ok) {
 				const closeButton = document.querySelector(".btn");
 				app.classList.add("success", "countdown");
-				title.textContent = "Authentication Successful";
+				title.textContent = "Authentication successful";
 				message.textContent = "You have successfully logged in.";
 				window.close();
 				setTimeout(() => {
@@ -324,7 +336,7 @@
 				}, 300);
 			} else {
 				app.classList.add("error");
-				title.textContent = "Authentication Failed";
+				title.textContent = "Authentication failed";
 				message.textContent = serverState.error || "An error occurred";
 			}
 		</script>

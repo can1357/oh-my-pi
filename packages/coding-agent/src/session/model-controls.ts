@@ -632,12 +632,10 @@ export class ModelControls {
 						signal: controller.signal,
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
-							const entryId = this.#host.sessionManager.appendModelUsage(
-								{ purpose: "auto-thinking", ...usage },
-								usageOwner,
-							);
+							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
 							if (entryId) usageOwner.parentId = entryId;
 						},
+						telemetry: this.#host.agent.telemetry,
 					},
 				);
 			} catch (error) {

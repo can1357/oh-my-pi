@@ -25,7 +25,7 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
-import { computeUserMessageMetrics } from "./user-metrics";
+import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
@@ -135,6 +135,7 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
+	const prose = judgeProse(text);
 	const ts = Date.parse(entry.timestamp);
 	return {
 		sessionFile,
@@ -151,6 +152,8 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 		negation: metrics.negation,
 		repetition: metrics.repetition,
 		blame: metrics.blame,
+		prose,
+		proseHash: prose ? Bun.hash(prose).toString(16) : "",
 	};
 }
 

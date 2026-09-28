@@ -2,14 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import {
-	getBehaviorByModel,
-	getRecentRequests,
-	getToolStats,
-	getToolStatsByModel,
-	initDb,
-	setFileOffset,
-} from "@oh-my-pi/omp-stats/db";
+import { getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
+import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/rollup";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
@@ -422,10 +416,10 @@ describe("tool usage stats pipeline", () => {
 		).toEqual(retained);
 		expect(getToolStats()).toEqual(before);
 		expect(
-			getBehaviorByModel().map(row => ({
+			getFrustrationByModel().map(row => ({
 				model: row.model,
 				provider: row.provider,
-				messages: row.totalMessages,
+				messages: row.messages,
 			})),
 		).toEqual([{ model: MODEL, provider: PROVIDER, messages: 1 }]);
 	});

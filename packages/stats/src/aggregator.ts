@@ -1,33 +1,16 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
 	completeSessionSync,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
-	getBehaviorByModel,
-	getBehaviorOverall,
-	getBehaviorTimeSeries,
-	getCostTimeSeries,
 	type FileOffset,
 	getFileOffsets,
 	getMessageById,
 	getMessageCount,
-	getModelPerformanceSeries,
-	getModelTimeSeries,
-	getOverallStats,
-	getProviderHourlyBurn,
-	getProviderTimeSeries,
-	getStatsByAgentType,
-	getStatsByFolder,
-	getStatsByModel,
-	getStatsByProvider,
-	getTimeSeries,
-	getToolStats,
-	getToolStatsByModel,
-	getToolTimeSeries,
 	initDb,
 	markSessionBackfillsComplete,
 	type ParsedSession,
@@ -41,21 +24,38 @@ import {
 	parseSessionFile,
 	type SessionParserState,
 } from "./parser";
+import {
+	getCostTimeSeries,
+	getModelPerformanceSeries,
+	getModelTimeSeries,
+	getOverallStats,
+	getProviderHourlyBurn,
+	getProviderTimeSeries,
+	getStatsByAgentType,
+	getStatsByFolder,
+	getStatsByModel,
+	getStatsByProvider,
+	getTimeSeries,
+	getToolStats,
+	getToolStatsByModel,
+	getToolTimeSeries,
+	type RangeWindow,
+} from "./rollup";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
 // JavaScript entry. Standalone source `omp-stats` keeps using this package's
 // own sync-worker source file.
 import type {
-	BehaviorDashboardStats,
 	DashboardStats,
 	FolderStats,
 	MessageStats,
 	ProviderDashboardStats,
+	ProviderWindowStats,
 	RequestDetails,
 	ToolDashboardStats,
 } from "./types";
-import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
+import { computeUsageWindowStats, fetchUsageData, type UsageDataSnapshot } from "./usage-windows";
 
 const STATS_SYNC_LOCK_RETRY_MS = 25;
 const STATS_SYNC_LOCK_WAIT_MS = 60 * 60 * 1000;
@@ -102,6 +102,11 @@ export interface SyncOptions {
 	 * parse on the calling thread without spawning workers. File I/O is pipelined.
 	 */
 	workers?: number;
+	/**
+	 * Sync only these transcripts (e.g. files a watcher saw change) instead of
+	 * listing every session. Missing files are skipped.
+	 */
+	files?: readonly string[];
 }
 
 function defaultWorkerCount(): number {
@@ -250,13 +255,47 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 	});
 }
 
+/** Recency tiers for {@link orderForIngest}, newest first. */
+const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
+
+/**
+ * Order a full sync so recent activity lands first: transcripts modified in
+ * the last day, then the last week, then the rest. Within a tier files go in
+ * creation order, so a fork still follows its parent and the parent keeps
+ * ownership of the entries the fork copied (first writer wins). The only
+ * exception is a from-scratch ingest where a fork was touched more recently
+ * than a parent idle for a day: the fork then owns the copied entries, which
+ * changes per-session attribution but never totals.
+ */
+async function orderForIngest(files: string[]): Promise<string[]> {
+	const now = Date.now();
+	const ranked: { file: string; tier: number; born: number; index: number }[] = [];
+	for (let start = 0; start < files.length; start += SYNC_METADATA_FILES) {
+		const batch = files.slice(start, start + SYNC_METADATA_FILES);
+		const stats = await Promise.all(batch.map(file => fs.promises.stat(file).catch(() => null)));
+		for (let i = 0; i < batch.length; i++) {
+			const stat = stats[i];
+			const age = stat ? now - stat.mtimeMs : Number.POSITIVE_INFINITY;
+			const tier = INGEST_TIERS_MS.findIndex(limit => age <= limit);
+			ranked.push({
+				file: batch[i],
+				tier: tier === -1 ? INGEST_TIERS_MS.length : tier,
+				born: stat ? stat.birthtimeMs || stat.ctimeMs : 0,
+				index: start + i,
+			});
+		}
+	}
+	ranked.sort((a, b) => a.tier - b.tier || a.born - b.born || a.index - b.index);
+	return ranked.map(entry => entry.file);
+}
+
 async function syncAllSessionsLocked(
 	opts?: SyncOptions,
 ): Promise<{ processed: number; files: number; reconcile: boolean }> {
 	await initDb();
 	const replay = prepareSessionSync();
 
-	const files = await listAllSessionFiles();
+	const files = opts?.files ?? (await orderForIngest(await listAllSessionFiles()));
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
@@ -294,6 +333,9 @@ async function syncAllSessionsLocked(
 
 	const finish = () => {
 		flush();
+		// A targeted sync cannot settle reconciliation or backfills (they need
+		// every transcript); leave their markers for the next full sync.
+		if (opts?.files) return { processed: totalProcessed, files: filesProcessed, reconcile: false };
 		completeSessionSync(reconcile);
 		markSessionBackfillsComplete();
 		return { processed: totalProcessed, files: filesProcessed, reconcile };
@@ -427,92 +469,31 @@ async function syncAllSessionsLocked(
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-const FIVE_MIN_MS = 5 * 60 * 1000;
 
 type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
-interface TimeRangeConfig {
-	timeSeriesHours: number;
-	timeSeriesBucketMs: number;
-	modelSeriesDays: number;
-	modelSeriesBucketMs: number;
-	modelPerformanceDays: number;
-	modelPerformanceBucketMs: number;
-	costSeriesDays: number;
-	cutoff: number | null;
-}
-
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
-const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
-	"1h": {
-		timeSeriesHours: 1,
-		timeSeriesBucketMs: FIVE_MIN_MS,
-		modelSeriesDays: 1,
-		modelSeriesBucketMs: FIVE_MIN_MS,
-		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: FIVE_MIN_MS,
-		costSeriesDays: 1,
-	},
-	"24h": {
-		timeSeriesHours: 24,
-		timeSeriesBucketMs: HOUR_MS,
-		modelSeriesDays: 1,
-		modelSeriesBucketMs: HOUR_MS,
-		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: HOUR_MS,
-		costSeriesDays: 1,
-	},
-	"7d": {
-		timeSeriesHours: 24 * 7,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 7,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 7,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 7,
-	},
-	"30d": {
-		timeSeriesHours: 24 * 30,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 30,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 30,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 30,
-	},
-	"90d": {
-		timeSeriesHours: 24 * 90,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 90,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 90,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 90,
-	},
-	all: {
-		timeSeriesHours: 24 * 3650,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 3650,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 3650,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 3650,
-	},
+/** Span and series bucket per range; mirrored by the client's `data/range.ts`. */
+const TIME_RANGES: Record<TimeRange, { spanMs: number | null; bucketMs: number }> = {
+	"1h": { spanMs: HOUR_MS, bucketMs: 5 * 60 * 1000 },
+	"24h": { spanMs: DAY_MS, bucketMs: HOUR_MS },
+	"7d": { spanMs: 7 * DAY_MS, bucketMs: DAY_MS },
+	"30d": { spanMs: 30 * DAY_MS, bucketMs: DAY_MS },
+	"90d": { spanMs: 90 * DAY_MS, bucketMs: DAY_MS },
+	all: { spanMs: null, bucketMs: DAY_MS },
 };
 
-export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
-	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
-	const config = TIME_RANGE_TO_CONFIG[normalized as TimeRange];
-	if (config) {
-		const cutoff = normalized === "all" ? null : Date.now() - Math.max(1, config.timeSeriesHours * 60 * 60 * 1000);
-		return { ...config, cutoff };
-	}
+/** Most folders the projects payload carries (busiest first); the tail is thousands of temp dirs. */
+const FOLDER_LIMIT = 2000;
 
-	const fallbackConfig = TIME_RANGE_TO_CONFIG[DEFAULT_TIME_RANGE];
+/** Resolve a `?range=` value (default 24h) to its cutoff and series bucket size. */
+export function getTimeRangeConfig(range?: string | null): RangeWindow {
+	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
+	const config = TIME_RANGES[normalized as TimeRange] ?? TIME_RANGES[DEFAULT_TIME_RANGE];
 	return {
-		...fallbackConfig,
-		cutoff: Date.now() - fallbackConfig.timeSeriesHours * 60 * 60 * 1000,
+		cutoff: config.spanMs === null ? null : Date.now() - config.spanMs,
+		bucketMs: config.bucketMs,
 	};
 }
 
@@ -521,26 +502,16 @@ export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
  */
 export async function getDashboardStats(range?: string | null): Promise<DashboardStats> {
 	await initDb();
-	const {
-		timeSeriesHours,
-		timeSeriesBucketMs,
-		modelSeriesDays,
-		modelSeriesBucketMs,
-		modelPerformanceDays,
-		modelPerformanceBucketMs,
-		costSeriesDays,
-		cutoff,
-	} = getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byModel: getStatsByModel(cutoff ?? undefined),
-		byFolder: getStatsByFolder(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		overall: getOverallStats(window.cutoff),
+		byModel: getStatsByModel(window.cutoff),
+		byFolder: getStatsByFolder(window.cutoff, FOLDER_LIMIT),
+		byAgentType: getStatsByAgentType(window.cutoff),
+		timeSeries: getTimeSeries(window),
+		modelSeries: getModelTimeSeries(window),
+		modelPerformanceSeries: getModelPerformanceSeries(window),
+		costSeries: getCostTimeSeries(window.cutoff),
 	};
 }
 
@@ -548,12 +519,11 @@ export async function getOverviewStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
-	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
+		overall: getOverallStats(window.cutoff),
+		byAgentType: getStatsByAgentType(window.cutoff),
+		timeSeries: getTimeSeries(window),
 	};
 }
 
@@ -561,29 +531,22 @@ export async function getModelDashboardStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "byModel" | "modelSeries" | "modelPerformanceSeries">> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, modelPerformanceDays, modelPerformanceBucketMs, cutoff } =
-		getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		byModel: getStatsByModel(cutoff ?? undefined),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
+		byModel: getStatsByModel(window.cutoff),
+		modelSeries: getModelTimeSeries(window),
+		modelPerformanceSeries: getModelPerformanceSeries(window),
 	};
 }
 
 export async function getCostDashboardStats(range?: string | null): Promise<Pick<DashboardStats, "costSeries">> {
 	await initDb();
-	const { costSeriesDays, cutoff } = getTimeRangeConfig(range);
-
-	return {
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
-	};
+	return { costSeries: getCostTimeSeries(getTimeRangeConfig(range).cutoff) };
 }
 
 export async function getFolderStats(range?: string | null): Promise<FolderStats[]> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return getStatsByFolder(cutoff ?? undefined);
+	return getStatsByFolder(getTimeRangeConfig(range).cutoff, FOLDER_LIMIT);
 }
 
 export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
@@ -593,8 +556,7 @@ export async function getRecentRequests(limit?: number): Promise<MessageStats[]>
 
 export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return dbGetRecentErrors(limit, cutoff);
+	return dbGetRecentErrors(limit, getTimeRangeConfig(range).cutoff);
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
@@ -603,16 +565,12 @@ export async function getRequestDetails(id: number): Promise<RequestDetails | nu
 	if (!msg) return null;
 
 	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
-	if (entry?.type !== "message") return null;
-
-	// TODO: Get parent/context messages?
-	// For now we return the single entry which contains the assistant response.
-	// The user prompt is likely the parent.
+	if (entry?.type !== "message" || !("message" in entry)) return null;
 
 	return {
 		...msg,
 		messages: [entry],
-		output: (entry as any).message,
+		output: entry.message,
 	};
 }
 
@@ -624,51 +582,79 @@ export async function getTotalMessageCount(): Promise<number> {
 	return getMessageCount();
 }
 
-export async function getBehaviorDashboardStats(range?: string | null): Promise<BehaviorDashboardStats> {
-	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return {
-		overall: getBehaviorOverall(cutoff),
-		byModel: getBehaviorByModel(cutoff),
-		behaviorSeries: getBehaviorTimeSeries(cutoff),
-	};
-}
-
 /**
  * Get the tools dashboard payload: per-tool totals, per-(tool, model)
- * breakdown, and the call time series (bucketed like the model series).
+ * breakdown, and the call time series.
  */
 export async function getToolDashboardStats(range?: string | null): Promise<ToolDashboardStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	const window = getTimeRangeConfig(range);
 	return {
-		byTool: getToolStats(cutoff ?? undefined),
-		byToolModel: getToolStatsByModel(cutoff ?? undefined),
-		series: getToolTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		byTool: getToolStats(window.cutoff),
+		byToolModel: getToolStatsByModel(window.cutoff),
+		series: getToolTimeSeries(window),
 	};
 }
 
 /**
  * Get the providers dashboard payload: per-provider totals, peak-burn-hours
- * histogram, provider token time series, and subscription-window analytics
- * (utilization series + insights) derived from recorded usage-limit snapshots.
+ * histogram and provider token time series. Subscription windows are served
+ * separately by {@link getProviderWindowStats}.
+ */
+export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
+	await initDb();
+	const window = getTimeRangeConfig(range);
+	return {
+		providers: getStatsByProvider(window.cutoff),
+		hourly: getProviderHourlyBurn(window.cutoff),
+		series: getProviderTimeSeries(window),
+	};
+}
+
+const USAGE_CACHE_TTL_MS = 60_000;
+let usageCache: { key: string; at: number; data: Promise<UsageDataSnapshot> } | null = null;
+
+/**
+ * Usage snapshots since `sinceMs`, memoized for a minute per hour-aligned
+ * cutoff and source database: the broker fetch takes seconds and the
+ * dashboard asks on every range switch and live refresh.
+ */
+function cachedUsageData(sinceMs: number): Promise<UsageDataSnapshot> {
+	const sinceHour = Math.floor(sinceMs / HOUR_MS) * HOUR_MS;
+	const key = `${getAgentDbPath()}:${sinceHour}`;
+	const now = Date.now();
+	if (usageCache?.key === key && now - usageCache.at < USAGE_CACHE_TTL_MS) {
+		return usageCache.data;
+	}
+	const data = fetchUsageData(sinceHour);
+	usageCache = { key, at: now, data };
+	data.catch(() => {
+		if (usageCache?.data === data) usageCache = null;
+	});
+	return data;
+}
+
+/**
+ * Subscription-window analytics derived from recorded usage-limit snapshots:
+ * insights for every provider window, plus utilization series for `provider`
+ * only (all series can number in the thousands).
  *
  * Window token estimates use broker-held fleet token burn when a broker is
  * configured — the window fractions cover every install sharing the broker's
  * credentials, so dividing them into local-only tokens would undercount.
  */
-export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
+export async function getProviderWindowStats(
+	range?: string | null,
+	provider?: string | null,
+): Promise<ProviderWindowStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
-	const providers = getStatsByProvider(cutoff ?? undefined);
-	const usage = await fetchUsageData(cutoff ?? 0);
-	const tokensByProvider = usage.fleetTokensByProvider ?? new Map(providers.map(p => [p.provider, p.totalTokens]));
+	const { cutoff } = getTimeRangeConfig(range);
+	const usage = await cachedUsageData(cutoff ?? 0);
+	const tokensByProvider =
+		usage.fleetTokensByProvider ?? new Map(getStatsByProvider(cutoff).map(p => [p.provider, p.totalTokens]));
 	const { usageSeries, windowInsights } = computeUsageWindowStats(usage.rows, tokensByProvider);
 	return {
-		providers,
-		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		usageSeries,
 		windowInsights,
+		usageSeries: provider ? usageSeries.filter(series => series.provider === provider) : [],
 	};
 }

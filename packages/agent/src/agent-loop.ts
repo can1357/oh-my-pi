@@ -64,7 +64,7 @@ import {
 	finishExecuteToolSpan,
 	finishInvokeAgentSpan,
 	fireOnRunEnd,
-	PiGenAIAttr,
+	OmpGenAIAttr,
 	recordSkippedTool,
 	resolveTelemetry,
 	runInActiveSpan,
@@ -3316,7 +3316,7 @@ async function executeToolCalls(
 			parent: invokeAgentSpan,
 		});
 		if (toolSpan && toolCall.intent) {
-			toolSpan.setAttribute(PiGenAIAttr.ToolCallIntent, toolCall.intent);
+			toolSpan.setAttribute(OmpGenAIAttr.ToolCallIntent, toolCall.intent);
 		}
 
 		let result: AgentToolResult<any> = { content: [], details: {} };
