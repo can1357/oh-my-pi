@@ -72,7 +72,7 @@ After an addon loads successfully, the loader best-effort removes cache director
 
 ## Load validation and runtime initialization
 
-Every install or compiled candidate must report `package.json#version` from `__piNativesBuildVersion()`. The version is not compiled in: `scripts/stamp-native-version.ts` writes it into a fixed placeholder slot after linking, on every `scripts/bazel-natives.ts` install and local cargo build, so a release bump does not recompile the addon crate. Workspace loads skip this check. The loader does not validate a complete symbol list.
+Every install or compiled candidate must report `package.json#version` from `__piNativesBuildVersion()`. The version is not compiled in: `scripts/stamp-native-version.ts` writes it into a fixed placeholder slot after linking, on every `scripts/bazel-natives.ts` install, local cargo build, and Nix package build (`nix/package.nix`), so a release bump does not recompile the addon crate. Workspace loads skip this check. The loader does not validate a complete symbol list.
 
 After `require(...)` and version validation, the loader calls `__ompInstallTokioRuntime()` when present. Rust deliberately avoids creating worker threads during `#[module_init]`, while the dynamic-loader lock is held. The post-load hook installs bounded Windows Tokio/Rayon pools; older addons without the hook use napi-rs defaults. Hook failure is best-effort and appears only in startup markers when enabled.
 

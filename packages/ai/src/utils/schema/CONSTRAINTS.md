@@ -5,10 +5,11 @@ This document is the operational contract for schema normalization/strictness in
 ## Scope
 
 - Applies to provider-facing tool schemas produced by:
-  - `normalize.ts` — Google, CCA, MCP, OpenAI Responses, and OpenAI strict-mode (sanitize + enforce) sanitization. All schema walkers live here.
-  - `adapt.ts` — thin composer wrapping `tryEnforceStrictSchema` for provider call sites, plus the `PI_NO_STRICT` env flag callers consult to opt out of strict mode.
-  - `fields.ts` — keyword classification sets used by the walkers.
+   - `normalize.ts` — Google, CCA, MCP, OpenAI Responses, and OpenAI strict-mode (sanitize + enforce) sanitization. All schema walkers live here.
+   - `adapt.ts` — thin composer wrapping `tryEnforceStrictSchema` for provider call sites, plus the `PI_NO_STRICT` env flag callers consult to opt out of strict mode.
+   - `fields.ts` — keyword classification sets used by the walkers.
 - Covers OpenAI-style strict mode, OpenAI Responses `oneOf` rejection, Google schema constraints, and Cloud Code Assist Claude constraints.
+
 ---
 
 ## 1) OpenAI-style strict mode (`adaptSchemaForStrict` / `tryEnforceStrictSchema`)
@@ -18,17 +19,17 @@ When strict mode is requested (`strict=true` at call site), the schema MUST sati
 1. **Non-structural keywords are removed before strict enforcement**
    - Sanitization uses `sanitizeSchemaForStrictMode`.
    - Removed keys include formatting/validation/decorative keywords and unsupported structural extras:
-     - `format`, `pattern`, `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
-     - `minItems`, `maxItems`, `uniqueItems`, `multipleOf`
-     - `$schema`, `examples`, `default`, `title`, `$comment`
-     - `if`, `then`, `else`, `not`
-     - `unevaluatedProperties`, `unevaluatedItems`, `patternProperties`
-     - `propertyNames`, `contains`, `minContains`, `maxContains`
-     - `dependentRequired`, `dependentSchemas`
-     - `contentEncoding`, `contentMediaType`, `contentSchema`
-     - `deprecated`, `readOnly`, `writeOnly`
-     - `minProperties`, `maxProperties`
-     - `$dynamicRef`, `$dynamicAnchor`
+      - `format`, `pattern`, `minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
+      - `minItems`, `maxItems`, `uniqueItems`, `multipleOf`
+      - `$schema`, `examples`, `default`, `title`, `$comment`
+      - `if`, `then`, `else`, `not`
+      - `unevaluatedProperties`, `unevaluatedItems`, `patternProperties`
+      - `propertyNames`, `contains`, `minContains`, `maxContains`
+      - `dependentRequired`, `dependentSchemas`
+      - `contentEncoding`, `contentMediaType`, `contentSchema`
+      - `deprecated`, `readOnly`, `writeOnly`
+      - `minProperties`, `maxProperties`
+      - `$dynamicRef`, `$dynamicAnchor`
    - Before stripping `default`, its value is inlined into the sibling `description` as ` (default: X)` so that strict-mode providers retain the default hint in free-form text. Inlining is skipped when `description` already contains `(default:` or when no sibling `description` is present.
 
 2. **`const` is normalized to `enum`**
@@ -38,8 +39,8 @@ When strict mode is requested (`strict=true` at call site), the schema MUST sati
    - Every object node gets `additionalProperties: false`.
    - Every property key is included in `required`.
    - Optional properties are made nullable:
-     - Pure union nodes (only `anyOf` plus optional `description`) get a `{ "type": "null" }` branch appended in place — never a nested wrapper.
-     - All other nodes are wrapped as `anyOf: [<original schema>, { "type": "null" }]`. Nodes with constraining siblings next to `anyOf` MUST keep the wrapper: sibling keywords are conjunctive with `anyOf`, so appending a null branch would not make the node nullable.
+      - Pure union nodes (only `anyOf` plus optional `description`) get a `{ "type": "null" }` branch appended in place — never a nested wrapper.
+      - All other nodes are wrapped as `anyOf: [<original schema>, { "type": "null" }]`. Nodes with constraining siblings next to `anyOf` MUST keep the wrapper: sibling keywords are conjunctive with `anyOf`, so appending a null branch would not make the node nullable.
    - Nested pure unions are spliced into the parent `anyOf` (`(A ∨ B) ∨ C` → `A ∨ B ∨ C`); an inner `description` is hoisted to the parent when the parent has none. Strict output MUST NOT contain an `anyOf` branch that is itself a pure union — some upstream validators (OpenRouter DeepSeek) reject branches without `type`.
    - Tuple entries in `prefixItems` are strictified recursively.
 
@@ -63,14 +64,14 @@ Schemas sent on the Google JSON Schema path MUST follow:
 
 1. **Unsupported JSON Schema keywords are stripped (except property names under `properties`)**
    - Unsupported keys (`UNSUPPORTED_SCHEMA_FIELDS`):
-     - `$schema`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
-     - `examples`, `prefixItems`, `unevaluatedProperties`, `unevaluatedItems`
-     - `patternProperties`, `additionalProperties`
-     - `minItems`, `maxItems`, `minLength`, `maxLength`
-     - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
-     - `pattern`, `format`
-     - `dependencies`, `dependentSchemas`, `dependentRequired`
-     - `deprecated`, `readOnly`, `writeOnly`, `$comment`
+      - `$schema`, `$ref`, `$defs`, `$dynamicRef`, `$dynamicAnchor`
+      - `examples`, `prefixItems`, `unevaluatedProperties`, `unevaluatedItems`
+      - `patternProperties`, `additionalProperties`
+      - `minItems`, `maxItems`, `minLength`, `maxLength`
+      - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
+      - `pattern`, `format`
+      - `dependencies`, `dependentSchemas`, `dependentRequired`
+      - `deprecated`, `readOnly`, `writeOnly`, `$comment`
    - Important: keys inside a `properties` object are treated as property names and MUST NOT be stripped by keyword match.
    - Human-meaningful stripped keys (`pattern`, `format`, min/max constraints, `default`, `examples`, etc.) are appended to the sibling `description` as an Anthropic-style spill block: `{pattern: "^foo$", minimum: 0}`. Structural/meta keys such as `$ref`, `$defs`, and `additionalProperties` are not spilled.
 
@@ -83,6 +84,7 @@ Schemas sent on the Google JSON Schema path MUST follow:
 
 4. **Object schemas get an explicit properties map**
    - `{ "type": "object" }` becomes `{ "type": "object", "properties": {} }`.
+
 ---
 
 ## 3) Claude via Cloud Code Assist (`normalizeSchemaForCCA`)
@@ -144,14 +146,14 @@ If any remain, schema is incompatible.
 ## 4) Practical provider mapping
 
 - **OpenAI-compatible strict paths** (`openai-completions`, `openai-responses`, `openai-codex-responses`):
-  - Use `adaptSchemaForStrict`.
-  - Emit `strict: true` only when effective strict enforcement succeeded.
+   - Use `adaptSchemaForStrict`.
+   - Emit `strict: true` only when effective strict enforcement succeeded.
 
 - **Google Gemini/Vertex/Gemini CLI (non-CCA Claude)**:
-  - Use `normalizeSchemaForGoogle` and send schema on `parametersJsonSchema` path.
+   - Use `normalizeSchemaForGoogle` and send schema on `parametersJsonSchema` path.
 
 - **Cloud Code Assist Claude models (`model.id` starts with `claude-`)**:
-  - Use `normalizeSchemaForCCA` and send sanitized normalized schema in `parameters`.
+   - Use `normalizeSchemaForCCA` and send sanitized normalized schema in `parameters`.
 
 ---
 

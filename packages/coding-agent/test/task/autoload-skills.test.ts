@@ -50,6 +50,7 @@ function createMockSession(
 		prompt: async (text: string, options?: PromptOptions) => {
 			promptIndex += 1;
 			onPrompt({ text, options, promptIndex, emit });
+			return true;
 		},
 		sendCustomMessage: vi.fn(async () => {}),
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],

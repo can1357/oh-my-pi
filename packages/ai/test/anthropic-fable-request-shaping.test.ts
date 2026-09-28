@@ -166,7 +166,7 @@ describe("Anthropic preserved-thinking request shaping", () => {
 			cacheRetention: "long",
 		});
 
-		expect(payload.system?.[1]?.cache_control?.ttl).toBe("1h");
+		expect(payload.system?.at(-1)?.cache_control?.ttl).toBe("1h");
 		const messageContent = payload.messages?.[0]?.content;
 		if (!Array.isArray(messageContent)) throw new Error("expected block message content");
 		expect(messageContent.at(-1)?.cache_control?.ttl).toBe("1h");

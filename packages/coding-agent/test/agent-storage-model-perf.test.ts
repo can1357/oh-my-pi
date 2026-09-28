@@ -37,9 +37,7 @@ describe("AgentStorage model perf aggregates", () => {
 		vi.useRealTimers();
 		AgentStorage.close();
 		if (tempDir) {
-			try {
-				await tempDir.remove();
-			} catch {}
+			await tempDir.remove();
 			tempDir = undefined as unknown as TempDir;
 		}
 	});
@@ -164,7 +162,7 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
 		// Two valid turns totaling 1500 tokens over 8.5s, one with ttft missing.
 		insert.run("openai", "gpt-5", 1000, 6000, 1000, "stop", now - 5000);
@@ -199,7 +197,7 @@ describe("AgentStorage model perf aggregates", () => {
 			provider TEXT, model TEXT, output_tokens INTEGER, duration INTEGER,
 			ttft INTEGER, stop_reason TEXT, timestamp INTEGER
 		)`);
-		const insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
+		using insert = statsDb.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)");
 		const now = Date.now();
 		// 257 rows are the minimal cap-boundary fixture: the newest 256 run at
 		// 100 t/s and the one excluded oldest row is a wild 10000 t/s outlier.
@@ -227,8 +225,10 @@ describe("AgentStorage model perf aggregates", () => {
 		const env = {
 			...process.env,
 			HOME: homeDir,
+			USERPROFILE: homeDir,
 			OMP_PROFILE: "",
 			PI_CODING_AGENT_DIR: agentDir,
+			PI_CONFIG_DIR: ".omp",
 			PI_PROFILE: "",
 			XDG_CACHE_HOME: tempDir.join("xdg-cache"),
 			XDG_CONFIG_HOME: tempDir.join("xdg-config"),

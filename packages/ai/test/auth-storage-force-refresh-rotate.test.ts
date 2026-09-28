@@ -10,6 +10,7 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
+import { OAuthRefresher } from "../src/auth/refresh";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
@@ -113,6 +114,67 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(after).toBe("minted-access");
 	});
 
+	test("cached refresh rebinds a pinned account by id after preceding row removal", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.credentials.set(
+			PROVIDER,
+			["A", "B", "C"].map(accountId => ({
+				type: "oauth" as const,
+				access: `cached-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				accountId,
+				expires: farExpiry(),
+			})),
+		);
+		const [preceding, target] = store.listAuthCredentials(PROVIDER);
+		if (!preceding || target?.credential.type !== "oauth") throw new Error("expected accounts A and B");
+		authStorage.sessions.pin(PROVIDER, "selector-cached-refresh", target.id);
+
+		const storage = authStorage;
+		const credentialStore = store;
+		const cachedCredential = target.credential;
+		vi.spyOn(OAuthRefresher.prototype, "refresh").mockImplementationOnce(async () => {
+			await credentialStore.deleteAuthCredential(preceding.id, "concurrent removal");
+			await storage.credentials.reload();
+			return cachedCredential;
+		});
+		// B moves from index 1 to 0 while the cached refresh is awaited.
+		// Reusing index 1 would silently send account C's bearer instead.
+		expect(await storage.keys.get(PROVIDER, "selector-cached-refresh", { forceRefresh: true })).toBe("cached-B");
+	});
+
+	test("forced refresh does not suppress a token entering its normal refresh-skew window", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		let refreshCalls = 0;
+		let issued = 0;
+		registerProvider(
+			() => {
+				refreshCalls += 1;
+			},
+			() => `minted-access-${++issued}`,
+		);
+		await authStorage.credentials.set(PROVIDER, {
+			type: "oauth",
+			access: "cached-access",
+			refresh: "cached-refresh",
+			expires: farExpiry(),
+		});
+		const row = store.listAuthCredentials(PROVIDER).find(entry => entry.credential.type === "oauth");
+		if (!row || row.credential.type !== "oauth") throw new Error("expected stored OAuth row");
+
+		await authStorage.oauth.refresh(row.id);
+		expect(refreshCalls).toBe(1);
+		const persisted = store.listAuthCredentials(PROVIDER).find(entry => entry.id === row.id);
+		if (!persisted || persisted.credential.type !== "oauth") throw new Error("expected refreshed OAuth row");
+		store.updateAuthCredential(row.id, { ...persisted.credential, expires: Date.now() + 30_000 });
+		await authStorage.reload();
+
+		const refreshedNearExpiry = await authStorage.oauth.refresh(row.id);
+		expect(refreshedNearExpiry.credential).toMatchObject({ type: "oauth", access: "minted-access-2" });
+		expect(refreshCalls).toBe(2);
+	});
+
 	test("getOAuthAccess includes a stable credentialId across cached and forced refresh resolves", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();
@@ -149,13 +211,37 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached");
 		const rotated = await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() });
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		// A hard 401 must NOT take the usage-limit code path.
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 
 		const second = await authStorage.keys.get(PROVIDER, "sess");
 		expect(["acc-A", "acc-B"]).toContain(second ?? "");
 		expect(second).not.toBe(first);
+	});
+
+	test("a routine refresh does not disable sibling failover on a later 401", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "routine-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "routine-B", refresh: "ref-B", expires: farExpiry() },
+		]);
+		const [target, sibling] = store.listAuthCredentials(PROVIDER);
+		if (!target || sibling?.credential.type !== "oauth") throw new Error("expected two OAuth rows");
+		const sessionId = "routine-refresh-then-401";
+		authStorage.sessions.pin(PROVIDER, sessionId, target.id);
+
+		const refreshed = await authStorage.oauth.refresh(target.id);
+		expect(refreshed.credential).toMatchObject({ type: "oauth", access: "minted-access" });
+		expect(
+			await authStorage.limits.rotate(PROVIDER, sessionId, {
+				credentialId: target.id,
+				apiKey: "minted-access",
+				error: authError(),
+			}),
+		).toEqual({ switched: true });
+		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sibling.credential.access);
 	});
 
 	test("resolver binds stored API keys to their credential rows", async () => {
@@ -274,7 +360,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			.spyOn(authStorage.keys, "getWithCredential")
 			.mockResolvedValueOnce({ apiKey: "quota-blocked-B", credentialId: 1 })
 			.mockResolvedValueOnce({ apiKey: "quota-blocked-A", credentialId: 2 });
-		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue(false);
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });
 		const attemptedKeys: string[] = [];
 
 		await expect(
@@ -346,7 +432,10 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		}
 
 		const resolvedKeys = [initialKey];
+		const start = Date.now();
+		const clock = vi.spyOn(Date, "now");
 		for (let index = 0; index < 9; index += 1) {
+			clock.mockReturnValue(start + index * 300_000);
 			const refreshed = await authStorage.keys.get(PROVIDER, sessionId, { forceRefresh: true });
 			if (!refreshed) throw new Error("expected refreshed OAuth bearer");
 			resolvedKeys.push(refreshed);
@@ -435,14 +524,14 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: authError(),
 			apiKey: "missing-or-changed-failed-bearer",
 		});
-		expect(rotated).toBe(false);
+		expect(rotated.switched).toBe(false);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const rotatedByMissingId = await authStorage.limits.rotate(PROVIDER, sessionId, {
 			error: authError(),
 			credentialId: missingCredentialId,
 		});
-		expect(rotatedByMissingId).toBe(false);
+		expect(rotatedByMissingId.switched).toBe(false);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const marked = await authStorage.limits.markReached(PROVIDER, sessionId, {
@@ -484,7 +573,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: oldKey,
 			credentialId: targetRow.id,
 		});
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sticky);
 
 		const laterSelections = new Set<string>();
@@ -511,7 +600,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: usageLimitError(),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		// Usage / account-rate-limit errors route to markUsageLimitReached, which
 		// owns the block duration (default + server usage-report reset) — the
 		// resolver never parses retry-after itself.
@@ -539,7 +628,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await authStorage.keys.get(PROVIDER, "cyber-policy")).not.toBe(first);
 	});
@@ -580,14 +669,14 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				error: denial,
 				apiKey: first,
 			}),
-		).toBe(false);
+		).toEqual({ switched: false });
 		expect(
 			await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
 				error: denial,
 				modelId: "gpt-5.3-codex",
 				apiKey: first,
 			}),
-		).toBe(false);
+		).toEqual({ switched: false });
 		expect(await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(first);
 		const usageLimitSpy = vi.spyOn(codexStorage.limits, "markReached");
 		const rotated = await codexStorage.limits.rotate(CODEX_PROVIDER, sessionId, {
@@ -596,7 +685,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: first,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await codexStorage.keys.get(CODEX_PROVIDER, sessionId, { modelId: DAYBREAK_MODEL })).toBe(
 			"daybreak-sibling",
@@ -659,7 +748,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: first,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).not.toHaveBeenCalled();
 		expect(await cursorStorage.keys.get(CURSOR_PROVIDER, sessionId, { modelId: CURSOR_MODEL })).toBe(
 			"cursor-plan-sibling",
@@ -703,7 +792,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: new ProviderHttpError("Generic provider failure", 401, { code: "insufficient_quota" }),
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(usageLimitSpy.mock.calls[0]?.[0]).toBe(PROVIDER);
 		expect(usageLimitSpy.mock.calls[0]?.[1]).toBe("machine-code-quota");
@@ -731,7 +820,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: xaiCreditsError,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(await authStorage.keys.get(PROVIDER, "xai-credits")).not.toBe(first);
 	});
@@ -759,7 +848,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 			const rotated = await authStorage.limits.rotate(PROVIDER, sessionId, { error });
 
-			expect(rotated).toBe(true);
+			expect(rotated.switched).toBe(true);
 			expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 			expect(await authStorage.keys.get(PROVIDER, sessionId)).not.toBe(first);
 			usageLimitSpy.mockRestore();
@@ -822,7 +911,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		await authStorage.keys.get(PROVIDER, "sess");
-		expect(await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() })).toBe(false);
+		expect((await authStorage.limits.rotate(PROVIDER, "sess", { error: authError() })).switched).toBe(false);
 	});
 
 	test("rotateSessionCredential returns false when the session has no sticky credential", async () => {
@@ -833,7 +922,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		// Never resolved a key for this session → nothing to rotate away from.
-		expect(await authStorage.limits.rotate(PROVIDER, "untouched", { error: authError() })).toBe(false);
+		expect((await authStorage.limits.rotate(PROVIDER, "untouched", { error: authError() })).switched).toBe(false);
 	});
 
 	test("markUsageLimitReached reports the earliest sibling unblock time when every sibling is blocked", async () => {
@@ -950,7 +1039,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			apiKey: deniedKey,
 		});
 
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 		expect(await authStorage.keys.get("anthropic", sessionId)).toBe("healthy-access");
 	});
 
@@ -975,7 +1064,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: anthropicError,
 			apiKey: firstKey,
 		});
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 
 		const secondKey = await authStorage.keys.get("anthropic", sessionId);
 		expect(secondKey).toBe("token-org-2");
@@ -987,6 +1076,6 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			error: anthropicError,
 			apiKey: secondKey,
 		});
-		expect(secondSwitched).toBe(false);
+		expect(secondSwitched.switched).toBe(false);
 	});
 });

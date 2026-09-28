@@ -38,6 +38,36 @@ class ToolBlock extends Block {
 	setToolActivityVisible(): void {}
 }
 
+/** A settled block whose render costs real wall-clock time, like a markdown-heavy message. */
+class SlowBlock extends Block {
+	#costMs: number;
+
+	constructor(rows: string[], costMs: number) {
+		super(rows, true);
+		this.#costMs = costMs;
+	}
+
+	override render(): readonly string[] {
+		const until = performance.now() + this.#costMs;
+		while (performance.now() < until) {}
+		return super.render();
+	}
+}
+
+/** A settled block that records how often the container rendered it. */
+class CountingBlock extends Block {
+	renders = 0;
+
+	constructor(rows: string[]) {
+		super(rows, true);
+	}
+
+	override render(): readonly string[] {
+		this.renders++;
+		return super.render();
+	}
+}
+
 function literalStableRow(row: string): TranscriptStableRow {
 	return { key: row };
 }
@@ -274,6 +304,9 @@ describe("TranscriptContainer", () => {
 		block.finalize(["complete"]);
 		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
 		expect(transcript.blockStates()).toEqual(["committed"]);
+		expect(transcript.render(80)).toEqual(["complete"]);
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(80)?.rows).toEqual(["complete", ""]);
 	});
 
 	it("replays and retires semantic stable rows after they reflow at a new width", () => {
@@ -410,6 +443,63 @@ describe("TranscriptContainer", () => {
 		// settled transcript prefix live for one frame while it drains next.
 		expect(transcript.renderViewport(80, 1, frame)).toEqual(["current tool"]);
 	});
+	it("retires a resumed ledger across frames instead of one blocking batch (#12933)", () => {
+		const transcript = new TranscriptContainer();
+		const blocks = Array.from({ length: 6 }, (_, index) => new SlowBlock([`block ${index}`], 4));
+		for (const block of blocks) transcript.addChild(block);
+
+		const drained: string[] = [];
+		let batches = 0;
+		for (let batch = transcript.peekFinalizedBatch(80, 0); batch !== undefined;) {
+			drained.push(...batch.rows);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+			if (++batches > blocks.length) throw new Error("retirement did not converge");
+			batch = transcript.peekFinalizedBatch(80, 0);
+		}
+
+		// The whole backlog would block the frame that first paints it, so a
+		// batch stops at the render budget and the rest follows on later frames.
+		expect(batches).toBeGreaterThan(1);
+		// Chunking must not reorder, drop, or duplicate a single scrollback row.
+		expect(drained.filter(row => row !== "")).toEqual(blocks.map((_, index) => `block ${index}`));
+		expect(transcript.blockStates()).toEqual(blocks.map(() => "committed"));
+	});
+
+	it("leaves the backlog behind the screen unrendered while painting (#12933)", () => {
+		const transcript = new TranscriptContainer();
+		const blocks = Array.from({ length: 40 }, (_, index) => new CountingBlock([`row ${index}`]));
+		for (const block of blocks) transcript.addChild(block);
+
+		expect(transcript.renderViewport(80, 4, frame)).toEqual(["row 36", "row 37", "row 38", "row 39"]);
+		// Only the viewport tail, plus the one block that proves the overflow,
+		// costs a render; a resumed session's backlog never does.
+		expect(blocks.slice(0, 34).map(block => block.renders)).toEqual(blocks.slice(0, 34).map(() => 0));
+		expect(blocks[39]!.renders).toBeGreaterThan(0);
+	});
+
+	it("keeps an emergency row from a block behind the bounded viewport walk", () => {
+		class HintBlock extends Block {
+			renderTranscriptBlockEmergencyRow(): string {
+				return "hint";
+			}
+		}
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["running"], false));
+		transcript.addChild(new HintBlock(["hint body"], true));
+		for (let index = 0; index < 5; index++) transcript.addChild(new Block([`settled ${index}`], true));
+
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["hint", "settled 4"]);
+	});
+
+	it("does not count empty active blocks behind the viewport as hidden work", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["running"], false));
+		transcript.addChild(new Block([], false));
+		for (let index = 0; index < 4; index++) transcript.addChild(new Block([`settled ${index}`], true));
+
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["settled 2", "settled 3"]);
+	});
+
 	it("excludes empty blocks so pressure never emits blank rows (issue 9483)", () => {
 		const transcript = new TranscriptContainer();
 		// Text blocks interleaved with empty (hidden tool-activity) blocks that

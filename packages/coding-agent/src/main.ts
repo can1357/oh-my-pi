@@ -32,7 +32,7 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
 	disabledProviderIds,
@@ -40,7 +40,6 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
-	type ResolveCliModelResult,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
@@ -90,6 +89,7 @@ import {
 	createAgentSession,
 	discoverAuthStorage,
 	loadSessionExtensions,
+	resolvePrewalkTarget,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
@@ -164,6 +164,7 @@ import {
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -586,7 +587,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
-	startBackgroundModelDiscovery?: () => Promise<void>,
+	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
@@ -641,7 +642,7 @@ async function runInteractiveMode(
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
-		void startBackgroundModelDiscovery?.();
+		startDeferredStartupWork?.();
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
@@ -1487,81 +1488,22 @@ export async function buildSessionOptions(
 			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 		}
 
-		const resolveCandidate = (pattern: string) =>
-			resolveCliModel({ cliModel: pattern, modelRegistry, preferences: modelMatchPreferences });
-
-		const discoverableProviders = new Map(
-			modelRegistry.getDiscoverableProviders().map(provider => [provider.toLowerCase(), provider]),
+		const selection = await resolvePrewalkTarget(
+			targetPatterns,
+			target,
+			modelRegistry,
+			modelMatchPreferences,
+			disabledProviders,
+			{ deferUnregistered: true },
 		);
-		const refreshedProviders = new Set<string>();
-		let authenticatedResolution: ResolveCliModelResult | undefined;
-		let firstUnauthenticatedResolution: ResolveCliModelResult | undefined;
-		let lastResolution: ResolveCliModelResult | undefined;
-
-		// Preserve fallback priority. Each provider-qualified candidate gets its
-		// scoped discovery opportunity before we advance to the next candidate.
-		for (const pattern of targetPatterns) {
-			let candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-
-			// A disabled provider is unreachable; try the next fallback pattern.
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-				continue;
-			}
-
-			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
-			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
-			const discoverableProvider = discoverableProviders.get(requestedProvider);
-			if (!discoverableProvider) continue;
-
-			refreshedProviders.add(requestedProvider);
-			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
-
-			candidate = resolveCandidate(pattern);
-			lastResolution = candidate;
-			if (candidate.model && disabledProviders.has(candidate.model.provider)) continue;
-			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
-				authenticatedResolution = candidate;
-				break;
-			}
-			if (candidate.model) {
-				firstUnauthenticatedResolution ??= candidate;
-			}
-		}
-
-		const resolved =
-			authenticatedResolution ??
-			firstUnauthenticatedResolution ??
-			lastResolution ??
-			resolveCandidate(targetPatterns[0] ?? target);
-
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (disabledProviders.has(resolved.model.provider)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — provider "${resolved.model.provider}" is disabled`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
+		if (selection.deferred) {
+			// Preserve role fallback order until extensions have registered their providers.
+			options.deferredPrewalk = { target, patterns: targetPatterns };
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			options.prewalk = selection.prewalk;
+			for (const warning of selection.warnings) {
+				process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+			}
 		}
 	}
 
@@ -1919,7 +1861,9 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
-		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
+		setStartupComposerLspServers(
+			!parsedArgs.noLsp && cfgLspEnabled.get(settingsInstance) ? discoverStartupLspServers(cwd, "connecting") : null,
+		);
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",
@@ -2123,9 +2067,13 @@ export async function runRootCommand(
 			}
 		}
 		await pluginPreloadPromise;
-		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
-		}
+		// Pure file I/O: overlap it with session-option building, but land it before
+		// extensions load or the session can start project daemons.
+		const daemonPresencePromise =
+			deps === DEFAULT_RUN_ROOT_DEPENDENCIES
+				? logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd)
+				: undefined;
+		daemonPresencePromise?.catch(() => {});
 
 		scheduleMarketplaceAutoUpdate({
 			autoUpdate: cfgMarketplaceAutoUpdate.get(settingsInstance),
@@ -2147,6 +2095,10 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
+		sessionOptions.onPrewalkWarning = warning => {
+			if (isInteractive) notifs.push({ kind: "warn", message: warning });
+			else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		};
 
 		// OTEL: unless `telemetry.otlpExportEnabled` is off, register global OTLP
 		// exporters when an endpoint is configured via env, then switch on the agent
@@ -2161,6 +2113,7 @@ export async function runRootCommand(
 		if (isTelemetryExportEnabled()) {
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
+		await daemonPresencePromise;
 
 		// Handle CLI --api-key as runtime override (not persisted)
 		if (parsedArgs.apiKey) {
@@ -2180,8 +2133,9 @@ export async function runRootCommand(
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
-			// every parallel arm by ~30ms.
-			modelRegistry.refreshInBackground();
+			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
+			// frame (see `startDeferredStartupWork`), for the same reason.
+			if (!isInteractive) modelRegistry.refreshInBackground();
 			return result;
 		};
 
@@ -2323,6 +2277,8 @@ export async function runRootCommand(
 				eventBus,
 				subagentEventBus,
 				preloadedExtensions: extensionsResult,
+				// runInteractiveMode validates once init has painted the first frame.
+				deferRetryFallbackValidation: isInteractive,
 			});
 
 			const sessionToolNames = session.getAllToolNames();
@@ -2369,11 +2325,21 @@ export async function runRootCommand(
 			// empty (issue #9220). Fire-and-forget: the prompt must never block on the
 			// background pass.
 			const configuredScope = parsedArgs.models ?? cfgEnabledModels.get(settingsInstance);
-			if (isInteractive && configuredScope.length > 0) {
-				void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(error =>
-					logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
-				);
-			}
+			// Interactive-only work that must not delay the first session-bound frame:
+			// runInteractiveMode calls it once init has painted. Neither feeds the first
+			// prompt: fallback-chain validation only produces header warnings, and the
+			// background refresh already raced the first prompt when it ran earlier.
+			const startDeferredStartupWork = (): void => {
+				session.validateRetryFallbackChains();
+				modelRegistry.refreshInBackground();
+				if (configuredScope.length > 0) {
+					// Must follow refreshInBackground: it waits on the in-flight refresh.
+					void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
+						error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
+					);
+				}
+				void startBackgroundModelDiscovery?.();
+			};
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
@@ -2466,7 +2432,7 @@ export async function runRootCommand(
 						initialMessage,
 						initialImages,
 						parsedArgs.join,
-						startBackgroundModelDiscovery,
+						startDeferredStartupWork,
 						startupLease,
 					);
 				} finally {

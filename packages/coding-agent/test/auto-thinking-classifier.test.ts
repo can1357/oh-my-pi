@@ -279,6 +279,7 @@ describe("auto thinking classifier helpers", () => {
 			expect.objectContaining({ role: "judge", stopReason: "error", errorMessage: "Internal Server Error" }),
 		);
 		expect(onUsage).toHaveBeenNthCalledWith(2, {
+			purpose: "auto-thinking",
 			role: "judge",
 			api: fixture.classifierModel.api,
 			provider: fixture.classifierModel.provider,

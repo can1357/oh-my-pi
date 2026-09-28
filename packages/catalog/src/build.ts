@@ -140,8 +140,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
- * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `cache-read-at-input-rate`, `limits-patch`, `long-context-cost`,
+ * `context-window-floor`, `input-modalities`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
@@ -219,6 +219,14 @@ export function applyCatalogCorrections(
 			// permanent off-peak and never wake at the dated boundary.
 			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
 		}
+	}
+	if (catalog.cacheReadAtInputRate === true) {
+		const { longContext } = model.cost;
+		model.cost = {
+			...model.cost,
+			cacheRead: model.cost.input,
+			...(longContext && { longContext: { ...longContext, cacheRead: longContext.input } }),
+		};
 	}
 	if (catalog.timeBased !== undefined) {
 		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };

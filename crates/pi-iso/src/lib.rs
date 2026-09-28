@@ -31,6 +31,7 @@ use async_trait::async_trait;
 
 mod apfs;
 mod btrfs;
+pub mod cow;
 mod diff;
 mod linux_reflink;
 mod overlayfs;
@@ -58,7 +59,8 @@ pub enum BackendKind {
 	/// Kernel `overlay` filesystem (Linux), with optional `fuse-overlayfs`
 	/// fallback.
 	Overlayfs,
-	/// Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE` block clone tree (NTFS/ReFS).
+	/// Windows `FSCTL_DUPLICATE_EXTENTS_TO_FILE` block clone tree (`ReFS`,
+	/// including Dev Drive).
 	WindowsBlockClone,
 	/// Windows Projected File System.
 	Projfs,
