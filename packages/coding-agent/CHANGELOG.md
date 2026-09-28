@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed batch task delegation silently falling back to the default agent when a specialist selector such as `reviewer`, `scout`, or a custom agent was placed at the top level; misplaced selectors now get actionable `tasks[].agent` guidance ([#12610](https://github.com/can1357/oh-my-pi/pull/12610) by [@dbc-hbin](https://github.com/dbc-hbin)).
+
 ## [18.4.2] - 2026-09-28
 
 ### Added
