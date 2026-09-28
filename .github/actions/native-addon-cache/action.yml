@@ -1,0 +1,65 @@
+name: Native addon cache
+description: >-
+  Compute the linux-x64 addon cache key.
+  On PRs, restore cached addons or fetch the latest npm release.
+outputs:
+   key:
+      description: Full addon cache key (natives-linux-x64-v1-<inputs hash>)
+      value: ${{ steps.natives-key.outputs.key }}
+   prefix:
+      description: Cache key prefix used for the newest-main restore fallback
+      value: ${{ steps.natives-key.outputs.prefix }}
+runs:
+   using: composite
+   steps:
+      - name: Compute native addon cache key
+        id: natives-key
+        shell: bash
+        env:
+           # Must stay identical on every event: PRs look up the entry main
+           # saved for the same inputs.
+           NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
+        run: |
+           echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
+           echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
+
+      # `ci-natives` is a plain workspace-relative path on purpose: the
+      # cache version hashes the literal path list, so kata (save) and
+      # hosted (restore) must spell it identically, and upload-artifact
+      # skips dot-directories by default.
+      - name: Restore main-built native addons
+        id: natives-cache
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           path: ci-natives
+           key: ${{ steps.natives-key.outputs.key }}
+           restore-keys: |
+              ${{ steps.natives-key.outputs.prefix }}
+      - name: Fetch release native addons (npm)
+        if: github.event_name == 'pull_request' && steps.natives-cache.outputs.cache-matched-key == ''
+        shell: bash
+        run: |
+           set -euo pipefail
+           tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+           echo "Fetching $tarball"
+           curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+           mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
+           cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
+           cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
+      # Make the addon source visible whenever it is not source-matched,
+      # instead of leaving a reviewer to wonder which addons the tests ran.
+      - name: Report native addon source
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+           EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
+           MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
+        run: |
+           if [ "$EXACT" = true ]; then
+             echo "Using main's addons for this exact native source state ($MATCHED)."
+           elif [ -n "$MATCHED" ]; then
+             echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon build ($MATCHED). Native changes are validated post-merge on main and at release."
+           else
+             echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
+           fi
