@@ -275,7 +275,9 @@ impl Libei {
 			loop {
 				control::check()?;
 				let now = tokio::time::Instant::now();
-				let deadline = drain_deadline.unwrap_or(discovery_deadline).min(discovery_deadline);
+				let deadline = drain_deadline
+					.unwrap_or(discovery_deadline)
+					.min(discovery_deadline);
 				if now >= deadline {
 					if targets.is_complete(
 						self.has_capability(DeviceCapability::PointerAbsolute),
@@ -300,8 +302,12 @@ impl Libei {
 					continue;
 				};
 				let event = event
-					.ok_or_else(|| DesktopError::input_failed("libei disconnected during device discovery"))?
-					.map_err(|err| DesktopError::input_failed(format!("libei device discovery: {err}")))?;
+					.ok_or_else(|| {
+						DesktopError::input_failed("libei disconnected during device discovery")
+					})?
+					.map_err(|err| {
+						DesktopError::input_failed(format!("libei device discovery: {err}"))
+					})?;
 				processed_events += 1;
 				self.handle_event(event)?;
 				// Drain the initial burst even after the first matching devices:
