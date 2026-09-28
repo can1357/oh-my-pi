@@ -91,7 +91,14 @@ describe("proc progress rendering", () => {
 			{
 				jobs: [
 					{ id: "wake-job", type: "bash", status: "running", label: "build", durationMs: 100, progress: "wake" },
-					{ id: "ambient-job", type: "bash", status: "running", label: "lint", durationMs: 100, progress: "ambient" },
+					{
+						id: "ambient-job",
+						type: "bash",
+						status: "running",
+						label: "lint",
+						durationMs: 100,
+						progress: "ambient",
+					},
 					{ id: "silent-job", type: "bash", status: "running", label: "check", durationMs: 100 },
 				],
 			},
