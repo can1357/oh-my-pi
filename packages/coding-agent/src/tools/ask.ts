@@ -18,9 +18,9 @@ import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask"
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
+import { type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { Ellipsis, replaceTabs, TERMINAL, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -78,19 +78,29 @@ const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1),
 });
 
+const askRecoveryTool = { name: "ask", description: "", parameters: askSchema };
+
 export type AskToolInput = typeof askSchema.infer;
 
 /**
- * Recover a validated `questions` payload from a persisted `ask` toolCall's
- * `arguments`. Used by `/tree` re-answer (issue #5642): selecting a past
- * `ask` toolResult re-opens the picker with the *original* questions, so the
- * new answer branches as a sibling instead of mutating the old one. Runs the
- * same schema the live tool call validated against — legacy/corrupted
- * persisted args fail closed (`undefined`) rather than feeding malformed
- * data back into the picker.
+ * Recover valid questions from a persisted `ask` tool call for `/tree` re-answer.
+ * Apply live tool-call normalization first so optional null placeholders in saved
+ * arguments do not prevent reopening; malformed questions still fail closed.
  */
 export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["questions"] | undefined {
-	const parsed = askSchema(toolCallArguments);
+	if (!isRecord(toolCallArguments)) return undefined;
+	let normalized: Record<string, unknown>;
+	try {
+		normalized = validateToolArguments(askRecoveryTool, {
+			type: "toolCall",
+			id: "",
+			name: "ask",
+			arguments: toolCallArguments,
+		});
+	} catch {
+		return undefined;
+	}
+	const parsed = askSchema(normalized);
 	if (parsed instanceof arkType.errors) return undefined;
 	return parsed.questions;
 }

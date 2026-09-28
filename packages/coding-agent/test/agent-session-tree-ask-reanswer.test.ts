@@ -168,6 +168,43 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 		}
 	});
 
+	it("reopens a persisted Ask result with null optional previews instead of moving the leaf", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+			const savedQuestions = [
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [
+						{ label: "staging", preview: null },
+						{ label: "production", preview: "Production rollout" },
+					],
+				},
+			];
+			sessionManager.appendMessage(userMsg("please deploy"));
+			sessionManager.appendMessage(toolCallMsg("ask-null-preview", "ask", { questions: savedQuestions }));
+			const resultId = sessionManager.appendMessage(
+				toolResultMsg("ask-null-preview", "ask", "User selected: staging"),
+			);
+			sessionManager.appendMessage(assistantMsg("deploying to staging"));
+			const leafBeforeProbe = sessionManager.getLeafId();
+
+			const result = await session.navigateTree(resultId, { allowAskReopen: true });
+
+			expect(result.reopenAsk?.questions).toEqual([
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [{ label: "staging" }, { label: "production", preview: "Production rollout" }],
+				},
+			]);
+			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
 	it("(b)+(c) branches a new sibling toolResult and keeps the original branch reachable", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {

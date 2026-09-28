@@ -354,6 +354,80 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages[0].historyRewriteAt).toBeLessThan(new Date(newTurn.timestamp).getTime());
 		});
 
+		it("keeps context notes behind a native Anthropic summary so its block opens the request", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("3", "2", "Native summary", ""),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				nativeCompaction,
+				msg("4", "3", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+		});
+
+		it("keeps context notes out of the fold between a native summary and its retained assistant turn", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const retained = msg("3", "2", "assistant", "checking");
+			if (retained.message.role !== "assistant") throw new Error("Expected assistant");
+			retained.message.content.push({ type: "toolCall", id: "t1", name: "read", arguments: {} });
+			retained.message.stopReason = "toolUse";
+			const result: SessionMessageEntry = {
+				type: "message",
+				id: "4",
+				parentId: "3",
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "read",
+					content: [{ type: "text", text: "file" }],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("5", "4", "Native summary", "3"),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				retained,
+				result,
+				nativeCompaction,
+				msg("6", "5", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual([
+				"compactionSummary",
+				"assistant",
+				"toolResult",
+				"custom",
+				"user",
+			]);
+		});
+
 		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The

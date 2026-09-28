@@ -12,11 +12,14 @@
 - The `eval` tool description now notes that the kernel may be shared with the parent session and concurrent `task` subagents ([#13521](https://github.com/can1357/oh-my-pi/pull/13521) by [@radkawar](https://github.com/radkawar))
 
 ### Fixed
+- Fixed `/tree` navigating past saved Ask results instead of reopening their questions when an optional preview was saved as `null` ([#13570](https://github.com/can1357/oh-my-pi/issues/13570)).
+- Fixed legacy `createGrepTool()` failing to search a file when a `glob` filter is also supplied ([#13571](https://github.com/can1357/oh-my-pi/issues/13571)).
 - Fixed ongoing Claude tasks stopping instead of automatically redeeming eligible saved resets when usage polling is throttled or earlier failures exhausted the retry budget; concurrent tasks now share confirmed resets without spending again
 - Fixed user-tagged `^model` agents from the main session being unavailable to nested subagents.
 - Fixed SDK requests using an `ApiKeyResolver` from `createApiKeyResolver` failing with a drained account's multi-hour quota error instead of briefly waiting for a healthy sibling credential whose block expires within seconds ([#13270](https://github.com/can1357/oh-my-pi/issues/13270))
 - Fixed headless subagents losing an assignment during a session transition and then entering yield reminders without ever receiving it ([#13538](https://github.com/can1357/oh-my-pi/issues/13538)).
 
+- Fixed Anthropic requests failing with "`compaction` block must be sent first" after a native compaction when experimental context notes were active; the notes now follow the compaction summary and any retained turn it opens ([#13569](https://github.com/can1357/oh-my-pi/pull/13569) by [@H4vC](https://github.com/H4vC))
 - Fixed Windows sessions started from an 8.3 short path (such as `C:\Users\ADMINI~1\project`) using the short spelling as the project directory, and home-directory paths written with 8.3 aliases not being shortened to `~` in the status line, tool labels, and errors ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
 - Fixed `edit` `PUT >N` moving a shallower insert (Go `case`, `} else {`) past a closing brace when that breaks the file's syntax ([#13520](https://github.com/can1357/oh-my-pi/pull/13520) by [@radkawar](https://github.com/radkawar))
 - Fixed `omp update` and other one-shot commands on Windows printing "ended before completing" and exiting 1 after they had actually completed ([#13470](https://github.com/can1357/oh-my-pi/issues/13470))
