@@ -23,6 +23,15 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
+## Compatibility Posture
+
+Default: `established`.
+
+- Existing observable behavior, documented public APIs, persisted data, configuration schemas, and wire protocols **MUST** be preserved unless the current task explicitly authorizes change.
+- Behavior the current task explicitly identifies as a bug **MAY** change.
+- Non-public, non-persisted internal interfaces use clean cutovers: migrate every in-repo caller; remove obsolete code, comments, aliases, re-exports, and deprecated paths.
+- Compatibility shims and migrations require an actual external or persisted contract.
+
 ## GitHub
 
 - Before posting a GitHub comment or creating an issue, MUST show the target and proposed text and obtain user confirmation. An explicit instruction to post supplied text to a specified target already counts as confirmation.
@@ -45,6 +54,12 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 - **NEVER use `ReturnType<>`** — use the actual type name.
 - **NEVER use inline imports** — no `await import()`, no `import("pkg").Type` in type positions, no dynamic type imports. Always top-level.
 - Check `node_modules` for external API types instead of guessing.
+- Choose the simplest implementation that fully meets current requirements. **AVOID** speculative abstractions, configuration, or indirection.
+- Grow systems in working end-to-end layers. Each capability **MUST** build on a working product; **NEVER** trade working behavior for unfinished complexity.
+- Components **MUST** remain modular with clearly separated concerns.
+- **SHOULD** prefer established, maintained libraries when they reduce complexity or improve reliability. **NEVER** reimplement common functionality without a clear reason.
+- Use existing project dependencies before writing custom code or adding packages. Inspect their documentation and types; **NEVER** assume they lack needed capability.
+- Make architectural decisions for the long term. **NEVER** accept temporary stopgaps intended for later replacement.
 - **Barrel exports**: prefer `export * from "./module"` over named re-exports, including `export type { ... } from`. In pure `index.ts` barrels, use star re-exports even for single-specifier cases. If stars create ambiguity, remove the redundant export path; do not keep duplicates.
 - **Class privacy**: use ES `#private` fields; leave externally accessible members bare. **No `private`/`protected`/`public` keyword on fields or methods**, except on **constructor parameter properties** where TypeScript requires it (e.g. `constructor(private readonly session: ToolSession)`).
 - **Promises**: use `Promise.withResolvers()` instead of `new Promise((resolve, reject) => ...)`.
