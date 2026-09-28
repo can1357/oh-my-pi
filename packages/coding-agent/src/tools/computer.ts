@@ -164,8 +164,7 @@ export function createComputerPrelude(
 			if (!cells.has(cell) || closed || !controller.settle) return undefined;
 			cells.delete(cell);
 			try {
-				const text = await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
-				return text === undefined ? undefined : { text };
+				return await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
 			} catch (error) {
 				// Cancellation of the turn needs no report; anything else leaves the
 				// model without its post-input observation, so it is told to look.

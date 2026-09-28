@@ -1200,6 +1200,7 @@ class EditableWindowSession extends FakeNativeSession {
 	snapshots = 0;
 	/** Value of the window's text row, to vary it between reads. */
 	status = "Ready";
+	axFails = false;
 	windows: DesktopWindow[] = [windowFixture];
 	#nextRef = 1;
 	#live = new Set<string>();
@@ -1212,6 +1213,7 @@ class EditableWindowSession extends FakeNativeSession {
 		return this.windows;
 	}
 	override async axSnapshot(): Promise<{ text: string }> {
+		if (this.axFails) throw new Error("AxFailed: window has no accessibility root");
 		this.snapshots += 1;
 		this.#previous = this.#live;
 		this.#live = new Set();
@@ -1241,11 +1243,15 @@ class EditableWindowSession extends FakeNativeSession {
 }
 
 /** Settle the cell that just ended; `output` is what that cell printed. */
-async function settleWorker(transport: MemoryTransport, id: string, output = ""): Promise<unknown> {
+async function settleRun(transport: MemoryTransport, id: string, output = "") {
 	transport.inbound({ type: "settle", id, timeoutMs: 5_000, session: snapshot(true), output });
 	const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
 	if (message.type !== "result" || !message.ok) throw new Error(`settle ${id} failed`);
-	return message.payload.returnValue;
+	return message.payload;
+}
+
+async function settleWorker(transport: MemoryTransport, id: string, output = ""): Promise<unknown> {
+	return (await settleRun(transport, id, output)).returnValue;
 }
 
 /** A cell that prints the window's tree, settled: the model has now seen that tree. */
@@ -1294,6 +1300,8 @@ describe("computer cell settlement", () => {
 		new ComputerWorkerCore(transport, () => native);
 
 		await readCell(transport, "read");
+		// A silent screenshot is not shown to the model: it does not put the window in pixel mode.
+		await runWorker(transport, "silent-shot", 'await (await desktop.window("42")).screenshot({ silent: true })');
 		await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
 		const before = native.snapshots;
 		const report = String(await settleWorker(transport, "settle-key"));
@@ -1301,6 +1309,7 @@ describe("computer cell settlement", () => {
 		expect(report.split("\n")[0]).toMatch(
 			/after press shift — no accessibility change visible \d\.\d s after the input/,
 		);
+		expect(report).not.toContain("screenshot below");
 		const held = await runWorker(transport, "held", 'return (await desktop.ref("e3")).ref');
 		expect(held.ok && held.payload.returnValue).toBe("e3");
 	});
@@ -1438,6 +1447,107 @@ describe("computer cell settlement", () => {
 		expect(report).not.toContain('window "6"');
 	});
 
+	it("repeats a screenshot for a window worked by pixels, whatever the read order and even without AX", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+
+		// Screenshot, then a tree read, then pixel input: the window is worked by pixels.
+		await runWorker(
+			transport,
+			"look",
+			'const win = await desktop.window("42"); await win.screenshot(); await win.ax()',
+		);
+		await runWorker(transport, "click", 'await (await desktop.window("42")).click(3, 4)');
+		const pixels = await settleRun(transport, "settle-pixels");
+		expect(String(pixels.returnValue).split("\n")[0]).toEndWith("; screenshot below:");
+		expect(pixels.displays.filter(block => block.type === "image")).toHaveLength(1);
+
+		// Keys leave the mode as it is.
+		await runWorker(transport, "key", 'await (await desktop.window("42")).press("shift")');
+		expect((await settleRun(transport, "settle-key")).displays.filter(block => block.type === "image")).toHaveLength(
+			1,
+		);
+
+		// An AX failure still leaves the frame.
+		native.axFails = true;
+		await runWorker(transport, "click-2", 'await (await desktop.window("42")).click(5, 6)');
+		const blind = await settleRun(transport, "settle-blind");
+		expect(String(blind.returnValue)).toContain("could not be read back through AX: AxFailed");
+		expect(blind.displays.filter(block => block.type === "image")).toHaveLength(1);
+		native.axFails = false;
+
+		// A screenshot shown in an earlier cell does not keep the mode through this cell's element action.
+		await runWorker(transport, "look-only", 'await (await desktop.window("42")).screenshot()');
+		expect(await settleWorker(transport, "settle-look-only")).toBeUndefined();
+		await runWorker(transport, "read", 'return await (await desktop.window("42")).ax()');
+		const button = native.editing ? "Done" : "Edit";
+		await runWorker(
+			transport,
+			"press",
+			`const [el] = (await (await desktop.window("42")).ax()).match(/button "${button}" \\[ref=(e\\d+)\\]/).slice(1); await (await desktop.ref(el)).press()`,
+		);
+		const ax = await settleRun(transport, "settle-ax");
+		expect(String(ax.returnValue)).not.toContain("screenshot below");
+		expect(ax.displays.filter(block => block.type === "image")).toHaveLength(0);
+
+		// A displayed screenshot taken after the input already answers it: no read-back at all.
+		await runWorker(
+			transport,
+			"click-look",
+			'const win = await desktop.window("42"); await win.click(1, 1); await win.screenshot()',
+		);
+		const looked = await settleRun(transport, "settle-looked");
+		expect(looked.returnValue).toBeUndefined();
+		expect(looked.displays).toEqual([]);
+	});
+
+	it("adds a desktop screenshot while the desktop root is worked by pixels, reporting the window under the pointer", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+		native.capture = async target => ({
+			data: Uint8Array.of(137, 80, 78, 71),
+			width: 64,
+			height: 32,
+			sourceWidth: 64,
+			sourceHeight: 32,
+			target,
+			displays: [display],
+		});
+		const images = (payload: { displays: Array<{ type: string }> }) =>
+			payload.displays.filter(block => block.type === "image");
+
+		// A displayed desktop screenshot, then a click at its pixels: the root is worked by pixels.
+		await readCell(transport, "read");
+		await runWorker(transport, "look", "await desktop.screenshot()");
+		await runWorker(transport, "root-click", "await desktop.click(7, 8)");
+		const click = await settleRun(transport, "settle-root-click");
+		const header = String(click.returnValue).split("\n")[0];
+		expect(header).toStartWith('window "42" Code "Editor" after desktop click 7,8 — ');
+		// The frame the model clicks in is the desktop's, not the window's.
+		expect(header).not.toContain("screenshot below");
+		expect(String(click.returnValue)).toContain("desktop screenshot below");
+		expect(click.screenshots).toEqual([expect.objectContaining({ target: "desktop" })]);
+		expect(images(click)).toHaveLength(1);
+
+		// Keys at the root keep the mode.
+		await runWorker(transport, "root-key", 'await desktop.press("shift")');
+		const key = await settleRun(transport, "settle-root-key");
+		expect(String(key.returnValue)).toContain("desktop screenshot below");
+		expect(images(key)).toHaveLength(1);
+
+		// An element action in a cell without root pixel input ends it.
+		const ref = String(key.returnValue).match(/button "(?:Edit|Done)" \[ref=(e\d+)\]/)![1];
+		await runWorker(transport, "press", `await (await desktop.ref("${ref}")).press()`);
+		await settleRun(transport, "settle-press");
+		await runWorker(transport, "root-key-2", 'await desktop.press("shift")');
+		const after = await settleRun(transport, "settle-root-key-2");
+		expect(String(after.returnValue)).not.toContain("screenshot below");
+		expect(after.screenshots).toEqual([]);
+		expect(images(after)).toHaveLength(0);
+	});
+
 	it("names windows the cell's input opened and focused", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();
@@ -1464,7 +1574,7 @@ describe("computer cell settlement", () => {
 			},
 			async settle() {
 				if (fail) throw new Error("computer worker restarted; captures and ax refs were reset");
-				return 'window "42" after press e3 — current tree:';
+				return { text: 'window "42" after press e3 — current tree:', images: [] };
 			},
 			async close() {},
 		}));
@@ -1481,6 +1591,7 @@ describe("computer cell settlement", () => {
 		expect(await prelude.settleCell?.(idle, { failed: false, output: "" })).toBeUndefined();
 		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toEqual({
 			text: 'window "42" after press e3 — current tree:',
+			images: [],
 		});
 		expect(await prelude.settleCell?.(acting, { failed: false, output: "" })).toBeUndefined();
 

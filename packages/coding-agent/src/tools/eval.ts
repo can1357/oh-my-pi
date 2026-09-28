@@ -991,6 +991,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					activeLiveCell = undefined;
 				}
 				const preludeReplies: string[] = [];
+				// Settle images join the cell's own displays, so they are resized and noted alike.
+				const displayOutputs = [...result.displayOutputs];
 				if (!result.cancelled) {
 					const failed = result.exitCode !== undefined && result.exitCode !== 0;
 					for (const prelude of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
@@ -1005,6 +1007,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							});
 						}
 						if (reply?.text) preludeReplies.push(reply.text);
+						for (const image of reply?.images ?? [])
+							displayOutputs.push({ type: "image", data: image.data, mimeType: image.mimeType });
 					}
 				}
 				// Settling is part of the cell as the model sees it, including a cancellation that lands during it.
@@ -1014,7 +1018,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const cellDisplayTexts: string[] = [];
 				const cellImageNotes: string[] = [];
 				let cellHasMarkdown = false;
-				for (const output of result.displayOutputs) {
+				for (const output of displayOutputs) {
 					if (output.type === "json") {
 						const formatted = formatDisplayJson(output.data, artifactPath !== undefined);
 						const label = `display[${cellDisplayTexts.length + 1}]:\n`;
