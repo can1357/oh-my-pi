@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.0] - 2026-09-28
+
 ### Changed
 
 - Updated telemetry attribute names from the `pi.*` namespace to the `omp.*` namespace.
