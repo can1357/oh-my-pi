@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
+	git::git_builtin,
 	minimizer,
 	output_decode::{OutputDecoder, decode_bytes},
 	process,
@@ -797,12 +798,10 @@ async fn create_session_for_run(
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
 	// destructive set (`rm`, `mv`, `cp`, `ln`) additionally honors
 	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
-	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
-		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
-		let rm_disabled =
-			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN");
-		let mv_disabled =
-			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN");
+	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
+		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
+		let rm_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_RM_BUILTIN");
+		let mv_disabled = destructive_disabled || env_flag(config, "PI_DISABLE_MV_BUILTIN");
 		for (name, registration) in pi_builtins::utility_builtins() {
 			let disabled = match name {
 				"rm" => rm_disabled,
@@ -816,6 +815,13 @@ async fn create_session_for_run(
 				shell.register_builtin(name, registration);
 			}
 		}
+	}
+
+	// Opt-in via PI_SMART_GIT: `git worktree add` becomes a copy-on-write clone
+	// through pi-vcs; every other git invocation reaches the binary unchanged
+	// (see `crate::git`).
+	if env_flag(config, "PI_SMART_GIT") {
+		shell.register_builtin("git", git_builtin());
 	}
 
 	copy_env_into_shell(&mut shell, std::env::vars_os())?;
@@ -1776,14 +1782,14 @@ pub const GIT_REPO_LOCATION_ENV_VARS: [&str; 6] = [
 /// Windows environment lookups are case-insensitive, so `git_dir` binds there
 /// exactly like `GIT_DIR`; POSIX names are case-sensitive.
 #[cfg(windows)]
-fn is_git_repo_location_var(key: &str) -> bool {
+pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
 	GIT_REPO_LOCATION_ENV_VARS
 		.iter()
 		.any(|name| key.eq_ignore_ascii_case(name))
 }
 
 #[cfg(not(windows))]
-fn is_git_repo_location_var(key: &str) -> bool {
+pub(crate) fn is_git_repo_location_var(key: &str) -> bool {
 	GIT_REPO_LOCATION_ENV_VARS.contains(&key)
 }
 
@@ -2112,13 +2118,13 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 /// does not do. It therefore shadows the real one unless
 /// `PI_DISABLE_NOHUP_BUILTIN` (session env or process env) asks otherwise.
 fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
-	uutils_env_disabled(config, "PI_DISABLE_NOHUP_BUILTIN")
+	env_flag(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
-/// Reads a boolean "disable" flag for the uutils builtins from the session
-/// environment (preferred) then the process environment, mirroring the nohup
-/// builtin gate. Truthy = present and not "", "0", or "false".
-fn uutils_env_disabled(config: &ShellConfig, key: &str) -> bool {
+/// Reads a boolean builtin switch (`PI_DISABLE_*`, `PI_SMART_GIT`) from the
+/// session environment (preferred) then the process environment. Truthy =
+/// present and not "", "0", or "false".
+fn env_flag(config: &ShellConfig, key: &str) -> bool {
 	let raw = config
 		.session_env
 		.as_ref()

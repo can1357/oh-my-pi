@@ -2,13 +2,17 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- Renamed the Codex image model `openai-codex/gpt-image-1` to `openai-codex/gpt-image-2` to match what the Codex backend runs (`gpt-image-2-codex`); update `image` roles that name the old id.
+## [18.4.3] - 2026-09-28
 
 ### Added
 
+- Added support for Claude Sonnet 5.5 model with image and text inputs
+- Added new compatibility rules for Anthropic Sonnet family enabling mid‑conversation system features and disabling forced tool choice
 - Added the `web-search-model`, `hosted-image`, and `image-model` catalog axes (`Model.webSearchModel`, `hostedImage`, `imageModel`). `web-search` now comes from the model's lineage and API (GPT-5+ Responses, Claude 4+ Messages, Gemini 2+), so proxies and gateways that expose these models inherit it.
+
+### Changed
+
+- Renamed the Codex image model `openai-codex/gpt-image-1` to `openai-codex/gpt-image-2` to match what the Codex backend runs (`gpt-image-2-codex`); saved `openai-codex/gpt-image-1` selectors resolve to the new id.
 
 ## [18.4.2] - 2026-09-28
 

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.3] - 2026-09-28
+
 ### Added
 
 - Added an optional `onDone` callback to `readSseJsonOrText` that reports the `[DONE]` sentinel without attaching a raw-event observer ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).

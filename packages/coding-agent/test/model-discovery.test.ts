@@ -302,6 +302,31 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("gateway", "old-model")).toBeUndefined();
 	});
 
+	test("refreshIfStale rebuilds only after models config changes on disk", async () => {
+		const gateway = (ids: string[]) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				models: ids.map(id => ({ id, reasoning: false, input: ["text"] })),
+			},
+		});
+		writeRawModelsJson(gateway(["first-model"]));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+		expect(await registry.refreshIfStale()).toBe(false);
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson(gateway(["first-model", "added-model"]));
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+
+		expect(registry.find("gateway", "added-model")).toBeUndefined();
+		expect(await registry.refreshIfStale()).toBe(true);
+		expect(registry.find("gateway", "added-model")).toBeDefined();
+		expect(await registry.refreshIfStale()).toBe(false);
+	});
+
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
 		await authStorage.credentials.set("anthropic", {

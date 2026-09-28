@@ -28,7 +28,8 @@ export interface ResolvedRoleModel {
 
 /** Catalog refresh capability used by the session picker. */
 export interface ModelPickerRegistry extends ModelBrowserRegistry {
-	refresh(strategy: "offline"): Promise<void>;
+	/** Bring the catalog up to date without rebuilding a current one; `true` when the picker must re-read it. */
+	refreshIfStale(): Promise<boolean>;
 }
 
 export interface ModelPickerCallbacks {
@@ -172,13 +173,15 @@ export class ModelPickerComponent implements Component {
 			this.#browser.selectSelector(options.currentSelector);
 		}
 
-		// Reconcile with cached discovery state in the background. A --models
-		// scope is registry-independent, so the offline reload would only repeat
-		// the synchronous hydration above.
+		// Re-read only if the catalog moves (startup discovery landing, a
+		// models.yml edit): rebuilding a current catalog on every open blocks
+		// the first paint for seconds. A --models scope is registry-independent.
 		if (this.#scopedModels.length === 0) {
 			this.#registry
-				.refresh("offline")
-				.then(() => this.#syncFromRegistryState())
+				.refreshIfStale()
+				.then(changed => {
+					if (changed) this.#syncFromRegistryState();
+				})
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})

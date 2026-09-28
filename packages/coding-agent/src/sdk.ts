@@ -4310,6 +4310,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
 				}
 			},
+			// Recovery only fires on turns without tool calls and appends a new one,
+			// so streamed calls (and their speculation sessions) are never rewritten.
+			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
