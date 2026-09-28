@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `<agent>@<selector>` spawns (for example `reviewer@anthropic/claude-fable-5-1`) so `task`, eval `agent()`, and `workpool()` can run any agent on a model tagged with `^` in the session; selectors that were not tagged are rejected before dispatch.
+- Added `<agent>@<selector>` spawns (for example `reviewer@anthropic/claude-fable-5-1`) so `task`, eval `agent()`, and `workpool()` can run any agent on a model tagged with `^` in the session; selectors that were not tagged are rejected before dispatch ([#13584](https://github.com/can1357/oh-my-pi/pull/13584) by [@emizuki](https://github.com/emizuki)).
 
 ## [18.4.1] - 2026-09-28
 
