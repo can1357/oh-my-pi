@@ -289,22 +289,16 @@ describe("macOS spelling feature gates", () => {
 
 	it("does no spelling work on local-execution drafts", async () => {
 		const checkSpelling = mock(async () => [{ start: 6, length: 8 }]);
-		const completeWord = mock(async () => ["received"]);
 		const autocorrectWord = mock(async () => "received");
 		const spellingGuesses = mock(async () => ["received"]);
-		const provider = new MacOSSpellingProvider(
-			backend({ checkSpelling, completeWord, autocorrectWord, spellingGuesses }),
-			true,
-		);
-		provider.setFeatures({ typoDetection: true, autocomplete: true, autocorrect: true });
+		const provider = new MacOSSpellingProvider(backend({ checkSpelling, autocorrectWord, spellingGuesses }), true);
+		provider.setFeatures({ typoDetection: true, autocorrect: true });
 
 		expect(provider.decorateTypos("recieved", decorationContext("!echo recieved", 0, 6))).toBe("recieved");
-		expect(provider.getWordCompletion(["$ print reciev"], 0, 14)).toBeNull();
 		expect(await provider.tryAutocorrect(["!!git recieved "], 0, 15)).toBeNull();
 		expect(await provider.getWordReplacements(["$$ x recieved"], 0, 8)).toBeNull();
 
 		expect(checkSpelling).not.toHaveBeenCalled();
-		expect(completeWord).not.toHaveBeenCalled();
 		expect(autocorrectWord).not.toHaveBeenCalled();
 		expect(spellingGuesses).not.toHaveBeenCalled();
 
