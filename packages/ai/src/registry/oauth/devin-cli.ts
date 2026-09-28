@@ -2,17 +2,20 @@
  * Devin CLI credential adoption: `login "custom" hook="devin-cli"`.
  *
  * The official Devin CLI persists its Windsurf seat key (raw `sk-ws-01-...`
- * plus the server-directed API host) in `~/.local/share/devin/credentials.toml`.
- * This hook imports those credentials as a stored `devin` api-key account so
- * chat, discovery, and usage work from the pool without the `DEVIN_API_KEY`
- * env-var fallback. Never prompts and never touches the network: either the
- * CLI credentials exist or the flow fails with an actionable message.
+ * plus the server-directed API host) in `credentials.toml`. This hook imports
+ * those credentials as a stored `devin` api-key account so chat, discovery,
+ * and usage work from the pool without the `DEVIN_API_KEY` env-var fallback.
+ * Never prompts and never touches the network: either the CLI credentials
+ * exist or the flow fails with an actionable message.
  */
-import * as fs from "node:fs";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as AIError from "../../error";
+import { isRecord } from "../../utils";
 import type { OAuthController } from "./types";
+
+const KNOWN_API_HOSTS = new Set(["server.codeium.com", "server.enterprise.windsurf.com"]);
 
 /**
  * Candidate locations of the Devin CLI credential file, in probe order. The
@@ -26,72 +29,88 @@ export function devinCliCredentialPaths(
 	platform: NodeJS.Platform = process.platform,
 ): string[] {
 	const pathImpl = platform === "win32" ? path.win32 : path;
-	const paths = [pathImpl.join(homedir, ".local", "share", "devin", "credentials.toml")];
+	const paths: string[] = [];
 	const push = (candidate: string): void => {
 		if (!paths.includes(candidate)) paths.push(candidate);
 	};
 	if (platform === "win32") {
 		if (env.APPDATA) push(pathImpl.join(env.APPDATA, "devin", "credentials.toml"));
-	} else {
-		if (env.XDG_DATA_HOME) paths.unshift(pathImpl.join(env.XDG_DATA_HOME, "devin", "credentials.toml"));
+	}
+	if (env.XDG_DATA_HOME) push(pathImpl.join(env.XDG_DATA_HOME, "devin", "credentials.toml"));
+	push(pathImpl.join(homedir, ".local", "share", "devin", "credentials.toml"));
+	if (platform !== "win32") {
 		push(pathImpl.join(homedir, "Library", "Application Support", "devin", "credentials.toml"));
 	}
 	return paths;
 }
 
-/**
- * Parse and validate the CLI credential file. Split from the hook so tests can
- * exercise the failure partitions against fixture files instead of `$HOME`.
- */
-export function readDevinCliCredentials(filePath: string): string {
-	let text: string;
-	try {
-		text = fs.readFileSync(filePath, "utf8");
-	} catch {
-		throw new AIError.OAuthError(
-			`No Devin CLI credentials found at ${filePath}. Run \`devin auth login\` once, then retry this login.`,
-			{ kind: "configuration", provider: "devin-cli" },
-		);
+export async function loginDevinCliHook(_callbacks: OAuthController): Promise<string> {
+	let lastError: unknown;
+	for (const candidate of devinCliCredentialPaths()) {
+		try {
+			return await readDevinCliCredentials(candidate);
+		} catch (error) {
+			// A present-but-invalid file is the user's real problem; a missing
+			// one just means this platform's location does not exist yet.
+			lastError = error;
+			if (!(error instanceof AIError.OAuthError) || error.kind !== "configuration") throw error;
+		}
 	}
-	return parseDevinCliCredentials(filePath, text);
+	throw new AIError.OAuthError(
+		`No Devin CLI credentials found (probed: ${devinCliCredentialPaths().join(", ")}). Run \`devin auth login\` once, then retry this login.`,
+		{ kind: "configuration", provider: "devin-cli", cause: lastError instanceof Error ? lastError : undefined },
+	);
 }
 
-function parseDevinCliCredentials(filePath: string, text: string): string {
-	let parsed: { windsurf_api_key?: unknown };
+/** Parse and validate the CLI credential file at `filePath`. */
+export async function readDevinCliCredentials(filePath: string): Promise<string> {
+	let text: string;
 	try {
-		parsed = Bun.TOML.parse(text) as { windsurf_api_key?: unknown };
+		text = await Bun.file(filePath).text();
+	} catch (error) {
+		if (isEnoent(error)) {
+			throw new AIError.OAuthError(
+				`No Devin CLI credentials found at ${filePath}. Run \`devin auth login\` once, then retry this login.`,
+				{ kind: "configuration", provider: "devin-cli", cause: error instanceof Error ? error : undefined },
+			);
+		}
+		throw new AIError.OAuthError(`Devin CLI credentials at ${filePath} are unreadable: ${String(error)}`, {
+			kind: "validation",
+			provider: "devin-cli",
+			cause: error instanceof Error ? error : undefined,
+		});
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = Bun.TOML.parse(text);
 	} catch (error) {
 		throw new AIError.OAuthError(
 			`Devin CLI credentials at ${filePath} are not valid TOML: ${error instanceof Error ? error.message : String(error)}`,
 			{ kind: "validation", provider: "devin-cli" },
 		);
 	}
-	const key = typeof parsed.windsurf_api_key === "string" ? parsed.windsurf_api_key.trim() : "";
-	if (!key) {
+	if (!isRecord(parsed) || typeof parsed.windsurf_api_key !== "string" || parsed.windsurf_api_key.trim() === "") {
 		throw new AIError.OAuthError(
 			`Devin CLI credentials at ${filePath} carry no windsurf_api_key. Run \`devin auth login\` once, then retry this login.`,
 			{ kind: "validation", provider: "devin-cli" },
 		);
 	}
+
 	// The key is returned raw: the Windsurf RPCs authenticate with the
 	// unprefixed form, and the api_server_url in the file matches the host the
 	// devin provider and its usage endpoint already default to.
-	return key;
-}
+	const key = parsed.windsurf_api_key.trim();
 
-export async function loginDevinCliHook(_callbacks: OAuthController): Promise<string> {
-	const candidates = devinCliCredentialPaths();
-	for (const candidate of candidates) {
-		try {
-			return readDevinCliCredentials(candidate);
-		} catch (error) {
-			// A present-but-invalid file is the user's real problem; a missing
-			// one just means this platform's location does not exist yet.
-			if (!(error instanceof AIError.OAuthError) || error.kind !== "configuration") throw error;
+	if (typeof parsed.api_server_url === "string" && parsed.api_server_url !== "") {
+		const host = new URL(parsed.api_server_url).host;
+		if (!KNOWN_API_HOSTS.has(host)) {
+			throw new AIError.OAuthError(
+				`Devin CLI credentials point at unknown API host "${host}" (expected one of: ${[...KNOWN_API_HOSTS].join(", ")}).`,
+				{ kind: "validation", provider: "devin-cli" },
+			);
 		}
 	}
-	throw new AIError.OAuthError(
-		`No Devin CLI credentials found (probed: ${candidates.join(", ")}). Run \`devin auth login\` once, then retry this login.`,
-		{ kind: "configuration", provider: "devin-cli" },
-	);
+
+	return key;
 }
