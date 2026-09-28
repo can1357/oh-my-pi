@@ -101,9 +101,9 @@ export abstract class SearchProvider {
 	/**
 	 * Returns `true` when this provider should run when the user explicitly
 	 * selects it, even if {@link isAvailable} would reject it for the auto
-	 * chain. Providers that ship an unauthenticated fallback (e.g. Exa's
-	 * public MCP) override this so explicit selection still routes through
-	 * the fallback rather than silently falling back to another provider.
+	 * chain. Providers with an unauthenticated fallback kept out of the auto
+	 * chain (e.g. Perplexity's anonymous ask endpoint) override this so explicit
+	 * selection still routes through it rather than failing.
 	 *
 	 * Defaults to mirroring {@link isAvailable}.
 	 */

@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed DeepSeek `/responses` requests failing with `400 No tool output found` when a repaired orphan tool-result note landed between two outputs of the same tool round, and with `400 The reasoning_text in the thinking mode must be passed back` when replayed history lacked reasoning for an assistant turn ([#13083](https://github.com/can1357/oh-my-pi/issues/13083)).
-
 ## [18.4.2] - 2026-09-28
 
 ### Fixed

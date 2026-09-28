@@ -369,3 +369,13 @@ class "anthropic" {
 		antigravity-usage-label "true"
 	}
 }
+
+// Claude 4+ ships the server-side `web_search` tool on any Messages-compatible host.
+class "anthropic" {
+	on-api "anthropic-messages" {
+		revision ">=4" {
+			web-search "anthropic"
+			web-search-model "claude-haiku-4-5"
+		}
+	}
+}

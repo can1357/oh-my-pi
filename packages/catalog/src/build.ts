@@ -87,6 +87,9 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	) {
 		model.webSearch = webSearch;
 	}
+	if (typeof catalog.webSearchModel === "string") model.webSearchModel = catalog.webSearchModel;
+	if (catalog.hostedImage === true) model.hostedImage = true;
+	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
