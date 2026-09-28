@@ -48,6 +48,13 @@ import type {
 	StatusLineSettings,
 } from "./types";
 
+/**
+ * Freshness window for the git segment's working-tree counts. A whole-worktree
+ * `git status` costs ~1 CPU-second on large repos and every open session polls
+ * it, so edits surface within this window; HEAD moves refetch immediately via
+ * {@link StatusLineComponent.invalidateGitCaches}.
+ */
+const GIT_STATUS_TTL_MS = 10_000;
 const JJ_REFRESH_TTL_MS = 5000;
 const JJ_COMMAND_TIMEOUT_MS = 5_000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
@@ -605,6 +612,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
+	#gitStatusGeneration = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
@@ -1290,6 +1298,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#branchLastFetch = undefined;
 		this.#branchCacheGeneration++;
 		this.#cachedPrContext = undefined;
+		// A HEAD move (commit, checkout, reset) changes the dirty counts; keep the
+		// stale counts on screen but refetch on the next render. The generation
+		// bump stops an in-flight pre-move result from re-stamping freshness.
+		this.#gitStatusLastFetch = 0;
+		this.#gitStatusGeneration++;
 		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
 		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
 		// so the next render refetches.
@@ -1529,11 +1542,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#gitStatusInFlightCwd !== undefined) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
-		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < 1000) {
+		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < GIT_STATUS_TTL_MS) {
 			return this.#cachedGitStatus;
 		}
 
 		this.#gitStatusInFlightCwd = gitCwd;
+		const generation = this.#gitStatusGeneration;
 
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
@@ -1546,7 +1560,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					const prev = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 					this.#cachedGitStatus = nextStatus;
 					this.#cachedGitStatusCwd = gitCwd;
-					this.#gitStatusLastFetch = Date.now();
+					this.#gitStatusLastFetch = this.#gitStatusGeneration === generation ? Date.now() : 0;
 					this.#gitStatusInFlightCwd = undefined;
 					if (!this.#disposed && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
 						this.#invalidateStatusLineRenderCache();
