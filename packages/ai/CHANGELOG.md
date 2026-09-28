@@ -5,6 +5,7 @@
 ### Fixed
 
 - Tool calls whose final argument JSON is cut off or followed by trailing text are no longer executed from an auto-closed preview. OpenAI Completions, Anthropic, Bedrock, Responses, Codex, Devin, Ollama, Apple, Cursor, GitLab Duo, and the in-band JSON dialects now give such a call the existing parse-error arguments, so the tool is not run and the model receives the parse error and can resend the call ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
+- Fixed Devin `/usage` showing no data for accounts signed in with `/login devin` (the token is stored as an API key and was sent without its session-token prefix), and Devin auth no longer makes a failing extra request before accepting a legacy Windsurf Enterprise key
 
 ## [18.4.9] - 2026-10-01
 

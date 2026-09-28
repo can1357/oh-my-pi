@@ -21,7 +21,7 @@ import {
 	type Timestamp,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import type {
 	UsageAmount,
@@ -48,7 +48,7 @@ function timestampMs(timestamp: Timestamp): number {
 	return Number(timestamp.seconds) * 1_000 + timestamp.nanos / 1_000_000;
 }
 
-/** Credential bytes exactly as their storage kind requires on the Cascade wire. */
+/** Stored credential bytes; `devinCliMetadata` encodes them for the wire by shape. */
 function devinCredential(credential: UsageCredential): string | undefined {
 	const raw = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
 	const token = raw?.trim();
@@ -265,7 +265,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 	if (!token) return null;
 	const baseUrl = (params.baseUrl ?? DEVIN_DEFAULT_BASE_URL).replace(/\/+$/, "");
 
-	const metadata = params.credential.type === "oauth" ? devinCliMetadata(token) : devinWireMetadata(token);
+	const metadata = devinCliMetadata(token);
 	try {
 		const request = create(GetUserStatusRequestSchema, {
 			metadata: create(MetadataSchema, metadata),

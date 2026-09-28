@@ -10,7 +10,6 @@ import {
 	DisplayOption,
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
-	type Metadata,
 	MetadataSchema,
 	ModelDimensionKind,
 } from "./devin-proto";
@@ -295,7 +294,7 @@ function devinDynamicFamilies(lanes: Iterable<DevinFamilyLane>): EffortVariantFa
  * Options for fetching dynamic Devin (Codeium Cascade) models from `GetCliModelConfigs`.
  */
 export interface DevinModelDiscoveryOptions {
-	/** Codeium session token carried inside protobuf `Metadata.apiKey`. */
+	/** Stored Devin credential; encoded into protobuf `Metadata.apiKey` by shape. */
 	apiKey?: string;
 	/** Optional Codeium API base URL override. */
 	baseUrl?: string;
@@ -324,74 +323,46 @@ export async function fetchDevinModels(
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
-	const fetchImpl = discoveryFetch(options.fetch);
-
-	const fetchCatalog = async (metadata: Metadata): Promise<ModelSpec<"devin-agent">[] | null> => {
-		try {
-			const request = create(GetCliModelConfigsRequestSchema, { metadata });
-			const body = toBinary(GetCliModelConfigsRequestSchema, request);
-			const response = await fetchImpl(requestUrl, {
-				method: "POST",
-				headers: {
-					"content-type": "application/proto",
-					"connect-protocol-version": "1",
-					accept: "*/*",
-				},
-				body,
-				signal,
-			});
-			if (!response.ok) return null;
-
-			const decoded = decodeDevinUnaryMessage(
-				GetCliModelConfigsResponseSchema,
-				new Uint8Array(await response.arrayBuffer()),
-			);
-			return decoded ? normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl) : null;
-		} catch {
-			return null;
-		}
-	};
 
 	try {
-		const nativeMetadata = create(MetadataSchema, {
-			...devinDiscoveryMetadata(options.apiKey),
-			supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
+		const request = create(GetCliModelConfigsRequestSchema, {
+			metadata: create(MetadataSchema, {
+				...devinDiscoveryMetadata(options.apiKey),
+				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
+			}),
 		});
-		const nativeModels = await fetchCatalog(nativeMetadata);
-		const nativeIsSeedOnly =
-			nativeModels !== null &&
-			nativeModels.length > 0 &&
-			nativeModels.every(model => model.id === "swe-1-6" || model.id === "swe-1-6-fast");
-		if (nativeModels !== null && nativeModels.length > 0 && !nativeIsSeedOnly) {
-			return nativeModels;
-		}
+		const body = toBinary(GetCliModelConfigsRequestSchema, request);
+		const response = await discoveryFetch(options.fetch)(requestUrl, {
+			method: "POST",
+			headers: {
+				"content-type": "application/proto",
+				"connect-protocol-version": "1",
+				accept: "*/*",
+			},
+			body,
+			signal,
+		});
+		if (!response.ok) return null;
 
-		// Legacy Windsurf Enterprise seats expose their full credential-scoped
-		// roster only to the editor identity and raw windsurf_api_key. Native
-		// chisel discovery returns the two-row fallback seed for those seats.
-		const legacyMetadata = create(MetadataSchema, {
-			apiKey: options.apiKey ?? "",
-			ideName: "windsurf",
-			ideVersion: "3.2.23",
-			extensionName: "windsurf",
-			extensionVersion: "1.48.2",
-			locale: "en",
-		});
-		const legacyModels = await fetchCatalog(legacyMetadata);
-		const models =
-			legacyModels !== null && (nativeModels === null || legacyModels.length > nativeModels.length)
-				? legacyModels
-				: nativeModels;
-		if (models === null || models.length === 0) {
+		const decoded = decodeDevinUnaryMessage(
+			GetCliModelConfigsResponseSchema,
+			new Uint8Array(await response.arrayBuffer()),
+		);
+		if (!decoded) return null;
+		const models = normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
+		if (models.length === 0) {
 			// The backend gates the native catalog on the pinned client identity;
 			// an empty-but-200 response is the failure signature of a stale pin.
-			logger.warn("Devin returned an empty model catalog; the pinned client identities may be stale", {
+			// Treat it as failed discovery so the static seed survives. This runs
+			// after filtering: only disabled or internal configs is equally unusable.
+			logger.warn("Devin returned an empty model catalog; the pinned client identity may be stale", {
 				metadata: devinDiscoveryMetadata(undefined),
 			});
 			return null;
 		}
-
 		return models;
+	} catch {
+		return null;
 	} finally {
 		clearTimeout(timer);
 	}

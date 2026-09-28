@@ -17,7 +17,7 @@ const DEVIN_LOCALE = "en";
 /**
  * Released Devin CLI request identity. The backend gates behavior on this
  * tuple: `ideType: "chisel"` is what unlocks router assignment (`AssignModel`)
- * and the CLI model surface, which the older Windsurf identity does not reach.
+ * and the CLI model surface.
  */
 const DEVIN_CLI_METADATA = {
 	ideName: "devin-cli",
@@ -31,9 +31,8 @@ const DEVIN_CLI_METADATA = {
 
 /**
  * Native discovery identity. The Devin CLI announces itself as the `chisel`
- * client on its dev channel for `GetCliModelConfigs`; that identity — not the
- * released chat identity or the legacy Windsurf one — unlocks the full native
- * config set.
+ * client on its dev channel for `GetCliModelConfigs`; that identity, not the
+ * released chat identity, unlocks the full native config set.
  */
 const DEVIN_DISCOVERY_METADATA = {
 	ideName: "chisel",
@@ -44,33 +43,39 @@ const DEVIN_DISCOVERY_METADATA = {
 	os: DEVIN_OS,
 } as const;
 
-/** Session token as the wire format carries it: the scheme prefix is required. */
-export function normalizeDevinSessionToken(apiKey: string | undefined): string {
-	if (!apiKey) return "";
-	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
+/**
+ * Credential bytes as the Cascade wire expects them. The Devin CLI sends the
+ * stored key verbatim; its own login stores Devin session tokens (JWTs) with
+ * the `devin-session-token$` scheme prefix and legacy Windsurf Enterprise keys
+ * (`sk-ws-...`) bare. OMP's Devin login and `DEVIN_API_KEY` may hold a session
+ * token without the prefix, so the prefix is added to JWT-shaped tokens only;
+ * every other key goes out unchanged. The shape decides, not the storage kind:
+ * a legacy key can be stored as either an API key or an OAuth access token.
+ */
+function encodeDevinCredential(apiKey: string | undefined): string {
+	const key = apiKey?.trim();
+	if (!key) return "";
+	if (key.startsWith(DEVIN_SESSION_TOKEN_PREFIX)) return key;
+	return key.split(".").length === 3 ? `${DEVIN_SESSION_TOKEN_PREFIX}${key}` : key;
 }
 
-/** Released-CLI metadata with credential bytes already encoded for the wire. */
-export function devinWireMetadata(apiKey: string | undefined, userJwt = "") {
+/**
+ * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
+ * `GetChatMessage`, `GetUserStatus`). `userJwt` stays empty for the calls
+ * authenticated by the credential alone (auth, model assignment, usage).
+ */
+export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
 	return {
-		apiKey: apiKey ?? "",
+		apiKey: encodeDevinCredential(apiKey),
 		userJwt,
 		...DEVIN_CLI_METADATA,
 	};
 }
 
-/**
- * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
- * `GetChatMessage`, `GetUserStatus`) authenticated by a Devin session token.
- */
-export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
-	return devinWireMetadata(normalizeDevinSessionToken(apiKey), userJwt);
-}
-
 /** Fields for `Metadata` on the dev-channel `GetCliModelConfigs` call. */
 export function devinDiscoveryMetadata(apiKey: string | undefined) {
 	return {
-		apiKey: normalizeDevinSessionToken(apiKey),
+		apiKey: encodeDevinCredential(apiKey),
 		...DEVIN_DISCOVERY_METADATA,
 	};
 }
