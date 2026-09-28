@@ -6,9 +6,21 @@ export interface LocalWorkSource {
 	readonly hasPendingLocalWork: boolean;
 }
 
+/** Consumed head slots tolerated before the backlog is compacted (see {@link EventStream.queue}). */
+const QUEUE_COMPACT_MIN_HEAD = 64;
+
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
+	/**
+	 * Events pushed while no consumer was waiting. The iterator dequeues by
+	 * advancing {@link #queueHead} instead of `shift()` — O(remaining) per event,
+	 * quadratic for a consumer draining a backlog — so while it drains, the
+	 * slots before the head are consumed (cleared) placeholders. Do not mutate
+	 * the array while the stream is being iterated.
+	 */
 	queue: T[] = [];
+	/** Index of the next undelivered event in {@link queue}; 0 whenever the queue is empty. */
+	#queueHead = 0;
 	waiting: Array<{ resolve: (value: IteratorResult<T>) => void; reject: (err: unknown) => void }> = [];
 	done = false;
 	/** True once finalResultPromise has been resolved or rejected. */
@@ -115,10 +127,34 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		}
 	}
 
+	/**
+	 * Take the event at the queue head. Clears the consumed slot so it stops
+	 * retaining the event, resets the queue once drained, and compacts it once
+	 * consumed slots are at least half of it (amortized O(1) per event).
+	 */
+	#dequeue(): T {
+		const queue = this.queue;
+		const head = this.#queueHead;
+		const event = queue[head];
+		if (head + 1 === queue.length) {
+			queue.length = 0;
+			this.#queueHead = 0;
+			return event;
+		}
+		// The slot is dead once the head moves past it; `undefined` only drops the reference.
+		queue[head] = undefined as T;
+		this.#queueHead = head + 1;
+		if (this.#queueHead >= QUEUE_COMPACT_MIN_HEAD && this.#queueHead * 2 >= queue.length) {
+			queue.splice(0, this.#queueHead);
+			this.#queueHead = 0;
+		}
+		return event;
+	}
+
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {
 		while (true) {
-			if (this.queue.length > 0) {
-				yield this.queue.shift()!;
+			if (this.#queueHead < this.queue.length) {
+				yield this.#dequeue();
 			} else if (this.#failed) {
 				throw this.#error;
 			} else if (this.done) {

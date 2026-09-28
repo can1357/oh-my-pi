@@ -514,6 +514,45 @@ describe("frame-skip coalescing", () => {
 		expect(textAt(latestMessage(component), 0)).toBe("streamed xyz");
 	});
 
+	it("detects an in-place rewrite of a value-equal replacement of the snapped content", () => {
+		// The unchanged-target shortcut must follow the live blocks: after a
+		// flush hands over equal-valued fresh blocks, an in-place rewrite of THOSE
+		// blocks still repaints.
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "streamed abc" }]), true);
+		const snapped = component.messages.length;
+
+		const replacement = makeMessage([{ type: "text", text: "streamed abc" }]);
+		controller.setTarget(replacement, true);
+		expect(component.messages).toHaveLength(snapped);
+
+		(replacement.content[0] as Extract<AssistantMessage["content"][number], { type: "text" }>).text = "streamed xyz";
+		controller.setTarget(replacement, true);
+		expect(component.messages).toHaveLength(snapped + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("streamed xyz");
+	});
+
+	it("detects an in-place rewrite nested inside a snapped block", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		const block = { type: "text" as const, text: "streamed abc", meta: { revision: 1 } };
+		const message = makeMessage([block]);
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(message, true);
+		const snapped = component.messages.length;
+
+		controller.setTarget(message, true);
+		expect(component.messages).toHaveLength(snapped);
+
+		block.meta.revision = 2;
+		controller.setTarget(message, true);
+		expect(component.messages).toHaveLength(snapped + 1);
+	});
+
 	it("cancels a pending drain when smooth streaming is turned off", () => {
 		vi.useFakeTimers();
 		let smooth = true;

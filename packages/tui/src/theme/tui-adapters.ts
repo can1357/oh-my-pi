@@ -59,7 +59,20 @@ function getHighlightColors(t: Theme): NativeHighlightColors {
  * the 33ms frame budget and starving the spinner/render timers (the "TUI freeze").
  */
 const HIGHLIGHT_CACHE_MAX = 256;
-const highlightCache = new LRUCache<string, string>({ max: HIGHLIGHT_CACHE_MAX });
+// Size-bound like markdown's render cache: a streaming block (bash command,
+// eval cell) inserts one full `code + highlighted` pair per growth frame, so a
+// count cap alone would retain 256 near-copies of a large payload. Sizes are
+// UTF-16 code units of key + value (ANSI output runs several times the source
+// length). The per-entry cap stays generous so a large but settled code body
+// repainting every frame still hits; only payloads past it re-highlight.
+const HIGHLIGHT_CACHE_MAX_SIZE = 8 * 1024 * 1024;
+const HIGHLIGHT_CACHE_MAX_ENTRY_SIZE = 1024 * 1024;
+const highlightCache = new LRUCache<string, string>({
+	max: HIGHLIGHT_CACHE_MAX,
+	maxSize: HIGHLIGHT_CACHE_MAX_SIZE,
+	maxEntrySize: HIGHLIGHT_CACHE_MAX_ENTRY_SIZE,
+	sizeCalculation: (value, key) => Math.max(1, key.length + value.length),
+});
 let highlightCacheTheme: Theme | undefined;
 
 function highlightCached(code: string, validLang: string | undefined, highlightTheme: Theme): string | null {

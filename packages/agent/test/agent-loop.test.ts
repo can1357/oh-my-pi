@@ -5101,6 +5101,53 @@ describe("agentLoop passive additionalContext", () => {
 		expect(contextEventIndex).toBeGreaterThan(Math.max(...resultEventIndices));
 	});
 
+	it("injects identical context from a batch once, at its first position", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		let secondRequest: Context | undefined;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-a", name: "echo", arguments: { value: "a" } },
+						{ type: "toolCall", id: "tool-b", name: "echo", arguments: { value: "b" } },
+						{ type: "toolCall", id: "tool-c", name: "echo", arguments: { value: "c" } },
+					],
+				},
+				request => {
+					secondRequest = request;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: developerConverter,
+			beforeToolCall: async ({ args }) => ({
+				// "c" repeats "a" with a trailing newline: still the same guidance.
+				additionalContext:
+					args.value === "b" ? "context for b" : args.value === "c" ? "shared guidance\n" : "shared guidance",
+			}),
+		};
+		const stream = agentLoop([createUserMessage("echo thrice")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+		}
+
+		const developer = secondRequest?.messages.filter(message => message.role === "developer");
+		expect(developer?.map(message => message.content)).toEqual([
+			[{ type: "text", text: ["shared guidance", "context for b"].join("\n\n") }],
+		]);
+	});
+
 	it("hands the host tool context to the tool untouched and routes its sink through ToolCallContext", async () => {
 		const toolSchema = type({ value: "string" });
 		class HostToolContext {
