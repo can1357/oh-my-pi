@@ -2,6 +2,8 @@
  * Utility functions for mapping unified ToolChoice to provider-specific formats.
  */
 import type { ToolChoice } from "../types";
+import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import type { CapturedHttpErrorResponse } from "./http-inspector";
 
 /** OpenAI Completions API tool choice format */
 export type OpenAICompletionsToolChoice =
@@ -98,4 +100,56 @@ export function mapToAnthropicToolChoice(choice?: ToolChoice): AnthropicToolChoi
 	}
 	const name = extractFunctionName(choice);
 	return name ? { type: "tool", name } : undefined;
+}
+
+const FORCED_TOOL_CHOICE_REJECTION_PATTERNS: readonly RegExp[] = [
+	/(?:tool_choice:\s*)?type\s+\\?["']?tool\\?["']?\s+and\s+\\?["']?any\\?["']?\s+are not supported for this model/i,
+	/tool_choice forces tool use is not compatible with this model/i,
+	/tool_choice\s+\\?["']?specified\\?["']?\s+is incompatible with thinking enabled/i,
+	/only\s+\\?["']?auto\\?["']?\s+is supported for\s+\\?["']?tool_choice\\?["']?/i,
+	/thinking mode does not support this tool_choice/i,
+];
+
+/**
+ * Returns true if an HTTP error status and body text represent a model's
+ * refusal to accept a forced tool_choice selector. Matches only wordings
+ * documented in this repository.
+ */
+export function isForcedToolChoiceRejection(
+	error: unknown,
+	capturedErrorResponse?: CapturedHttpErrorResponse,
+): boolean {
+	const status = extractHttpStatusFromError(error) ?? capturedErrorResponse?.status;
+	if (status !== 400) return false;
+
+	let errorJson: string | undefined;
+	let bodyJson: string | undefined;
+	if (error && typeof error === "object") {
+		if ("error" in error && typeof error.error === "object" && error.error !== null) {
+			try {
+				errorJson = JSON.stringify(error.error);
+			} catch {
+				// ignore
+			}
+		}
+		if ("body" in error && typeof error.body === "object" && error.body !== null) {
+			try {
+				bodyJson = JSON.stringify(error.body);
+			} catch {
+				// ignore
+			}
+		}
+	}
+
+	const parts = [
+		error instanceof Error ? error.message : typeof error === "string" ? error : undefined,
+		errorJson,
+		bodyJson,
+		capturedErrorResponse?.bodyText,
+	]
+		.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+		.join("\n");
+
+	if (!parts) return false;
+	return FORCED_TOOL_CHOICE_REJECTION_PATTERNS.some(pattern => pattern.test(parts));
 }

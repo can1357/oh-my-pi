@@ -49,6 +49,7 @@ import {
 } from "../utils/schema";
 import {
 	isForcedToolChoice,
+	isForcedToolChoiceRejection,
 	mapToOpenAIResponsesToolChoice,
 	type OpenAIResponsesToolChoice,
 } from "../utils/tool-choice";
@@ -853,6 +854,39 @@ const streamOpenAIResponsesOnce = (
 			let strictRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
+			let forcedToolChoiceRetryAvailable = true;
+			const rebuildChainedParams = async (overrides?: { disableStrictTools?: boolean; toolChoice?: ToolChoice }) => {
+				const fallbackBuilt = buildParams(
+					model,
+					context,
+					options,
+					providerSessionState,
+					strictToolsScope,
+					overrides?.disableStrictTools ?? forceDisableStrictTools,
+					chainState?.canAppend ? chainState.lastParams?.input : undefined,
+					overrides?.toolChoice,
+				);
+				const fallbackParams = fallbackBuilt.params;
+				if (chainState && !chainState.disabled) fallbackParams.store = true;
+				let fallbackChained: OpenAIResponsesChainedParams =
+					chainState && !chainState.disabled
+						? buildOpenAIResponsesChainedParams(
+								fallbackParams,
+								fallbackBuilt.trailingScaffoldingItems,
+								chainState,
+							)
+						: { params: fallbackParams };
+				sentPreviousResponseId = fallbackChained.previousResponseId;
+				fallbackChained = {
+					...fallbackChained,
+					params: await applyPayloadReplacement(fallbackChained.params),
+				};
+				chained = fallbackChained;
+				activeRawRequestDump.body = chained.params;
+				activeParams = fallbackParams;
+				activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
+				activeStrictToolsApplied = fallbackBuilt.strictToolsApplied;
+			};
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
 				let openaiStream: AsyncIterable<ResponseStreamEvent>;
 				while (true) {
@@ -900,6 +934,16 @@ const streamOpenAIResponsesOnce = (
 							};
 							continue;
 						}
+						if (
+							forcedToolChoiceRetryAvailable &&
+							!requestSignal.aborted &&
+							isForcedToolChoice(chained.params.tool_choice) &&
+							isForcedToolChoiceRejection(error, capturedErrorResponse)
+						) {
+							forcedToolChoiceRetryAvailable = false;
+							await rebuildChainedParams({ toolChoice: "auto" });
+							continue;
+						}
 						const compiledGrammarTooLarge =
 							model.compat.retryWithoutStrictOnGrammarError &&
 							isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse);
@@ -916,34 +960,7 @@ const streamOpenAIResponsesOnce = (
 							strictRetryAvailable = false;
 							forceDisableStrictTools = true;
 							disableStrictToolsForScope(providerSessionState, strictToolsScope);
-							const fallbackBuilt = buildParams(
-								model,
-								context,
-								options,
-								providerSessionState,
-								strictToolsScope,
-								true,
-								chainState?.canAppend ? chainState.lastParams?.input : undefined,
-							);
-							const fallbackParams = fallbackBuilt.params;
-							if (chainState && !chainState.disabled) fallbackParams.store = true;
-							let fallbackChained: OpenAIResponsesChainedParams =
-								chainState && !chainState.disabled
-									? buildOpenAIResponsesChainedParams(
-											fallbackParams,
-											fallbackBuilt.trailingScaffoldingItems,
-											chainState,
-										)
-									: { params: fallbackParams };
-							sentPreviousResponseId = fallbackChained.previousResponseId;
-							fallbackChained = {
-								...fallbackChained,
-								params: await applyPayloadReplacement(fallbackChained.params),
-							};
-							chained = fallbackChained;
-							activeRawRequestDump.body = chained.params;
-							activeParams = fallbackParams;
-							activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
+							await rebuildChainedParams({ disableStrictTools: true });
 							continue;
 						}
 						if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {
@@ -1521,12 +1538,14 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
+	toolChoiceOverride?: ToolChoice,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
+	const effectiveToolChoice = toolChoiceOverride ?? options?.toolChoice;
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,
 		disableReasoning: options?.disableReasoning,
-		toolChoice: options?.toolChoice,
+		toolChoice: effectiveToolChoice,
 		strictResponsesPairing: options?.strictResponsesPairing,
 		includeEncryptedReasoning: options?.includeEncryptedReasoning,
 		filterReasoningHistory: options?.filterReasoningHistory,
@@ -1648,7 +1667,7 @@ export function buildParams(
 								emittedNames.has(t.customWireName ?? t.name) ||
 								(t.native?.type === "computer" && emittedComputer),
 						);
-			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(effectiveToolChoice, survivingTools, model);
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				if (
 					typeof toolChoice === "object" &&
