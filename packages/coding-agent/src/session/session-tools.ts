@@ -840,6 +840,7 @@ export class SessionTools {
 		const resolve = (model: Model | undefined) =>
 			resolveCodeMode({
 				provider: model?.provider ?? "",
+				modelIdentity: model?.identity,
 				toolMode: model?.toolMode,
 				setting,
 				extraDirectTools,
@@ -1022,6 +1023,7 @@ export class SessionTools {
 		toolNames = normalizeToolNames(toolNames);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
+			modelIdentity: this.#host.model()?.identity,
 			toolMode: this.#host.model()?.toolMode,
 			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
 			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),

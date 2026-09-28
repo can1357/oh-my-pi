@@ -1,9 +1,11 @@
 /**
- * Codex Code Mode: collapse the direct tool surface for code_mode_only models
- * to a small keep-set and expose every other session tool through the eval
- * bridge, mirroring codex-rs ToolMode::CodeModeOnly.
+ * Code Mode: collapse the direct tool surface to a small keep-set and expose
+ * every other session tool through the eval bridge. The shape mirrors
+ * codex-rs ToolMode::CodeModeOnly, but OMP can apply it to any model whose
+ * eval transport supports the bridge.
  */
 
+import { compareRevision, parseRevision, type ModelIdentity } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 
 /**
@@ -42,19 +44,30 @@ export interface CodeModeResolution {
 	directToolNames: Set<string>;
 }
 
-export function resolveCodeMode(args: {
+export interface ResolveCodeModeArgs {
 	provider: string;
+	modelIdentity?: ModelIdentity;
 	toolMode?: string;
 	setting: "off" | "on" | "auto";
 	extraDirectTools?: readonly string[];
 	enabledToolNames: readonly string[];
 	evalTransportAvailable: boolean;
-}): CodeModeResolution {
+}
+
+const AUTO_CODE_MODE_GPT_FLOOR = [5, 6, 0] as const;
+
+function autoCodeModeModel(identity: ModelIdentity | undefined): boolean {
+	if (identity?.class !== "openai" || identity.family !== "gpt" || identity.revision === undefined) return false;
+	const revision = parseRevision(identity.revision);
+	return revision !== undefined && compareRevision(revision, AUTO_CODE_MODE_GPT_FLOOR) >= 0;
+}
+
+export function resolveCodeMode(args: ResolveCodeModeArgs): CodeModeResolution {
 	const active =
-		args.provider === "openai-codex" &&
 		args.enabledToolNames.includes("eval") &&
 		args.evalTransportAvailable &&
-		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
+		(args.setting === "on" ||
+			(args.setting === "auto" && (args.toolMode === "code_mode_only" || autoCodeModeModel(args.modelIdentity))));
 	if (!active) return { active: false, directToolNames: new Set(args.enabledToolNames) };
 	const direct = new Set<string>();
 	for (const name of args.enabledToolNames) {
