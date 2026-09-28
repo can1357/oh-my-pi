@@ -153,6 +153,8 @@ export interface StructuredSubagentRequest {
 /** A normalized preflight result, reusable by tests and adapters. */
 export interface EffectiveSubagentPolicy {
 	discovery: DiscoveryResult;
+	/** Requested `agent` string, including any `@selector`; re-dispatch with this, not {@link agentName}. */
+	agentSpec: string;
 	agentName: string;
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
@@ -288,6 +290,17 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
+ * Split `agent@selector`, which runs `agent` on a model the user tagged with
+ * `^`. Names without a non-empty agent and selector around the first `@` are
+ * returned unchanged.
+ */
+function splitTaggedModelAgent(name: string): { agentName: string; taggedSelector?: string } {
+	const at = name.indexOf("@");
+	if (at <= 0 || at === name.length - 1) return { agentName: name };
+	return { agentName: name.slice(0, at), taggedSelector: name.slice(at + 1) };
+}
+
+/**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
@@ -297,13 +310,21 @@ export async function resolveEffectiveSubagentPolicy(
 ): Promise<EffectiveSubagentPolicy> {
 	await request.session.settings.reloadFromDisk();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
-	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
+	const agentSpec = request.agent?.trim() || spawnPolicy.defaultAgent;
+	const split = splitTaggedModelAgent(agentSpec);
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
-	assertDepthAndSpawnAllowed(request, agentName);
+	// A plain name is checked before discovery; `a@b` needs discovery first,
+	// because an agent literally named `a@b` wins over the tagged-model split.
+	if (split.taggedSelector === undefined) assertDepthAndSpawnAllowed(request, agentSpec);
 
 	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
-	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
+	const sessionAgents = request.session.getSessionAgents?.() ?? [];
+	const agents = [...discovery.agents, ...sessionAgents];
+	const { agentName, taggedSelector } = getAgent(agents, agentSpec)
+		? { agentName: agentSpec, taggedSelector: undefined }
+		: split;
+	if (split.taggedSelector !== undefined) assertDepthAndSpawnAllowed(request, agentName);
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -322,6 +343,17 @@ export async function resolveEffectiveSubagentPolicy(
 			"preflight",
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
+	}
+	let requestModel = request.model;
+	if (taggedSelector !== undefined) {
+		const tagged = sessionAgents.flatMap(candidate => candidate.model?.slice(0, 1) ?? []);
+		if (!tagged.includes(taggedSelector)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Model "${taggedSelector}" was not tagged with ^ in this session. Tagged: ${tagged.join(", ") || "none"}`,
+			);
+		}
+		requestModel = taggedSelector;
 	}
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
@@ -349,7 +381,7 @@ export async function resolveEffectiveSubagentPolicy(
 		: undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
 	const modelResolution = {
-		requestModel: request.model,
+		requestModel,
 		settingsOverride: agentModelOverrides[agentName],
 		agentModel: effectiveAgent.model,
 		settings: request.session.settings,
@@ -370,6 +402,7 @@ export async function resolveEffectiveSubagentPolicy(
 	}
 	return {
 		discovery,
+		agentSpec,
 		agentName,
 		agent,
 		effectiveAgent,

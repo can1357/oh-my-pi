@@ -92,6 +92,8 @@ Type `^` in the composer to choose a model from the same scope and ranking as th
 
 On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
 
+To run a specialist on a tagged model, pass `<agent>@<selector>` as the `agent`, for example `reviewer@anthropic/claude-fable-5-1`. An agent whose name equals the whole string still wins; otherwise the name before the first `@` selects the agent and its prompt, tools, and spawn restrictions (checked after discovery for these names), and the rest must exactly equal a selector tagged in this session (including tags inherited from the parent), or preflight fails before dispatch. The tagged selector takes the invocation slot of the model precedence below, so it wins over `task.agentModelOverrides` and the agent's frontmatter `model`. A tag comes from any non-synthetic prompt containing `^<selector>`, including a subagent's assignment, so this limits spawns to tagged models rather than proving the user typed each tag.
+
 Tagging a model never rewrites the model-facing `task` description mid-session: the description lists the pseudonyms baked into the current base prompt, and later tags arrive as a hidden `session-agents` system notice on the next user turn. The notice rides the same channel as the eval-prelude and tool-roster deltas, so the provider cache prefix stays byte-stable. The next base-prompt rebuild absorbs the live set into the description.
 
 Pseudonyms survive `/resume`; rewinding before a model's first mention frees its number. Repeating a selector reuses its pseudonym. Unknown selectors remain literal, as do mentions in `!`/`$` local-execution drafts. Tokens require whitespace boundaries: autocomplete adds the trailing space. When two models share a display name in one draft, the second remains a literal selector to avoid ambiguous expansion.
@@ -218,7 +220,7 @@ For task dispatch, model precedence is:
 2. the agent frontmatter's prioritized `model` list
 3. the parent's active model, then its configured/default model fallback
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field. An `<agent>@<selector>` spawn fills that invocation slot with a [user-tagged selector](#user-tagged-model-agents).
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
 
