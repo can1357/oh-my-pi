@@ -453,6 +453,10 @@
 - Fixed CRLF `SKILL.md` files injecting raw YAML frontmatter into user-invoked and autoload skill messages ([#13590](https://github.com/can1357/oh-my-pi/issues/13590)).
 - Fixed Cursor native Grep ignoring requested context, Read negative offsets starting at the top, and Delete reporting zero-byte files ([#13600](https://github.com/can1357/oh-my-pi/issues/13600)).
 
+### Changed
+
+- Code Mode can now run on non-Codex providers: `auto` enables it for GPT-5.6+ models while `on` forces it for any model with the JavaScript eval bridge available ([#13592](https://github.com/can1357/oh-my-pi/pull/13592) by [@dbc-hbin](https://github.com/dbc-hbin)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Changed
