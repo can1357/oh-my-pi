@@ -21,7 +21,7 @@ import { SessionManager } from "../src/session/session-manager";
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 
 import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
-import { cfgProvidersOpenaiCodexCodeMode } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgToolsCodeMode } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ENABLED = [
 	"eval",
@@ -40,7 +40,6 @@ const ENABLED = [
 describe("resolveCodeMode", () => {
 	test("off: inactive regardless of catalog flag", () => {
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "off",
 			enabledToolNames: ENABLED,
@@ -51,7 +50,6 @@ describe("resolveCodeMode", () => {
 	});
 	test("auto + code_mode_only: active, keep-set only", () => {
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "auto",
 			enabledToolNames: ENABLED,
@@ -63,7 +61,6 @@ describe("resolveCodeMode", () => {
 	test("auto without flag: inactive", () => {
 		expect(
 			resolveCodeMode({
-				provider: "openai-codex",
 				setting: "auto",
 				enabledToolNames: ENABLED,
 				evalTransportAvailable: true,
@@ -73,27 +70,15 @@ describe("resolveCodeMode", () => {
 	test("on: active without catalog flag", () => {
 		expect(
 			resolveCodeMode({
-				provider: "openai-codex",
 				setting: "on",
 				enabledToolNames: ENABLED,
 				evalTransportAvailable: true,
 			}).active,
 		).toBe(true);
 	});
-	test("non-codex provider: inactive even when on", () => {
-		expect(
-			resolveCodeMode({
-				provider: "anthropic",
-				setting: "on",
-				enabledToolNames: ENABLED,
-				evalTransportAvailable: true,
-			}).active,
-		).toBe(false);
-	});
 	test("inactive when eval is unavailable", () => {
 		expect(
 			resolveCodeMode({
-				provider: "openai-codex",
 				toolMode: "code_mode_only",
 				setting: "auto",
 				enabledToolNames: ["read", "bash"],
@@ -104,7 +89,6 @@ describe("resolveCodeMode", () => {
 	test("inactive when the eval transport lacks JavaScript", () => {
 		expect(
 			resolveCodeMode({
-				provider: "openai-codex",
 				toolMode: "code_mode_only",
 				setting: "auto",
 				enabledToolNames: ["eval", "read"],
@@ -114,7 +98,6 @@ describe("resolveCodeMode", () => {
 	});
 	test("extra direct tools honored only when enabled", () => {
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "auto",
 			extraDirectTools: ["read", "nonexistent"],
@@ -126,7 +109,6 @@ describe("resolveCodeMode", () => {
 	});
 	test("keep-set intersects enabled tools", () => {
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "auto",
 			enabledToolNames: ["eval", "read"],
@@ -136,7 +118,6 @@ describe("resolveCodeMode", () => {
 	});
 	test("prototype-named tools do not bypass the keep-set", () => {
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "auto",
 			enabledToolNames: ["eval", "toString", "__proto__"],
@@ -156,7 +137,6 @@ describe("resolveCodeMode", () => {
 			EVAL_CANCEL_BRIDGE_NAME,
 		];
 		const r = resolveCodeMode({
-			provider: "openai-codex",
 			toolMode: "code_mode_only",
 			setting: "auto",
 			enabledToolNames: ["eval", "read", ...reserved],
@@ -368,6 +348,26 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
 	});
 
+	test("tools.codeMode on keeps the collapsed surface after switching to a non-Codex model", async () => {
+		const { session, directModel } = createSession(Settings.isolated({ "tools.codeMode": "on" }));
+		await session.setActiveToolsByName(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+
+		await session.setModel(directModel);
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+	});
+
+	test("legacy Codex on setting does not collapse a non-Codex model", async () => {
+		const { session, directModel } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "on" }));
+		await session.setActiveToolsByName(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+
+		await session.setModel(directModel);
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
+	});
+
 	test("a caller slate without eval keeps Code Mode inactive", async () => {
 		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
 
@@ -443,12 +443,12 @@ describe("Code Mode session reconciliation", () => {
 
 	test("runtime setting changes immediately reconcile the Code Mode surface", async () => {
 		const settings = Settings.isolated();
-		cfgProvidersOpenaiCodexCodeMode.set(settings, "auto");
+		cfgToolsCodeMode.set(settings, "auto");
 		const { session } = createSession(settings);
 		await session.setActiveToolsByName(["eval", "read"]);
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
 
-		cfgProvidersOpenaiCodexCodeMode.set(settings, "off");
+		cfgToolsCodeMode.set(settings, "off");
 		// The listener queues its reconcile on the next microtask; the no-op mutation serializes behind it.
 		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
@@ -458,7 +458,7 @@ describe("Code Mode session reconciliation", () => {
 	test("runtime eval.js changes reconcile Code Mode transport availability", async () => {
 		const settings = Settings.isolated();
 		cfgEvalJs.set(settings, true);
-		cfgProvidersOpenaiCodexCodeMode.set(settings, "auto");
+		cfgToolsCodeMode.set(settings, "auto");
 		const { session } = createSession(settings);
 		await session.setActiveToolsByName(["eval", "read"]);
 		expect(session.getActiveToolNames()).toEqual(["eval"]);

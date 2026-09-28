@@ -44,8 +44,9 @@ import {
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
 	cfgProvidersOpenaiCodexCodeMode,
-	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgRetryModelFallback,
+	cfgToolsCodeMode,
+	cfgToolsCodeModeDirectTools,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	cfgToolsXdev,
@@ -1288,7 +1289,7 @@ describe("Settings", () => {
 		});
 
 		it("signals Code Mode partition inputs picked up from disk", async () => {
-			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
+			await writeSettings({ tools: { codeMode: "off" }, eval: { js: true } });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			let signalCount = 0;
 			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
@@ -1300,28 +1301,28 @@ describe("Settings", () => {
 				await tick();
 				expect(signalCount).toBe(0);
 
-				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
+				await writeSettings({ tools: { codeMode: "on" }, eval: { js: true } });
 				await settings.reloadFromDisk();
 				await tick();
 
-				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
+				expect(cfgToolsCodeMode.get(settings)).toBe("on");
 				expect(signalCount).toBe(1);
 
 				// A single reload that changes several partition inputs signals once.
 				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					tools: { codeMode: "on", codeModeDirectTools: ["bash"] },
 					eval: { js: false },
 				});
 				await settings.reloadFromDisk();
 				await tick();
 
 				expect(cfgEvalJs.get(settings)).toBe(false);
-				expect(cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)).toEqual(["bash"]);
+				expect(cfgToolsCodeModeDirectTools.get(settings)).toEqual(["bash"]);
 				expect(signalCount).toBe(2);
 
 				// `edit.mode` renames the direct edit tool on the wire.
 				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
+					tools: { codeMode: "on", codeModeDirectTools: ["bash"] },
 					eval: { js: false },
 					edit: { mode: "apply_patch" },
 				});
@@ -1335,7 +1336,7 @@ describe("Settings", () => {
 			}
 		});
 
-		it("signals Code Mode partition inputs supplied by the destination project", async () => {
+		it("signals legacy Codex Code Mode inputs supplied by the destination project", async () => {
 			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const otherProject = tempDir.join("code-mode-project");
