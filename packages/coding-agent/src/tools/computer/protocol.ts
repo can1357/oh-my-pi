@@ -21,6 +21,8 @@ export type ComputerWorkerInbound =
 	| { type: "ping"; id: string }
 	| { type: "run"; id: string; code: string; timeoutMs: number; session: ComputerSessionSnapshot }
 	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot }
+	/** Re-read what the cell that just ended touched; the result's `returnValue` is the report text or undefined. */
+	| { type: "settle"; id: string; timeoutMs: number; session: ComputerSessionSnapshot }
 	| { type: "abort"; id: string }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
