@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a post-input report to `computer` Eval cells: a cell that sends desktop input ends with each touched window's current tree, rows marked against the tree the model last saw, plus windows the input opened, closed or focused; eval preludes gain a `settleCell` hook that appends text after a cell's output ([#14343](https://github.com/can1357/oh-my-pi/pull/14343) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a post-input report to `computer` Eval cells: a cell that sends desktop input ends with each touched window's current tree, rows marked against the tree the model last saw, plus windows the input opened, closed or focused; trees over 16 KB drop whole subtrees, keeping changed rows; eval preludes gain a `settleCell` hook that appends text after a cell's output ([#14343](https://github.com/can1357/oh-my-pi/pull/14343) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.6.1] - 2026-10-04
 

@@ -1,18 +1,12 @@
 /**
  * What the model last saw of each window, and what a cell's input touched
- * since, so the cell can end with the state its input left behind.
- *
- * Every mutating helper returns nothing, so after an action the model spent a
- * whole call reading the window back, and after a refused action it spent one
- * re-reading the tree its refs came from. The ledger records the inputs a cell
- * sends; when the cell settles the worker re-reads each window they touched
- * and prints that tree once, marked against the tree the model last received.
- *
- * Tree text is the native `ax()` grammar (`crates/pi-natives/src/desktop/ax.rs`
- * `format_tree`): one node per line, two spaces of indent per depth, then
- * `- role "label" [ref=eN] …`.
+ * since, so the cell can end with the state its input left behind. The ledger
+ * records the inputs a cell sends; when the cell settles the worker re-reads
+ * each window they touched and prints that tree once, marked against the tree
+ * the model last received.
  */
 import type { DesktopDisplay, DesktopWindow, DiffRun } from "@oh-my-pi/pi-natives";
+import { elideAxTree, isMarkedRow, parseTreeRow } from "./ax-tree";
 
 /**
  * `"42" Code "main.ts"`: the id JSON-quoted, as `window()` takes it (ids are
@@ -67,56 +61,20 @@ export interface PendingSettle {
 
 interface WindowRecord {
 	pid?: number;
-	/** Tree text the model last received. */
+	/** Unelided tree text the model last received. */
 	shown?: string;
 	options: AxReadOptions;
 }
 
+/**
+ * Bytes one window's tree may take in a cell's report. Larger trees are
+ * elided structurally, dropping unmarked subtrees without controls first, so
+ * the rows the input changed survive.
+ */
+export const REPORT_TREE_BUDGET_BYTES = 16 * 1024;
+
 /** Most refs remembered for mapping an element back to its window. */
 const MAX_REFS = 20_000;
-const ROW = /^((?: {2})*)[-+~] (\S+)/;
-const REF = /^ \[ref=(e\d+)\]/;
-
-/** Row structure of one tree line: where its ref token sits. */
-interface ParsedRow {
-	indent: number;
-	role: string;
-	/** Ref token span `[start, end)`, including its leading space. */
-	refStart: number;
-	refEnd: number;
-	ref: string;
-}
-
-/** Index just past a quoted, backslash-escaped string starting at `from`, or -1. */
-function quotedEnd(line: string, from: number): number {
-	for (let index = from + 1; index < line.length; index++) {
-		const char = line[index];
-		if (char === "\\") index++;
-		else if (char === '"') return index + 1;
-	}
-	return -1;
-}
-
-/** Parse a tree row; non-row lines (trailers, headers) return undefined. */
-export function parseTreeRow(line: string): ParsedRow | undefined {
-	const match = ROW.exec(line);
-	if (!match) return undefined;
-	let position = match[0].length;
-	if (line.startsWith(' "', position)) {
-		const end = quotedEnd(line, position + 1);
-		if (end < 0) return undefined;
-		position = end;
-	}
-	const ref = REF.exec(line.slice(position));
-	if (!ref) return undefined;
-	return {
-		indent: match[1].length,
-		role: match[2],
-		refStart: position,
-		refEnd: position + ref[0].length,
-		ref: ref[1],
-	};
-}
 
 /** Every ref a tree text names. */
 export function treeRefs(text: string): string[] {
@@ -514,7 +472,14 @@ export function renderReadBack(readBack: ReadBack): string {
 		summary = `no accessibility change visible ${(readBack.sinceInputMs / 1000).toFixed(1)} s after the input (the app may still be working); refs renewed`;
 	else
 		summary = `${change.changed} changed, ${change.added} added, ${change.removed.length} removed (rows marked ~ changed, + added)`;
-	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, change?.text ?? readBack.text];
+	const tree = change?.text ?? readBack.text;
+	const elided = elideAxTree(tree, REPORT_TREE_BUDGET_BYTES);
+	if (elided) {
+		const lostMarks =
+			tree.split("\n").filter(isMarkedRow).length - elided.text.split("\n").filter(isMarkedRow).length;
+		summary += `; ${elided.elidedRows} rows elided to fit (${lostMarks === 0 ? "every changed row kept" : `${lostMarks} changed rows among them`}) — \`win.ax()\`/\`win.find()\` reach them`;
+	}
+	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, elided?.text ?? tree];
 	if (change && change.removed.length > 0) {
 		const shown = change.removed.slice(0, 8).join("; ");
 		const more = change.removed.length > 8 ? `; +${change.removed.length - 8} more` : "";

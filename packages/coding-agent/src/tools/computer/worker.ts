@@ -801,15 +801,9 @@ export class ComputerWorkerCore {
 	}
 
 	/**
-	 * Re-reads every window the cell's input touched and says, once, what it
-	 * left behind: each window's current tree marked against the last tree the
-	 * model received, then windows the input opened, closed or focused. Each
-	 * window is read once, so refs from the tree the model held before the cell
-	 * stay valid (the native registry keeps one previous generation) and the
-	 * printed refs are live. A window the cell read with `ax()` after its input
-	 * is skipped only when `output`, what the cell printed, carries that tree.
-	 * Input whose window is unknown is reported on the focused window. Nothing
-	 * when the cell sent no input and no ref failed.
+	 * Re-read each window the cell's input touched and report it against the
+	 * model's last tree. Each window is read once: the native registry keeps one
+	 * previous ref generation, so the refs the model held before the cell stay valid.
 	 */
 	async #settle(
 		session: NativeDesktopSession,

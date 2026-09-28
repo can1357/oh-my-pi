@@ -36,14 +36,7 @@ export interface ComputerController {
 		signal?: AbortSignal,
 	): Promise<ComputerRunOk>;
 	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
-	/**
-	 * Report what the eval cell that just ended left behind: each window its
-	 * input touched, re-read and marked against the model's last tree of it,
-	 * and windows it opened, closed or focused. `output` is what the cell
-	 * printed, so trees the cell's code read but did not print are not taken as
-	 * seen. Undefined when there is nothing to report. Controllers without it
-	 * report nothing.
-	 */
+	/** Report what the cell that just ended left behind; `output` is what it printed. Undefined when nothing to report. */
 	settle?(snapshot: ComputerSessionSnapshot, output: string, signal?: AbortSignal): Promise<string | undefined>;
 	close(): Promise<void>;
 }

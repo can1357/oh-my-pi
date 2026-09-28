@@ -1198,6 +1198,8 @@ describe("computer supervisor recovery", () => {
 class EditableWindowSession extends FakeNativeSession {
 	editing = false;
 	snapshots = 0;
+	/** Extra read-only text rows, to grow the tree past the report's byte budget. */
+	filler = 0;
 	/** Value of the window's text row, to vary it between reads. */
 	status = "Ready";
 	windows: DesktopWindow[] = [windowFixture];
@@ -1227,6 +1229,11 @@ class EditableWindowSession extends FakeNativeSession {
 			...(this.editing ? [`    - textfield "Phone" [ref=${ref()}]: "555"`] : []),
 			`    - button "Share" [ref=${ref()}]`,
 			`  - statictext [ref=${ref()}]: "${this.status}"`,
+			...(this.filler > 0 ? [`  - list [ref=${ref()}]`] : []),
+			...Array.from(
+				{ length: this.filler },
+				(_, index) => `    - statictext "Row ${index} of the ${this.status} transcript" [ref=${ref()}]`,
+			),
 		];
 		return { text: rows.join("\n") };
 	}
@@ -1436,6 +1443,46 @@ describe("computer cell settlement", () => {
 		expect(report.split("\n")[0]).toBe('window "43" Code "Behind" after desktop scroll 110,20 — current tree:');
 		expect(report).not.toContain('window "42"');
 		expect(report).not.toContain('window "6"');
+	});
+
+	it("elides a large report tree to its budget and keeps the rows the input changed", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.filler = 2_000;
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		await runWorker(transport, "press", 'await (await desktop.ref("e3")).press()');
+		const report = String(await settleWorker(transport, "settle-large"));
+		const [header, ...tree] = report.split("\n");
+		expect(header).toMatch(/ \d+ rows elided to fit \(every changed row kept\)/);
+		expect(Buffer.byteLength(tree.join("\n"), "utf-8")).toBeLessThanOrEqual(16 * 1024);
+		expect(tree).toContainEqual(expect.stringMatching(/^ {4}~ button "Done" \[ref=e\d+\] \(was: button "Edit"\)$/));
+		expect(tree).toContainEqual(expect.stringMatching(/^ {4}\+ textfield "Phone" \[ref=e\d+\]: "555"$/));
+		expect(tree).toContainEqual(expect.stringMatching(/^ {4}… \d+ rows elided$/));
+	});
+
+	it("counts the changed rows elision had to drop when the changes alone exceed the budget", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		native.filler = 2_000;
+		new ComputerWorkerCore(transport, () => native);
+
+		await readCell(transport, "read");
+		native.status = "Busy";
+		await runWorker(transport, "press", 'await (await desktop.ref("e3")).press()');
+		const report = String(await settleWorker(transport, "settle-flood"));
+		const [header, ...tree] = report.split("\n");
+		const counts = header.match(
+			/ — (\d+) changed, (\d+) added, .* (\d+) rows elided to fit \((\d+) changed rows among them\)/,
+		);
+		expect(counts).not.toBeNull();
+		const [changed, added, , lost] = counts!.slice(1).map(Number);
+		const kept = tree.filter(line => /^(?: {2})*[+~] /.test(line)).length;
+		expect(changed + added).toBe(2_003);
+		expect(lost).toBe(changed + added - kept);
+		expect(kept).toBeGreaterThan(0);
+		expect(Buffer.byteLength(tree.join("\n"), "utf-8")).toBeLessThanOrEqual(16 * 1024);
 	});
 
 	it("names windows the cell's input opened and focused", async () => {
