@@ -21,6 +21,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
+	ASYNC_JOBS_DEAD_LETTERED_TYPE,
 	buildAsyncResultBatchMessage,
 	type AsyncResultEntry,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
@@ -33,7 +34,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
 	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
@@ -48,6 +49,7 @@ function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 describe("AgentSession owner-routed async delivery", () => {
 	let session: AgentSession;
 	const authStorages: AuthStorage[] = [];
+	const tempDirs: TempDir[] = [];
 
 	afterEach(async () => {
 		vi.useRealTimers();
@@ -56,6 +58,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		}
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
+		}
+		for (const tempDir of tempDirs.splice(0)) {
+			tempDir[Symbol.dispose]();
 		}
 		AsyncJobManager.resetForTests();
 	});
@@ -635,7 +640,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			ownedAsyncJobManager: manager,
+			asyncJobManager: manager,
 		});
 
 		const completedJobId = manager.register("task", "prior session", async () => "done", {
@@ -689,7 +694,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			ownedAsyncJobManager: manager,
+			asyncJobManager: manager,
 		});
 		const resultQueued = observeAsyncResultEnqueue(session);
 
@@ -744,7 +749,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			ownedAsyncJobManager: manager,
+			asyncJobManager: manager,
 		});
 
 		// The delivery generation starts at 0; a new session bumps it to 1.
@@ -868,5 +873,92 @@ describe("AgentSession owner-routed async delivery", () => {
 		await Promise.resolve();
 		expect(flushed).toBe(true);
 		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
+	});
+
+	it("records dead-lettered owned jobs in the transcript when dispose cancels them", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const tempDir = TempDir.createSync("@omp-async-dead-letter-");
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const appendSpy = vi.spyOn(sessionManager, "appendCustomMessageEntry");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			ownedAsyncJobManager: manager,
+		});
+
+		const never = Promise.withResolvers<string>();
+		manager.register(
+			"bash",
+			"long rebuild",
+			({ signal }) => untilAborted(signal, never.promise).then(() => "unreachable"),
+			{ id: "sub-job", ownerId: "SubAgent" },
+		);
+		expect(session.hasPendingAsyncWork()).toBe(true);
+
+		await session.dispose();
+		never.resolve("too late");
+
+		// The dead-letter record is appended to the transcript manager before
+		// the terminal write barrier seals it — a revived agent reads it from
+		// the session file on disk (the manager's own persistence machinery
+		// handles durability; empty-session cleanup is separate behavior).
+		const deadLetterCalls = appendSpy.mock.calls.filter(call => call[0] === ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(deadLetterCalls.length).toBe(1);
+		const [customType, content, display, details] = deadLetterCalls[0]!;
+		expect(customType).toBe(ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(display).toBe(false);
+		expect(content as string).toContain("1 owned background job(s)");
+		expect(content as string).toContain("sub-job");
+		expect(content as string).toContain("long rebuild");
+		expect(details).toMatchObject({ jobs: [{ id: "sub-job", type: "bash", label: "long rebuild" }] });
+	});
+
+	it("writes no dead-letter record when dispose has no pending owned jobs", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const tempDir = TempDir.createSync("@omp-async-dead-letter-");
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const appendSpy = vi.spyOn(sessionManager, "appendCustomMessageEntry");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			ownedAsyncJobManager: manager,
+		});
+
+		await session.dispose();
+
+		const deadLetterCalls = appendSpy.mock.calls.filter(call => call[0] === ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(deadLetterCalls.length).toBe(0);
 	});
 });
