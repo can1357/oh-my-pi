@@ -1242,6 +1242,15 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
 }
 
 /**
+ * Catalog-data axis assignments for one model spec — the `catalog` field of
+ * {@link resolveModelPolicy} without resolving the compat and thinking
+ * policies, which dominate its cost on catalog-wide scans.
+ */
+export function resolveCatalogAxes(spec: ModelSpec<Api>): Record<string, unknown> {
+	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
+}
+
+/**
  * Resolves the full policy surface for one model spec: structured identity,
  * complete compat record, thinking metadata, and catalog-data corrections.
  */

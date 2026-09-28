@@ -540,12 +540,15 @@ export function createBashToolDefinition(cwd: string, options?: BashToolOptions)
 					onUpdate,
 				);
 			}
+			// The registry tool takes no per-call environment: `env` is service-launch
+			// configuration and is rejected outside it. A hook's env reaches `!` user
+			// shells through `shellEnv` above and the `operations` branch through its
+			// exec options.
 			return tool.execute(
 				toolCallId,
 				{
 					command: spawn?.command ?? command,
 					cwd: spawn?.cwd ?? cwd,
-					env: spawn?.env,
 					timeout,
 				},
 				signal,

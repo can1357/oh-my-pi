@@ -75,7 +75,7 @@ Two independent settings can prevent a Bash subprocess from starting. They serve
 
 ### `bash.patterns`: permission policy
 
-`bash.patterns` is for commands that must be allowed, confirmed by a person, or refused regardless of whether another tool could perform the work. Rules are ordered; the first matching rule wins. Each rule has a `match` glob and an `approval` value of `allow`, `prompt`, or `deny`.
+`bash.patterns` is for commands that must be allowed, confirmed by a person, or refused regardless of whether another tool could perform the work. Rules are ordered; the first matching rule wins. Each rule has a `match` glob and an `approval` value of `allow`, `prompt`, or `deny`. Whitespace runs in both the glob and the command collapse to a single space before matching, so a newline in a glob matches any whitespace (`"*\n*"` behaves like `"* *"`).
 
 ```yaml
 bash:

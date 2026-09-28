@@ -14,8 +14,9 @@ use std::{
 	io::{self, Read},
 	path::Path,
 	sync::{
-		LazyLock,
-		atomic::{AtomicU64, Ordering},
+		Arc, LazyLock,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+		mpsc,
 	},
 };
 
@@ -28,7 +29,7 @@ use grep_searcher::{
 use napi::{
 	JsString,
 	bindgen_prelude::*,
-	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
@@ -45,6 +46,25 @@ static PCRE2_JIT_ENABLED: LazyLock<bool> = LazyLock::new(|| match std::env::var(
 	Ok(v) if !v.is_empty() => v != "0" && !v.eq_ignore_ascii_case("false"),
 	_ => !cfg!(target_os = "macos"),
 });
+
+/// Upper bound on entries per streamed `onMatches` batch; a file with more
+/// content matches streams several batches while it is still being searched.
+const GREP_STREAM_BATCH: usize = 1024;
+/// Streamed batches queued for the JS thread at once. A full queue blocks the
+/// search workers until JS drains it, so streaming memory is bounded by the
+/// batches in flight, not by the total match count.
+const GREP_STREAM_QUEUE: usize = 8;
+
+/// `onMatches` callback: bounded queue, called without the error-first slot.
+type GrepStreamCallback = ThreadsafeFunction<
+	Vec<GrepMatch>,
+	UnknownReturnValue,
+	Vec<GrepMatch>,
+	Status,
+	false,
+	false,
+	GREP_STREAM_QUEUE,
+>;
 
 /// Output mode for [`search`] and [`grep`] (string values match JS callers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +160,15 @@ pub struct GrepOptions<'env> {
 	/// Filesystem every path is stat'ed, walked, and read through (native when
 	/// absent).
 	pub filesystem:         Option<ShellFilesystem>,
+	/// Stream results instead of returning them: called on the JS thread with
+	/// batches (at most 1024 entries, files in no particular order) of what
+	/// `matches` would hold, while the search runs. A slow callback pauses the
+	/// search instead of buffering, every call returns before the promise
+	/// settles, and the result then carries counts with empty `matches`.
+	/// A throw rejects the search with it. Incompatible with `maxCount` and
+	/// `offset`.
+	#[napi(ts_type = "(matches: GrepMatch[]) => void")]
+	pub on_matches:         Option<GrepStreamCallback>,
 }
 
 /// A context line (before or after a match).
@@ -243,6 +272,12 @@ impl TypeFilter {
 // Internal match collection
 // ---------------------------------------------------------------------------
 
+/// Receives streamed search output from any search worker thread.
+pub(crate) trait MatchSink: Send + Sync {
+	/// Take ownership of entries as they are found; an error stops the search.
+	fn deliver(&self, matches: Vec<GrepMatch>) -> Result<()>;
+}
+
 struct MatchCollector {
 	matches:         Vec<CollectedMatch>,
 	match_count:     u64,
@@ -321,6 +356,77 @@ impl MatchCollector {
 			collect_matches,
 			context_before: SmallVec::new(),
 		}
+	}
+
+	fn for_params(params: SearchParams) -> Self {
+		Self::new(
+			params.max_count,
+			params.offset,
+			params.max_columns.map(|v| v as usize),
+			params.mode == OutputMode::Content,
+		)
+	}
+
+	fn into_result(self) -> SearchResultInternal {
+		SearchResultInternal {
+			matches:       self.matches,
+			match_count:   self.match_count,
+			collected:     self.collected_count,
+			limit_reached: self.limit_reached,
+		}
+	}
+}
+
+/// Content-mode collector that hands a file's matches to a [`MatchSink`] in
+/// chunks of [`GREP_STREAM_BATCH`] while the file is searched, so a dense file
+/// never accumulates all of its matching lines.
+struct StreamingCollector<'a> {
+	collector: MatchCollector,
+	sink:      &'a dyn MatchSink,
+	path:      &'a str,
+	/// Delivery failure that stopped the search; reported over search errors.
+	failure:   Option<Error>,
+}
+
+impl StreamingCollector<'_> {
+	fn flush(&mut self) -> io::Result<()> {
+		if self.collector.matches.is_empty() {
+			return Ok(());
+		}
+		let collected = std::mem::take(&mut self.collector.matches);
+		let mut batch = Vec::with_capacity(collected.len());
+		push_content_matches(&mut batch, self.path.to_owned(), collected);
+		self.sink.deliver(batch).map_err(|err| {
+			let stopped = io::Error::other(err.reason.clone());
+			self.failure = Some(err);
+			stopped
+		})
+	}
+}
+
+impl Sink for StreamingCollector<'_> {
+	type Error = io::Error;
+
+	fn matched(
+		&mut self,
+		searcher: &Searcher,
+		mat: &SinkMatch<'_>,
+	) -> std::result::Result<bool, Self::Error> {
+		// Flush before collecting the next match: the searcher reports a match's
+		// after-context before the following match, so every pending match is
+		// complete here.
+		if self.collector.matches.len() >= GREP_STREAM_BATCH {
+			self.flush()?;
+		}
+		self.collector.matched(searcher, mat)
+	}
+
+	fn context(
+		&mut self,
+		searcher: &Searcher,
+		ctx: &SinkContext<'_>,
+	) -> std::result::Result<bool, Self::Error> {
+		self.collector.context(searcher, ctx)
 	}
 }
 
@@ -600,19 +706,36 @@ fn run_search_slice<M: Matcher + Sync>(
 	content: &[u8],
 	params: SearchParams,
 ) -> io::Result<SearchResultInternal> {
-	let mut collector = MatchCollector::new(
-		params.max_count,
-		params.offset,
-		params.max_columns.map(|v| v as usize),
-		params.mode == OutputMode::Content,
-	);
+	let mut collector = MatchCollector::for_params(params);
 	searcher.search_slice(matcher, content, &mut collector)?;
-	Ok(SearchResultInternal {
-		matches:       collector.matches,
-		match_count:   collector.match_count,
-		collected:     collector.collected_count,
-		limit_reached: collector.limit_reached,
-	})
+	Ok(collector.into_result())
+}
+
+/// Content-mode search of `content` that streams its matches to `sink` as
+/// `path`; the returned result carries counts only. The outer error is a
+/// delivery failure that must stop the whole search; the inner one is a
+/// search failure of this file alone.
+fn run_streaming_search_slice<M: Matcher + Sync>(
+	searcher: &mut Searcher,
+	matcher: &M,
+	content: &[u8],
+	params: SearchParams,
+	sink: &dyn MatchSink,
+	path: &str,
+) -> Result<io::Result<SearchResultInternal>> {
+	let mut collector = StreamingCollector {
+		collector: MatchCollector::for_params(params),
+		sink,
+		path,
+		failure: None,
+	};
+	let searched = searcher
+		.search_slice(matcher, content, &mut collector)
+		.and_then(|()| collector.flush());
+	if let Some(err) = collector.failure {
+		return Err(err);
+	}
+	Ok(searched.map(|()| collector.collector.into_result()))
 }
 
 fn build_searcher_for_params(params: SearchParams) -> Searcher {
@@ -817,6 +940,8 @@ pub(crate) struct GrepConfig {
 	pub(crate) max_count_per_file: Option<u32>,
 	/// Filesystem the search path is resolved, walked, and read through.
 	pub(crate) filesystem:         BlockingFs,
+	/// Receives results while searching instead of the returned `matches`.
+	pub(crate) stream:             Option<Arc<dyn MatchSink>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,29 +1334,79 @@ enum FileOutcome {
 /// Shared accumulator across both search passes.
 ///
 /// `results` is drained between passes; `deferred` is filled by pass 1 and
-/// consumed by pass 2; the counters accumulate across both.
-struct PassState {
+/// consumed by pass 2; the counters accumulate across both. With a `sink`,
+/// matching files stream their entries instead of filling `results`, and only
+/// the `streamed_*` totals remain.
+struct PassState<'a> {
 	/// Filesystem every candidate is read through.
-	fs:                BlockingFs,
-	results:           Mutex<Vec<FileSearchResult>>,
-	deferred:          Mutex<Vec<pi_walker::FileCandidate>>,
-	files_searched:    AtomicU64,
-	skipped_oversized: AtomicU64,
-	emitted:           AtomicU64,
+	fs:                     BlockingFs,
+	results:                Mutex<Vec<FileSearchResult>>,
+	deferred:               Mutex<Vec<pi_walker::FileCandidate>>,
+	files_searched:         AtomicU64,
+	skipped_oversized:      AtomicU64,
+	emitted:                AtomicU64,
+	sink:                   Option<&'a dyn MatchSink>,
+	streamed_matches:       AtomicU64,
+	streamed_files:         AtomicU64,
+	streamed_limit_reached: AtomicBool,
 }
 
-impl PassState {
+impl<'a> PassState<'a> {
 	fn new(fs: &BlockingFs) -> Self {
+		Self::with_sink(fs, None)
+	}
+
+	fn with_sink(fs: &BlockingFs, sink: Option<&'a dyn MatchSink>) -> Self {
 		Self {
-			fs:                fs.clone(),
-			results:           Mutex::default(),
-			deferred:          Mutex::default(),
-			files_searched:    AtomicU64::default(),
+			fs: fs.clone(),
+			results: Mutex::default(),
+			deferred: Mutex::default(),
+			files_searched: AtomicU64::default(),
 			skipped_oversized: AtomicU64::default(),
-			emitted:           AtomicU64::default(),
+			emitted: AtomicU64::default(),
+			sink,
+			streamed_matches: AtomicU64::default(),
+			streamed_files: AtomicU64::default(),
+			streamed_limit_reached: AtomicBool::default(),
+		}
+	}
+
+	/// Result of a streamed search: its totals, with every entry already
+	/// delivered to the sink.
+	fn streamed_result(&self) -> GrepResult {
+		let skipped_oversized = self.skipped_oversized.load(Ordering::Relaxed);
+		GrepResult {
+			matches:            Vec::new(),
+			total_matches:      crate::utils::clamp_u32(self.streamed_matches.load(Ordering::Relaxed)),
+			files_with_matches: crate::utils::clamp_u32(self.streamed_files.load(Ordering::Relaxed)),
+			files_searched:     crate::utils::clamp_u32(self.files_searched.load(Ordering::Relaxed)),
+			limit_reached:      self
+				.streamed_limit_reached
+				.load(Ordering::Relaxed)
+				.then_some(true),
+			skipped_oversized:  (skipped_oversized > 0)
+				.then(|| crate::utils::clamp_u32(skipped_oversized)),
 		}
 	}
 }
+
+/// Stream the entry a matching file contributes beyond its content matches
+/// (which [`StreamingCollector`] already delivered): its count or its path.
+fn stream_file_entry(
+	sink: &dyn MatchSink,
+	mode: OutputMode,
+	path: &str,
+	match_count: u64,
+) -> Result<()> {
+	let mut entry = Vec::with_capacity(1);
+	match mode {
+		OutputMode::Content => return Ok(()),
+		OutputMode::Count => push_count_match(&mut entry, path.to_owned(), match_count),
+		OutputMode::FilesWithMatches => push_file_match(&mut entry, path.to_owned()),
+	}
+	sink.deliver(entry)
+}
+
 /// Read the first [`MAX_FILE_BYTES`] of a file into owned bytes for searching.
 ///
 /// Used by the deferred oversized pass: files larger than the cap are searched
@@ -1263,6 +1438,8 @@ fn read_file_prefix(fs: &BlockingFs, path: &Path, buffer: &mut Vec<u8>) -> io::R
 }
 
 /// Read one candidate per `policy` and search it, classifying the result.
+/// Content matches stream to `sink` when given; its delivery failure is the
+/// only error.
 fn search_one_file<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	worker: &mut SearchWorker,
@@ -1270,7 +1447,8 @@ fn search_one_file<M: Matcher + Sync>(
 	file: &pi_walker::FileCandidate,
 	file_params: SearchParams,
 	policy: ReadPolicy,
-) -> FileOutcome {
+	sink: Option<&dyn MatchSink>,
+) -> Result<FileOutcome> {
 	let read = match policy {
 		ReadPolicy::Full => {
 			read_file_bytes_with_size(fs, &file.path, file_size_hint(file.size), &mut worker.buffer)
@@ -1279,25 +1457,35 @@ fn search_one_file<M: Matcher + Sync>(
 	};
 	match read {
 		Ok(ReadFile::Read) => {},
-		Ok(ReadFile::Oversized) => return FileOutcome::Defer,
+		Ok(ReadFile::Oversized) => return Ok(FileOutcome::Defer),
 		Ok(ReadFile::Skipped) => {
-			return match policy {
+			return Ok(match policy {
 				ReadPolicy::Prefix => FileOutcome::SkippedOversized,
 				ReadPolicy::Full => FileOutcome::Skipped,
-			};
+			});
 		},
-		Err(_) => return FileOutcome::Skipped,
+		Err(_) => return Ok(FileOutcome::Skipped),
 	}
+	let search = match sink {
+		Some(sink) if file_params.mode == OutputMode::Content => run_streaming_search_slice(
+			&mut worker.searcher,
+			matcher,
+			&worker.buffer,
+			file_params,
+			sink,
+			&file.relative,
+		)?
+		.ok(),
+		_ => search_file_bytes(&mut worker.searcher, matcher, &worker.buffer, file_params),
+	};
 	// A searcher error counts as searched-with-no-matches, matching the prior
 	// behavior (the file was read and attempted).
-	let search = search_file_bytes(&mut worker.searcher, matcher, &worker.buffer, file_params)
-		.unwrap_or(SearchResultInternal {
-			matches:       Vec::new(),
-			match_count:   0,
-			collected:     0,
-			limit_reached: false,
-		});
-	FileOutcome::Searched(search)
+	Ok(FileOutcome::Searched(search.unwrap_or(SearchResultInternal {
+		matches:       Vec::new(),
+		match_count:   0,
+		collected:     0,
+		limit_reached: false,
+	})))
 }
 
 /// Search one candidate and fold its outcome into the shared [`PassState`].
@@ -1308,7 +1496,7 @@ fn handle_file<M: Matcher + Sync>(
 	file_params: SearchParams,
 	policy: ReadPolicy,
 	stop_after_matches: Option<u64>,
-	state: &PassState,
+	state: &PassState<'_>,
 	ct: &task::CancelToken,
 ) -> Result<()> {
 	ct.heartbeat()?;
@@ -1317,7 +1505,7 @@ fn handle_file<M: Matcher + Sync>(
 	{
 		return Ok(());
 	}
-	match search_one_file(&state.fs, worker, matcher, file, file_params, policy) {
+	match search_one_file(&state.fs, worker, matcher, file, file_params, policy, state.sink)? {
 		FileOutcome::Defer => {
 			state.deferred.lock().push(file.clone());
 		},
@@ -1327,7 +1515,18 @@ fn handle_file<M: Matcher + Sync>(
 		FileOutcome::Skipped => {},
 		FileOutcome::Searched(search) => {
 			state.files_searched.fetch_add(1, Ordering::Relaxed);
-			if search.match_count > 0 {
+			if search.match_count > 0
+				&& let Some(sink) = state.sink
+			{
+				state.streamed_files.fetch_add(1, Ordering::Relaxed);
+				state
+					.streamed_matches
+					.fetch_add(search.match_count, Ordering::Relaxed);
+				if search.limit_reached {
+					state.streamed_limit_reached.store(true, Ordering::Relaxed);
+				}
+				stream_file_entry(sink, file_params.mode, &file.relative, search.match_count)?;
+			} else if search.match_count > 0 {
 				let emitted_in_file = search.collected;
 				state.results.lock().push(FileSearchResult {
 					relative_path: file.relative.clone(),
@@ -1355,7 +1554,7 @@ fn run_pass<M: Matcher + Sync>(
 	policy: ReadPolicy,
 	parallel_allowed: bool,
 	stop_after_matches: Option<u64>,
-	state: &PassState,
+	state: &PassState<'_>,
 	ct: &task::CancelToken,
 ) -> Result<Vec<FileSearchResult>> {
 	if parallel_allowed && pi_walker::should_parallelize(candidates.len()) {
@@ -1495,7 +1694,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	reason = "matches options structure of underlying walk candidates collector"
 )]
 fn run_parallel_streaming_grep<M: Matcher + Sync>(
-	fs: &BlockingFs,
+	state: &PassState<'_>,
 	search_path: &Path,
 	matcher: &M,
 	glob: Option<&str>,
@@ -1505,9 +1704,9 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 	use_gitignore: bool,
 	skip_node_modules: bool,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<Vec<FileSearchResult>> {
 	let request = build_grep_walk_request(
-		fs,
+		&state.fs,
 		search_path,
 		glob,
 		include_hidden,
@@ -1516,7 +1715,6 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 		pi_walker::WalkOrder::Unordered,
 	)?;
 	let file_params = per_file_params(params);
-	let state = PassState::new(fs);
 
 	request
 		.for_each_file_candidate_parallel(
@@ -1527,7 +1725,7 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 					return Ok(pi_walker::ParallelWalkControl::Continue);
 				}
 				with_parallel_grep_searcher(file_params, |searcher| {
-					handle_file(file, searcher, matcher, file_params, ReadPolicy::Full, None, &state, ct)
+					handle_file(file, searcher, matcher, file_params, ReadPolicy::Full, None, state, ct)
 				})?;
 				Ok(pi_walker::ParallelWalkControl::Continue)
 			},
@@ -1541,15 +1739,11 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 	let deferred = std::mem::take(&mut *state.deferred.lock());
 	if !deferred.is_empty() {
 		let oversized =
-			run_pass(&deferred, matcher, file_params, ReadPolicy::Prefix, true, None, &state, ct)?;
+			run_pass(&deferred, matcher, file_params, ReadPolicy::Prefix, true, None, state, ct)?;
 		results.extend(oversized);
 	}
 
-	Ok((
-		results,
-		state.skipped_oversized.load(Ordering::Relaxed),
-		state.files_searched.load(Ordering::Relaxed),
-	))
+	Ok(results)
 }
 
 fn emitted_content_matches(results: &[FileSearchResult]) -> u64 {
@@ -1563,7 +1757,7 @@ fn flush_stream_window<M: Matcher + Sync>(
 	results: &mut Vec<FileSearchResult>,
 	matcher: &M,
 	file_params: SearchParams,
-	state: &PassState,
+	state: &PassState<'_>,
 	ct: &task::CancelToken,
 	stop_after_matches: u64,
 ) -> Result<bool> {
@@ -1697,18 +1891,26 @@ fn run_streaming_grep<M: Matcher + Sync>(
 ) -> Result<(Vec<FileSearchResult>, u64, u64)> {
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
-		None => run_parallel_streaming_grep(
-			fs,
-			search_path,
-			matcher,
-			glob,
-			type_filter,
-			params,
-			include_hidden,
-			use_gitignore,
-			skip_node_modules,
-			ct,
-		),
+		None => {
+			let state = PassState::new(fs);
+			let results = run_parallel_streaming_grep(
+				&state,
+				search_path,
+				matcher,
+				glob,
+				type_filter,
+				params,
+				include_hidden,
+				use_gitignore,
+				skip_node_modules,
+				ct,
+			)?;
+			Ok((
+				results,
+				state.skipped_oversized.load(Ordering::Relaxed),
+				state.files_searched.load(Ordering::Relaxed),
+			))
+		},
 		Some(stop) if stop <= ORDERED_STREAMING_STOP_MAX_COUNT || pi_walker::walk_workers() <= 1 => {
 			run_sequential_grep(
 				fs,
@@ -1950,6 +2152,12 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	let max_columns = options.max_columns;
 	let max_count = options.max_count.map(u64::from);
 	let offset = options.offset.unwrap_or(0) as u64;
+	let stream = options.stream.as_deref();
+	if stream.is_some() && (max_count.is_some() || offset != 0) {
+		return Err(Error::from_reason(
+			"Streaming grep (onMatches) does not support maxCount or offset",
+		));
+	}
 	let include_hidden = options.hidden.unwrap_or(true);
 	let use_gitignore = options.gitignore.unwrap_or(true);
 	let glob = options
@@ -2042,7 +2250,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			}
 
 			let path_string = search_path.to_string_lossy().into_owned();
-			return Ok(GrepResult {
+			return hand_off(stream, GrepResult {
 				matches:            vec![GrepMatch {
 					path:           path_string,
 					line_number:    0,
@@ -2060,8 +2268,19 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			});
 		}
 
-		let search = run_search(matcher, bytes.as_slice(), params)
-			.map_err(|err| Error::from_reason(format!("Search failed: {err}")))?;
+		let path_string = search_path.to_string_lossy().into_owned();
+		let search = match stream {
+			Some(sink) if output_mode == OutputMode::Content => run_streaming_search_slice(
+				&mut build_searcher_for_params(params),
+				matcher,
+				bytes.as_slice(),
+				params,
+				sink,
+				&path_string,
+			)?,
+			_ => run_search(matcher, bytes.as_slice(), params),
+		}
+		.map_err(|err| Error::from_reason(format!("Search failed: {err}")))?;
 
 		if search.match_count == 0 {
 			return Ok(GrepResult {
@@ -2074,7 +2293,6 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			});
 		}
 
-		let path_string = search_path.to_string_lossy().into_owned();
 		let mut matches = Vec::new();
 		match output_mode {
 			OutputMode::Content => {
@@ -2107,7 +2325,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		let limit_reached =
 			search.limit_reached || max_count.is_some_and(|max| search.collected >= max);
 
-		return Ok(GrepResult {
+		return hand_off(stream, GrepResult {
 			matches,
 			total_matches: crate::utils::clamp_u32(search.match_count),
 			files_with_matches: 1,
@@ -2118,6 +2336,22 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	}
 
 	let mentions_node_modules = glob.is_some_and(|g| g.contains("node_modules"));
+	if let Some(sink) = stream {
+		let state = PassState::with_sink(fs, Some(sink));
+		run_parallel_streaming_grep(
+			&state,
+			&search_path,
+			matcher,
+			glob,
+			type_filter.as_ref(),
+			params,
+			include_hidden,
+			use_gitignore,
+			!mentions_node_modules,
+			&ct,
+		)?;
+		return Ok(state.streamed_result());
+	}
 	let results = run_streaming_grep(
 		fs,
 		&search_path,
@@ -2154,6 +2388,111 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			None
 		},
 	})
+}
+
+/// Streaming hands a single-file result's entries to `sink` instead of
+/// returning them.
+fn hand_off(sink: Option<&dyn MatchSink>, mut result: GrepResult) -> Result<GrepResult> {
+	if let Some(sink) = sink
+		&& !result.matches.is_empty()
+	{
+		sink.deliver(std::mem::take(&mut result.matches))?;
+	}
+	Ok(result)
+}
+
+/// [`MatchSink`] over the `onMatches` callback.
+///
+/// Coalesces small per-file deliveries into batches of at most
+/// [`GREP_STREAM_BATCH`] entries, blocks workers while the bounded callback
+/// queue is full, and always holds the newest batch back: [`Self::settle`]
+/// sends it last and waits for it, so the promise settles only after JS has
+/// run every call.
+struct JsMatchStream {
+	callback: GrepStreamCallback,
+	pending:  Mutex<Vec<GrepMatch>>,
+	/// First error thrown by the callback; stops the search and rejects it.
+	failure:  Arc<Mutex<Option<Error>>>,
+	failed:   Arc<AtomicBool>,
+}
+
+impl JsMatchStream {
+	fn new(callback: GrepStreamCallback) -> Self {
+		Self { callback, pending: Mutex::default(), failure: Arc::default(), failed: Arc::default() }
+	}
+
+	/// Queue `batch`, blocking while the queue is full; `done` fires once the
+	/// callback has run on it.
+	fn send(&self, batch: Vec<GrepMatch>, done: Option<mpsc::SyncSender<()>>) -> Result<()> {
+		let failure = Arc::clone(&self.failure);
+		let failed = Arc::clone(&self.failed);
+		let status = self.callback.call_with_return_value(
+			batch,
+			ThreadsafeFunctionCallMode::Blocking,
+			move |returned: Result<UnknownReturnValue>, _: Env| {
+				if let Err(err) = returned {
+					failure.lock().get_or_insert(err);
+					failed.store(true, Ordering::Release);
+				}
+				if let Some(done) = done {
+					let _ = done.send(());
+				}
+				Ok(())
+			},
+		);
+		if status != Status::Ok {
+			return Err(Error::new(
+				status,
+				"grep onMatches callback is no longer callable".to_owned(),
+			));
+		}
+		Ok(())
+	}
+
+	/// Deliver the held-back batch and wait until JS ran it (and, the queue
+	/// being FIFO, every call before it), then surface a callback throw over
+	/// `result`.
+	fn settle(&self, result: Result<GrepResult>) -> Result<GrepResult> {
+		let last = std::mem::take(&mut *self.pending.lock());
+		let result = match result {
+			Ok(output) if !last.is_empty() => {
+				let (done, finished) = mpsc::sync_channel(1);
+				// Disconnection means the environment is shutting down; nothing
+				// is left to wait for.
+				self.send(last, Some(done)).map(|()| {
+					let _ = finished.recv();
+					output
+				})
+			},
+			other => other,
+		};
+		let failure = self.failure.lock().take();
+		match failure {
+			Some(err) => Err(err),
+			None => result,
+		}
+	}
+}
+
+impl MatchSink for JsMatchStream {
+	fn deliver(&self, mut matches: Vec<GrepMatch>) -> Result<()> {
+		if self.failed.load(Ordering::Acquire) {
+			return Err(Error::from_reason("grep onMatches callback threw"));
+		}
+		let ready = {
+			let mut pending = self.pending.lock();
+			if pending.is_empty() {
+				*pending = matches;
+				return Ok(());
+			}
+			if pending.len() + matches.len() <= GREP_STREAM_BATCH {
+				pending.append(&mut matches);
+				return Ok(());
+			}
+			std::mem::replace(&mut *pending, matches)
+		};
+		self.send(ready, None)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -2234,7 +2573,8 @@ pub fn has_match(
 ///
 /// # Arguments
 /// - `options`: Pattern, path, filters, and output mode.
-/// - `on_match`: Optional callback invoked per match/result.
+/// - `on_match`: Optional callback invoked per returned match/result, after the
+///   search (never called when `options.onMatches` streams instead).
 ///
 /// # Returns
 /// Aggregated results across matching files.
@@ -2265,10 +2605,15 @@ pub fn grep(
 		timeout_ms,
 		signal,
 		filesystem,
+		on_matches,
 	} = options;
 
+	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback)));
 	let config = GrepConfig {
 		filesystem: ShellFilesystem::blocking(filesystem),
+		stream: stream
+			.clone()
+			.map(|stream| -> Arc<dyn MatchSink> { stream }),
 		pattern,
 		path,
 		glob,
@@ -2288,7 +2633,13 @@ pub fn grep(
 		mode,
 	};
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("grep", ct, move |ct| grep_sync(config, on_match.as_ref(), ct))
+	task::blocking("grep", ct, move |ct| {
+		let result = grep_sync(config, on_match.as_ref(), ct);
+		match stream {
+			Some(stream) => stream.settle(result),
+			None => result,
+		}
+	})
 }
 
 #[cfg(test)]
@@ -2383,7 +2734,156 @@ mod tests {
 			mode:               None,
 			max_count_per_file: None,
 			filesystem:         BlockingFs::native(),
+			stream:             None,
 		}
+	}
+
+	#[cfg(unix)]
+	#[derive(Default)]
+	struct RecordingSink {
+		batches: parking_lot::Mutex<Vec<Vec<super::GrepMatch>>>,
+	}
+
+	#[cfg(unix)]
+	impl super::MatchSink for RecordingSink {
+		fn deliver(&self, matches: Vec<super::GrepMatch>) -> napi::Result<()> {
+			self.batches.lock().push(matches);
+			Ok(())
+		}
+	}
+
+	#[cfg(unix)]
+	struct FailingSink;
+
+	#[cfg(unix)]
+	impl super::MatchSink for FailingSink {
+		fn deliver(&self, _matches: Vec<super::GrepMatch>) -> napi::Result<()> {
+			Err(napi::Error::from_reason("consumer gone"))
+		}
+	}
+
+	/// `needle {i}` lines each followed by a `ctx {i}` line, dense enough to
+	/// span several streamed batches.
+	#[cfg(unix)]
+	fn write_dense_file(path: &Path, matches: usize) {
+		let content: String = (0..matches)
+			.map(|i| format!("needle {i}\nctx {i}\n"))
+			.collect();
+		write_file(path, &content);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn streaming_grep_delivers_bounded_batches_and_returns_only_counts() {
+		let dense_matches = super::GREP_STREAM_BATCH * 2 + 5;
+		let root = TempDirGuard::new();
+		write_dense_file(&root.path().join("dense.txt"), dense_matches);
+		write_file(&root.path().join("small.txt"), "needle x\nhay\n");
+		write_file(&root.path().join("none.txt"), "hay\n");
+
+		for (target, expected_files, expected_searched) in
+			[(root.path().to_path_buf(), 2, 3), (root.path().join("dense.txt"), 1, 1)]
+		{
+			let sink = std::sync::Arc::new(RecordingSink::default());
+			let mut config = base_grep_config(&target);
+			config.context_after = Some(1);
+			config.stream = Some(sink.clone());
+
+			let result = grep_sync(config, None, task::CancelToken::default())
+				.expect("streaming grep should succeed");
+
+			assert!(result.matches.is_empty(), "streamed matches must not be returned");
+			assert_eq!(result.files_with_matches, expected_files);
+			assert_eq!(result.files_searched, expected_searched);
+			assert_eq!(result.total_matches as usize, dense_matches + expected_files as usize - 1);
+
+			let batches = sink.batches.lock();
+			assert!(
+				batches
+					.iter()
+					.all(|batch| batch.len() <= super::GREP_STREAM_BATCH)
+			);
+			let dense: Vec<&super::GrepMatch> = batches
+				.iter()
+				.flatten()
+				.filter(|matched| matched.path.ends_with("dense.txt"))
+				.collect();
+			assert!(
+				batches
+					.iter()
+					.filter(|batch| batch[0].path.ends_with("dense.txt"))
+					.count() >= 3,
+				"a dense file streams while it is searched, not as one batch",
+			);
+			assert_eq!(dense.len(), dense_matches);
+			for (i, matched) in dense.iter().enumerate() {
+				assert_eq!(matched.line, format!("needle {i}"));
+				let after = matched
+					.context_after
+					.as_deref()
+					.expect("after-context survives batching");
+				assert_eq!(after.len(), 1);
+				assert_eq!(after[0].line, format!("ctx {i}"));
+			}
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn streaming_count_mode_streams_one_entry_per_matching_file() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("a.txt"), "needle\nneedle\n");
+		write_file(&root.path().join("b.txt"), "needle\n");
+		let sink = std::sync::Arc::new(RecordingSink::default());
+		let mut config = base_grep_config(root.path());
+		config.mode = Some(GrepOutputMode::Count);
+		config.stream = Some(sink.clone());
+
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("streaming count grep should succeed");
+
+		assert!(result.matches.is_empty());
+		assert_eq!(result.total_matches, 3);
+		let mut counts: Vec<(String, Option<u32>)> = sink
+			.batches
+			.lock()
+			.iter()
+			.flatten()
+			.map(|entry| (entry.path.clone(), entry.match_count))
+			.collect();
+		counts.sort();
+		assert_eq!(counts, [("a.txt".to_owned(), Some(2)), ("b.txt".to_owned(), Some(1))]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn streaming_grep_stops_with_the_sink_error() {
+		let root = TempDirGuard::new();
+		write_dense_file(&root.path().join("dense.txt"), super::GREP_STREAM_BATCH * 2);
+		let mut config = base_grep_config(root.path());
+		config.stream = Some(std::sync::Arc::new(FailingSink));
+
+		let Err(err) = grep_sync(config, None, task::CancelToken::default()) else {
+			panic!("a failed delivery must fail the search");
+		};
+
+		assert!(err.reason.contains("consumer gone"), "reason = {}", err.reason);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn streaming_grep_rejects_global_limits() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("a.txt"), "needle\n");
+		let mut config = base_grep_config(root.path());
+		config.max_count = Some(1);
+		config.stream = Some(std::sync::Arc::new(RecordingSink::default()));
+
+		let Err(err) = grep_sync(config, None, task::CancelToken::default()) else {
+			panic!("streaming cannot honor a global maxCount");
+		};
+
+		assert!(err.reason.contains("maxCount"), "reason = {}", err.reason);
 	}
 
 	#[test]

@@ -1226,8 +1226,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// error on a zero exit (changes captured but not landed, or a
 					// retained workspace) is a failure too: the work needs manual
 					// recovery, which a "completed" job would hide. Mirrors the sync
-					// path's status derivation.
+					// path's status derivation. `isError` marks a child that finished
+					// before a later step (isolation merge, nested patch apply) threw.
 					const resultFailed =
+						result.isError === true ||
 						!singleResult ||
 						(singleResult.aborted ?? false) ||
 						singleResult.exitCode !== 0 ||
@@ -1554,12 +1556,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
+			// A child that finished before the failure keeps its exit status,
+			// usage, and artifact path. `error` is set so nothing reads a zero
+			// exit code as a completed run.
+			const settled = error instanceof StructuredSubagentError ? error.result : undefined;
+			const cause = error instanceof StructuredSubagentError ? error.cause : undefined;
+			const salvaged = settled
+				? { ...settled, error: settled.error ?? (cause instanceof Error ? cause.message : message) }
+				: undefined;
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				isError: true,
 				details: {
 					projectAgentsDir: null,
-					results: [],
+					results: salvaged ? [salvaged] : [],
 					totalDurationMs: Date.now() - startTime,
+					...(salvaged?.usage ? { usage: salvaged.usage } : {}),
+					...(salvaged?.outputPath ? { outputPaths: [salvaged.outputPath] } : {}),
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};

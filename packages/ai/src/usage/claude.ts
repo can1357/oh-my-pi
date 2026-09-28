@@ -702,6 +702,11 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		const { orgId, baseUrl: _baseUrl, report: _report, ...resetCredits } = resetCreditList;
 		result.resetCredits = resetCredits;
 		if (orgId) result.metadata = { ...result.metadata, orgId };
+	} else if (ctx.previousReport?.resetCredits) {
+		// `null` means the reset probe failed (timeout, 429, malformed body), not
+		// that the account has no saved resets. Keep the block this credential
+		// last reported instead of dropping banked resets from the report.
+		result.resetCredits = ctx.previousReport.resetCredits;
 	}
 	result.metadata = {
 		...result.metadata,

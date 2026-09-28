@@ -42,10 +42,10 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 ## Discovery locations (loader API)
 
-`discoverAndLoadCustomTools(configuredPaths, cwd, builtInToolNames)` merges:
+`discoverAndLoadCustomTools(configuredPaths, cwd, builtInToolNames, pushPendingAction?, agentDir?)` merges:
 
 1. Capability providers (`toolCapability`), including:
-   - Native OMP config (`~/.omp/agent/tools`, `.omp/tools`)
+   - Native OMP config (`<agentDir>/tools`, default `~/.omp/agent/tools`; `.omp/tools`)
    - Claude config (`~/.claude/tools`, `.claude/tools`)
    - Codex config (`~/.codex/tools`, `.codex/tools`)
    - Claude marketplace plugin cache provider

@@ -103,6 +103,11 @@ export interface UsageServiceDeps {
 	logger: UsageLogger;
 }
 
+type UsageReportsOptions = {
+	baseUrlResolver?: (provider: Provider) => string | undefined;
+	signal?: AbortSignal;
+};
+
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
@@ -261,9 +266,13 @@ export class UsageService implements UsageApi {
 		if (providerImpl.supports && !providerImpl.supports(params)) return null;
 
 		try {
+			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
+				this.#deps.cache.reportKey(request),
+			)?.value;
 			const report = await providerImpl.fetchUsage(params, {
 				fetch: this.fetch,
 				logger: this.logger,
+				...(previousReport ? { previousReport } : {}),
 			});
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
@@ -563,16 +572,19 @@ export class UsageService implements UsageApi {
 		return true;
 	}
 
-	/** Collect resolved account requests for all configured usage providers. */
-	async #collectUsageRequests(options?: {
-		baseUrlResolver?: (provider: Provider) => string | undefined;
-	}): Promise<UsageRequestDescriptor[]> {
+	/** Collect resolved account requests, restricted to runtime providers when the store owns aggregate reports. */
+	async #collectUsageRequests(
+		options?: UsageReportsOptions,
+		providerFilter?: ReadonlySet<Provider>,
+	): Promise<UsageRequestDescriptor[]> {
 		const requests: UsageRequestDescriptor[] = [];
-		const providers = new Set<string>([
-			...this.#deps.pool.providers(),
-			...this.#runtimeUsageProviderOverrides.keys(),
-			...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
-		]);
+		const providers =
+			providerFilter ??
+			new Set<string>([
+				...this.#deps.pool.providers(),
+				...this.#runtimeUsageProviderOverrides.keys(),
+				...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
+			]);
 
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
@@ -742,14 +754,9 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
-	async reports(options?: {
-		baseUrlResolver?: (provider: Provider) => string | undefined;
-		/** Caller's cancel signal; only rejects this caller, never the shared upstream fetch. */
-		signal?: AbortSignal;
-	}): Promise<UsageReport[] | null> {
-		// Store-level hook > local per-credential fan-out. `RemoteAuthCredentialStore`
-		// implements the hook so a gateway backed by a broker routes usage to the
-		// broker without the caller wiring it explicitly.
+	async reports(options?: UsageReportsOptions): Promise<UsageReport[] | null> {
+		// The broker owns its providers' reports; runtime providers registered
+		// only in this process still need local per-credential probes.
 		const storeOverride = this.#deps.store.fetchUsageReports?.bind(this.#deps.store);
 		if (storeOverride) {
 			// Reuse the in-flight map so concurrent callers (widget poll + format
@@ -768,9 +775,28 @@ export class UsageService implements UsageApi {
 			}
 			const reports = await raceSignal(shared, options?.signal, "usage fetch aborted");
 			if (reports) this.#deps.blocks.reconcileReports(reports);
-			return reports;
+			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
+
+			// The broker owns its reported providers; only extension providers
+			// absent from its response need local credentials and a local probe.
+			const brokerProviders = new Set(reports.map(report => report.provider));
+			const localProviders = new Set<Provider>();
+			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+				if (!brokerProviders.has(provider)) localProviders.add(provider);
+			}
+			if (localProviders.size === 0) return reports;
+			const localReports = await this.#fetchLocalReports(options, localProviders);
+			return localReports?.length ? [...reports, ...localReports] : reports;
 		}
-		const requests = await this.#collectUsageRequests(options);
+		return this.#fetchLocalReports(options);
+	}
+
+	/** Probe only the selected providers locally, preserving per-credential caching and cooldowns. */
+	async #fetchLocalReports(
+		options?: UsageReportsOptions,
+		providerFilter?: ReadonlySet<Provider>,
+	): Promise<UsageReport[] | null> {
+		const requests = await this.#collectUsageRequests(options, providerFilter);
 		if (requests.length === 0) return [];
 
 		this.logger?.debug("Usage fetch requested", {

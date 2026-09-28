@@ -279,6 +279,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			parser_impl: crate::parser::ParserImpl::default(),
 			key_bindings: None,
 			history: None,
+			resource_limits: crate::rlimits::ResourceLimits::default(),
 		}
 	}
 }

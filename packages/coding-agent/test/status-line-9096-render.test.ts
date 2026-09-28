@@ -92,7 +92,7 @@ test("renders profile plus compact metric status line", () => {
 	expect(rendered).not.toContain("100K");
 });
 
-test("reserves token breakdown widths in startup placeholders", () => {
+test("renders token breakdown labels at narrow widths", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -139,9 +139,7 @@ test("reserves token breakdown widths in startup placeholders", () => {
 		segmentOptions: { token_total: { breakdown: true } },
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(14, "plain-left"));
 	const rendered = stripVTControlCharacters(component.renderBottomBar(14, "left"));
-	expect(startup).toContain("in:…   out:…");
 	expect(rendered).toContain("in:25K out:5");
 });
 
@@ -362,11 +360,9 @@ test("renders compact embedded context in an exact-width six-cell gauge gap", ()
 		},
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(20, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(20).content);
 	expect(rendered).toContain("ctx:8%");
 	expect(rendered).toContain("25K");
-	expect(startup.indexOf("ctx:")).toBe(rendered.indexOf("ctx:"));
 });
 
 test("keeps compact context when it only fits after dropping the last status segment", () => {
@@ -473,7 +469,7 @@ test("falls back to compact context when an explicit total cannot fit", () => {
 	expect(rendered).toBe("ctx:8%");
 });
 
-test("reserves the compact total width in startup placeholders", () => {
+test("reserves the compact total width in the embedded gauge", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -521,19 +517,13 @@ test("reserves the compact total width in startup placeholders", () => {
 		segmentOptions: { context_pct: { compact: true } },
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(20, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(20).content);
-	expect(startup).toContain("ctx:…");
-	expect(startup).toContain("…");
 	expect(rendered).toContain("ctx:8%");
 	expect(rendered).toContain("100K");
-	expect(startup.indexOf("ctx:…")).toBe(rendered.indexOf("ctx:8%"));
-	expect(startup.lastIndexOf("…")).toBe(rendered.indexOf("100K"));
-	expect(startup).not.toContain("status demo");
 	expect(rendered).not.toContain("status demo");
 });
 
-test("masks boundary ticks across the reserved compact placeholder width", () => {
+test("masks boundary ticks across the compact context label", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -594,17 +584,14 @@ test("masks boundary ticks across the reserved compact placeholder width", () =>
 		segmentOptions: { context_pct: { compact: true } },
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(11, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(11).content);
-	const startupLabelStart = startup.indexOf("ctx:…");
 	const liveLabelStart = rendered.indexOf("ctx:9.1%");
-	expect(startupLabelStart).toBe(liveLabelStart);
-	const reservedTail = startup.slice(startupLabelStart + "ctx:…".length, startupLabelStart + "ctx:9.1%".length);
-	expect(reservedTail).not.toContain("╎");
-	expect(reservedTail).not.toContain("┃");
+	const label = rendered.slice(liveLabelStart, liveLabelStart + "ctx:9.1%".length);
+	expect(label).not.toContain("╎");
+	expect(label).not.toContain("┃");
 });
 
-test("startup gauge omits the window label when live labels cannot fit the gap", () => {
+test("omits the window label when compact labels cannot fit the gap", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "MMM", contextWindow: 100000 } },
@@ -652,18 +639,9 @@ test("startup gauge omits the window label when live labels cannot fit the gap",
 		segmentOptions: { context_pct: { compact: true } },
 	});
 
-	// A 10-cell bar leaves a gap that fits the shortened `ctx:…` placeholder but
-	// not the live `ctx:8%` plus the `100K` window label. The fit decision must
-	// use the live label widths, so the placeholder must not paint a window
-	// label that the first live frame would immediately drop.
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(10, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(10).content);
-	expect(startup).toContain("ctx:…");
 	expect(rendered).toContain("ctx:8%");
-	// Neither frame shows the standalone window label at this width. The only
-	// ellipsis in the startup gauge is the one inside `ctx:…`.
 	expect(rendered).not.toContain("100K");
-	expect((startup.match(/…/g) ?? []).length).toBe(1);
 });
 
 test("preserves the last ordinary segment when compact context labels cannot fit", () => {
@@ -778,7 +756,7 @@ test("drops the last ordinary segment when the explicit compact total then fits"
 	expect(rendered).not.toContain("M");
 });
 
-test("reserves the live compact percentage width during startup", () => {
+test("reserves the live compact percentage width", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -830,13 +808,11 @@ test("reserves the live compact percentage width during startup", () => {
 		},
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(8, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(8).content);
-	expect(startup).not.toContain("M");
 	expect(rendered).not.toContain("M");
 });
 
-test("keeps the percent suffix fixed in startup placeholders", () => {
+test("keeps the overflow percent suffix visible", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -885,14 +861,11 @@ test("keeps the percent suffix fixed in startup placeholders", () => {
 		segmentOptions: { context_pct: { compact: false } },
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(8, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(8).content);
-	expect(startup.indexOf("%")).toBe(rendered.indexOf("%"));
-	expect(startup).toContain("  …%");
 	expect(rendered).toContain("120%");
 });
 
-test("reserves standalone compact context width during startup", () => {
+test("preserves the model when standalone compact context does not fit", () => {
 	const component = new StatusLineComponent(
 		{
 			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
@@ -944,10 +917,7 @@ test("reserves standalone compact context width during startup", () => {
 		},
 	});
 
-	const startup = stripVTControlCharacters(component.renderStartupPlaceholder(11, "box"));
 	const rendered = stripVTControlCharacters(component.getTopBorder(11).content);
-	expect(startup).not.toContain("ctx:…");
-	expect(startup).toContain("⬢");
 	expect(rendered).not.toContain("ctx:9.1%");
 	expect(rendered).toContain("⬢");
 });

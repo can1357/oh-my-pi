@@ -1,7 +1,7 @@
 import { type ApiKeyResolution, type ApiKeyResolver, markAfterSiblingWait } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
-import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
@@ -22,16 +22,12 @@ export interface ApiKeyResolverOptions {
  * can build resolvers without depending on the full class.
  */
 export interface ApiKeyResolverRegistry {
-	getApiKeyForProvider(
-		provider: string,
-		sessionId?: string,
-		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
-	): Promise<string | undefined>;
+	getApiKeyForProvider(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined>;
 	/** Resolve the bearer and durable credential row identity, when available. */
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
+		options?: AuthApiKeyOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -59,8 +55,18 @@ export function createApiKeyResolver(
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
 	const { sessionId, baseUrl, modelId } = options;
-	const resolveKey = (forceRefresh: boolean | undefined, signal?: AbortSignal): Promise<ApiKeyResolution> =>
-		registry.getApiKeyWithCredentialForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh, signal });
+	const resolveKey = (
+		forceRefresh: boolean | undefined,
+		signal?: AbortSignal,
+		refreshReason?: AuthApiKeyOptions["refreshReason"],
+	): Promise<ApiKeyResolution> =>
+		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
+			baseUrl,
+			modelId,
+			forceRefresh,
+			signal,
+			refreshReason,
+		});
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -89,6 +95,6 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
 	};
 }

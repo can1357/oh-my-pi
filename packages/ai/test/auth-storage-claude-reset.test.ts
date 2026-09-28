@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AuthStorage, type OAuthCredential, type ResetCreditTarget } from "@oh-my-pi/pi-ai/auth-storage";
+import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { isRecord } from "@oh-my-pi/pi-ai/utils";
 
 interface ResetPost {
@@ -24,6 +25,8 @@ interface ResetFixture {
 		genericUsageEnabled?: boolean;
 		response: unknown;
 		responseStatus: number;
+		/** Plain `/usage` leaves the programs unevaluated and every reset probe is rate-limited. */
+		resetProbeFailing?: boolean;
 		postGate?: Promise<void>;
 		postArrived?: () => void;
 		usageGate?: Promise<void>;
@@ -67,6 +70,9 @@ async function fixture(): Promise<ResetFixture> {
 				await state.usageGate;
 				// The incident's generic broker usage path is unavailable; live reset discovery still answers.
 				if (!url.search && !state.genericUsageEnabled) return new Response("usage throttled", { status: 429 });
+				if (state.resetProbeFailing && url.search !== "") {
+					return Response.json({ error: "rate_limited" }, { status: 429 });
+				}
 				if (url.search && state.discoveryStatus) {
 					return new Response("discovery throttled", {
 						status: state.discoveryStatus,
@@ -116,13 +122,17 @@ async function fixture(): Promise<ResetFixture> {
 						available: state.usable && state.remaining > 0,
 						arm: state.program === "juniper_tide" ? "reset" : "control",
 					},
+					...(state.resetProbeFailing ? { cedar_ember: null, juniper_tide: null } : {}),
 				});
 			}
 			return new Response("not found", { status: 404 });
 		},
 	});
 	cleanups.push(() => server.stop(true));
-	const storage = await AuthStorage.create(":memory:");
+	// Only Claude usage: other default providers could reach the network via host API-key env vars.
+	const storage = await AuthStorage.create(":memory:", {
+		usageProviderResolver: provider => (provider === "anthropic" ? claudeUsageProvider : undefined),
+	});
 	cleanups.push(() => storage.close());
 	const credentials: OAuthCredential[] = ["org-a", "org-b"].map(orgId => ({
 		type: "oauth",
@@ -362,5 +372,22 @@ describe("Claude saved reset account safety", () => {
 		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
 		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual([""]);
+	});
+
+	it("does not carry a spent reset forward when the follow-up reset probe fails", async () => {
+		const f = await fixture();
+		f.state.genericUsageEnabled = true;
+		const savedResetsByOrg = async () => {
+			const reports = await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+			return Object.fromEntries(
+				(reports ?? []).map(report => [report.metadata?.orgId, report.resetCredits?.availableCount]),
+			);
+		};
+		expect(await savedResetsByOrg()).toEqual({ "org-a": 2, "org-b": 2 });
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+
+		f.state.resetProbeFailing = true;
+		expect(await savedResetsByOrg()).toStrictEqual({ "org-a": 2, "org-b": undefined });
 	});
 });

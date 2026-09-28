@@ -1088,6 +1088,15 @@ export function createSubagentSettings(
 		// Subagents run unadvised by default; runSubprocess opts a spawn back in
 		// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
 		"advisor.enabled": false,
+		// A subagent assignment is one turn: its tool loop ends only when the run
+		// yields, so post-turn `checkCompaction` (driven from `agent_end`) fires
+		// after the run is over and `maintainContextMidRun` is the only proactive
+		// compaction the child ever reaches. `compaction.midTurnEnabled` encodes an
+		// interactive preference — keep compaction boundaries on real user turns —
+		// that has no counterpart here, so inheriting `false` left hours-long
+		// worker runs sailing past the configured threshold until the provider
+		// rejected the context (#13211). A per-spawn override still wins.
+		"compaction.midTurnEnabled": true,
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
@@ -1987,11 +1996,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			const serving = session.servingModel;
 			if (!serving) return;
 			const isFallback = serving.isFallback;
+			// A model swap moves the window the usage gauge divides by. Without
+			// this the Agent Hub kept the startup model's window while labelling
+			// the row with the fallback that replaced it. Models with no declared
+			// window keep the last known one rather than blanking the gauge.
+			const contextWindow =
+				serving.contextWindow && serving.contextWindow > 0 ? serving.contextWindow : progress.contextWindow;
 			if (
 				serving.selector === progress.resolvedModel &&
 				serving.modelIdentity === progress.resolvedModelIdentity &&
 				serving.thinkingLevel === progress.resolvedThinkingLevel &&
-				(progress.resolvedModelIsFallback ?? false) === isFallback
+				(progress.resolvedModelIsFallback ?? false) === isFallback &&
+				contextWindow === progress.contextWindow
 			) {
 				return;
 			}
@@ -1999,6 +2015,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			progress.resolvedModelIdentity = serving.modelIdentity;
 			progress.resolvedThinkingLevel = serving.thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
+			progress.contextWindow = contextWindow;
 			scheduleProgress(true);
 		};
 		return session.subscribe(event => {
@@ -2309,6 +2326,9 @@ async function driveSessionToYield(
 				// any chance of producing a yield.
 				const lastBeforeReminder = session.getLastAssistantMessage();
 				if (lastBeforeReminder?.stopReason === "error") break;
+				// A turn waiting on owner work is a scheduling pause. The outer
+				// barrier settles that work before a reminder counts against it.
+				if (!budgetStop && session.hasPendingAsyncWork()) break;
 				try {
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
@@ -2357,10 +2377,10 @@ async function driveSessionToYield(
 		};
 
 		// Yield ladder + quiescence barrier (structured concurrency), one
-		// loop: each iteration first demands a yield — initially, and again
-		// whenever an async-result delivery un-latched the previous one
-		// (including during the notice turn) — then either completes on
-		// quiescence or settles one generation of owner async work.
+		// loop: a turn without a yield first settles pending owner work, then
+		// spends reminders only after there is nothing left to wait for.
+		// A yield also waits for quiescence; each delivered result supersedes
+		// the previous yield and demands a fresh one.
 		//
 		// A final yield with owner background jobs still running or
 		// undelivered is a scheduling pause, not run completion — the monitor
@@ -2375,24 +2395,34 @@ async function driveSessionToYield(
 		// Suppressed (acknowledged / wait-watched) jobs never re-wake the run
 		// and are reaped at teardown.
 		//
-		// Before blocking on running jobs, tell the model ONCE what it is
-		// waiting on so it can stand by or cancel via `write proc://<id>/kill` instead of sitting silent
-		// until the jobs (or the runtime limit) expire. Runs that never yield
-		// (ladder exhausted / terminal model error) skip the barrier — more
-		// injected turns just multiply the failure noise; the teardown reap
-		// still cancels and awaits their jobs before worktree capture.
+		// Before blocking on running jobs after a yield, tell the model ONCE
+		// what it is waiting on so it can stand by or cancel the job. A turn
+		// without a yield settles its pending jobs without an extra notice.
+		// Runs that exhaust the ladder with no pending work, or hit a terminal
+		// model error, skip the barrier; teardown reaps their jobs.
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
-				// Ladder exhausted / terminal model error: classified below
-				// (missing yield, or stale yield when one was invalidated).
-				if (!monitor.yieldCalled()) break;
+				if (
+					!monitor.yieldCalled() &&
+					(monitor.budgetStopRequested() ||
+						session.getLastAssistantMessage()?.stopReason === "error" ||
+						!session.hasPendingAsyncWork())
+				)
+					break;
 			}
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
-			if (!session.hasPendingAsyncWork()) break;
+			if (!session.hasPendingAsyncWork()) {
+				if (monitor.yieldCalled()) break;
+				continue;
+			}
+			if (!monitor.yieldCalled()) {
+				await awaitAbortable(session.settleAsyncWork());
+				continue;
+			}
 			if (!asyncPendingNoticeSent) {
 				asyncPendingNoticeSent = true;
 				const running = session.getAsyncJobSnapshot()?.running ?? [];
@@ -3962,9 +3992,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
 						ircSelfId: ircEnabled ? id : "",
 					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					// Per-spawn text (context, worktree, IRC roster) goes after the
+					// trailing `<project-context>` block so spawns of the same agent
+					// share the static prompt prefix as a cache hit.
+					return [...defaultPrompt, subagentPrompt];
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,

@@ -9,11 +9,9 @@ import {
 	type ComposerWelcomeUpdate,
 } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
+	type ComposerCache,
 	type ComposerThemePreferences,
-	readComposerStartupCache,
-	writeComposerLspCache,
-	writeComposerRecentSessionsCache,
-	writeComposerUiCache,
+	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
@@ -40,7 +38,8 @@ export interface PrepaintComposerPreferences extends ComposerPreferences {
 interface PendingComposer {
 	readonly composer: Composer;
 	readonly cwd: string;
-	readonly cache: boolean;
+	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
+	readonly cache: ComposerCache | undefined;
 	recentSessions?: Promise<RecentSession[] | undefined>;
 }
 
@@ -78,9 +77,9 @@ export class ComposerLease {
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
-	const useCache = options.cache !== false;
-	const cached = useCache
-		? readComposerStartupCache(cwd)
+	const cache = options.cache === false ? undefined : sharedComposerCache();
+	const cached = cache
+		? cache.read(cwd)
 		: {
 				preferences: undefined,
 				theme: undefined,
@@ -116,7 +115,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		} catch {}
 		throw error;
 	}
-	const pending: PendingComposer = { composer, cwd, cache: useCache };
+	const pending: PendingComposer = { composer, cwd, cache };
 	pendingComposer = pending;
 	// Keep filesystem discovery out of the synchronous prepaint turn. Composer.start()
 	// has queued the first frame; recents can begin once the event loop yields.
@@ -157,23 +156,15 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
-	if (pending.cache) {
-		void writeComposerUiCache(pending.cwd, preferences, update.theme).catch(error => {
-			logger.debug("composer UI cache write failed", { error });
-		});
-	}
+	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
 }
 
-/** Apply discovered project LSP rows and cache them for the next first frame. */
-export function setStartupComposerLspServers(servers: LspServerInfo[]): void {
+/** Apply discovered project LSP rows (`null` = LSP disabled) and cache them for the next first frame. */
+export function setStartupComposerLspServers(servers: LspServerInfo[] | null): void {
 	const pending = pendingComposer;
 	if (!pending) return;
 	pending.composer.updateWelcome({ lspServers: servers });
-	if (pending.cache) {
-		void writeComposerLspCache(pending.cwd, servers).catch(error => {
-			logger.debug("composer LSP cache write failed", { error });
-		});
-	}
+	pending.cache?.writeLspServers(pending.cwd, servers);
 }
 
 async function loadRecentSessionsAfterFirstFrame(
@@ -183,11 +174,7 @@ async function loadRecentSessionsAfterFirstFrame(
 	await scheduler.yield();
 	try {
 		const sessions = loadOverride ? await loadOverride() : await loadRecentSessions(pending.cwd);
-		if (pending.cache) {
-			void writeComposerRecentSessionsCache(pending.cwd, sessions).catch(error => {
-				logger.debug("composer recent sessions cache write failed", { error });
-			});
-		}
+		pending.cache?.writeRecentSessions(pending.cwd, sessions);
 		if (pendingComposer === pending) {
 			pending.composer.updateWelcome({ recentSessions: sessions });
 		}

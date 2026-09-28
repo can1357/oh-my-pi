@@ -1,0 +1,38 @@
+---
+source: brush-parser/src/parser/tests/here_docs.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "cat <<EOF\ncontent line 1\ncontent line 2\nEOF\n",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cat",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  IoRedirect(HereDocument(None, IoHereDocument(
+                    requires_expansion: true,
+                    here_end: Word(
+                      value: "EOF",
+                      loc: "[location]",
+                    ),
+                    doc: Word(
+                      value: "content line 1\ncontent line 2\n",
+                      loc: "[location]",
+                    ),
+                  ))),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

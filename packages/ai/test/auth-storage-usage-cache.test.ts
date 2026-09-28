@@ -372,6 +372,60 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 	});
 });
 
+describe("AuthStorage usage cache: Claude saved resets", () => {
+	it("keeps the last known saved resets when a later reset probe fails", async () => {
+		let probeStatus = 200;
+		const usageFetch = (async (input: string | URL | Request) => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			const body = {
+				five_hour: { utilization: 25, resets_at: "2099-09-23T00:00:00Z" },
+				cedar_ember: null,
+				juniper_tide: null,
+			};
+			if (url.pathname.endsWith("/profile")) return Response.json({ organization: { uuid: "org_1" } });
+			if (!url.searchParams.has("cedar_ember")) return Response.json(body);
+			if (probeStatus !== 200) return Response.json({ error: "rate_limited" }, { status: probeStatus });
+			return Response.json({
+				...body,
+				cedar_ember: {
+					eligible: true,
+					grants: [
+						{
+							id: "grant_1",
+							label: "Anytime reset",
+							resets_left: 1,
+							usable_now: true,
+							clears: ["five_hour"],
+							blocking: [],
+						},
+					],
+					next_grant_id: "grant_1",
+				},
+			});
+		}) as unknown as typeof fetch;
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		const storage = new AuthStorage(store, {
+			usageFetch,
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		try {
+			await storage.credentials.reload();
+			const first = requireAnthropicReport(await storage.usage.reports());
+			expect(first.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
+
+			// Anthropic rate-limits `/usage` per source IP; the plain usage read
+			// succeeds while the separate Cedar probe is refused.
+			probeStatus = 429;
+			expireCachePayloads(store);
+			const second = requireAnthropicReport(await storage.usage.reports());
+			expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt);
+			expect(second.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
+		} finally {
+			storage.close();
+		}
+	});
+});
+
 describe("AuthStorage usage cache: explicit invalidation", () => {
 	it("preserves failed-probe cooldown across repeated invalidation and storage recreation", async () => {
 		const row = oauthRow(1, "a@example.com");

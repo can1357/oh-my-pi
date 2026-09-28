@@ -462,8 +462,9 @@ describe("runSubprocess incremental yield loops", () => {
 				return;
 			}
 			if (promptIndex === 4) {
-				// The forced final reminder is answered with a terminal yield,
-				// but owner async work parks it behind the quiescence barrier.
+				// Owner work starts on the forced final reminder. Its terminal
+				// yield parks behind the quiescence barrier.
+				handle.asyncPending.value = true;
 				emitTerminalYieldTurn("PARKED", emit, pushMessage);
 				return;
 			}
@@ -477,7 +478,6 @@ describe("runSubprocess incremental yield loops", () => {
 			}
 			emitTerminalYieldTurn("FRESH", emit, pushMessage);
 		});
-		handle.asyncPending.value = true;
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 

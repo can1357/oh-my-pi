@@ -298,6 +298,8 @@ If `llama.cpp` is not explicitly configured, registry adds an implicit discovera
 
 Runtime discovery calls llama.cpp model endpoints and synthesizes model entries with local defaults.
 
+The provider `api` is the default for discovered models; catalog rules can override it per model class. Qwen-class models on any `discovery.type: llama.cpp` provider (implicit or explicit) are discovered as `openai-completions`, because the Responses API cannot carry the chat template's thinking controls (`enable_thinking` / `chat_template_kwargs`). The override lives in `packages/catalog/src/compat/rules/providers/llama.cpp.kdl` (`discovery-api`); `omp models find <id> --json` shows the resolved `api`.
+
 ### Implicit LM Studio discovery
 
 If `lm-studio` is not explicitly configured, registry adds an implicit discoverable provider:

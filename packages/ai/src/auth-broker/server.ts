@@ -50,6 +50,7 @@ import {
 } from "./wire-schemas";
 
 const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
+const AUTH_RECOVERY_REFRESH_OPTIONS = { reuseRecentMint: true } as const;
 
 export interface AuthBrokerServerOptions {
 	/** Underlying credential storage (wraps the local SQLite store on the broker). */
@@ -765,8 +766,13 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				const refreshMatch = req.method === "POST" ? pathname.match(REFRESH_ROUTE) : null;
 				if (refreshMatch) {
 					const id = Number.parseInt(refreshMatch[1], 10);
+					const authRecovery = url.searchParams.get("reason") === "auth-recovery";
 					try {
-						const entry = await opts.storage.oauth.refresh(id, req.signal);
+						const entry = await opts.storage.oauth.refresh(
+							id,
+							req.signal,
+							authRecovery ? AUTH_RECOVERY_REFRESH_OPTIONS : undefined,
+						);
 						const body: CredentialRefreshResponse = { entry };
 						logger.info("auth-broker credential refreshed", {
 							id,

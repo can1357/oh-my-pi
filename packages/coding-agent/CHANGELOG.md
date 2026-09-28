@@ -2,6 +2,72 @@
 
 ## [Unreleased]
 
+## [18.4.1] - 2026-09-28
+
+### Changed
+
+- With LSP disabled (`--no-lsp` or `lsp.enabled: false`), startup skips language-server discovery and warmup, and the welcome screen no longer shows the LSP Servers section
+- The first frame's status bar now renders live at the current terminal width from the cached model, thinking level, and status-line settings instead of replaying an `…`-filled snapshot: path and git branch are always current, the context gauge shows the window without a stale percent, git dirty counts no longer blank out when the session bar takes over, and folders that never ran omp paint the bar (and your theme) too.
+- Moved the composer startup cache (theme, welcome, recent sessions, LSP rows, status bar) from per-project JSON files under `cache/composer/` to a single `cache/composer.db`; the old directory is no longer read and can be deleted.
+- Improved interactive startup: the session status bar appears sooner because `retry.fallbackChains` validation, the background model-catalog refresh, and project daemon registration no longer block the first session frame.
+- Reduced CPU use from subagent HUD repaints during active sessions ([#13245](https://github.com/can1357/oh-my-pi/pull/13245) by [@iliaal](https://github.com/iliaal)).
+- Clarified which provider transports honor `thinkingBudgets` and that local OpenAI-compatible models use effort controls instead ([#13503](https://github.com/can1357/oh-my-pi/issues/13503)).
+- `/fork` now prints how to resume the session it leaves behind (`omp --resume <id>` or `/resume <id>`) instead of the new transcript's filename ([#13338](https://github.com/can1357/oh-my-pi/pull/13338) by [@LlemonDuck](https://github.com/LlemonDuck))
+- `/vibe` status checks no longer redraw every worker the director killed: `vibe_wait` and `vibe_list` leave killed sessions off the wall with a `N killed hidden` count, and `vibe_list` collapses them to one trailing line naming the most recent (transcripts stay at `history://<id>`) ([#13073](https://github.com/can1357/oh-my-pi/pull/13073) by [@igasmi](https://github.com/igasmi)).
+
+### Fixed
+
+- Fixed `find` exhausting memory on trees with many matching lines: its keyword scan now counts matches as they stream in, holding a few hundred MiB where a 5-million-line tree took several GiB, and finishes faster ([#13495](https://github.com/can1357/oh-my-pi/issues/13495))
+- Fixed a native compaction speculation that failed for good turning off background compaction for the rest of the cycle. With `compaction.methodOrder` such as `["remote", "soft"]`, speculation now moves to the next configured method and the threshold pass keeps deferring to it, instead of running that method on the blocking path ([#13478](https://github.com/can1357/oh-my-pi/pull/13478) by [@andrebrait](https://github.com/andrebrait)).
+- Extensions that register bash through the legacy `createBashTool`/`createBashToolDefinition` with a `spawnHook` no longer make every bash call fail with `ready and env require a service name.` ([#13461](https://github.com/can1357/oh-my-pi/pull/13461) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `/new` with automatic thinking starting the new session at the previous session's classified effort instead of the provisional level, both in its first `thinking_level_change` entry and on the wire ([#13383](https://github.com/can1357/oh-my-pi/issues/13383))
+- Fixed a corrupt `agent.db` crashing every launch with `no such table` (for example `hint_usage`) instead of being preserved and recreated ([#13530](https://github.com/can1357/oh-my-pi/pull/13530) by [@Hunter-124](https://github.com/Hunter-124))
+- Fixed `edit` rejecting a one-line replacement of an `if` opener, `case` label, or function signature with another of the same shape as an "ambiguous boundary" whenever another edit in the same batch broke the file's syntax; it now applies with the usual syntax-error warning. ([#13522](https://github.com/can1357/oh-my-pi/pull/13522))
+- Jujutsu status and diffs now report renames and copies (`R`/`C`, `rename from`/`rename to`) the way `jj status` and `jj diff` do, instead of a delete plus an add ([#13406](https://github.com/can1357/oh-my-pi/pull/13406) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed a subagent that finished before a later step failed (such as the isolation merge) losing its evidence: the `task` result now names the child's exit status and `agent://` output, keeps that output on disk, and is marked as an error ([#13557](https://github.com/can1357/oh-my-pi/pull/13557) by [@aktanazat](https://github.com/aktanazat))
+- Fixed SDK sessions created with `agentDir` loading user rules (`rules/`, `RULES.md`) and custom tools from the default agent dir instead of that `agentDir`; `discoverCustomToolPaths` and `discoverAndLoadCustomTools` accept an `agentDir` argument ([#13558](https://github.com/can1357/oh-my-pi/pull/13558) by [@aktanazat](https://github.com/aktanazat))
+- Reduced daemon broker metadata writes for historical services when owners reconnect or the broker restarts ([#13471](https://github.com/can1357/oh-my-pi/pull/13471) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed compaction re-emitting the whole transcript into native scrollback when `display.collapseCompacted` is off, for both the automatic compaction-end and the manual `/compact` path ([#12140](https://github.com/can1357/oh-my-pi/issues/12140), [#13235](https://github.com/can1357/oh-my-pi/pull/13235) by [@holny](https://github.com/holny))
+- Subagents can submit their preceding report with a data-less yield after a finish reminder ([#12837](https://github.com/can1357/oh-my-pi/pull/12837) by [@iliaal](https://github.com/iliaal)).
+- Fixed session dispose losing the final message and exit record on SQL/indexed session storage ([#13415](https://github.com/can1357/oh-my-pi/pull/13415) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the `recall`, `reflect`, and `memory_edit` tool descriptions naming each other by bare name when those tools are reachable only as `xd://` devices ([#13207](https://github.com/can1357/oh-my-pi/pull/13207) by [@andrebrait](https://github.com/andrebrait)).
+- Listed the directories searched for agent files in the `task` tool's unknown-agent error, with the home directory shortened to `~`
+- Fixed sessions and subagents of the same agent in different working directories (such as one git worktree per task) never sharing the cached Anthropic system prompt: context files, workspace tree, workspace roots, and other directory-specific sections now come after the static system prompt, which stays a cache hit across directories ([#13104](https://github.com/can1357/oh-my-pi/issues/13104))
+- Fixed the startup "What's New" heading and config warnings keeping the dark palette on a light terminal: they were colored before the terminal reported its background, so the heading rendered near-white on white. Both now resolve their color at render time and follow the auto theme switch
+- Fixed idle `display: true` custom messages (such as extension `pi.sendMessage` notices sent without starting a turn) not appearing in the transcript until the session was reloaded ([#12718](https://github.com/can1357/oh-my-pi/pull/12718) by [@Broglah1](https://github.com/Broglah1)).
+- Fixed `omp usage` ignoring usage providers registered by extensions, which left those accounts listed as having no usage data; `omp usage` now also accepts `-e`/`--extension` and `--no-extensions` ([#13579](https://github.com/can1357/oh-my-pi/issues/13579))
+- Fixed a task model saved in `/agents` being ignored for the rest of the session after an Alt+P session-only pick ([#13345](https://github.com/can1357/oh-my-pi/issues/13345)).
+- Fixed tool calls made through an `xd://` alias being recorded under the alias, which made OpenAI/OpenRouter Responses replay reject every later request ([#13352](https://github.com/can1357/oh-my-pi/issues/13352)).
+- Fixed pasted images in skill invocations not reaching the configured vision model when the main model supports only text ([#13480](https://github.com/can1357/oh-my-pi/issues/13480)).
+- A provider listed in `disabledProviders` no longer answers through a retry fallback chain, an advisor or a restored model, and gets no credential however one of its models was selected ([#13194](https://github.com/can1357/oh-my-pi/pull/13194) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed `glob` silently clamping `limit` above 200 while advising `Use limit=<clamped>` retries: a clamped request is now disclosed up front and the "Use limit=" advice is dropped once the hard cap is reached ([#13263](https://github.com/can1357/oh-my-pi/issues/13263))
+- Fixed subagents that stop to wait for their own background job failing with a missing yield instead of waiting for the job ([#13305](https://github.com/can1357/oh-my-pi/issues/13305)).
+- Fixed a failed session append leaving partial bytes behind on Windows, where ftruncate is refused on the append handle: the rollback now reopens the file without O_APPEND and verifies it is still the same file before truncating ([#13362](https://github.com/can1357/oh-my-pi/pull/13362) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed plugin installation failing on Windows outside developer mode by linking the plugin through a directory junction, matching the marketplace link ([#13364](https://github.com/can1357/oh-my-pi/pull/13364) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed the grep tool searching subdirectories for globs whose base path merely resolved to the cwd: only globs spelled without a directory prefix (like `*.ts`) now match at any depth, while `./*.ts` and absolute paths stay scoped to their directory ([#13360](https://github.com/can1357/oh-my-pi/pull/13360) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed the `ask` tool's "Other (type your own)" prompt sending RPC and SDK clients a terminal-rendered title (options with icon glyphs, lines clipped to the terminal width) instead of the question text; the interactive TUI's own ask dialog is unaffected ([#13477](https://github.com/can1357/oh-my-pi/pull/13477) by [@andrebrait](https://github.com/andrebrait))
+- Fixed prewalk targets registered by extensions resolving before their provider was loaded. The hand-off now retries after extension registration, preserves role fallback order, and refreshes a cold runtime provider when needed.
+- Fixed saving settings on Windows through a symlinked `config.yml` whose target contains `..` writing a file other than the one the link reads, and `agent.db` staying open after its storage is closed ([#13351](https://github.com/can1357/oh-my-pi/pull/13351) by [@Vortex727](https://github.com/Vortex727))
+- Fixed grep line ranges (`path:N-M`) returning out-of-range lines for absolute paths with `./` or `..` segments ([#13296](https://github.com/can1357/oh-my-pi/pull/13296) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Fixed service requests the project's service broker cannot parse, such as commands added by a newer omp after an update, waiting 30 seconds to time out; the broker now rejects them immediately with the reason ([#13301](https://github.com/can1357/oh-my-pi/pull/13301) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed sessions stopping on "Anthropic stream stalled while waiting for the next event" (and other mid-stream stalls, HTTP/2 resets, premature closes, or sockets closed mid-response) when the connection died after the reply's text had already rendered. Replay was refused to avoid duplicating shown text and the tool-turn continuation needed a tool call, so text-only turns had no recovery; the partial turn is now kept and the model is asked to continue from where it stopped, up to 3 times per prompt when `retry.enabled` is on ([#13333](https://github.com/can1357/oh-my-pi/pull/13333) by [@jerryfane](https://github.com/jerryfane))
+- Fixed editing one fallback chain in the model hub, or one agent in `/agents`, saving every chain or agent a `--config` overlay supplies into `config.yml` ([#13308](https://github.com/can1357/oh-my-pi/pull/13308) by [@Vortex727](https://github.com/Vortex727))
+- Fixed `omp install --dry-run <local-path>` and `omp plugin link --dry-run` linking the plugin and writing the lockfile instead of only previewing ([#13241](https://github.com/can1357/oh-my-pi/pull/13241)).
+- Sessions containing assistant messages with no recorded usage now open with that usage counted as zero, instead of crashing on load with `undefined is not an object (evaluating 'usage.cacheRead')` ([#13386](https://github.com/can1357/oh-my-pi/pull/13386) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+- Fixed rules with an `astCondition` and `interruptMode: always` letting the matching `write` or `edit` run before the interrupt, so the file changed on disk even though the rule fired; the call is now blocked before it executes ([#13303](https://github.com/can1357/oh-my-pi/pull/13303) by [@JYeswak](https://github.com/JYeswak))
+- Fixed rules not applying to tool calls made from inside `eval` (for example `tool.write(...)`), which ran without any rule check; they are now checked the same way as direct calls ([#13316](https://github.com/can1357/oh-my-pi/pull/13316) by [@JYeswak](https://github.com/JYeswak))
+- Fixed bash calls whose optional fields arrive filled with empty values being rejected as service starts ([#13182](https://github.com/can1357/oh-my-pi/issues/13182)).
+- Fixed keyless vLLM providers failing every request with "No API key found" ([#13246](https://github.com/can1357/oh-my-pi/issues/13246)).
+- Fixed the Agent Hub usage gauge measuring a subagent against its startup model's context window after a fallback model swap ([#13061](https://github.com/can1357/oh-my-pi/pull/13061)).
+- Fixed HTML session exports failing to render offline or under a strict script CSP; the viewer libraries are now inlined ([#12948](https://github.com/can1357/oh-my-pi/issues/12948)).
+- Fixed hashline edits rejecting files whose names contain `#` (such as yadm alternate files) ([#13428](https://github.com/can1357/oh-my-pi/pull/13428)).
+- Fixed a module created with `write` leaving the importing file stuck on TS2307 in typescript-language-server ([#12925](https://github.com/can1357/oh-my-pi/pull/12925)).
+- Fixed startup waiting up to 10s on an unresponsive LM Studio loopback probe; the probe now gives up after 250ms like Ollama and llama.cpp ([#12945](https://github.com/can1357/oh-my-pi/issues/12945)).
+- The interactive `/usage` dashboard keeps connected accounts visible when some or all usage lookups fail, showing unavailable usage instead of hiding accounts ([#13476](https://github.com/can1357/oh-my-pi/pull/13476) by [@aktanazat](https://github.com/aktanazat)).
+- Fixed multiline pastes splitting into separate submissions after a terminal drops bracketed-paste mode, and text typed right after Enter being erased by the post-submit clear ([#13440](https://github.com/can1357/oh-my-pi/pull/13440) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed subagents never compacting when the parent sets `compaction.midTurnEnabled: false`; a subagent's run is a single turn, so subagents keep mid-run compaction on unless a spawn overrides it ([#13212](https://github.com/can1357/oh-my-pi/pull/13212)).
+- Fixed the exit resume hint so the `omp --resume <id>` command prints on its own line, letting triple-click select just the command ([#12748](https://github.com/can1357/oh-my-pi/pull/12748) by [@F0Rextasy](https://github.com/F0Rextasy)).
+
 ## [18.4.0] - 2026-09-28
 
 ### Added
@@ -1630,174 +1696,4 @@
 - Fixed the `aarch64-linux` `nix build` output segfaulting in the dynamic loader before startup by repointing the stale `DT_VERDEF` that `patchelf` leaves behind when it grows `.dynamic`, and surfaced smoke-test signal deaths in the build log instead of masking them ([#9881](https://github.com/can1357/oh-my-pi/issues/9881)).
 - Added custom RPC launcher builders so embedded clients can transport omp RPC through SSH and remote process managers.
 
-## [18.0.7] - 2026-08-26
-
-### Added
-
-- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
-- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
-- Include token usage statistics in inspect_image tool output
-- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
-- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
-- Added nonblocking shared model-catalog refresh with cached startup hydration and source freshness diagnostics, allowing newly published models for known providers to appear without a binary release.
-- Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
-
-### Changed
-
-- Enforce a 5-minute timeout and 8 MiB output limit for GitHub CLI operations
-- Apply a 30-minute timeout for marketplace plugin repository cloning
-- Improve large file handling with blob streaming and explicit truncation support
-- Improved `omp git` responsiveness by streaming file contents, rendering complete lines promptly, progressively applying syntax highlighting, and deferring large commit statistics until after the first interactive frame.
-- Expanded `omp git` navigation and editing shortcuts: refresh with `r`, stage or unstage files and directories with `s`, `u`, or `space`, navigate hunks and files with keyboard shortcuts, use Vim-style motions in both panes, select diff views with `1`–`4`, and open the commit form with `c`.
-- Standardized completed edit results across edit modes with hashline-style paths and numbered previews.
-- Documented browser relay behavior more clearly, including that `browser.relay` can enable relay access independently of `app.relay` and that a relayed session operates in the user's logged-in browser.
-- Clarified the computer tool documentation: `desktop.window()` must be awaited, and `win.ax()` returns a textual accessibility-tree snapshot rather than a structured node list.
-
-### Fixed
-
-- Fixed the VCS status line counting every file inside an untracked directory instead of collapsing it to one entry like `git status`.
-- Fixed git TUI sidebar wheel scrolling snapping back to the selected row after staging or collapsing entries; the list now follows the selection only when it actually changes.
-- Fixed `inspect_image` selecting a text-only vision/default role when an image-capable model was available on the active provider.
-- Improved unexpected-stop recovery for reasoning-only stalls by requiring the next concrete tool action instead of repeated analysis.
-- The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
-- Fixed hub process waits being incorrectly prolonged or satisfied by a replacement process after an automatic restart.
-- Preserved an explicitly empty `tools: []` configuration for agent definitions instead of adding default work tools.
-- Corrected MCP per-tool approval configuration documentation and behavior to use registered tool names for deny policies.
-- Made `/branch` consistently open the branch-from-message selector regardless of the `doubleEscapeAction` setting.
-- Improved ACP behavior when prompting during an active turn by returning a typed `session_busy` JSON-RPC error instead of an opaque internal error.
-- Fixed `--model <id>:<effort>` losing its effort setting when cycling back to the `default` role; an explicit `--thinking` setting continues to take precedence.
-- Fixed extension-registered Codex models configured with `preferWebsockets: false` from attempting a WebSocket connection.
-- Fixed stale command-generated provider and model-override credentials after HTTP 401 responses by refreshing credentials before retrying.
-- Fixed extensions configured in `.omp/config.yml` not exposing their bundled skills, hooks, tools, commands, rules, prompts, and MCP configuration for discovery.
-- Fixed compiled extensions that could not import public coding-agent registry modules.
-- Fixed extension-provided environment variables being lost in user shell commands and prevented environment changes from one hook from affecting later commands.
-- Fixed imported and legacy sessions with missing usage metadata from dropping RPC lifecycle events.
-- Fixed GitHub and GitHub Enterprise issue, pull-request, and tool lookups to preserve and use the repository's actual host.
-- Fixed binary installation when GitHub returns minified release metadata.
-- Fixed `omp bench` and `omp if-bench` resolving credential-scoped dynamic models already listed by `omp models`.
-- Fixed checkpoint and rewind recovery in Codex Code Mode.
-- Fixed truncated `ask` questions being displayed incorrectly when expanded with Ctrl+O.
-- Fixed the welcome screen and transcript layout not adapting correctly after terminal resizes.
-- Made `omp if-bench` retry transient Anthropic cyber-safety refusals before treating them as run-ending failures.
-- Fixed streamed assistant responses when later provider updates revise earlier Markdown.
-- Fixed abandoned foreground tool cards and fast tool completions from blocking transcript scrolling or later output.
-- Improved transcript replay and shutdown behavior so terminal resizes and exits do not duplicate, lose, or unnecessarily re-render committed output.
-- Fixed cache-miss status messages from disrupting completed streamed assistant responses.
-- Fixed YAML rewrites for settings, migrated configuration, and keybindings from adding trailing spaces to nested mapping headers.
-- Fixed `/model` role-cycle icons overlapping their ordinal on terminals with full-width icon rendering.
-- Improved `/collab` QR-code fallbacks so the browser join URL remains visible when the code is clipped or cannot fit.
-- Fixed hub and child peer listings from exposing parked agents as active model context, while restoring accurate running, idle, parked, shown, and truncated counts.
-- Fixed browser relay clients hanging when enabling the Runtime domain on a tab shared with another client.
-- Fixed browser relay sessions leaving Chrome's debugging infobar attached after the last client releases a tab.
-- Fixed interactive TTSR interruptions being displayed as errors when the rule injection succeeded.
-- Fixed cold interactive launches duplicating the welcome header in Windows console scrollback.
-- Fixed Git TUI hunk navigation and sidebar selection after staging or unstaging files, including correct handling of CRLF files on Windows.
-- Fixed long sessions becoming unrecoverable when a provider rejects histories that exceed its message-count limit.
-- Improved `/dump` output with readable titles for system notices and fenced XML payloads.
-- Fixed kernel session recovery when a dead kernel reports cancellation.
-- Applied advisor tool-call loop limits to advisor runs as well as regular model runs.
-- Fixed `lsp rename_file` error handling for unreadable source paths and destination checks.
-- Fixed LSP clients with different process arguments, initialization options, or settings from incorrectly sharing one process; `lsp reload *` now replaces superseded clients.
-- Fixed auto-retry countdowns appearing frozen during long provider-specified waits.
-- Fixed the Todo HUD after viewing a subagent and returning to the main session.
-- Fixed child task results from linking unreadable artifacts and from replaying result bodies that had already been delivered.
-- Fixed `omp update` showing a Unix reinstall command on Windows after a package-rename migration verification failure.
-- Preserved `thinking.requiresEffort: false` in custom model configuration so supported local models can explicitly disable thinking.
-- Prevented incompatible non-object values in shared project settings from silently replacing an entire settings group; such values are dropped with a warning.
-- Jina Reader now uses configured credentials for authenticated rate limits while remaining available anonymously.
-- Improved advisor session recovery and listing performance for large advisor transcripts.
-- Fixed failed `browser.open` calls from leaving OMP-spawned application processes running when no tab could be acquired.
-- Browser handles now fail fast with a specific per-operation timeout error instead of hanging an entire browser cell.
-- Fixed autonomous runs becoming idle when a thinking-only length stop overlaps speculative handoff and compaction recovery.
-- Kept completed assistant replies visible when viewport pressure prevents older active content from being retired.
-- Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
-- Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
-- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
-
-## [18.0.6] - 2026-08-26
-
-### Added
-
-- Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
-- The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
-- Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
-
-### Changed
-
-- `omp commit --legacy` now uses the same conventional commit message generation as the git TUI.
-- The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
-- Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
-
-### Fixed
-
-- Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
-- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
-- Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
-
-## [18.0.5] - 2026-08-25
-
-### Added
-
-- Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
-- Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
-- Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.
-- Added the `omp if-bench` command for zero-tool instruction-following and working-memory benchmarking across models, with live progress and ranked results.
-- Added `q` to quit the git TUI.
-- Added advanced whitespace filtering to the git TUI, including formatting-only changes and import-only changes in TypeScript, JavaScript, Rust, and Go.
-- Improved the git TUI sidebar by compressing single-child directory chains and separating new or untracked files from tracked changes.
-- Added Yolo-Auto to `/login` and documented the `YOLO_AUTO_API_KEY` environment variable.
-- Updated the OpenRouter `/login` flow to support browser-based sign-in and automatic API-key provisioning, while retaining support for pasted `sk-or-…` keys.
-- Added DeepInfra support for the `image_gen` and `tts` tools, including provider selection and MP3 or WAV output for text-to-speech.
-
-### Changed
-
-- Standardized completed edit results with hashline-style paths and numbered previews across edit modes.
-- Improved `omp git` responsiveness with immediate file rendering, progressive syntax highlighting, and deferred large-commit statistics.
-- Documented that `retry.maxDelayMs: 0` permits provider-requested quota waits to continue until automatic retry, rather than enforcing a wait ceiling.
-- Expanded git TUI navigation and file-management shortcuts, including refresh, stage/unstage, directory operations, hunk and file navigation, pane movement, diff-view selection, commit-form access, and paging.
-
-### Fixed
-
-- Fixed race condition where tunnel startup was incorrectly reported as failure on quick process exit
-- Fixed Obsidian theme task instructions and usage-limit text becoming unreadable against dark backgrounds.
-- Fixed marketplace-installed plugins failing to discover their `rules/` directories.
-- Fixed advisor notes in `/tree` displaying internal XML wrappers instead of readable text.
-- Fixed successful agent and subagent results being discarded when cleanup exceeded its deadline.
-- Fixed exiting plan mode mid-turn so the active turn now stops immediately.
-- Fixed Windows workstation context reporting a virtual display adapter instead of the physical GPU.
-- Fixed numbered selector menus such as `/review` ignoring digit-key selection.
-- Fixed the welcome screen failing to reflow after terminal resizing.
-- Fixed transcript layout issues that could clip assistant text, leave stale tool cards, disrupt scrolling, or make large-session rendering and shutdown unreliable.
-- Fixed streamed assistant responses failing when later provider updates revised earlier Markdown.
-- Fixed cache-miss status placement after streamed assistant output.
-- Fixed `/model` role-cycle icons overlapping their ordinal on full-width terminals.
-- Fixed constrained `/collab` QR codes rendering as empty rows; the browser URL hint is now shown instead.
-- Fixed `hub list` and child peer rosters incorrectly including parked agents in model context and restored accurate status counts.
-- Fixed browser relay clients hanging when enabling the Runtime domain on a shared tab.
-- Fixed interactive TTSR interruptions being displayed as errors after successful rule injection.
-- Fixed fast tool completions leaving a persistent running summary that obstructed later output.
-- Fixed the Windows console welcome header being duplicated after cold launch.
-- Fixed git TUI hunk navigation feedback when the sidebar has focus and preserved file selection after staging or unstaging.
-- Fixed long sessions becoming unrecoverable when providers reject histories exceeding message-count limits.
-- Improved `/dump` output with readable system-notice titles and XML-fenced raw payloads.
-- Fixed kernel sessions failing to recover when cancellation was reported by a dead kernel.
-- Applied advisor tool-call loop limits to prevent repeated failing calls from continuing without bound.
-- Fixed `lsp rename_file` incorrectly reporting inaccessible paths as nonexistent and mishandling uncertain destination checks.
-- Fixed LSP clients with different launch or initialization configurations incorrectly sharing one process; reloading now replaces superseded clients.
-- Fixed the browser relay leaving Chrome's debugging infobar attached after the last client released a tab.
-- Fixed auto-retry countdowns appearing frozen during long provider-requested waits.
-- Fixed the Todo HUD becoming stale after viewing a subagent and returning to the main session.
-- Fixed child-task artifact links and duplicate `hub jobs` result bodies.
-- Fixed `omp update` showing a POSIX reinstall command on Windows after a package-rename migration failure.
-- Preserved `thinking.requiresEffort: false` in custom model configuration so supported local Qwen templates can disable thinking explicitly.
-- Fixed project settings from shared capability files being able to replace an entire settings group when a conflicting non-object value is present; the conflicting value is now ignored with a warning.
-- Jina Reader requests now use configured credentials for higher authenticated rate limits while remaining available anonymously.
-- Fixed advisor session persistence and loading performance for repeated retries and unusually large advisor transcripts.
-- Fixed failed `browser.open` calls leaving OMP-spawned application processes running when no tab could be acquired.
-- Improved browser-handle failures with prompt, operation-specific timeout errors instead of waiting for the entire browser cell.
-- Fixed autonomous runs becoming idle after thinking-only length stops during speculative handoff.
-- Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
-- Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
-- Fixed large MCP tool payloads being stored redundantly on disk.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@dfbf3cc34eeb](https://github.com/can1357/oh-my-pi/blob/dfbf3cc34eeb5653580f51bfbcae558a9840f697/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@2d6380d359c0](https://github.com/can1357/oh-my-pi/blob/2d6380d359c09edcbbe46d56ddefe76692470659/packages/coding-agent/CHANGELOG.md).

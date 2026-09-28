@@ -287,23 +287,27 @@ export class UsageCache {
 	/**
 	 * Force the next usage fetch for `provider` to bypass the 5-min cache, so
 	 * `/usage` reflects a freshly-redeemed reset instead of stale numbers.
+	 * `resetSpentCredentialId` also forgets that credential's cached saved-reset
+	 * block, so a failed follow-up reset probe cannot carry the pre-spend
+	 * inventory forward.
 	 */
-	invalidate(provider: string, baseUrl?: string): void {
+	invalidate(provider: string, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
 		this.#epoch += 1;
 		const expired = Date.now() - 1;
 		for (const entry of this.#pool.entries(provider)) {
 			if (entry.credential.type !== "oauth") continue;
 			const cacheKey = this.reportKey(oauthUsageRequest(provider, entry.credential, baseUrl));
-			const existing = this.getStale<UsageReport | null>(cacheKey);
-			this.set(cacheKey, {
-				value: existing?.value ?? null,
-				expiresAt: expired,
-			});
+			let value = this.getStale<UsageReport | null>(cacheKey)?.value ?? null;
+			if (value?.resetCredits && entry.id === options?.resetSpentCredentialId) {
+				const { resetCredits: _spent, ...rest } = value;
+				value = rest;
+			}
+			this.set(cacheKey, { value, expiresAt: expired });
 		}
 	}
 
 	/** A confirmed reset permits one fresh probe even during a pre-reset failure cooldown. */
-	invalidateAfterReset(provider: Provider, baseUrl?: string): void {
+	invalidateAfterReset(provider: Provider, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
 		this.#recoveryEpochs.set(provider, this.recoveryEpoch(provider) + 1);
 		this.#bumpRefreshEpoch(provider);
 		if (!this.deletePrefix(`failure:report:${this.#usageCacheProviderKey(provider)}:`)) {
@@ -313,7 +317,7 @@ export class UsageCache {
 			}
 			for (const key of keys) this.set(this.failureKey(key), { value: null, expiresAt: 0 });
 		}
-		this.invalidate(provider, baseUrl);
+		this.invalidate(provider, baseUrl, options);
 	}
 
 	/**

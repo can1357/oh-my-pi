@@ -71,6 +71,13 @@ export interface ServingModel {
 	thinkingLevel?: ThinkingLevel;
 	/** Whether fallback routing, rather than the configured primary, owns it. */
 	isFallback: boolean;
+	/**
+	 * Context window of the attributed model, carried verbatim from
+	 * {@link Model.contextWindow} (`null` when the model declares none), so
+	 * observers size context usage against the model that produced the turn
+	 * instead of the one the run started on.
+	 */
+	contextWindow?: number | null;
 }
 
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;

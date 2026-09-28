@@ -69,6 +69,7 @@ import {
 	defaultConvertToLlm,
 } from "./messages";
 import {
+	assertRemoteCompactionInputFits,
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
 	isOpenAiRemoteCompactionApi,
@@ -1748,6 +1749,7 @@ export async function compact(
 						contextWindow: model.contextWindow,
 					});
 				}
+				assertRemoteCompactionInputFits(trimmed, model);
 				const requestOptions = {
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,

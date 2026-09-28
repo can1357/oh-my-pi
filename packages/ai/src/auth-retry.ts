@@ -423,7 +423,11 @@ export async function withOAuthAccess<T>(
 			if (!refreshedCurrent) {
 				refreshedCurrent = true;
 				try {
-					next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
+					next = await storage.oauth.access(provider, sessionId, {
+						forceRefresh: true,
+						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						signal,
+					});
 				} catch {
 					next = undefined;
 				}

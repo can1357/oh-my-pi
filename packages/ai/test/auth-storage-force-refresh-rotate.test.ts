@@ -10,6 +10,7 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
+import { OAuthRefresher } from "../src/auth/refresh";
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";
@@ -113,6 +114,67 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(after).toBe("minted-access");
 	});
 
+	test("cached refresh rebinds a pinned account by id after preceding row removal", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.credentials.set(
+			PROVIDER,
+			["A", "B", "C"].map(accountId => ({
+				type: "oauth" as const,
+				access: `cached-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				accountId,
+				expires: farExpiry(),
+			})),
+		);
+		const [preceding, target] = store.listAuthCredentials(PROVIDER);
+		if (!preceding || target?.credential.type !== "oauth") throw new Error("expected accounts A and B");
+		authStorage.sessions.pin(PROVIDER, "selector-cached-refresh", target.id);
+
+		const storage = authStorage;
+		const credentialStore = store;
+		const cachedCredential = target.credential;
+		vi.spyOn(OAuthRefresher.prototype, "refresh").mockImplementationOnce(async () => {
+			await credentialStore.deleteAuthCredential(preceding.id, "concurrent removal");
+			await storage.credentials.reload();
+			return cachedCredential;
+		});
+		// B moves from index 1 to 0 while the cached refresh is awaited.
+		// Reusing index 1 would silently send account C's bearer instead.
+		expect(await storage.keys.get(PROVIDER, "selector-cached-refresh", { forceRefresh: true })).toBe("cached-B");
+	});
+
+	test("forced refresh does not suppress a token entering its normal refresh-skew window", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		let refreshCalls = 0;
+		let issued = 0;
+		registerProvider(
+			() => {
+				refreshCalls += 1;
+			},
+			() => `minted-access-${++issued}`,
+		);
+		await authStorage.credentials.set(PROVIDER, {
+			type: "oauth",
+			access: "cached-access",
+			refresh: "cached-refresh",
+			expires: farExpiry(),
+		});
+		const row = store.listAuthCredentials(PROVIDER).find(entry => entry.credential.type === "oauth");
+		if (!row || row.credential.type !== "oauth") throw new Error("expected stored OAuth row");
+
+		await authStorage.oauth.refresh(row.id);
+		expect(refreshCalls).toBe(1);
+		const persisted = store.listAuthCredentials(PROVIDER).find(entry => entry.id === row.id);
+		if (!persisted || persisted.credential.type !== "oauth") throw new Error("expected refreshed OAuth row");
+		store.updateAuthCredential(row.id, { ...persisted.credential, expires: Date.now() + 30_000 });
+		await authStorage.reload();
+
+		const refreshedNearExpiry = await authStorage.oauth.refresh(row.id);
+		expect(refreshedNearExpiry.credential).toMatchObject({ type: "oauth", access: "minted-access-2" });
+		expect(refreshCalls).toBe(2);
+	});
+
 	test("getOAuthAccess includes a stable credentialId across cached and forced refresh resolves", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();
@@ -156,6 +218,30 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const second = await authStorage.keys.get(PROVIDER, "sess");
 		expect(["acc-A", "acc-B"]).toContain(second ?? "");
 		expect(second).not.toBe(first);
+	});
+
+	test("a routine refresh does not disable sibling failover on a later 401", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "oauth", access: "routine-A", refresh: "ref-A", expires: farExpiry() },
+			{ type: "oauth", access: "routine-B", refresh: "ref-B", expires: farExpiry() },
+		]);
+		const [target, sibling] = store.listAuthCredentials(PROVIDER);
+		if (!target || sibling?.credential.type !== "oauth") throw new Error("expected two OAuth rows");
+		const sessionId = "routine-refresh-then-401";
+		authStorage.sessions.pin(PROVIDER, sessionId, target.id);
+
+		const refreshed = await authStorage.oauth.refresh(target.id);
+		expect(refreshed.credential).toMatchObject({ type: "oauth", access: "minted-access" });
+		expect(
+			await authStorage.limits.rotate(PROVIDER, sessionId, {
+				credentialId: target.id,
+				apiKey: "minted-access",
+				error: authError(),
+			}),
+		).toEqual({ switched: true });
+		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe(sibling.credential.access);
 	});
 
 	test("resolver binds stored API keys to their credential rows", async () => {
@@ -346,7 +432,10 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		}
 
 		const resolvedKeys = [initialKey];
+		const start = Date.now();
+		const clock = vi.spyOn(Date, "now");
 		for (let index = 0; index < 9; index += 1) {
+			clock.mockReturnValue(start + index * 300_000);
 			const refreshed = await authStorage.keys.get(PROVIDER, sessionId, { forceRefresh: true });
 			if (!refreshed) throw new Error("expected refreshed OAuth bearer");
 			resolvedKeys.push(refreshed);

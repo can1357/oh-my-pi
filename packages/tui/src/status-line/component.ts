@@ -25,6 +25,7 @@ import type {
 	StatusLineHost,
 	StatusLineSession,
 } from "./host";
+import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
@@ -247,6 +248,8 @@ interface ContextUsageMemo {
 	tokenizerRef: unknown;
 	usedTokens: number;
 	contextWindow: number;
+	/** The session reported `percent: null`: usage is unknown, so no percent is shown. */
+	percentUnknown: boolean;
 	systemPromptRef: readonly string[] | undefined;
 	toolsRef: readonly any[] | undefined;
 	skillsRef: readonly any[] | undefined;
@@ -312,7 +315,6 @@ interface CachedStatusLine {
 	availableWidth: number;
 	renderRevision: number;
 	inputRevision: number;
-	placeholders: boolean;
 	previewTitle: string | undefined;
 	externalInputs: StatusLineExternalInputs;
 }
@@ -430,14 +432,19 @@ function formatEmbeddedContextPercent(percent: number): string {
 }
 
 function embeddedContextGaugeMinWidth(
-	percent: number,
+	percent: number | null,
 	contextWindow: number,
 	compact: boolean,
 	showWindow: boolean,
 ): number {
-	const percentLabel = compact ? `ctx:${formatCompactContextPercent(percent)}` : formatEmbeddedContextPercent(percent);
+	const percentLabel = compact
+		? `ctx:${formatCompactContextPercent(percent)}`
+		: percent === null
+			? ""
+			: formatEmbeddedContextPercent(percent);
 	if (!showWindow) return percentLabel.length;
-	return percentLabel.length + formatNumber(contextWindow).length + 4;
+	const percentWidth = percentLabel.length === 0 ? 0 : percentLabel.length + 2;
+	return percentWidth + formatNumber(contextWindow).length + 2;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -1516,6 +1523,24 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
+	/**
+	 * Seed working-tree status from the status line this one replaces (the
+	 * startup bar), so the dirty counts stay on screen instead of blanking until
+	 * this instance's first fetch lands. Normal TTL refreshes follow.
+	 */
+	adoptGitStatus(source: StatusLineComponent): void {
+		if (this.#cachedGitStatusCwd === undefined && source.#cachedGitStatusCwd !== undefined) {
+			this.#cachedGitStatus = source.#cachedGitStatus;
+			this.#cachedGitStatusCwd = source.#cachedGitStatusCwd;
+			this.#gitStatusLastFetch = source.#gitStatusLastFetch;
+		}
+		if (this.#jjStatusLastFetch === 0 && source.#jjStatusLastFetch !== 0) {
+			this.#cachedJjStatus = source.#cachedJjStatus;
+			this.#jjStatusLastFetch = source.#jjStatusLastFetch;
+		}
+		this.#invalidateStatusLineRenderCache();
+	}
+
 	#lookupPr(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
 		number: number;
 		url: string;
@@ -2121,6 +2146,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usedTokens = usage?.tokens ?? 0;
 		const contextWindow = usage?.contextWindow ?? modelContextWindow;
 		this.#contextUsageCache = {
+			percentUnknown: usage?.percent === null,
 			messagesRef: messages,
 			length,
 			lastFingerprint,
@@ -2174,7 +2200,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const breakdown = this.getCachedContextBreakdown();
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
-		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
+		let contextPercent: number | null =
+			contextWindow > 0 && !this.#contextUsageCache?.percentUnknown
+				? (breakdown.usedTokens / contextWindow) * 100
+				: null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
@@ -2472,8 +2501,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * clocks, countdowns, and VCS fallback polling advance only at their own
 	 * display/probe cadence.
 	 */
-	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings, placeholders: boolean): number {
-		if (placeholders) return 0;
+	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
 		const meter = this.#meter();
@@ -2502,17 +2530,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return 0;
 	}
 
-	#buildStatusLine(
-		width: number,
-		layout: StatusLineLayout = "box",
-		previewTitle?: string,
-		options?: { readonly placeholders?: boolean },
-	): CachedStatusLine {
+	#buildStatusLine(width: number, layout: StatusLineLayout = "box", previewTitle?: string): CachedStatusLine {
 		const effectiveSettings = this.#resolveSettings();
-		const placeholders = options?.placeholders === true;
 		const externalInputs = this.#readStatusLineExternalInputs();
 		const nowMs = Date.now();
-		const clockTick = this.#statusLineClock(nowMs, effectiveSettings, placeholders);
+		const clockTick = this.#statusLineClock(nowMs, effectiveSettings);
 		if (clockTick !== this.#statusLineClockTick) {
 			this.#statusLineClockTick = clockTick;
 			this.#invalidateStatusLineRenderCache();
@@ -2524,14 +2546,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cached.availableWidth === width &&
 			cached.renderRevision === this.#renderRevision &&
 			cached.inputRevision === this.#statusLineInputRevision &&
-			cached.placeholders === placeholders &&
 			cached.previewTitle === previewTitle &&
 			this.#sameStatusLineExternalInputs(cached.externalInputs, externalInputs)
 		) {
 			return cached;
 		}
 
-		const content = this.#renderStatusLine(width, layout, previewTitle, options, nowMs);
+		const content = this.#renderStatusLine(width, layout, previewTitle, nowMs);
 		const result = {
 			content,
 			dimmedContent: this.#dimWhileFocusProxied(content),
@@ -2539,7 +2560,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			availableWidth: width,
 			renderRevision: this.#renderRevision,
 			inputRevision: this.#statusLineInputRevision,
-			placeholders,
 			previewTitle,
 			externalInputs,
 		};
@@ -2562,16 +2582,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * `previewTitle` is a stand-in session title for composer previews; the
 	 * `session_name` segment renders it when the session is unnamed.
 	 */
-	#renderStatusLine(
-		width: number,
-		layout: StatusLineLayout,
-		previewTitle: string | undefined,
-		options: { readonly placeholders?: boolean } | undefined,
-		nowMs: number,
-	): string {
+	#renderStatusLine(width: number, layout: StatusLineLayout, previewTitle: string | undefined, nowMs: number): string {
 		const effectiveSettings = this.#resolveSettings();
 		this.#syncPricingTimer();
-		const placeholders = options?.placeholders === true;
 		const plain = layout !== "box" && layout !== "band";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
@@ -2581,7 +2594,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		const liveCtx = this.#buildSegmentContext(
+		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
@@ -2590,7 +2603,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			nowMs,
 			previewTitle,
 		);
-		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
 		const separatorDef = plain
 			? { left: "·", right: "·" }
 			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
@@ -2642,8 +2654,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const embedContext =
 			!plain &&
 			effectiveSettings.contextLine === "embedded" &&
-			ctx.contextPercent !== null &&
-			ctx.contextPercent !== undefined &&
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
 			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
@@ -2670,13 +2680,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
-				const count = placeholders ? "…" : `${runningBackgroundJobs}`;
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${count}`));
+				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
-			if (subagentBadge) {
-				const content = placeholders ? [theme.icon.agents, "…"].filter(Boolean).join(" ") : subagentBadge;
-				rightParts.unshift(placeholders ? theme.fg("statusLineSubagents", content) : content);
-			}
+			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];
@@ -2707,19 +2713,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// handling, so the gauge must reserve enough room for both labels. Without
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
-		// Startup still knows the live usage values. Reserve those label widths
-		// while painting placeholders so the ordinary groups do not jump when the
-		// first live status line replaces `ctx:…` / `…`.
 		const embeddedContextWidth = embedContext
 			? embeddedContextGaugeMinWidth(
-					ctx.contextPercent ?? 0,
+					ctx.contextPercent,
 					ctx.contextWindow,
 					embedCompactContext,
 					showEmbeddedContextWindow,
 				)
 			: 0;
 		const embeddedContextPercentWidth = embedContext
-			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow, embedCompactContext, false)
+			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow, embedCompactContext, false)
 			: 0;
 		// A default (non-compact) gauge may fall back to its short percentage-only
 		// label when both context labels cannot coexist with the final ordinary
@@ -2903,11 +2906,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const horizontal = theme.boxRound.horizontal;
 		const mode = effectiveSettings.contextLine ?? "embedded";
 		const pct = ctx.contextPercent;
-		if (mode === "off" || pct === null || pct === undefined) {
+		if (mode === "off" || (pct === null && ctx.contextWindow <= 0)) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
 		}
 
-		const clampedPct = Math.min(100, Math.max(0, pct));
+		// Unknown usage against a known window (startup prepaint) draws the fresh-session
+		// gauge: one lit cell and the window label, no percent.
+		const clampedPct = pct === null ? 0 : Math.min(100, Math.max(0, pct));
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
@@ -2918,27 +2923,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct > 100;
+		const percentOverflow = pct !== null && pct > 100;
 		if (embedContext) {
-			// The live label widths drive every fit decision below. Startup paints
-			// shortened placeholders (`ctx:…` / `…`), but sizing the fit off those
-			// narrower strings would let a gap that only fits the placeholders show
-			// a window label at startup that the first live frame then drops (or the
-			// reverse). Reserve/decide on the live widths so the label set is stable
-			// across the placeholder→live transition, and paint the placeholder text.
 			const livePercent = embedCompactContext
-				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
-				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : pct === null ? null : clampedPct)}`
+				: pct === null
+					? ""
+					: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
-			const candidatePercent = ctx.startupPlaceholder
-				? embedCompactContext
-					? "ctx:…"
-					: "…%".padStart(livePercent.length)
-				: livePercent;
-			const candidateWindow = showEmbeddedContextWindow ? (ctx.startupPlaceholder ? "…" : liveWindow) : "";
-			const minimumLabelWidth = showEmbeddedContextWindow
-				? livePercent.length + liveWindow.length + 4
-				: livePercent.length;
+			const candidatePercent = livePercent;
+			const candidateWindow = liveWindow;
+			const minimumLabelWidth = embeddedContextGaugeMinWidth(
+				pct,
+				ctx.contextWindow,
+				embedCompactContext,
+				showEmbeddedContextWindow,
+			);
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
 				percentPlacementWidth = livePercent.length;
@@ -3065,9 +3065,32 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 	}
 
-	/** Render startup ellipses inside each segment's normal icon, color, and static chrome. */
-	renderStartupPlaceholder(width: number, layout: StatusLineLayout): string {
-		return this.#buildStatusLine(width, layout, undefined, { placeholders: true }).content;
+	/**
+	 * Wire this bar into `editor` for a composer layout: the matching top-border
+	 * provider, the autocomplete probe, and the standalone bottom-bar placement.
+	 * Callers re-run it whenever the composer shape changes.
+	 */
+	attachToEditor(
+		editor: Pick<Editor, "isAutocompleteActive" | "setTopBorderProvider" | "setTopBorder">,
+		style: Pick<ComposerStyle, "statusAttachment" | "bottomBar" | "bottomBarGap">,
+	): void {
+		this.setAutocompleteActiveProbe(() => editor.isAutocompleteActive());
+		switch (style.statusAttachment) {
+			case "top-border":
+				editor.setTopBorderProvider(availableWidth => this.getTopBorder(availableWidth));
+				break;
+			case "top-band":
+				editor.setTopBorderProvider(availableWidth => this.getBandTopBorder(availableWidth));
+				break;
+			case "top-rule-chip":
+				editor.setTopBorderProvider(availableWidth => this.getStandaloneTopBorder(availableWidth));
+				break;
+			case "none":
+				editor.setTopBorderProvider(undefined);
+				editor.setTopBorder(undefined);
+				break;
+		}
+		this.setComposerStyle(style);
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {

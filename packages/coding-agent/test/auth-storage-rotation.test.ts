@@ -224,6 +224,47 @@ describe("AuthStorage account rotation", () => {
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe(stickyKey);
 	});
 
+	test("ModelRegistry distinguishes forced renewal from provider 401 recovery", async () => {
+		let mints = 0;
+		oauth.registerOAuthProvider({
+			id: targetProvider,
+			name: targetProvider,
+			sourceId: stickyInvalidationSource,
+			async login() {
+				throw new Error("login is not used");
+			},
+			async refreshToken(credential) {
+				mints += 1;
+				return { ...credential, access: `mint-${mints}`, expires: Date.now() + 3_600_000 };
+			},
+			getApiKey: credential => credential.access,
+		});
+		await authStorage.credentials.set(targetProvider, [
+			{ type: "oauth", access: "initial", refresh: "refresh", expires: Date.now() + 3_600_000 },
+		]);
+		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		const resolver = registry.resolver(targetProvider, { sessionId: "intent" });
+		expect(await registry.getApiKeyForProvider(targetProvider, "intent", { forceRefresh: true })).toBe("mint-1");
+		expect(await registry.getApiKeyForProvider(targetProvider, "intent", { forceRefresh: true })).toBe("mint-2");
+		expect(
+			resolvedApiKeyBearer(
+				await resolver({
+					lastChance: false,
+					error: Object.assign(new Error("unauthorized"), { status: 401 }),
+				}),
+			),
+		).toBe("mint-2");
+		expect(
+			resolvedApiKeyBearer(
+				await resolver({
+					lastChance: false,
+					error: Object.assign(new Error("server error"), { status: 500 }),
+				}),
+			),
+		).toBe("mint-3");
+		expect(mints).toBe(3);
+	});
+
 	test("API key resolver re-resolves after a concurrent OAuth refresh makes a 401 bearer stale", async () => {
 		const resolvedKeys = ["stale-access", "refreshed-access"];
 		const rotationTargets: Array<string | undefined> = [];
