@@ -37,7 +37,7 @@ describe("Editor async autocomplete scheduling", () => {
 		const forcedItems = [{ label: "zeta.ts", value: "@zeta.ts" }];
 		const pending: Array<PromiseWithResolvers<{ items: AutocompleteItem[]; prefix: string } | null>> = [];
 		// Prime the zero-candidate state: `@` opens the popup, then the narrowing filter (`z`,
-		// see Editor#debouncedUpdateAutocomplete) empties the list while the popup stays open.
+		// see Editor#debouncedUpdateAutocomplete) empties the list, hiding the still-open popup.
 		const primed = async (): Promise<Editor> => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setAutocompleteProvider({
@@ -57,7 +57,7 @@ describe("Editor async autocomplete scheduling", () => {
 			editor.handleInput("@");
 			await untilAutocompleteShown(editor);
 			editor.handleInput("z");
-			expect(editor.isShowingAutocomplete()).toBeTrue();
+			expect(editor.isShowingAutocomplete()).toBeFalse();
 			return editor;
 		};
 		try {
@@ -145,6 +145,7 @@ describe("Editor async autocomplete scheduling", () => {
 			submitted = text;
 		};
 
+		const bareRows = editor.render(80).length;
 		const shown = untilAutocompleteShown(editor);
 		editor.handleInput("@");
 		await shown;
@@ -155,10 +156,42 @@ describe("Editor async autocomplete scheduling", () => {
 		expect(narrowed).not.toContain(".cache/");
 		expect(narrowed).not.toContain("other/");
 
+		// No candidate left: the popup renders no rows (no placeholder) until the refresh lands.
 		editor.handleInput("x");
-		expect(editor.render(80).join("\n")).toContain("Searching…");
+		expect(editor.render(80)).toHaveLength(bareRows);
 		editor.handleInput("\r");
 		expect(submitted).toBe("@widgetx");
+	});
+
+	it("drops a hidden @ popup on Escape so its pending refresh never appears", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		const refresh = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+		const refreshStarted = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			getSuggestions(lines, cursorLine, cursorCol, signal) {
+				const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+				if (text === "@")
+					return Promise.resolve({ items: [{ value: "@alpha.ts", label: "alpha.ts" }], prefix: "@" });
+				refreshStarted.resolve();
+				signal?.addEventListener("abort", () => refresh.resolve(null));
+				return refresh.promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+
+		const shown = untilAutocompleteShown(editor);
+		editor.handleInput("@");
+		await shown;
+		editor.handleInput("z");
+		await refreshStarted.promise;
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+
+		editor.handleInput("\x1b");
+		expect(await refresh.promise).toBeNull();
+		expect(editor.isShowingAutocomplete()).toBeFalse();
+		expect(editor.getText()).toBe("@z");
 	});
 
 	it("shows interim suggestions a slow provider reports before resolving", async () => {
