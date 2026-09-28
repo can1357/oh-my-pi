@@ -746,8 +746,10 @@ describe("devin catalog seed", () => {
 		expect(descriptor?.defaultModel).toBe("swe-2");
 		// Cascade rejects the bare `swe-2` slug as a chat uid, so the seed ships the
 		// live effort lanes and the reviewed family collapses them onto the default.
-		const [swe2, ...rest] = collapseVariants(seedModels("devin"));
-		expect(rest).toEqual([]);
+		// Both SWE-1.6 lanes stay seeded so saved selections resolve offline.
+		const collapsed = collapseVariants(seedModels("devin"));
+		expect(collapsed.map(model => model.id)).toEqual(["swe-2", "swe-1-6-fast", "swe-1-6"]);
+		const swe2 = collapsed[0];
 		expect(swe2?.id).toBe("swe-2");
 		expect(swe2?.requestModelId).toBe("swe-2-high");
 		expect(swe2?.thinking?.effortRouting).toEqual({
@@ -762,12 +764,20 @@ describe("devin catalog seed", () => {
 		expect(model.input).toEqual(["text", "image"]);
 		// Plan-included lanes report no cost dimensions; the KDL fallback prices them.
 		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075 });
+
+		const fast = buildModel(collapsed[1] as ModelSpec<"devin-agent">);
+		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
+		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
+		expect(fast.input).toEqual(["text"]);
+		expect(fast.thinking).toBeUndefined();
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
 		expect(devinModelManagerOptions().staticModels).toBe(seedModels("devin"));
 		const scoped = devinModelManagerOptions({ baseUrl: "https://cascade.internal" });
 		expect(scoped.staticModels?.map(model => model.baseUrl)).toEqual([
+			"https://cascade.internal",
+			"https://cascade.internal",
 			"https://cascade.internal",
 			"https://cascade.internal",
 			"https://cascade.internal",
