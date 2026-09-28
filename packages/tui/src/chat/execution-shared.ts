@@ -15,6 +15,8 @@ import type { OutputArtifactError } from "../tools/streaming-output";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../tools/output-meta";
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
+import { interruptKey } from "../chrome/keybinding-hints";
+import { expandKeyHint } from "../render/render-utils";
 
 /** Output rows shown while an execution is collapsed. */
 export const PREVIEW_LINES = 20;
@@ -59,7 +61,7 @@ export function buildExecutionFrame(
 		ui,
 		spinner => theme.fg(colorKey, spinner),
 		text => theme.fg("muted", text),
-		`Running… (esc to cancel)`,
+		`Running… (${interruptKey()} to cancel)`,
 		getSymbolTheme().spinnerFrames,
 	);
 
@@ -84,7 +86,7 @@ export function buildStatusFooter(opts: {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
-		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (ctrl+o to expand)`));
+		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));

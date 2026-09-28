@@ -615,7 +615,7 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 
 ## 11) OpenTelemetry export
 
-OMP initializes OTLP export only when at least one signal has an endpoint. `OTEL_SDK_DISABLED=true` disables initialization.
+OMP initializes OTLP export only when at least one signal has an endpoint. Set `telemetry.otlpExportEnabled: false` (`/settings` → Providers → Privacy) to skip export even when endpoints are configured. `OTEL_SDK_DISABLED=true` also disables initialization.
 
 | Variable group                                                                                                  | Behavior                                                                                        |
 | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |

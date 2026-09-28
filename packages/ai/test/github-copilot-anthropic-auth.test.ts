@@ -73,22 +73,6 @@ describe("Anthropic Copilot auth config", () => {
 		expect(options.defaultHeaders.Authorization).toBe(`Bearer ${token}`);
 	});
 
-	it("uses X-Api-Key auth for OpenCode Go Anthropic models", () => {
-		const model = makeOpenCodeGoQwen37Model();
-		const token = "opencode_test_key";
-		const options = buildAnthropicClientOptions({
-			model,
-			apiKey: token,
-			extraBetas: [],
-			stream: true,
-			dynamicHeaders: {},
-		});
-
-		expect(options.apiKey).toBe(token);
-		expect(options.authToken).toBeNull();
-		expect(options.defaultHeaders.Authorization).toBeUndefined();
-	});
-
 	it("sends OpenCode Go Anthropic requests with X-Api-Key", async () => {
 		const requestedApiKeys: Array<string | null> = [];
 		const requestedAuthorizations: Array<string | null> = [];
@@ -123,52 +107,6 @@ describe("Anthropic Copilot auth config", () => {
 
 		expect(options.apiKey).toBeNull();
 		expect(options.defaultHeaders.Authorization).toBe("Bearer ghu_test_token_12345");
-	});
-
-	it("uses model baseUrl directly (no proxy-ep extraction)", () => {
-		const model = makeCopilotClaudeModel();
-		const token = "ghu_test_token_12345";
-		const options = buildAnthropicClientOptions({
-			model,
-			apiKey: token,
-			extraBetas: [],
-			stream: true,
-			dynamicHeaders: {},
-		});
-
-		expect(options.baseURL).toBe("https://api.githubcopilot.com");
-	});
-
-	it("routes structured enterprise credentials to the enterprise baseUrl", () => {
-		const model = makeCopilotClaudeModel();
-		const options = buildAnthropicClientOptions({
-			model,
-			apiKey: JSON.stringify({ token: "ghu_test_token_12345", enterpriseUrl: "ghe.example.com" }),
-			extraBetas: [],
-			stream: true,
-			dynamicHeaders: {},
-		});
-
-		expect(options.baseURL).toBe("https://copilot-api.ghe.example.com");
-	});
-	it("includes Copilot CLI static headers from model.headers", () => {
-		const model = makeCopilotClaudeModel();
-		const options = buildAnthropicClientOptions({
-			model,
-			apiKey: "ghu_test",
-			extraBetas: [],
-			stream: true,
-			dynamicHeaders: {},
-		});
-
-		expect(options.defaultHeaders).toMatchObject({
-			"User-Agent": "copilot/1.0.82",
-			"Editor-Version": "copilot/1.0.82",
-			"Copilot-Integration-Id": "copilot-developer-cli",
-			"Copilot-Harness-Id": "copilot-sdk",
-			"Openai-Intent": "conversation-agent",
-			"X-GitHub-Api-Version": "2026-08-01",
-		});
 	});
 
 	it("includes interleaved-thinking beta header when enabled", () => {

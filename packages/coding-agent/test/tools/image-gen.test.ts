@@ -417,4 +417,45 @@ describe("imageGenTool catalog routing", () => {
 		expect(tools[0]).toMatchObject({ type: "image_generation" });
 		expect(tools[0]).not.toHaveProperty("model");
 	});
+
+	it("reports the image model, size, and quality the Codex backend actually ran", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-1", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
+		// The Codex backend streams the image in `output_item.done`, leaves `response.completed.output` empty,
+		// and echoes its own tool configuration, ignoring the requested model/size/quality.
+		const events = [
+			{
+				type: "response.output_item.done",
+				item: { type: "image_generation_call", result: WEBP_DATA, size: "1774x887", quality: "low" },
+			},
+			{
+				type: "response.completed",
+				response: {
+					output: [],
+					tools: [{ type: "image_generation", model: "gpt-image-2-codex", size: "auto", quality: "auto" }],
+				},
+			},
+		];
+		const fetchMock: FetchImpl = async () =>
+			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-1" } });
+		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
+
+		const result = await imageGenTool.execute(
+			"codex-actual",
+			{ subject: "codex", aspect_ratio: "16:9" },
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+
+		expect(result.details?.model).toBe("gpt-image-2-codex");
+		expect(result.details?.images[0]).toMatchObject({ size: "1774x887", quality: "low" });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-1)");
+		expect(text).toContain("(1774x887, quality low)");
+	});
 });

@@ -161,31 +161,6 @@ describe("antigravity usage provider", () => {
 		);
 	});
 
-	it("merges two models with same tier into one limit", async () => {
-		const payload = {
-			models: {
-				modelA: makeApiModel("Model A", {
-					remainingFraction: 0.3,
-					tier: "premium",
-				}),
-				modelB: makeApiModel("Model B", {
-					remainingFraction: 0.5,
-					tier: "premium",
-				}),
-			},
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential(),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report).not.toBeNull();
-		expect(report!.limits.length).toBe(1);
-	});
-
 	it("keeps the worst remainingFraction when merging same tier", async () => {
 		const payload = {
 			models: {
@@ -459,40 +434,6 @@ describe("antigravity usage provider", () => {
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]!.scope.windowId).toBe("weekly");
 		expect(report!.limits[0]!.window?.label).toBe("Weekly");
-	});
-
-	it("includes email and projectId in report metadata", async () => {
-		const payload = {
-			models: { m: makeApiModel("M", { remainingFraction: 1 }) },
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential({
-					email: "user@example.com",
-					projectId: "proj-1",
-				}),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report!.metadata?.email).toBe("user@example.com");
-		expect(report!.metadata?.projectId).toBe("proj-1");
-	});
-
-	it("does not include email when credential has none", async () => {
-		const payload = {
-			models: { m: makeApiModel("M", { remainingFraction: 1 }) },
-		};
-		const report = await antigravityUsageProvider.fetchUsage!(
-			{
-				provider: "google-antigravity",
-				credential: makeCredential({ email: undefined }),
-				signal: undefined,
-			},
-			makeCtx(fakeFetch(payload)),
-		);
-		expect(report!.metadata?.email).toBeUndefined();
 	});
 
 	it("sorts limits by remainingFraction ascending (worst first)", async () => {

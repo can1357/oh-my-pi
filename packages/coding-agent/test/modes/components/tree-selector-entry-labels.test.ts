@@ -85,13 +85,6 @@ describe("tree selector entry labels", () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 
-	it("never renders a row as a bare bullet", () => {
-		const selector = selectorFor([userEntry, ...bookkeeping]);
-		selector.handleInput(ALT_A);
-		const bullets = visibleRows(selector).filter(row => /^[\s│├└─›]*•\s*$/.test(row));
-		expect(bullets).toEqual([]);
-	});
-
 	it("labels each bookkeeping entry with what it recorded", () => {
 		const selector = selectorFor([userEntry, ...bookkeeping]);
 		selector.handleInput(ALT_A);

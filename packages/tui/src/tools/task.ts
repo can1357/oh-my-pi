@@ -42,7 +42,7 @@ import { framedToolCard } from "../render/tool-card";
 import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
-import { assembleYieldResult } from "./task-yield-assembly";
+import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
 interface TaskRenderContext {
@@ -98,8 +98,13 @@ function normalizeFindings(value: unknown): FindingDetails[] {
 	return findings;
 }
 
-/** Reviewer output declares `findings` as an array, so a lone finding section still assembles as a list. */
-const REVIEWER_ARRAY_LABELS: ReadonlySet<string> = new Set(["findings"]);
+/** Reviewer output shapes: `findings` is an array (a lone finding still assembles as a list); the verdict fields are scalars. */
+const REVIEWER_SECTION_SHAPES: YieldSectionShapes = new Map([
+	["findings", "array"],
+	["overall_correctness", "scalar"],
+	["explanation", "scalar"],
+	["confidence", "scalar"],
+]);
 
 function extractIncrementalReviewResult(
 	items: RenderYieldItem[],
@@ -110,7 +115,7 @@ function extractIncrementalReviewResult(
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
 		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_ARRAY_LABELS);
+	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -553,7 +558,7 @@ function createAssignmentSectionRenderer(
 }
 
 /**
- * Build the shared-context section (the `# Goal / # Constraints` background a
+ * Build the shared-context section (the `# Goal / # Contract` background a
  * batch call hands every subagent). Rendered like the assignment brief so the
  * shared background stays visible for the whole task lifecycle.
  */
@@ -1726,6 +1731,8 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
@@ -1751,6 +1758,8 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */

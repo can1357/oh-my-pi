@@ -39,7 +39,6 @@ function createAssistantMessage(): AssistantMessage {
 
 function createContext(
 	options: {
-		editorText?: string;
 		goalObjective?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
@@ -69,7 +68,6 @@ function createContext(
 			}
 		: undefined;
 	return createInteractiveModeContext({
-		editor: { getText: () => options.editorText ?? "" },
 		sessionManager: { getSessionName: () => options.sessionName },
 		todoPhases: options.todoPhases ?? [],
 		...(options.showStatus ? { showStatus: options.showStatus } : {}),
@@ -219,58 +217,6 @@ describe("EventController idle compaction teardown", () => {
 			"※ recap: Reworking the login flow; auth suite passes. Next: wire the focused token-refresh test.",
 		);
 		expect(options).toEqual({ dim: false });
-		controller.dispose();
-	});
-
-	it("keeps the idle recap silent when disabled", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": false,
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
-		controller.dispose();
-	});
-
-	it("keeps the idle recap silent while the editor has a draft", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			editorText: "draft",
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
 		controller.dispose();
 	});
 

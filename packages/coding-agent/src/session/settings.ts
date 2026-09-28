@@ -25,6 +25,7 @@ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } fr
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -706,8 +707,9 @@ export const cfgRetryWaitForUsageReset = register({
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Wait For Usage Reset",
-		description:
-			"When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (Esc) but also hold subagents, so leave off for unattended runs.",
+		get description() {
+			return `When a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), sleep until the reset instead of failing fast past retry.maxDelayMs. Waits are abortable (${formatKeyHint("escape")}) but also hold subagents, so leave off for unattended runs.`;
+		},
 	},
 });
 
@@ -854,8 +856,9 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 /**
  * Anthropic subscription slow mode (`off` | `auto`). Deliberately has no
  * `/settings` UI: `/slow on|off` on an Anthropic model is the only switch.
- * `auto` switches to lower-priority service automatically when a Claude
- * subscription hits its 5-hour limit and Anthropic offers it.
+ * `auto` switches to low priority automatically when a Claude subscription
+ * hits its 5-hour limit and Anthropic offers it. Wrap-up allowance tracking
+ * runs either way; this only gates the low-priority lane.
  */
 export const cfgProvidersAnthropicSlowMode = register({
 	id: "providers.anthropic.slowMode",
@@ -1097,20 +1100,47 @@ export const cfgProvidersCacheRetention = register({
 				value: "auto",
 				label: "Auto",
 				description:
-					"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+					"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m; PI_CACHE_RETENTION still applies",
 			},
 			{
 				value: "short",
 				label: "Short (5m)",
-				description:
-					"Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle",
+				description: "Cheapest cache writes; pair with cache warming to keep short entries alive while idle",
 			},
 			{
 				value: "long",
 				label: "Long (1h)",
-				description: "1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests",
+				description: "1h TTL where the provider supports it; pricier writes, only warmed during active runs",
 			},
 			{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
+		],
+	},
+});
+
+export const cfgProvidersCacheWarming = register({
+	id: "providers.cacheWarming",
+	type: "enum",
+	values: ["off", "streaming", "idle"] as const,
+	default: "idle",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cache Warming",
+		description:
+			"Re-send the last request with a one-token output budget shortly before its prompt-cache entry expires",
+		options: [
+			{ value: "off", label: "Off", description: "Disable cache warming" },
+			{
+				value: "streaming",
+				label: "Streaming",
+				description: "Protect expensive prefixes during long tool executions; stops when the agent settles",
+			},
+			{
+				value: "idle",
+				label: "Idle",
+				description:
+					"Also refresh 5-minute entries between runs while the expected savings stay above the cost floor",
+			},
 		],
 	},
 });
@@ -1382,7 +1412,7 @@ export const cfgThinkingBudgetsXhigh = register({ id: "thinkingBudgets.xhigh", t
 
 export const cfgThinkingBudgetsMax = register({ id: "thinkingBudgets.max", type: "number", default: 32768 });
 
-/** Token budget per thinking level (`thinkingBudgets.*`), passed to providers on every request. */
+/** Token budget per thinking level (`thinkingBudgets.*`) on transports that accept reasoning token budgets. */
 export const cfgThinkingBudgets = combine({
 	minimal: cfgThinkingBudgetsMinimal,
 	low: cfgThinkingBudgetsLow,

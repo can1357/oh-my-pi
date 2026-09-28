@@ -8,11 +8,12 @@
 
 import { type } from "@oh-my-pi/omptype";
 import { readSseEvents } from "@oh-my-pi/pi-utils";
-import type { AuthCredential, DisabledCredentialSummary } from "../auth-storage";
+import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
 	ClientUsageSummaryResponse,
+	CredentialBlockDeleteRequest,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlocksDeleteResponse,
@@ -326,8 +327,13 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
-		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh`, {
+	async refreshCredential(
+		id: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<CredentialRefreshResponse> {
+		const suffix = reason === "auth-recovery" ? "?reason=auth-recovery" : "";
+		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh${suffix}`, {
 			schema: "credentialRefreshResponseSchema",
 			signal,
 		});
@@ -385,6 +391,18 @@ export class AuthBrokerClient {
 		return this.#request<CredentialBlockResponse>("POST", `/v1/credential/${id}/block`, {
 			body,
 			schema: "credentialBlockResponseSchema",
+			signal,
+		});
+	}
+
+	async deleteCredentialBlock(
+		id: number,
+		block: CredentialBlockDeleteRequest,
+		signal?: AbortSignal,
+	): Promise<CredentialBlocksDeleteResponse> {
+		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/block`, {
+			body: block,
+			schema: "credentialBlocksDeleteResponseSchema",
 			signal,
 		});
 	}

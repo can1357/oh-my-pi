@@ -15,7 +15,7 @@
  *   with `{ summary, shortSummary? }`.
  */
 
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -110,6 +110,10 @@ function normalizeRemoteCompactionEstimateValue(value: unknown): NormalizedEstim
 	const normalized: Record<string, unknown> = {};
 	let imageTokens = 0;
 	for (const [key, item] of Object.entries(record)) {
+		// Opaque encrypted reasoning/compaction state: its local base64 size far
+		// exceeds what the provider bills, so it stays out of the fit estimate
+		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
+		if (key === "encrypted_content" && typeof item === "string") continue;
 		const result = normalizeRemoteCompactionEstimateValue(item);
 		normalized[key] = result.value;
 		imageTokens += result.imageTokens;
@@ -122,6 +126,8 @@ export interface TrimRemoteCompactionInputResult {
 	rewrittenOutputs: number;
 	estimatedTokensBefore: number;
 	estimatedTokensAfter: number;
+	/** Whether `input` fits the model window; false means it must not be sent. */
+	fits: boolean;
 }
 
 /** Verdict for one remote-compaction request measured against the model window. */
@@ -135,9 +141,10 @@ interface RemoteCompactionBudgetProbe {
 /**
  * Cheap-first sizing of a remote-compaction request. Images and the request
  * frame are charged flat, so they come off the budget rather than through the
- * tokenizer; the serialized transcript is then probed with
- * {@link Tokenizer.checkTokenBudget}, which only pays for an exact count when
- * the byte bound cannot already prove the request fits.
+ * tokenizer; opaque `encrypted_content` payloads are excluded. The serialized
+ * transcript is then probed with {@link Tokenizer.checkTokenBudget}, which only
+ * pays for an exact count when the byte bound cannot already prove the request
+ * fits.
  */
 function probeRemoteCompactionInputBudget(
 	input: Array<Record<string, unknown>>,
@@ -199,6 +206,7 @@ export function trimRemoteCompactionInputToContextWindow(
 			rewrittenOutputs: 0,
 			estimatedTokensBefore: before.tokens,
 			estimatedTokensAfter: before.tokens,
+			fits: true,
 		};
 	}
 
@@ -222,6 +230,7 @@ export function trimRemoteCompactionInputToContextWindow(
 			rewrittenOutputs: 0,
 			estimatedTokensBefore: before.tokens,
 			estimatedTokensAfter: before.tokens,
+			fits: false,
 		};
 	}
 
@@ -230,7 +239,27 @@ export function trimRemoteCompactionInputToContextWindow(
 		rewrittenOutputs,
 		estimatedTokensBefore: before.tokens,
 		estimatedTokensAfter: after.tokens,
+		fits: true,
 	};
+}
+
+/**
+ * Refuse a native compaction request whose prepared input cannot fit the model
+ * window, before any network I/O. Re-expanded history behind an unreadable
+ * native boundary can exceed the window even when live context does not.
+ *
+ * @throws Error flagged `ContextOverflow` when `trimmed.fits` is false, so
+ *   compaction callers skip retries and advance to the next method.
+ */
+export function assertRemoteCompactionInputFits(trimmed: TrimRemoteCompactionInputResult, model: Model): void {
+	if (trimmed.fits) return;
+	throw attach(
+		new Error(
+			`Remote compaction input exceeds the context window of ${model.provider}/${model.id}: ` +
+				`estimated ${trimmed.estimatedTokensAfter} tokens > ${model.contextWindow}`,
+		),
+		create(Flag.ContextOverflow),
+	);
 }
 
 /** Race the caller's signal against the request timeout; `timeoutMs <= 0` disables the watchdog. */
@@ -794,6 +823,7 @@ export async function requestOpenAiRemoteCompaction(
 			contextWindow: model.contextWindow,
 		});
 	}
+	assertRemoteCompactionInputFits(trimmed, model);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,
 		// Preserve the native transcript. Only oversized trailing tool outputs are

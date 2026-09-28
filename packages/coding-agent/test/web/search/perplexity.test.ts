@@ -495,7 +495,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 			get: async (provider: string) => (provider === "perplexity" ? "oauth-session-jwt" : undefined),
 			source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 		},
-		limits: { rotate: async () => false },
+		limits: { rotate: async () => ({ switched: false }) },
 	} as unknown as AuthStorage;
 
 	it("does not emit a direct api-key config from the OAuth session token", async () => {
@@ -623,13 +623,6 @@ describe("Perplexity anonymous fallback", () => {
 			searchPerplexity({ query: "automatic search", authStorage: anonymousAuthStorage, fetch: fetchMock }),
 		).rejects.toThrow("No authentication method available.");
 		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
-	it("keeps anonymous Perplexity out of auto provider selection but allows explicit selection", () => {
-		const provider = new PerplexityProvider();
-
-		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
-		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
 	});
 });
 

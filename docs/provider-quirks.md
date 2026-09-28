@@ -155,7 +155,7 @@ The Anthropic provider (`packages/ai/src/providers/anthropic.ts`) implements the
 - **Thinking Signatures & Redacted Thinking**: Replaying modified or unsigned thinking blocks causes Anthropic API errors (`invalid signature in thinking block`). `convertAnthropicMessages` converts `ThinkingContent` and `RedactedThinkingContent` (`type: "redacted_thinking"`, `data`). `maybeAddReplayUnsignedThinkingHint` attaches recovery hints on signature errors, while `unwrapAnthropicThinkingEnvelope` strips legacy `<thinking>` XML wrappers.
 - **Tool Use Replay & Prefixes**: `encodeAnthropicToolName` / `decodeAnthropicToolName` (`packages/ai/src/providers/anthropic.ts`) prefixes custom tool names with `_` (`claudeToolPrefix`) when using OAuth to prevent collisions with built-in tools (`web_search`, `code_execution`, `text_editor`, `computer`). Server-executed web searches and tool searches (`AnthropicServerToolHistoryBlockParam` in `anthropic-wire.ts`) are detected via `isAnthropicServerToolHistoryBlock` for turn replay. Empty tool errors are filled by `ensureErrorToolResultWireContent`.
 - **Strict-Tool Schema Normalization & Fallback**: `normalizeAnthropicToolSchema` and `normalizeAnthropicStrictSchema` strip unsupported JSON schema keywords (e.g. `minItems`/`maxItems` on objects) for the `structured-outputs-2025-12-15` beta. If a strict tool schema causes HTTP 400, `streamAnthropicOnce` calls `dropAnthropicStrictTools` and automatically retries without strict mode.
-- **Adaptive vs Budget Thinking**: `ThinkingConfigParam` (`anthropic-wire.ts`) supports budget thinking (`{ type: "enabled", budget_tokens: N }` enforced by `ensureMaxTokensForThinking`) and adaptive thinking (`{ type: "adaptive" }` paired with `output_config: { effort: level }` via `effort-2025-11-24` beta). Forced tool choices (`disableThinkingIfToolChoiceForced`) automatically disable thinking.
+- **Adaptive vs Budget Thinking**: `ThinkingConfigParam` (`anthropic-wire.ts`) supports budget thinking (`{ type: "enabled", budget_tokens: N }` enforced by `ensureMaxTokensForThinking`) and adaptive thinking (`{ type: "adaptive" }` paired with `output_config: { effort: level }` via `effort-2025-11-24` beta). Forced tool choices (`disableThinkingIfToolChoiceForced`) automatically disable thinking. Thinking and visible output share `max_tokens`, so `streamSimple` treats a caller's `maxTokens` as the output it wants and adds the effort's thinking budget on top on every `anthropic-messages` thinking path and for adaptive Claude on Bedrock (capped at the model ceiling); without it, adaptive thinking can spend the whole cap and return nothing — an on-demand compaction then ends at `max_tokens` with no `compaction` block.
 - **Prompt Cache Breakpoints**: `applyPromptCaching` (`packages/ai/src/providers/anthropic.ts:3195`, called at `:3506`) marks a two-message rolling window at the tail of the conversation: it attaches `cache_control: { type: "ephemeral" }` (plus `ttl: "1h"` only for long retention on models that support it, built by `getCacheControl` at `:497`) to the last ordinary content block of each of the two trailing turns, skipping `thinking`, `redacted_thinking`, and `fallback` blocks (`applyCacheControlToLastBlock` at `:3179`). When the trailing user message is the neutral `"Continue."` pad appended after an assistant prefill, the window anchors on the preceding real assistant instead. Caching is never applied to system prompts or tool definitions, and there is no total-breakpoint cap.
 
 ### Stream behavior
@@ -462,6 +462,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
   - Stream completion verifies `turnEnded` (`sawTurnEnded`) or throws `incomplete-stream`.
 - **Tool Call Synthesis**:
   - `synthesizeCursorExecToolCall` generates display `toolCall` blocks on assistant output messages to mirror local tool execution in the UI and transcript.
+  - An MCP frame with no local handler on a stream flagged `externalToolExecutor` (auth-gateway) synthesizes the block **without** `kCursorExecResolved` and pairs no result: the gateway client is the executor, and `isClientToolUse` only reports a handoff for an unresolved call.
 
 ### Auth & usage
 - **Credentials & Headers**:
@@ -474,6 +475,9 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
   - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).
   - For OAuth credentials with WorkOS user sessions (`WorkosCursorSessionToken=${userId}::${accessToken}`), fetches personal usage from `https://cursor.com/api/usage-summary` (`parseCursorIndividualUsage`) and user profile email from `https://cursor.com/api/auth/me`.
+- **Turn Usage Accounting (`packages/ai/src/providers/cursor.ts`)**:
+  - `tokenDelta` frames accumulate a running output estimate; `TurnEndedUpdate` then reports the turn's final `input`/`output`/`cache_read`/`cache_write`/`reasoning` counters and every reported bucket replaces that estimate. A frame with no counters leaves the estimate in place.
+  - `conversationCheckpointUpdate.tokenDetails.usedTokens` is whole-conversation occupancy and lands on `usage.contextTokens`, independent of the output estimate — compaction and handoff size the context from it.
 
 ### Catalog model handling
 - **Descriptor Config (`packages/catalog/src/provider-models/descriptors.ts`)**:
@@ -1013,7 +1017,7 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Anthropic & Bedrock tool compatibility (`packages/ai/src/providers/openai-completions.ts`)**:
   - When `context.tools` is `undefined` but conversation history contains tool calls, `params.tools` is set to `[]` for Anthropic-via-LiteLLM compatibility.
   - When `context.tools` is explicitly empty (`[]`, e.g., `/btw` or background turns), `params.tools` and `tool_choice: "none"` are omitted so LiteLLM → Bedrock routes do not generate invalid, empty `toolConfig` blocks.
-- **Telemetry & gateway header detection (`packages/agent/src/telemetry.ts`, `packages/ai/src/auth-gateway/http.ts`)**: `detectGatewayFromHeaders` inspects `x-litellm-call-id` (falling back to `x-litellm-model-id` or `x-litellm-model-group`) to populate `pi.gen_ai.gateway.*` span attributes. Auth gateway HTTP endpoints expose `x-litellm-model-id`, `x-litellm-model-api-base`, `x-litellm-response-cost`, and `x-litellm-response-duration-ms`.
+- **Telemetry & gateway header detection (`packages/agent/src/telemetry.ts`, `packages/ai/src/auth-gateway/http.ts`)**: `detectGatewayFromHeaders` inspects `x-litellm-call-id` (falling back to `x-litellm-model-id` or `x-litellm-model-group`) to populate `omp.gen_ai.gateway.*` span attributes. Auth gateway HTTP endpoints expose `x-litellm-model-id`, `x-litellm-model-api-base`, `x-litellm-response-cost`, and `x-litellm-response-duration-ms`.
 
 ### Auth & usage
 - **Credentials & env (`packages/catalog/src/provider-models/descriptors.ts`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.

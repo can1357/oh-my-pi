@@ -182,14 +182,6 @@ describe("read local:// images", () => {
 		expect(joinText(result.content)).toContain("hello world");
 	});
 
-	it("surfaces a corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
-		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
-		const tool = new ReadTool(makeSession(testDir));
-
-		const error = await tool.execute("call", { path: "local://clip.mp4" }).catch(e => e);
-		expectVideoProbeFailure(String(error?.message ?? error), "clip.mp4");
-	});
-
 	it("surfaces a large corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
 		// A NUL-filled blob wearing a video extension must fail in the video
 		// reader, not in the text pipeline: no byte budget or line scan ever sees

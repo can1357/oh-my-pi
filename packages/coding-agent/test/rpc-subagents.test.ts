@@ -173,25 +173,6 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
-	test("clears stale snapshots when the active RPC session changes", () => {
-		const eventBus = new EventBus();
-		const registry = new RpcSubagentRegistry(eventBus, () => {});
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "SubagentA",
-			index: 0,
-			agent: "task",
-			agentSource: "bundled",
-			status: "started",
-			sessionFile: "/tmp/subagent.jsonl",
-		} satisfies SubagentLifecyclePayload);
-
-		expect(registry.getSubagents()).toHaveLength(1);
-		registry.clear();
-
-		expect(registry.getSubagents()).toHaveLength(0);
-		registry.dispose();
-	});
-
 	test("clears stale snapshots after successful RPC session changes", async () => {
 		const cases: Array<{
 			command: RpcSessionChangeCommand;

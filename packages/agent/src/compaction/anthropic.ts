@@ -255,7 +255,7 @@ export async function requestAnthropicNativeCompaction(
 		throw new Error(
 			response.stopDetails?.type === "compaction"
 				? "Anthropic compaction returned no signed summary"
-				: "Anthropic compaction response carried no compaction block",
+				: `Anthropic compaction response carried no compaction block (stop reason: ${response.stopDetails?.type ?? response.stopReason})`,
 		);
 	}
 	return {

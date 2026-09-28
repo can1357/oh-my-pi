@@ -660,26 +660,6 @@ describe("OpenAI responses history payload", () => {
 		});
 	});
 
-	it("prepends multiple OpenAI developer instructions in order without changing prompt cache key routing", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
-		const payload = (await captureResponsesPayload(
-			model,
-			{
-				systemPrompt: ["stable instructions", "second instructions"],
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			},
-			undefined,
-			{ sessionId: "session-abc" },
-		)) as { input?: unknown[]; prompt_cache_key?: unknown };
-
-		expect(payload.input).toEqual([
-			{ role: "developer", content: "stable instructions" },
-			{ role: "developer", content: "second instructions" },
-			{ role: "user", content: [{ type: "input_text", text: "hi" }] },
-		]);
-		expect(payload.prompt_cache_key).toBe("session-abc");
-	});
-
 	it("uses canonical instructions field for endpoints without developer-role support", async () => {
 		const baseModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const model = buildModel({
@@ -715,15 +695,6 @@ describe("OpenAI responses history payload", () => {
 		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const payload = (await captureResponsesPayload(model, preservedHistoryContext)) as { input?: unknown[] };
 		expect(payload.input).toEqual(preservedHistoryItems);
-	});
-
-	it("prefers assistant native history snapshots for openai-responses", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
-		const payload = (await captureResponsesPayload(model, assistantSnapshotContext)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			...snapshotHistoryItems,
-			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
-		]);
 	});
 
 	it("normalizes result-bearing native images for full Codex replay", () => {

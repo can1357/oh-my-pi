@@ -24,8 +24,14 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{
 		value: "codex",
-		label: "OpenAI",
+		label: "OpenAI Codex",
 		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
+	},
+	{
+		value: "openai",
+		label: "OpenAI API",
+		description:
+			"OpenAI Responses API web search billed to your API account (uses OPENAI_API_KEY/registry API key, separate from ChatGPT Codex OAuth)",
 	},
 	{
 		value: "xai",

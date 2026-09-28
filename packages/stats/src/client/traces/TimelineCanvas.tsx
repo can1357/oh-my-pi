@@ -7,11 +7,11 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { formatDurationMs } from "../data/formatters";
 import type { TraceMarker, TraceSpan, TraceSpanKind, TraceTrack } from "../types";
-import { useSystemTheme } from "../useSystemTheme";
 import { buildTicks, formatOffset, type TraceScale } from "./time-scale";
-import { TRACE_THEMES, type TraceTheme } from "./trace-colors";
+import { type TraceTheme, useTraceTheme } from "./trace-colors";
 
 export interface TimelineViewport {
 	u0: number;
@@ -166,8 +166,7 @@ export function TimelineCanvas({
 	onToggleCollapse,
 	traceStart,
 }: TimelineCanvasProps) {
-	const theme = useSystemTheme();
-	const colors = TRACE_THEMES[theme];
+	const colors = useTraceTheme();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const [canvasWidth, setCanvasWidth] = useState(800);
@@ -416,7 +415,7 @@ export function TimelineCanvas({
 	const tooltip = hover ? renderTooltip(hover, traceStart) : null;
 
 	return (
-		<div ref={containerRef} className="stats-trace-timeline">
+		<div ref={containerRef} className="traces-timeline">
 			{/* Gutter: track/lane labels + collapse chevrons (DOM, not canvas). */}
 			<div style={{ width: GUTTER_W, flexShrink: 0, position: "relative", height: layout.totalHeight }}>
 				{layout.blocks.map(block => (
@@ -443,18 +442,18 @@ export function TimelineCanvas({
 											? `Expand ${block.track.label}`
 											: `Collapse ${block.track.label}`
 									}
-									className="stats-trace-chevron"
+									className="traces-chevron"
 								>
 									{collapsed.has(block.track.id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
 								</button>
 							) : (
 								<span style={{ width: 12, flexShrink: 0 }} />
 							)}
-							<span className="stats-trace-gutter-track truncate" style={{ minWidth: 0 }}>
+							<span className="traces-gutter-track truncate" style={{ minWidth: 0 }}>
 								{block.track.label}
 							</span>
 							{block.track.model && (
-								<span className="stats-trace-gutter-model truncate" style={{ flexShrink: 1, minWidth: 0 }}>
+								<span className="traces-gutter-model mono truncate" style={{ flexShrink: 1, minWidth: 0 }}>
 									{block.track.model}
 								</span>
 							)}
@@ -462,7 +461,7 @@ export function TimelineCanvas({
 						{block.lanes.map(lane => (
 							<div
 								key={`${lane.track.id}:${lane.kind}`}
-								className="stats-trace-gutter-lane"
+								className="traces-gutter-lane"
 								style={{ top: lane.y, left: 20 + block.depth * 14, lineHeight: `${LANE_H}px` }}
 							>
 								{lane.label}
@@ -474,7 +473,7 @@ export function TimelineCanvas({
 
 			<canvas
 				ref={canvasRef}
-				className="stats-trace-canvas"
+				className="traces-canvas"
 				width={Math.floor(canvasWidth * devicePixelRatio)}
 				height={Math.floor(layout.totalHeight * devicePixelRatio)}
 				style={{ width: canvasWidth, height: layout.totalHeight }}
@@ -492,7 +491,7 @@ export function TimelineCanvas({
 				onKeyDown={handleKeyDown}
 			/>
 
-			{tooltip}
+			{tooltip && createPortal(tooltip, document.body)}
 		</div>
 	);
 }
@@ -573,14 +572,14 @@ function draw(
 		ctx.stroke();
 		ctx.restore();
 		ctx.fillStyle = colors.tick;
-		ctx.font = "9px system-ui, sans-serif";
+		ctx.font = `9px ${colors.fontMono}`;
 		ctx.textAlign = "center";
 		ctx.fillText(`⋯ ${formatDurationMs(gap.t1 - gap.t0)}`, x, RULER_H - 4);
 		ctx.textAlign = "left";
 	}
 
 	// Ruler: major ticks get a full-height gridline, minors stay in the ruler.
-	ctx.font = "9px system-ui, sans-serif";
+	ctx.font = `9px ${colors.fontMono}`;
 	for (const tick of buildTicks(scale, u0, u1, width)) {
 		const x = Math.round(toX(tick.u)) + 0.5;
 		ctx.strokeStyle = colors.grid;
@@ -625,9 +624,11 @@ function draw(
 			ctx.globalAlpha = matches ? 1 : 0.3;
 			if (isTurnLane) {
 				// Turn ranges read as context, not work: soft fill + solid start cap.
-				ctx.fillStyle = `${color}3a`;
+				ctx.fillStyle = color;
+				ctx.globalAlpha = (matches ? 1 : 0.3) * 0.23;
 				spanPath(ctx, x, y, w, LANE_H);
 				ctx.fill();
+				ctx.globalAlpha = matches ? 1 : 0.3;
 				ctx.fillStyle = color;
 				ctx.fillRect(x, y, 2, LANE_H);
 			} else {
@@ -636,7 +637,7 @@ function draw(
 				ctx.fill();
 			}
 			if (span.isError) {
-				ctx.fillStyle = `${colors.error}55`;
+				ctx.fillStyle = colors.errorSoft;
 				spanPath(ctx, x, y, w, LANE_H);
 				ctx.fill();
 				ctx.fillStyle = colors.error;
@@ -677,7 +678,7 @@ function draw(
 				ctx.rect(x + 3, y, w - 6, LANE_H);
 				ctx.clip();
 				ctx.fillStyle = isTurnLane ? colors.tick : colors.spanText;
-				ctx.font = "10px system-ui, sans-serif";
+				ctx.font = `10px ${colors.fontSans}`;
 				ctx.fillText(span.label, x + 5, y + LANE_H - 5);
 				ctx.restore();
 			}
@@ -713,28 +714,14 @@ function renderTooltip(hover: HoverState, traceStart: number) {
 	// Fixed positioning escapes the scroll frame's clipping; clamp to the window.
 	const left = Math.min(hover.clientX + 14, window.innerWidth - 320);
 	const top = hover.clientY + 16 > window.innerHeight - 140 ? hover.clientY - 120 : hover.clientY + 16;
-	const style: React.CSSProperties = {
-		position: "fixed",
-		left,
-		top,
-		zIndex: 60,
-		maxWidth: 300,
-		pointerEvents: "none",
-		background: "var(--surface-2)",
-		border: "1px solid var(--border-strong)",
-		borderRadius: 6,
-		padding: "7px 10px",
-		fontSize: 11,
-		lineHeight: 1.5,
-		boxShadow: "0 1px 2px rgba(0,0,0,0.2), 0 4px 16px rgba(0,0,0,0.25)",
-	};
+	const style: React.CSSProperties = { left, top };
 
 	if (hover.hit.kind === "marker") {
 		const { marker } = hover.hit;
 		return (
-			<div style={style}>
-				<div className="stats-font-medium stats-text-primary">{marker.label}</div>
-				<div className="stats-text-muted">
+			<div className="traces-tooltip" style={style}>
+				<div className="traces-tooltip-title">{marker.label}</div>
+				<div className="muted num">
 					{new Date(marker.time).toLocaleTimeString()} ({formatOffset(marker.time - traceStart)})
 				</div>
 			</div>
@@ -743,26 +730,22 @@ function renderTooltip(hover: HoverState, traceStart: number) {
 
 	const { span } = hover.hit;
 	return (
-		<div style={style}>
-			<div className="stats-font-medium stats-text-primary truncate">{span.label}</div>
-			<div className="stats-text-muted">
+		<div className="traces-tooltip" style={style}>
+			<div className="traces-tooltip-title truncate">{span.label}</div>
+			<div className="muted num">
 				{formatDurationMs(span.end - span.start)} · {new Date(span.start).toLocaleTimeString()} (
 				{formatOffset(span.start - traceStart)}){span.unterminated ? " · unterminated" : ""}
 			</div>
 			{span.kind === "model" && (
-				<div className="stats-text-muted">
+				<div className="muted num">
 					{span.tokens !== undefined && <>{span.tokens.toLocaleString()} tok</>}
 					{span.cost !== undefined && <> · ${span.cost.toFixed(4)}</>}
 					{span.ttft !== undefined && <> · TTFT {formatDurationMs(span.ttft)}</>}
 					{span.isError && <> · error</>}
 				</div>
 			)}
-			{span.kind === "subagent" && span.model && <div className="stats-text-muted">{span.model}</div>}
-			{span.detail && (
-				<div className="stats-text-secondary" style={{ wordBreak: "break-word" }}>
-					{span.detail}
-				</div>
-			)}
+			{span.kind === "subagent" && span.model && <div className="muted num">{span.model}</div>}
+			{span.detail && <div className="traces-tooltip-detail">{span.detail}</div>}
 		</div>
 	);
 }

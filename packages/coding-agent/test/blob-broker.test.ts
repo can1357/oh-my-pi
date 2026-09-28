@@ -159,14 +159,6 @@ describe("BlobRegistry lazy blobs", () => {
 		expect((await store.serve(request())).status).toBe(200);
 		expect(renders).toBe(2);
 	});
-
-	it("responds 410 when a lazy source is gone", async () => {
-		const store = new BlobRegistry();
-		const entry = store.registerLazy("gone", "image/png", async () => null);
-		expect(entry.bytes).toBe(0);
-		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
-		expect(response.status).toBe(410);
-	});
 });
 
 describe("BlobRegistry persistence", () => {

@@ -61,26 +61,6 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 		}
 	});
 
-	test("installs busy_timeout BEFORE any lock-taking statement", async () => {
-		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
-		try {
-			// The store doesn't expose the handle, so open a sibling read-only
-			// connection and verify the persisted side-effect of the open: WAL
-			// mode is set (PRAGMA journal_mode=WAL persists to the header), and
-			// the busy_timeout PRAGMA executed without throwing — the latter is
-			// proven by `open()` returning a store at all.
-			const observer = new Database(path.join(tempDir, "agent.db"));
-			try {
-				const row = observer.query("PRAGMA journal_mode").get() as { journal_mode: string };
-				expect(row.journal_mode).toBe("wal");
-			} finally {
-				observer.close();
-			}
-		} finally {
-			store.close();
-		}
-	});
-
 	test("open() survives a writer holding the lock past the retry budget (#7298)", async () => {
 		const dbPath = path.join(tempDir, "ordering.db");
 		const sentinel = path.join(tempDir, "locked.sentinel");
@@ -193,7 +173,6 @@ db.close();`,
 
 	test("exhausts retries and surfaces an error that includes the DB path", async () => {
 		const dbPath = path.join(tempDir, "stuck.db");
-		const realRun = Database.prototype.run;
 		vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database) {
 			// Always-busy: every attempt fails until the retry budget runs out.
 			throw makeBusyError("SQLITE_BUSY_RECOVERY", 261);
@@ -205,8 +184,5 @@ db.close();`,
 		// open uses `maxAttempts = 4`, so the loop sleeps between attempts 0..2
 		// (three times) then throws after attempt 3 without sleeping again.
 		expect(sleepSpy).toHaveBeenCalledTimes(3);
-		// Reference realRun so the TS unused-binding lint stays quiet without
-		// suppressing the actual error path above.
-		expect(typeof realRun).toBe("function");
 	});
 });

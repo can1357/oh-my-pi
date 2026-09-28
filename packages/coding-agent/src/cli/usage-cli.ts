@@ -10,7 +10,6 @@
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthAccountPolicy,
-	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
 	resolveUsedFraction,
@@ -22,14 +21,21 @@ import {
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import { discoverAuthStorage } from "../sdk";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+import {
+	accountIdentityLabel,
+	collectStoredAccounts,
+	collectUnreportedAccounts,
+	selectReportableAccounts,
+	type UsageAccountIdentity,
+} from "../slash-commands/helpers/usage-accounts";
 
 import { cfgRetryUsageReservePct } from "../session/settings";
 
@@ -44,21 +50,10 @@ export interface UsageCommandArgs {
 	history?: boolean;
 	/** History window in days (with `history` or the `clients` action). */
 	days?: number;
-}
-
-/** Identity slice of a stored credential, for "every account" coverage. */
-export interface UsageAccountIdentity {
-	provider: string;
-	type: "api_key" | "oauth";
-	email?: string;
-	accountId?: string;
-	projectId?: string;
-	enterpriseUrl?: string;
-	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
-	orgId?: string;
-	orgName?: string;
-	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
-	authorizedAt?: number;
+	/** CLI `-e <path>` extension paths to load before fetching live reports. */
+	extensions?: string[];
+	/** Skip extension discovery; only load explicit `extensions`. */
+	noExtensions?: boolean;
 }
 
 export interface UsagePolicyDiagnosticsOptions {
@@ -292,112 +287,6 @@ function reportAccountLabel(report: UsageReport, index: number): string {
 		if (scoped) return scoped;
 	}
 	return `account ${index + 1}`;
-}
-
-/** Lowercased identity strings a report can be attributed to. */
-function reportIdentifiers(report: UsageReport): Set<string> {
-	const ids = new Set<string>();
-	const add = (value: unknown): void => {
-		if (typeof value === "string" && value) ids.add(value.toLowerCase());
-	};
-	const meta = report.metadata ?? {};
-	add(meta.email);
-	add(meta.accountId);
-	add(meta.projectId);
-	add(meta.orgId);
-	for (const limit of report.limits) {
-		add(limit.scope.accountId);
-		add(limit.scope.projectId);
-		add(limit.scope.orgId);
-	}
-	return ids;
-}
-
-/**
- * Stored credentials that no usage report could be attributed to.
- *
- * Conservative on purpose: when a provider's reports carry no identity at
- * all (or the credential is an API key alongside existing reports), we
- * can't attribute, so we don't claim the account is missing.
- */
-export function collectUnreportedAccounts(
-	reports: UsageReport[],
-	accounts: UsageAccountIdentity[],
-): UsageAccountIdentity[] {
-	const byProvider = new Map<string, UsageReport[]>();
-	for (const report of reports) {
-		const list = byProvider.get(report.provider) ?? [];
-		list.push(report);
-		byProvider.set(report.provider, list);
-	}
-	return accounts.filter(account => {
-		const providerReports = byProvider.get(account.provider) ?? [];
-		if (providerReports.length === 0) return true;
-		if (account.type === "api_key") return false;
-		// Org-decisive attribution when EITHER side carries an org (Anthropic
-		// multi-subscription): two orgs share every other identifier, so an
-		// org-scoped account is covered only by its own org's report, and an
-		// org-less legacy account is never covered by an org-attributed sibling
-		// report — its own fetch failing must surface as "no usage data". Its
-		// own ORG-LESS report still covers it, though: a mixed pool (fresh
-		// org-scoped logins beside pre-org-capture rows) must not duplicate
-		// every legacy account. The shared org is a GATE, not a match: two Team
-		// members share the org id while drawing on per-user pools, so coverage
-		// also requires the account's own base identity inside the same-org
-		// subset (an org-only account, with no base identifiers, is covered by
-		// any same-org report). The email/account fallback below applies only
-		// when both sides are org-less.
-		const accountOrg = account.orgId?.toLowerCase();
-		const ids = [account.email, account.accountId, account.projectId]
-			.filter((value): value is string => typeof value === "string" && value.length > 0)
-			.map(value => value.toLowerCase());
-		const sameOrgReports: UsageReport[] = [];
-		let sawReportOrg = false;
-		for (const report of providerReports) {
-			const metaOrg = report.metadata?.orgId;
-			if (typeof metaOrg === "string" && metaOrg) {
-				sawReportOrg = true;
-				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
-			}
-		}
-		if (accountOrg || sawReportOrg) {
-			const candidates = accountOrg
-				? sameOrgReports
-				: providerReports.filter(report => {
-						const metaOrg = report.metadata?.orgId;
-						return !(typeof metaOrg === "string" && metaOrg);
-					});
-			if (candidates.length === 0) return true;
-			if (ids.length === 0) return false;
-			return !candidates.some(report => {
-				const identifiers = reportIdentifiers(report);
-				return ids.some(id => identifiers.has(id));
-			});
-		}
-		if (ids.length === 0) return false;
-		const reported = new Set<string>();
-		let anyIdentified = false;
-		for (const report of providerReports) {
-			const identifiers = reportIdentifiers(report);
-			if (identifiers.size > 0) anyIdentified = true;
-			for (const id of identifiers) reported.add(id);
-		}
-		if (!anyIdentified) return false;
-		return !ids.some(id => reported.has(id));
-	});
-}
-
-/** Compose the account label from parts, masking each part individually so `--redact` cannot be bypassed by the composite string. */
-function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
-	if (account.type === "api_key") return "API key";
-	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
-	const masked = redaction?.get(base) ?? base;
-	// orgId fallback: the uuid is the actual scoped identity; a token response
-	// can carry it without a display name, and two same-email rows must still
-	// be tellable apart.
-	const org = account.orgName ?? account.orgId;
-	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
 }
 
 function formatAccountHeader(
@@ -988,55 +877,6 @@ export function formatUsageHistory(
 	return lines.join("\n");
 }
 
-function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.credentials.all();
-	for (const provider in all) {
-		const entry = all[provider];
-		const credentials = Array.isArray(entry) ? entry : [entry];
-		for (const credential of credentials) {
-			if (credential.type === "oauth") {
-				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
-					authorizedAt: credential.authorizedAt,
-				});
-			} else {
-				accounts.push({ provider, type: "api_key" });
-			}
-		}
-	}
-	return accounts;
-}
-
-/**
- * Keep only accounts worth a usage row: those whose provider has a usage
- * provider, so a missing report is a real gap rather than the absence of any
- * usage concept. Providers with no usage endpoint (web-search keys, local /
- * keyless servers, inference providers without a usage API) would only ever
- * render as noise, so they are dropped.
- *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usage.providerFor})
- * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
- * `omp usage --provider xai` can still confirm the stored credential has no
- * usage endpoint.
- */
-export function selectReportableAccounts(
-	accounts: UsageAccountIdentity[],
-	hasUsageProvider: (provider: string) => boolean,
-	explicitProvider?: string,
-): UsageAccountIdentity[] {
-	if (explicitProvider) return accounts;
-	return accounts.filter(account => hasUsageProvider(account.provider));
-}
-
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -1220,19 +1060,26 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);
-		const reports =
-			(await authStorage.usage.reports({
-				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
-			})) ?? [];
-		// Reports are always fresh (broker-side fetch) but the account list can
-		// come from a disk-cached snapshot up to an hour old — revalidate so a
-		// just-logged-in (or just-rotated-identity) credential isn't rendered
-		// as a stale duplicate. Best-effort: offline broker keeps the cache.
+		// Extensions contribute usage providers via `registerProvider(name, { usage })`;
+		// without loading them their accounts land in `accountsWithoutUsage`.
+		await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
+			additionalExtensionPaths: cmd.extensions,
+			disableExtensionDiscovery: cmd.noExtensions,
+			includeAmbientHooks: false,
+			discoverModels: false,
+		});
+		// The broker may serve reports for credentials newer than the local
+		// snapshot. Refresh before probing extension providers with local keys
+		// and before labeling accounts; offline brokers keep the cached snapshot.
 		try {
 			await authStorage.credentials.revalidate();
 		} catch {
 			// Stale identities beat no output.
 		}
+		const reports =
+			(await authStorage.usage.reports({
+				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(
 			storedAccounts,

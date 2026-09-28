@@ -3,10 +3,12 @@ class "xai" {
 	prefix "cursor-grok-"
 	bounded "grok"
 	namespace "x-ai"
-	namespace "xai"
+	// Bedrock Converse ids are dotted (`us.xai.grok-4.6`). Unbounded
+	// namespace only splits on `/`, so `xai` never matched those rows.
+	namespace "xai" bounded=#true
 
 	family "grok" glob="*grok*"
 
 	revision prefix="cursor-grok-"
-	revision prefix="grok-"
+	revision prefix="grok-" anywhere=#true
 }
