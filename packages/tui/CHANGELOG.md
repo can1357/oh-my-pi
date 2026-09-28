@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `statusLine.contextMetric` to the status line: the embedded context gauge, the `context_pct` segment, and the footer can label usage with used tokens (`45K/200K`) instead of a percentage; threshold colors and gauge fill are unchanged
+- Added `statusLine.contextMetric` to the status line: the embedded context gauge, the `context_pct` segment, and the footer can label usage with used tokens (`45K/200K`) instead of a percentage; threshold colors and gauge fill are unchanged ([#13634](https://github.com/can1357/oh-my-pi/pull/13634) by [@kml93](https://github.com/kml93))
 
 ### Fixed
 

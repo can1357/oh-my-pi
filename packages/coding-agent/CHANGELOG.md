@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `statusLine.contextMetric` (`percentage` | `tokens`, default `percentage`) to label context usage with used tokens instead of a percentage on the status line gauge, the `context_pct` segment, and the footer, with a "Context Metric" selector under Settings › Appearance › Status Line
+- Added `statusLine.contextMetric` (`percentage` | `tokens`, default `percentage`) to label context usage with used tokens instead of a percentage on the status line gauge, the `context_pct` segment, and the footer, with a "Context Metric" selector under Settings › Appearance › Status Line ([#13634](https://github.com/can1357/oh-my-pi/pull/13634) by [@kml93](https://github.com/kml93))
 
 ## [18.4.2] - 2026-09-28
 
