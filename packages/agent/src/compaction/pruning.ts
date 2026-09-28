@@ -176,9 +176,11 @@ interface SupersedeCandidate {
 
 /**
  * Collect superseded tool results: for every unpruned, unprotected tool result
- * whose paired call resolves a supersede key, a LATER result with the same key
- * — or with a key that is the `"\u0000"`-prefix parent of this one — marks it
- * superseded. Returned in message order.
+ * whose paired call resolves a supersede key, a LATER successful result marks it
+ * superseded when that result shows at least as much: a complete same-key read, or
+ * a same-key read with the same partial view (summary, truncated page, …); a
+ * `"\u0000"`-prefix parent (selector-free) read replaces selector reads only when
+ * complete, so summaries, truncated pages, and errors never erase other evidence.
  */
 function collectSupersededResults(
 	entries: readonly SessionEntry[],
@@ -188,7 +190,8 @@ function collectSupersededResults(
 	protectedTools: readonly ProtectedToolMatcher[],
 ): SupersedeCandidate[] {
 	const candidates: SupersedeCandidate[] = [];
-	const seenKeys = new Set<string>();
+	/** Supersede key → views of newer successful results: `complete` or a partial-view signature. */
+	const newerViews = new Map<string, Set<string>>();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
@@ -199,8 +202,41 @@ function collectSupersededResults(
 		const key = supersedeKey(toolCall.name, toolCall.arguments as Record<string, unknown>);
 		if (key === undefined) continue;
 		const separator = key.indexOf("\u0000");
-		const superseded = seenKeys.has(key) || (separator >= 0 && seenKeys.has(key.slice(0, separator)));
-		seenKeys.add(key);
+		const sameKeyViews = newerViews.get(key);
+		const parentViews = separator >= 0 ? newerViews.get(key.slice(0, separator)) : undefined;
+		const details = message.details as
+			| {
+					summary?: unknown;
+					truncation?: { truncated?: boolean };
+					fileSize?: number;
+					totalLines?: number;
+					meta?: { truncation?: unknown; limits?: { columnTruncated?: unknown } };
+			  }
+			| undefined;
+		const partial =
+			toolCall.name !== "read"
+				? []
+				: details?.summary !== undefined
+					? ["summary"]
+					: [
+							(details?.truncation?.truncated === true || details?.meta?.truncation !== undefined) &&
+								"truncated",
+							details?.meta?.limits?.columnTruncated !== undefined && "column",
+							// Unscanned local text reads lack an exact line count; images do not have one.
+							details?.fileSize !== undefined &&
+								details.totalLines === undefined &&
+								message.content.every(block => block.type === "text") &&
+								"unscanned",
+						].filter(Boolean);
+		const view = message.isError ? undefined : partial.join("+") || "complete";
+		const superseded =
+			(sameKeyViews !== undefined &&
+				(view === undefined || sameKeyViews.has("complete") || sameKeyViews.has(view))) ||
+			parentViews?.has("complete") === true;
+		if (view !== undefined) {
+			if (sameKeyViews) sameKeyViews.add(view);
+			else newerViews.set(key, new Set([view]));
+		}
 		if (!superseded) continue;
 		candidates.push({
 			entry: entry as SessionMessageEntry,

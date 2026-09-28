@@ -251,6 +251,156 @@ describe("pruneSupersededToolResults — selectors", () => {
 	});
 });
 
+for (const mode of ["stale", "overflow"] as const) {
+	describe(`${mode} pruning — incomplete replacement reads`, () => {
+		test.each([
+			{
+				name: "a summary after a detailed range",
+				earlierPath: "src/foo.ts:50-200",
+				details: { summary: { lines: 1, elidedSpans: 1, elidedLines: 50 } },
+			},
+			{
+				name: "a summary after a complete bare read",
+				earlierPath: "src/foo.ts",
+				details: { summary: { lines: 1, elidedSpans: 1, elidedLines: 50 } },
+			},
+			{
+				name: "a line-limited read",
+				earlierPath: "src/foo.ts:50-200",
+				details: { truncation: { truncated: true } },
+			},
+			{
+				name: "an artifact-spilled read",
+				earlierPath: "src/foo.ts",
+				details: { meta: { truncation: { direction: "middle", artifactId: "complete-output" } } },
+			},
+			{
+				name: "a column-limited read",
+				earlierPath: "src/foo.ts",
+				details: { meta: { limits: { columnTruncated: { maxColumn: 768 } } } },
+			},
+			{
+				name: "a local read that stopped before EOF",
+				earlierPath: "src/foo.ts:500-600",
+				details: { fileSize: 5_000_000 },
+			},
+			{
+				name: "a failed read",
+				earlierPath: "src/foo.ts",
+				isError: true,
+			},
+		])("retains earlier code after $name", ({ earlierPath, details, isError }) => {
+			const [call1, result1] = readPair(earlierPath, FILE_CONTENT, T0);
+			const [call2, result2] = readPair("src/foo.ts", "No implementation body in this result.", T0 + 1_000);
+			resultMessage(result2).details = details;
+			resultMessage(result2).isError = isError ?? false;
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result =
+				mode === "stale"
+					? pruneSupersededToolResults(entries, tokenizer, cfg({ now: T0 + 1_000 }))
+					: pruneToolOutputs(entries, tokenizer, {
+							protectTokens: 1_000_000,
+							minimumSavings: 0,
+							protectedTools: [],
+							supersedeKey: readToolSupersedeKey,
+						});
+
+			expect(result.prunedCount).toBe(0);
+			expect(resultText(result1)).toBe(FILE_CONTENT);
+			expect(resultMessage(result1).prunedAt).toBeUndefined();
+		});
+
+		test("a later complete read can replace both the earlier code and its summary", () => {
+			const [call1, result1] = readPair("src/foo.ts:50-200", FILE_CONTENT, T0);
+			const [call2, result2] = readPair("src/foo.ts", "export function alpha() { … }", T0 + 1_000);
+			resultMessage(result2).details = { summary: { lines: 1, elidedSpans: 1, elidedLines: 50 } };
+			const updatedContent = "export function alpha() { return 2; }\n";
+			const [call3, result3] = readPair("src/foo.ts", updatedContent, T0 + 2_000);
+			resultMessage(result3).details = { fileSize: updatedContent.length, totalLines: 1 };
+			const entries: SessionEntry[] = [call1, result1, call2, result2, call3, result3];
+
+			const result =
+				mode === "stale"
+					? pruneSupersededToolResults(entries, tokenizer, cfg({ now: T0 + 2_000 }))
+					: pruneToolOutputs(entries, tokenizer, {
+							protectTokens: 1_000_000,
+							minimumSavings: 0,
+							protectedTools: [],
+							supersedeKey: readToolSupersedeKey,
+						});
+
+			expect(result.prunedCount).toBe(2);
+			expect(resultMessage(result1).prunedAt).toBeDefined();
+			expect(resultMessage(result2).prunedAt).toBeDefined();
+			expect(resultText(result3)).toBe(updatedContent);
+		});
+
+		test.each([
+			{
+				name: "an older summary",
+				path: "src/foo.ts",
+				details: { summary: { lines: 1, elidedSpans: 1, elidedLines: 50 } },
+			},
+			{
+				name: "an older copy of the same line-limited range",
+				path: "src/foo.ts:50-200",
+				details: { meta: { truncation: { direction: "head", shownRange: { start: 50, end: 200 } } } },
+			},
+		])("a same-view re-read replaces $name", ({ path, details }) => {
+			const [call1, result1] = readPair(path, FILE_CONTENT, T0);
+			resultMessage(result1).details = details;
+			const [call2, result2] = readPair(path, FILE_CONTENT, T0 + 1_000);
+			resultMessage(result2).details = details;
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result =
+				mode === "stale"
+					? pruneSupersededToolResults(entries, tokenizer, cfg({ now: T0 + 1_000 }))
+					: pruneToolOutputs(entries, tokenizer, {
+							protectTokens: 1_000_000,
+							minimumSavings: 0,
+							protectedTools: [],
+							supersedeKey: readToolSupersedeKey,
+						});
+
+			expect(result.prunedCount).toBe(1);
+			expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+			expect(resultText(result2)).toBe(FILE_CONTENT);
+		});
+
+		test.each([
+			{ name: "a page that stopped before EOF", details: { fileSize: 9_000_000 } },
+			{
+				name: "a line-limited page",
+				details: {
+					totalLines: 5_000,
+					meta: { truncation: { direction: "head", shownRange: { start: 1, end: 300 } } },
+				},
+			},
+		])("an older summary survives a newer bare read that shows $name", ({ details }) => {
+			const [call1, result1] = readPair("src/large.ts", FILE_CONTENT, T0);
+			resultMessage(result1).details = { summary: { lines: 50, elidedSpans: 50, elidedLines: 400 } };
+			const [call2, result2] = readPair("src/large.ts", "page 1-300 only", T0 + 1_000);
+			resultMessage(result2).details = details;
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result =
+				mode === "stale"
+					? pruneSupersededToolResults(entries, tokenizer, cfg({ now: T0 + 1_000 }))
+					: pruneToolOutputs(entries, tokenizer, {
+							protectTokens: 1_000_000,
+							minimumSavings: 0,
+							protectedTools: [],
+							supersedeKey: readToolSupersedeKey,
+						});
+
+			expect(result.prunedCount).toBe(0);
+			expect(resultText(result1)).toBe(FILE_CONTENT);
+		});
+	});
+}
+
 describe("pruneSupersededToolResults — protection & latest", () => {
 	test("(e) latest read never pruned, even with idle flush", () => {
 		const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
