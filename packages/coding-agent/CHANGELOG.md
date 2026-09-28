@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Code Mode can now run on non-Codex providers: `auto` enables it for GPT-5.6+ models while `on` forces it for any model with the JavaScript eval bridge available ([#13592](https://github.com/can1357/oh-my-pi/pull/13592) by [@dbc-hbin](https://github.com/dbc-hbin)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Changed
