@@ -569,8 +569,21 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	return sanitizeTerminalTitlePart(baseName);
 }
 
+/**
+ * Append the project directory to a session label (`name - dir`) so tabs stay
+ * identifiable across repositories (issue #12600). Bare-directory fallback and
+ * already-suffixed names pass through untouched.
+ */
+function withProjectDir(sessionName: string | undefined, cwd: string | undefined): string | undefined {
+	const label = sanitizeTerminalTitlePart(sessionName);
+	if (!label) return getFallbackTerminalTitle(cwd);
+	const base = getFallbackTerminalTitle(cwd);
+	if (!base || label.endsWith(` - ${base}`)) return label;
+	return `${label} - ${base}`;
+}
+
 export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
-	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	const label = withProjectDir(sessionName, cwd);
 	return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 }
 
@@ -651,7 +664,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
-	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	terminalTitleRuntime.label = withProjectDir(sessionName, cwd);
 	emitTerminalTitle();
 }
 
