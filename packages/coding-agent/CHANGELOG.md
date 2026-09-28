@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- Code Mode can now run on non-Codex providers: `auto` enables it for GPT-5.6+ models while `on` forces it for any model with the JavaScript eval bridge available ([#13592](https://github.com/can1357/oh-my-pi/pull/13592) by [@dbc-hbin](https://github.com/dbc-hbin)).
+- Added provider-agnostic `tools.codeMode`: `auto` enables Code Mode for catalog-approved models including GPT-5.6+, while `on` forces it for any compatible model; existing `providers.openai-codex.codeMode` configs remain Codex-only ([#13592](https://github.com/can1357/oh-my-pi/pull/13592) by [@dbc-hbin](https://github.com/dbc-hbin)).
 
 ## [18.4.1] - 2026-09-28
 

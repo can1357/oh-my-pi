@@ -111,6 +111,9 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
 	}
+	if (catalog.toolMode === "code_mode_only") {
+		model.toolMode = "code_mode_only";
+	}
 	const editPromptVariant = catalog.editPromptVariant;
 	if (editPromptVariant === "full" || editPromptVariant === "compact") {
 		model.editPromptVariant = editPromptVariant;

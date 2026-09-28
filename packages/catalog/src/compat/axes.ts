@@ -374,6 +374,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },
+	"tool-mode": { key: "toolMode", set: "catalog", shape: "scalar", values: ["code_mode_only"] },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */

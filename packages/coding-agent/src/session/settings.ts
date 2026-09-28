@@ -137,31 +137,46 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
 
+export const cfgToolsCodeMode = register({
+	id: "tools.codeMode",
+	type: "enum",
+	values: ["off", "on", "auto"] as const,
+	default: "off",
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Code Mode",
+		description:
+			"Route tools through eval's programmatic bridge. 'auto' follows model catalog policy; 'on' forces Code Mode for any compatible model; 'off' keeps the direct tool surface.",
+	},
+});
+
+export const cfgToolsCodeModeDirectTools = register({
+	id: "tools.codeModeDirectTools",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Code Mode Direct Tools",
+		description:
+			"Extra direct tools for Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
+	},
+});
+
+/** Legacy Codex-only setting retained so existing configs keep their original scope. */
 export const cfgProvidersOpenaiCodexCodeMode = register({
 	id: "providers.openai-codex.codeMode",
 	type: "enum",
 	values: ["off", "on", "auto"] as const,
 	default: "off",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Code Mode",
-		description:
-			"Route tools through eval's programmatic bridge. 'auto' enables Code Mode for code_mode_only models and GPT-5.6+ models; 'on' forces it for any model when the eval transport supports the bridge; 'off' keeps the direct tool surface.",
-	},
 });
 
+/** Legacy Codex-only direct-tool list retained for existing configs. */
 export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
 	id: "providers.openai-codex.codeModeDirectTools",
 	type: "array",
 	default: EMPTY_STRING_ARRAY,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Code Mode Direct Tools",
-		description:
-			"Extra direct tools for Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
-	},
 });
 
 /**
@@ -169,8 +184,10 @@ export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
  * `EditTool` on the wire (`apply_patch` vs `edit`), which the namespace metadata is keyed by.
  */
 export const cfgCodeModeInputs = combine({
-	codeMode: cfgProvidersOpenaiCodexCodeMode,
-	directTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
+	codeMode: cfgToolsCodeMode,
+	directTools: cfgToolsCodeModeDirectTools,
+	legacyCodexCodeMode: cfgProvidersOpenaiCodexCodeMode,
+	legacyCodexDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
 	evalJs: cfgEvalJs,
 	editMode: cfgEditMode,
 });
