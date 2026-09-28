@@ -73,6 +73,7 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
+import { isCompleteReadResult } from "../tools/read-supersede";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
@@ -709,6 +710,7 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#withPlanProtection({
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
+				supersedeComplete: isCompleteReadResult,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 				// Never re-write summarized-away entries; only flush the whole sent

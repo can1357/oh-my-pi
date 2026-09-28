@@ -2,10 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional `supersedeComplete` hook (`SupersedeCompleteFn`) to `PruneConfig` and `SupersedePruneConfig`: a selector-free result supersedes selector-carrying results of its key only when the hook reports it complete ([#13644](https://github.com/can1357/oh-my-pi/pull/13644) by [@poweroftrue](https://github.com/poweroftrue))
+
+### Changed
+
+- `readToolSupersedeKey()` now keys `:raw` and `:conflicts` reads as `path\u0001selector`, so a bare-path read no longer supersedes them; a failed result now supersedes only older failed results of its key ([#13644](https://github.com/can1357/oh-my-pi/pull/13644) by [@poweroftrue](https://github.com/poweroftrue))
+
 ### Fixed
 
 - Fixed auto-compaction with the `remote` method failing on long Codex/OpenAI sessions with "Remote compaction input exceeds the context window" ([#13611](https://github.com/can1357/oh-my-pi/issues/13611))
 - Fixed passive tool-call context being repeated when several calls in one batch returned the same text; identical per-call context is now delivered once, at its first position ([#13633](https://github.com/can1357/oh-my-pi/pull/13633) by [@andrebrait](https://github.com/andrebrait))
+- Fixed code the agent had already read disappearing from context when a later read of the same file returned only a summary, a truncated page, or an error ([#13644](https://github.com/can1357/oh-my-pi/pull/13644) by [@poweroftrue](https://github.com/poweroftrue))
 
 ## [18.4.2] - 2026-09-28
 
