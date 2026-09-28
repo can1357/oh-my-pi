@@ -3844,7 +3844,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): string | undefined {
-		if (this.#composerStashNoticeTimer) return theme.fg("success", "Prompt stashed");
+		if (this.#composerStashNoticeTimer) return theme.fg("dim", "Prompt stashed");
 		return resolveComposerHint({
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
