@@ -9,6 +9,18 @@ import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
 
+// The devin-cli hook must never touch the real credentials file here; these
+// cases exercise the login result storage, not the file parsing. Bun test has
+// no vi.hoisted, so the mock delegates through a hoisted function declaration
+// that each case re-points before acting.
+let loginDevinCliHookImpl: () => Promise<string> = async () => "";
+function loginDevinCliHookMock(): Promise<string> {
+	return loginDevinCliHookImpl();
+}
+vi.mock("@oh-my-pi/pi-ai/registry/oauth/devin-cli", () => ({
+	loginDevinCliHook: () => loginDevinCliHookMock(),
+}));
+
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
 	try {
@@ -115,6 +127,36 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
 	});
 
+	it("stores a devin-cli login under the store-as provider, not the auth id", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		loginDevinCliHookImpl = async () => "sk-ws-01-adopted";
+
+		await authStorage.oauth.login("devin-cli", {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		});
+
+		expect(countCredentialRows(dbPath, "devin")).toBe(1);
+		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
+		const credentials = store.listAuthCredentials("devin");
+		expect(credentials).toHaveLength(1);
+		const [stored] = credentials;
+		expect(stored?.credential).toEqual({ type: "api_key", key: "sk-ws-01-adopted", source: "login" });
+	});
+
+	it("returns undefined and stores nothing when a login hook yields an empty key", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		loginDevinCliHookImpl = async () => "";
+
+		const identity = await authStorage.oauth.login("devin-cli", {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		});
+
+		expect(identity).toBeUndefined();
+		expect(countCredentialRows(dbPath, "devin")).toBe(0);
+		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
+	});
 	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", async () => {
 		if (!store) throw new Error("test setup failed");
 		const firstToken = "sk-sp-first";
