@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/db";
+import {
+	getBehaviorByModel,
+	getRecentRequests,
+	getToolStats,
+	getToolStatsByModel,
+	initDb,
+} from "@oh-my-pi/omp-stats/db";
 import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -342,6 +348,54 @@ describe("tool usage stats pipeline", () => {
 		await fs.utimes(sessionFile, bumped, bumped);
 		await syncAllSessions({ workers: 1 });
 		expect(getToolStats()).toEqual(first);
+	});
+
+	it("repairs missing rows and links during full replay without invalidating existing request IDs", async () => {
+		await writeSessionFile("session.jsonl", { id: "replay" }, [
+			{
+				type: "message",
+				id: "user-1",
+				timestamp: TS1,
+				message: { role: "user", content: "Please inspect the file." },
+			},
+			...buildStandardEntries(),
+			buildAssistantEntry({
+				entryId: "reply",
+				parentId: "user-1",
+				timestamp: TS2,
+				toolCalls: [],
+				totalTokens: 10,
+				outputTokens: 2,
+				costTotal: 0.001,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+		const before = getToolStats();
+		const retained = getRecentRequests()
+			.filter(row => row.entryId !== "asst-1")
+			.map(row => ({ entryId: row.entryId, id: row.id }));
+		const database = await initDb();
+		database.run("DELETE FROM messages WHERE entry_id = 'asst-1'");
+		database.run("DELETE FROM tool_calls WHERE tool_call_id = 'call-1'");
+		database.run("UPDATE tool_calls SET result_chars = NULL, is_error = NULL WHERE tool_call_id = 'call-2'");
+		database.run("UPDATE user_messages SET model = NULL, provider = NULL");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('session_reconciliation', 'pending')");
+
+		await syncAllSessions({ workers: 1 });
+
+		expect(
+			getRecentRequests()
+				.filter(row => row.entryId !== "asst-1")
+				.map(row => ({ entryId: row.entryId, id: row.id })),
+		).toEqual(retained);
+		expect(getToolStats()).toEqual(before);
+		expect(
+			getBehaviorByModel().map(row => ({
+				model: row.model,
+				provider: row.provider,
+				messages: row.totalMessages,
+			})),
+		).toEqual([{ model: MODEL, provider: PROVIDER, messages: 1 }]);
 	});
 
 	it("collapses provider-polluted tool names and skips nameless calls", async () => {

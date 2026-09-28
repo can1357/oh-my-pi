@@ -465,14 +465,11 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 	return read;
 }
 
-function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
-	const entries: SessionEntry[] = [];
-	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
-	return { entries, read };
-}
 /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
-	return parseSessionEntriesLenient(bytes).entries;
+	const entries: SessionEntry[] = [];
+	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return entries;
 }
 
 function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
@@ -538,7 +535,53 @@ export async function parseSessionFile(
 	let info: nodeFs.Stats;
 	let checkpoint: string;
 	let read: number;
-	let entries: SessionEntry[];
+	const folder = extractFolderFromPath(sessionPath);
+	const agentType = classifyAgentType(sessionPath);
+	const stats: MessageStatsInput[] = [];
+	const userStats: UserMessageStats[] = [];
+	const userLinks: UserMessageLink[] = [];
+	const toolCalls: ToolCallStats[] = [];
+	const toolResults: ToolResultLink[] = [];
+
+	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
+	const visit = (entry: SessionEntry): void => {
+		if (isServiceTierChange(entry)) {
+			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+			return;
+		}
+		if (isUserMessage(entry)) {
+			const userMsg = extractUserStats(sessionPath, folder, entry);
+			if (userMsg) userStats.push(userMsg);
+			return;
+		}
+		if (isToolResultMessage(entry)) {
+			const link = extractToolResultLink(sessionPath, entry);
+			if (link) toolResults.push(link);
+			return;
+		}
+		if (isModelUsage(entry)) {
+			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+			if (modelUsageStats) stats.push(modelUsageStats);
+			return;
+		}
+		if (isAssistantMessage(entry)) {
+			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			if (msgStats) stats.push(msgStats);
+			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			// Persist links even when the user entry was ingested in an earlier tail read.
+			const parentId = entry.parentId;
+			const msg = entry.message;
+			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+				userLinks.push({
+					sessionFile: sessionPath,
+					entryId: parentId,
+					model: msg.model,
+					provider: msg.provider,
+				});
+			}
+		}
+	};
+
 	try {
 		const handle = await fs.open(sessionPath, "r");
 		try {
@@ -564,7 +607,7 @@ export async function parseSessionFile(
 			currentServiceTier = resume
 				? (state?.serviceTier ?? undefined)
 				: scanLastServiceTier(bytes.subarray(0, start));
-			({ entries, read } = parseSessionEntriesLenient(bytes.subarray(start - readStart)));
+			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
 			const newOffset = start + read;
 			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
 			const previous =
@@ -579,63 +622,6 @@ export async function parseSessionFile(
 		if (isEnoent(err))
 			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
 		throw err;
-	}
-
-	const folder = extractFolderFromPath(sessionPath);
-	const agentType = classifyAgentType(sessionPath);
-	const stats: MessageStatsInput[] = [];
-	const userStats: UserMessageStats[] = [];
-	const userLinks: UserMessageLink[] = [];
-	const toolCalls: ToolCallStats[] = [];
-	const toolResults: ToolResultLink[] = [];
-	const userByEntryId = new Map<string, UserMessageStats>();
-	for (const entry of entries) {
-		if (isServiceTierChange(entry)) {
-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-			continue;
-		}
-		if (isUserMessage(entry)) {
-			const userMsg = extractUserStats(sessionPath, folder, entry);
-			if (userMsg) {
-				userStats.push(userMsg);
-				userByEntryId.set(entry.id, userMsg);
-			}
-			continue;
-		}
-		if (isToolResultMessage(entry)) {
-			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
-			continue;
-		}
-		if (isModelUsage(entry)) {
-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
-			if (modelUsageStats) stats.push(modelUsageStats);
-			continue;
-		}
-		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
-			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-			// Link assistant's responding model back to the user message it answered.
-			const parentId = (entry as SessionMessageEntry).parentId;
-			if (parentId) {
-				const msg = entry.message as AssistantMessage;
-				if (msg.model && msg.provider) {
-					// Emit unconditionally. The aggregator's UPDATE is guarded by
-					// `model IS NULL` so this is idempotent: a no-op for already
-					// linked rows, a fix-up for fresh inserts (which start NULL
-					// because the user row is recorded before its reply lands) and
-					// for cross-pass orphans whose parent was committed by an
-					// earlier incremental sync.
-					userLinks.push({
-						sessionFile: sessionPath,
-						entryId: parentId,
-						model: msg.model,
-						provider: msg.provider,
-					});
-				}
-			}
-		}
 	}
 
 	const newOffset = start + read;

@@ -598,29 +598,56 @@ function backfillNoCacheInputCosts(database: Database): void {
 	applyBackfill();
 }
 
-/**
- * Get the stored offset for a session file.
- */
-export function getFileOffset(
-	sessionFile: string,
-): { offset: number; lastModified: number; parserState?: SessionParserState } | null {
-	if (!db) return null;
+/** Persisted transcript identity and parser cursor used to resume stats ingestion. */
+export interface FileOffset {
+	offset: number;
+	lastModified: number;
+	parserState?: SessionParserState;
+}
 
-	const stmt = db.query("SELECT offset, last_modified, parser_state FROM file_offsets WHERE session_file = ?");
-	const row = stmt.get(sessionFile) as
-		| { offset: number; last_modified: number; parser_state: string | null }
-		| undefined;
-	if (!row) return null;
+interface FileOffsetRow {
+	session_file: string;
+	offset: number;
+	last_modified: number;
+	parser_state: string | null;
+}
+
+function decodeFileOffset(row: FileOffsetRow): FileOffset {
 	let parserState: SessionParserState | undefined;
 	if (row.parser_state) {
 		try {
-			const state = JSON.parse(row.parser_state) as SessionParserState;
+			const state: SessionParserState = JSON.parse(row.parser_state);
 			if (state?.version === 1 && state.offset === row.offset) parserState = state;
 		} catch {
 			/* A missing cursor is reconstructed from the transcript. */
 		}
 	}
 	return { offset: row.offset, lastModified: row.last_modified, parserState };
+}
+
+/** Read one persisted cursor for callers inspecting an individual transcript. */
+export function getFileOffset(sessionFile: string): FileOffset | null {
+	if (!db) return null;
+	const row = db
+		.query<FileOffsetRow, [string]>(
+			"SELECT session_file, offset, last_modified, parser_state FROM file_offsets WHERE session_file = ?",
+		)
+		.get(sessionFile);
+	return row ? decodeFileOffset(row) : null;
+}
+
+/** Read a bounded sync work set's cursors with one SQLite snapshot instead of one lookup per file. */
+export function getFileOffsets(sessionFiles: string[]): Map<string, FileOffset> {
+	const offsets = new Map<string, FileOffset>();
+	if (!db || sessionFiles.length === 0) return offsets;
+	const placeholders = sessionFiles.map(() => "?").join(",");
+	const rows = db
+		.query<FileOffsetRow, string[]>(
+			`SELECT session_file, offset, last_modified, parser_state FROM file_offsets WHERE session_file IN (${placeholders})`,
+		)
+		.all(...sessionFiles);
+	for (const row of rows) offsets.set(row.session_file, decodeFileOffset(row));
+	return offsets;
 }
 
 /**
@@ -646,9 +673,17 @@ export interface ParsedSession {
 	sessionFile: string;
 	result: ParseSessionResult;
 	rebuild: boolean;
+	replay: boolean;
 }
 
-/** Commit derived rows, reconciliation state, and cursors together; a failed batch rolls back in full. */
+function* parsedRows<T>(
+	results: ParseSessionResult[],
+	select: (result: ParseSessionResult) => Iterable<T>,
+): Generator<T> {
+	for (const result of results) yield* select(result);
+}
+
+/** Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch. */
 export function applySessionParseResults(sessions: ParsedSession[]): {
 	processed: number;
 	files: number;
@@ -660,54 +695,85 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 		let processed = 0;
 		let files = 0;
 		let reconcile = false;
-		for (const { sessionFile, result, rebuild } of sessions) {
+		const writes: ParseSessionResult[] = [];
+		for (const { sessionFile, result, rebuild, replay } of sessions) {
 			const parserState = result.parserState;
 			if (!parserState) continue;
-			reconcile ||= result.reset ?? false;
-			if (result.reset || rebuild) {
+			let rows = result;
+			if (result.reset || rebuild || replay) {
 				const messages = database
 					.query<{ entry_id: string; timestamp: number }, [string]>(
 						"SELECT entry_id, timestamp FROM messages WHERE session_file = ?",
 					)
 					.all(sessionFile);
 				const users = database
-					.query<{ entry_id: string; timestamp: number }, [string]>(
-						"SELECT entry_id, timestamp FROM user_messages WHERE session_file = ?",
+					.query<{ entry_id: string; timestamp: number; model: string | null }, [string]>(
+						"SELECT entry_id, timestamp, model FROM user_messages WHERE session_file = ?",
 					)
 					.all(sessionFile);
 				const tools = database
-					.query<{ entry_id: string; timestamp: number; tool_call_id: string }, [string]>(
-						"SELECT entry_id, timestamp, tool_call_id FROM tool_calls WHERE session_file = ?",
-					)
+					.query<
+						{ entry_id: string; timestamp: number; tool_call_id: string; result_chars: number | null },
+						[string]
+					>("SELECT entry_id, timestamp, tool_call_id, result_chars FROM tool_calls WHERE session_file = ?")
 					.all(sessionFile);
-				// Only replacements can remove a dedupe owner; fresh files need no retained-row sets.
-				if (!reconcile && (messages.length > 0 || users.length > 0 || tools.length > 0)) {
-					const retainedMessages = new Set(result.stats.map(row => JSON.stringify([row.entryId, row.timestamp])));
-					const retainedUsers = new Set(result.userStats.map(row => JSON.stringify([row.entryId, row.timestamp])));
-					const retainedTools = new Set(
-						result.toolCalls.map(row => JSON.stringify([row.entryId, row.timestamp, row.toolCallId])),
-					);
-					// A removed owner may have surviving fork copies skipped earlier in this pass.
-					reconcile =
-						messages.some(row => !retainedMessages.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
-						users.some(row => !retainedUsers.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
-						tools.some(
-							row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])),
+				if (result.reset || rebuild) {
+					// Only removed owners require another full replay, not an identity-only file replacement.
+					if (!reconcile && (messages.length > 0 || users.length > 0 || tools.length > 0)) {
+						const retainedMessages = new Set(
+							result.stats.map(row => JSON.stringify([row.entryId, row.timestamp])),
 						);
+						const retainedUsers = new Set(
+							result.userStats.map(row => JSON.stringify([row.entryId, row.timestamp])),
+						);
+						const retainedTools = new Set(
+							result.toolCalls.map(row => JSON.stringify([row.entryId, row.timestamp, row.toolCallId])),
+						);
+						reconcile =
+							messages.some(row => !retainedMessages.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+							users.some(row => !retainedUsers.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+							tools.some(
+								row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])),
+							);
+					}
+					if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
+					if (users.length > 0)
+						database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
+					if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
+				} else {
+					// A reconciliation replay only needs missing rows and unfinished links. Keep stable request
+					// IDs and avoid rewriting every table/index for transcripts whose contents did not change.
+					const messageById = new Map(messages.map(row => [row.entry_id, row.timestamp]));
+					const userById = new Map(users.map(row => [row.entry_id, row]));
+					const toolById = new Map(tools.map(row => [row.tool_call_id, row]));
+					rows = {
+						...result,
+						stats: result.stats.filter(row => messageById.get(row.entryId) !== row.timestamp),
+						userStats: result.userStats.filter(row => userById.get(row.entryId)?.timestamp !== row.timestamp),
+						userLinks: result.userLinks.filter(row => userById.get(row.entryId)?.model == null),
+						toolCalls: result.toolCalls.filter(row => {
+							const stored = toolById.get(row.toolCallId);
+							return stored?.entry_id !== row.entryId || stored.timestamp !== row.timestamp;
+						}),
+						toolResults: result.toolResults.filter(row => toolById.get(row.toolCallId)?.result_chars == null),
+					};
 				}
-				if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
-				if (users.length > 0) database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
-				if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
 			}
-			if (result.stats.length > 0) insertMessageStats(result.stats);
-			if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
-			if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
-			if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-			if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-			setFileOffset(sessionFile, result.newOffset, parserState.mtimeMs, parserState);
-			const count = result.stats.length + result.userStats.length;
+			writes.push(rows);
+			const count = rows.stats.length + rows.userStats.length;
 			processed += count;
 			if (count > 0) files++;
+		}
+		// Remove replaced rows before choosing new fork owners, then write each table once per batch.
+		insertMessageStats(parsedRows(writes, result => result.stats));
+		insertUserMessageStats(parsedRows(writes, result => result.userStats));
+		updateUserMessageLinks(parsedRows(writes, result => result.userLinks));
+		insertToolCalls(parsedRows(writes, result => result.toolCalls));
+		updateToolResults(parsedRows(writes, result => result.toolResults));
+		for (const { sessionFile, result } of sessions) {
+			if (result.parserState) {
+				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
+			}
 		}
 		if (reconcile) {
 			database.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')").run();
@@ -740,8 +806,8 @@ export function completeSessionSync(reconcile: boolean): void {
  * stored cost (orchestration-aware) and keeps `premium_requests` monotonic, so
  * a forced re-parse repairs historical `premium_requests` and cost fix-ups.
  */
-export function insertMessageStats(stats: MessageStatsInput[]): number {
-	if (!db || stats.length === 0) return 0;
+export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
+	if (!db) return 0;
 
 	const stmt = db.query(`
 		INSERT INTO messages (
@@ -1751,8 +1817,8 @@ export function markSessionBackfillsComplete(): void {
  * copy user entries verbatim into the child JSONL, so the same
  * `(entry_id, timestamp)` must not land twice across different session files.
  */
-export function insertUserMessageStats(stats: UserMessageStats[]): number {
-	if (!db || stats.length === 0) return 0;
+export function insertUserMessageStats(stats: Iterable<UserMessageStats>): number {
+	if (!db) return 0;
 
 	const stmt = db.query(`
 		INSERT OR IGNORE INTO user_messages (
@@ -1800,15 +1866,14 @@ export function insertUserMessageStats(stats: UserMessageStats[]): number {
 
 /**
  * Backfill the responding `model`/`provider` on user-message rows that were
- * persisted before their assistant reply was parsed (a side effect of
- * incremental `fromOffset` syncing: the `userByEntryId` map in
- * `parseSessionFile` only spans a single pass). Each row is updated at most
+ * persisted before their assistant reply was parsed by an incremental tail
+ * read. Each row is updated at most
  * once because the `model IS NULL` guard short-circuits subsequent passes.
  *
  * Returns the number of rows actually updated.
  */
-export function updateUserMessageLinks(links: UserMessageLink[]): number {
-	if (!db || links.length === 0) return 0;
+export function updateUserMessageLinks(links: Iterable<UserMessageLink>): number {
+	if (!db) return 0;
 
 	const stmt = db.query(`
 		UPDATE user_messages
@@ -2013,8 +2078,8 @@ export function getBehaviorByModel(cutoff?: number | null): BehaviorModelStats[]
  * identity, not the call id alone — provider call ids are not a global
  * namespace across unrelated sessions.
  */
-export function insertToolCalls(calls: ToolCallStats[]): number {
-	if (!db || calls.length === 0) return 0;
+export function insertToolCalls(calls: Iterable<ToolCallStats>): number {
+	if (!db) return 0;
 
 	const stmt = db.query(`
 		INSERT OR IGNORE INTO tool_calls (
@@ -2064,8 +2129,8 @@ export function insertToolCalls(calls: ToolCallStats[]): number {
  * guard makes re-syncs idempotent; rows skipped by the fork guard simply
  * never match.
  */
-export function updateToolResults(links: ToolResultLink[]): number {
-	if (!db || links.length === 0) return 0;
+export function updateToolResults(links: Iterable<ToolResultLink>): number {
+	if (!db) return 0;
 
 	const stmt = db.query(`
 		UPDATE tool_calls

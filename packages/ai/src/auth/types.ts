@@ -632,6 +632,10 @@ export interface ResetCreditRedeemOutcome {
 /** One stored account's live saved-reset status, from {@link AuthStorage.resets.list}. */
 export interface ResetCreditAccountStatus extends UsageResetCredits {
 	provider: string;
+	/** Live quota evidence from this exact account's reset-discovery response. */
+	report?: UsageReport;
+	/** Provider-requested wait before retrying throttled reset discovery (not redemption). */
+	retryAfterMs?: number;
 	credentialId: number;
 	accountId?: string;
 	email?: string;
@@ -1253,7 +1257,7 @@ export interface BlocksApi {
 	 */
 	upsert(block: StoredCredentialBlock): void;
 	/**
-	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
+	 * Broker-server seam: clear one exact persisted block and notify snapshot waiters.
 	 */
 	delete(credentialId: number, providerKey: string, blockScope: string): void;
 	/** Delete all persisted blocks for a credential. */

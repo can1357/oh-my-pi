@@ -12,8 +12,8 @@ const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
 /**
  * Per-credential cool-down after a usage fetch fails. While this window is
  * active we serve the last successful value to avoid dropping the credential
- * from the report; without a previous value we just return null and retry
- * on the next poll. Used by UsageService.
+ * from the report; without a previous value we return null until the
+ * cooldown expires. Report invalidation does not bypass this cooldown.
  */
 export const USAGE_FAILURE_BACKOFF_MS = 10_000;
 /**
@@ -118,6 +118,9 @@ export function oauthUsageRequest(
 /** Store-backed usage report cache: keys, epoch, force-refresh markers, invalidation; used by AuthStorage. */
 export class UsageCache {
 	#epoch = 0;
+	#recoveryEpochs: Map<Provider, number> = new Map();
+	#refreshEpochs: Map<Provider, number> = new Map();
+	#allRefreshEpoch = 0;
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
@@ -146,6 +149,30 @@ export class UsageCache {
 
 	bumpEpoch(): void {
 		this.#epoch += 1;
+	}
+
+	/** Identifies confirmed recoveries that supersede an in-flight failed probe. */
+	recoveryEpoch(provider: Provider): number {
+		return this.#recoveryEpochs.get(provider) ?? 0;
+	}
+
+	/**
+	 * Changes when a user refresh, confirmed reset, or usage-implementation swap
+	 * makes an in-flight probe too old to answer. Block marks do not change it:
+	 * they stop a racing report from being cached, never trigger a re-probe.
+	 */
+	refreshEpoch(provider: Provider): number {
+		return this.#allRefreshEpoch + (this.#refreshEpochs.get(provider) ?? 0);
+	}
+
+	#bumpRefreshEpoch(provider: Provider | undefined): void {
+		if (provider === undefined) this.#allRefreshEpoch += 1;
+		else this.#refreshEpochs.set(provider, (this.#refreshEpochs.get(provider) ?? 0) + 1);
+	}
+
+	/** Failure cooldowns survive report invalidation and process restarts. */
+	failureKey(reportKey: string): string {
+		return `failure:${reportKey}`;
 	}
 
 	get<T>(key: string): UsageCacheEntry<T> | undefined {
@@ -275,12 +302,27 @@ export class UsageCache {
 		}
 	}
 
+	/** A confirmed reset permits one fresh probe even during a pre-reset failure cooldown. */
+	invalidateAfterReset(provider: Provider, baseUrl?: string): void {
+		this.#recoveryEpochs.set(provider, this.recoveryEpoch(provider) + 1);
+		this.#bumpRefreshEpoch(provider);
+		if (!this.deletePrefix(`failure:report:${this.#usageCacheProviderKey(provider)}:`)) {
+			const keys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
+			for (const entry of this.#pool.entries(provider)) {
+				keys.add(this.reportKey(usageRequest(provider, buildUsageCredential(entry.credential), baseUrl)));
+			}
+			for (const key of keys) this.set(this.failureKey(key), { value: null, expiresAt: 0 });
+		}
+		this.invalidate(provider, baseUrl);
+	}
+
 	/**
 	 * Expire cached reports for a provider after its runtime usage implementation changes.
 	 * This keeps a newly installed extension provider from serving a built-in snapshot.
 	 */
 	invalidateForProvider(provider: Provider): void {
 		this.#epoch += 1;
+		this.#bumpRefreshEpoch(provider);
 		const expired = Date.now() - 1;
 		const prefix = `report:${this.#usageCacheProviderKey(provider)}:`;
 		if (this.deletePrefix(prefix)) return;
@@ -308,6 +350,7 @@ export class UsageCache {
 		collectRequests: () => Promise<UsageRequestDescriptor[]>,
 	): Promise<void> {
 		this.#epoch += 1;
+		this.#bumpRefreshEpoch(provider);
 		const prefix = provider ? `report:${this.#usageCacheProviderKey(provider)}:` : "report:";
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active

@@ -43,6 +43,7 @@ import {
 } from "./types";
 import {
 	clientUsageReportRequestSchema,
+	credentialBlockDeleteRequestSchema,
 	credentialBlockRequestSchema,
 	credentialDisableRequestSchema,
 	credentialUploadRequestSchema,
@@ -830,6 +831,25 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						logger.warn("auth-broker credential block upsert failed", { id, peer, error: message });
 						const status = message.includes("No credential with id") ? 404 : 500;
 						return json(status, { error: message });
+					}
+				}
+				const blockDeleteMatch = req.method === "DELETE" ? pathname.match(BLOCK_ROUTE) : null;
+				if (blockDeleteMatch) {
+					const id = Number.parseInt(blockDeleteMatch[1], 10);
+					const parsed = await parseBody(req, credentialBlockDeleteRequestSchema);
+					if (!parsed.ok) return parsed.response;
+					if (!opts.storage.credentials.snapshot().credentials.some(entry => entry.id === id)) {
+						return json(404, { error: `No credential with id=${id}` });
+					}
+					try {
+						opts.storage.blocks.delete(id, parsed.data.providerKey, parsed.data.blockScope);
+						const response: CredentialBlocksDeleteResponse = { ok: true };
+						logger.info("auth-broker credential block deleted", { id, peer, ...parsed.data });
+						return json(200, response);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						logger.warn("auth-broker credential block delete failed", { id, peer, error: message });
+						return json(500, { error: message });
 					}
 				}
 				const blocksDeleteMatch = req.method === "DELETE" ? pathname.match(BLOCKS_ROUTE) : null;

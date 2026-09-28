@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Fixed Anthropic accounts remaining blocked after quota resets, including broker-connected clients, without lifting independent authentication or exhausted model limits
+- Fixed concurrent usage refreshes repeatedly bypassing failed-probe cooldowns and flooding provider usage endpoints
 - Fixed Gemini and Antigravity responses reporting negative input tokens and negative cost when upstream omitted `promptTokenCount` or reported more cached tokens than the prompt
 - Fixed a 401 on a stored credential giving up after one sibling switch, so a valid stored API key or account was never tried when two or more stale siblings existed; 401s now rotate through every distinct sibling ([#13555](https://github.com/can1357/oh-my-pi/issues/13555))
 - Fixed native judge responses without token counts producing non-finite usage and cost ([#13490](https://github.com/can1357/oh-my-pi/issues/13490)).

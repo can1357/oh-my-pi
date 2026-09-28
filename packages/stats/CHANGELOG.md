@@ -5,7 +5,7 @@
 ### Fixed
 
 - Ensure synchronization of session statistics is atomic, preventing duplicate entries during interrupted syncs
-- Sped up large session-history imports in `omp stats` with batched database writes and cached queries.
+- Sped up initial imports and repeat syncs in `omp stats`, including histories with tens of thousands of session files.
 
 ## [18.2.9] - 2026-09-22
 

@@ -44,6 +44,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
 	UsageFallbackConfirmation,
@@ -239,7 +240,7 @@ export interface TurnRecoveryHost {
 	 * `activeBlockUnblockAtMs` is the absolute unblock time parsed from the live
 	 * usage-limit error and never substitutes for live grant eligibility.
 	 */
-	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<boolean>;
+	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -2338,15 +2339,47 @@ export class TurnRecovery {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
 		}
 
-		if (!retryBudgetExhausted && !staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
-			if (
-				recordedUsageLimitOutcome.switchedCredential ||
-				// Convert the parsed hint to an absolute timestamp NOW, before the
-				// hook's usage IO — a duration re-anchored after slow fetches drifts.
-				(await this.#host.maybeAutoRedeemReset(
-					parsedRetryAfterMs === undefined ? undefined : Date.now() + parsedRetryAfterMs,
-				))
-			) {
+		// Rotation can spend the same-route retry budget before the last account
+		// hits its quota. Past the budget only a confirmed reset may continue: a
+		// rotation that keeps claiming a usable sibling would otherwise retry forever.
+		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
+			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
+			let restored = false;
+			if (!rotated) {
+				const resetAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = resetAbortController;
+				const startedAtMs = Date.now();
+				const unblockAtMs = parsedRetryAfterMs === undefined ? undefined : startedAtMs + parsedRetryAfterMs;
+				try {
+					for (let attempt = 0; ; attempt++) {
+						const result = await this.#host.maybeAutoRedeemReset(unblockAtMs);
+						resetAbortController.signal.throwIfAborted();
+						if (result.restored) {
+							restored = true;
+							break;
+						}
+						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						// Only retry the safe eligibility read, never the reset mutation or
+						// model request. Respect provider pacing within the configured wait cap.
+						const readDelayMs = Math.max(
+							1_000,
+							result.retryAfterMs,
+							calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, attempt + 1),
+						);
+						if (retrySettings.maxDelayMs > 0 && Date.now() - startedAtMs + readDelayMs > retrySettings.maxDelayMs)
+							break;
+						await sleepLong(readDelayMs, resetAbortController.signal);
+					}
+				} catch (error) {
+					if (!resetAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== resetAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === resetAbortController) this.#retryAbortController = undefined;
+				}
+			}
+			if (rotated || restored) {
 				switchedCredential = true;
 				delayMs = 0;
 			} else {

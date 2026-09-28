@@ -373,6 +373,175 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 });
 
 describe("AuthStorage usage cache: explicit invalidation", () => {
+	it("preserves failed-probe cooldown across repeated invalidation and storage recreation", async () => {
+		const row = oauthRow(1, "a@example.com");
+		const store = makeStore([row]);
+		let calls = 0;
+		const recovered = makeReport("a@example.com");
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			supports: params => params.provider === "anthropic",
+			async fetchUsage() {
+				calls += 1;
+				return calls === 1 ? null : recovered;
+			},
+		};
+		const options = {
+			usageProviderResolver: (provider: string) => (provider === "anthropic" ? usageProvider : undefined),
+		};
+		let storage = new AuthStorage(store, options);
+		await storage.credentials.reload();
+		try {
+			expect(await storage.usage.reports()).toEqual([]);
+			await storage.usage.invalidate("anthropic");
+			expect(await storage.usage.reports()).toEqual([]);
+			storage.close();
+			storage = new AuthStorage(store, options);
+			await storage.credentials.reload();
+			await storage.usage.invalidate("anthropic");
+			expect(await storage.usage.reports()).toEqual([]);
+			expect(calls).toBe(1);
+
+			expireCachePayloads(store);
+			expect(await storage.usage.reports()).toEqual([recovered]);
+			expect(calls).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("shares an in-flight failure across invalidation and concurrent usage consumers", async () => {
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		let calls = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			supports: params => params.provider === "anthropic",
+			async fetchUsage() {
+				calls += 1;
+				started.resolve();
+				return release.promise;
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+		});
+		await storage.credentials.reload();
+		try {
+			const initial = storage.usage.reports();
+			await started.promise;
+			await storage.usage.invalidate("anthropic");
+			const refreshed = storage.usage.reports();
+			await storage.usage.invalidate("anthropic");
+			const peer = storage.usage.reports();
+			release.resolve(null);
+
+			expect(await Promise.all([initial, refreshed, peer])).toEqual([[], [], []]);
+			expect(calls).toBe(1);
+			await storage.usage.invalidate("anthropic");
+			expect(await storage.usage.reports()).toEqual([]);
+			expect(calls).toBe(1);
+		} finally {
+			release.resolve(null);
+			storage.close();
+		}
+	});
+
+	it("replaces an invalidated in-flight success with one shared fresh probe", async () => {
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		const stale = makeReport("a@example.com");
+		const fresh: UsageReport = {
+			...stale,
+			fetchedAt: stale.fetchedAt + 1,
+			limits: stale.limits.map(limit => ({ ...limit, amount: { ...limit.amount, used: 0 } })),
+		};
+		let calls = 0;
+		let active = 0;
+		let peak = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			supports: params => params.provider === "anthropic",
+			async fetchUsage() {
+				calls += 1;
+				active += 1;
+				peak = Math.max(peak, active);
+				try {
+					if (calls !== 1) return fresh;
+					started.resolve();
+					return await release.promise;
+				} finally {
+					active -= 1;
+				}
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+		});
+		await storage.credentials.reload();
+		try {
+			const initial = storage.usage.reports();
+			await started.promise;
+			await storage.usage.invalidate("anthropic");
+			const refreshed = storage.usage.reports();
+			const peer = storage.usage.reports();
+			release.resolve(stale);
+
+			expect(await Promise.all([initial, refreshed, peer])).toEqual([[fresh], [fresh], [fresh]]);
+			expect(calls).toBe(2);
+			expect(peak).toBe(1);
+			expect(await storage.usage.reports()).toEqual([fresh]);
+			expect(calls).toBe(2);
+		} finally {
+			release.resolve(null);
+			storage.close();
+		}
+	});
+
+	it("answers an in-flight probe that races a block write without probing again", async () => {
+		const store = makeStore([oauthRow(1, "a@example.com")]);
+		store.upsertCredentialBlock = () => {};
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		const report = makeReport("a@example.com");
+		let calls = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			supports: params => params.provider === "anthropic",
+			async fetchUsage() {
+				calls += 1;
+				started.resolve();
+				return release.promise;
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+		});
+		await storage.credentials.reload();
+		try {
+			const pending = storage.usage.reports();
+			await started.promise;
+			// Every 429 writes a block while other sessions poll usage; that must
+			// not multiply requests against a per-IP rate-limited endpoint.
+			storage.blocks.upsert({
+				credentialId: 1,
+				providerKey: "anthropic:oauth",
+				blockScope: "tier:fable",
+				blockedUntilMs: Date.now() + 60_000,
+			});
+			await storage.usage.invalidate("openai-codex");
+			release.resolve(report);
+
+			expect(await pending).toEqual([report]);
+			expect(calls).toBe(1);
+		} finally {
+			release.resolve(null);
+			storage.close();
+		}
+	});
+
 	it("clears cached API-key reports before the next usage read", async () => {
 		const store = makeStore([
 			{

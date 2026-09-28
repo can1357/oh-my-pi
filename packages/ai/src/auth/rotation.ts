@@ -6,6 +6,8 @@ import type { CredentialRankingContext, CredentialRankingStrategy } from "../usa
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import {
+	ACCOUNT_POLICY_BLOCK_SCOPE,
+	AUTH_BLOCK_SCOPE,
 	DEFAULT_BLOCK_MS,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
@@ -347,6 +349,7 @@ export class RateLimits implements LimitsApi {
 			providerTypeKey(provider, matched.type),
 			matched.index,
 			Date.now() + DEFAULT_BLOCK_MS,
+			AUTH_BLOCK_SCOPE,
 		);
 
 		const markSuspect = this.#deps.store.markCredentialSuspect?.bind(this.#deps.store);
@@ -443,7 +446,7 @@ export class RateLimits implements LimitsApi {
 				modelPolicyScope,
 			);
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
-			routing.blockScope = modelPolicyScope;
+			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
 			const sticky = this.#deps.affinity.get(provider, sessionId);
 			if (
 				!sessionCredential.explicit ||
@@ -481,7 +484,13 @@ export class RateLimits implements LimitsApi {
 		) {
 			this.#deps.affinity.clear(provider, sessionId);
 		}
-		this.#deps.blocks.mark(provider, providerKey, sessionCredential.index, Date.now() + DEFAULT_BLOCK_MS);
+		this.#deps.blocks.mark(
+			provider,
+			providerKey,
+			sessionCredential.index,
+			Date.now() + DEFAULT_BLOCK_MS,
+			AUTH_BLOCK_SCOPE,
+		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
 			const disabledCause = message ?? "upstream reported invalidated OAuth token";
