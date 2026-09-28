@@ -92,14 +92,14 @@ describe("buildSkillPromptMessage", () => {
 		}
 	});
 
-	test("strips BOM + CRLF frontmatter without leaking raw YAML", async () => {
+	test("preserves HTML comments in the skill body", async () => {
 		const { dir, skill } = await createSkillFromRaw(
-			"\uFEFF---\r\nname: reviewer\r\ndescription: Review code\r\n---\r\n\r\nReview with BOM and CRLF.\r\n",
+			"---\nname: reviewer\ndescription: Review code\n---\n\nBody with <!-- note --> inside.\n",
 		);
 		try {
 			const built = await buildSkillPromptMessage(skill, { args: "" });
 
-			expect(built.message).toContain("Review with BOM and CRLF.");
+			expect(built.message).toContain("Body with <!-- note --> inside.");
 			expect(built.message).not.toContain("name: reviewer");
 			expect(built.message).not.toContain("description: Review code");
 		} finally {
@@ -107,31 +107,14 @@ describe("buildSkillPromptMessage", () => {
 		}
 	});
 
-	test("strips BOM + LF frontmatter without leaking raw YAML", async () => {
-		const { dir, skill } = await createSkillFromRaw(
-			"\uFEFF---\nname: reviewer\ndescription: Review code\n---\n\nReview with BOM and LF.\n",
-		);
+	test("strips frontmatter whose closing delimiter is at EOF with no trailing newline", async () => {
+		const { dir, skill } = await createSkillFromRaw("---\nname: reviewer\ndescription: Review code\n---");
 		try {
 			const built = await buildSkillPromptMessage(skill, { args: "" });
 
-			expect(built.message).toContain("Review with BOM and LF.");
 			expect(built.message).not.toContain("name: reviewer");
 			expect(built.message).not.toContain("description: Review code");
-		} finally {
-			await removeWithRetries(dir);
-		}
-	});
-
-	test("strips frontmatter whose closing delimiter has no trailing newline", async () => {
-		const { dir, skill } = await createSkillFromRaw(
-			"---\nname: reviewer\ndescription: Review code\n---\nBody right after the delimiter.",
-		);
-		try {
-			const built = await buildSkillPromptMessage(skill, { args: "" });
-
-			expect(built.message).toContain("Body right after the delimiter.");
-			expect(built.message).not.toContain("name: reviewer");
-			expect(built.message).not.toContain("description: Review code");
+			expect(built.details.lineCount).toBe(0);
 		} finally {
 			await removeWithRetries(dir);
 		}

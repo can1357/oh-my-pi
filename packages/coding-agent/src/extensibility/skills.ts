@@ -487,7 +487,7 @@ export async function buildSkillPromptMessage(
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
 	const content = await Bun.file(skill.filePath).text();
-	const body = parseFrontmatter(content.replace(/^\uFEFF/, ""), { level: "off" }).body.trim();
+	const body = parseFrontmatter(content, { repair: false, level: "off" }).body.trim();
 	const trimmedArgs = input.args.trim();
 	let message: string;
 	if (invocation === "user") {

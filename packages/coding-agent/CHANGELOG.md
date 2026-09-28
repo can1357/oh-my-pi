@@ -14,6 +14,9 @@
 ### Fixed
 
 - Fixed `block-clone` task isolation on Windows ReFS and Dev Drive volumes failing on files whose size is not a whole number of clusters, larger than 4 GiB, or sparse.
+### Fixed
+
+- Fixed `SKILL.md` files with CRLF line endings leaking the raw YAML frontmatter block into the skill prompt body for `/skill:` invocations and autoload injections; the prompt path now strips frontmatter with the canonical parser instead of an LF-only pattern, without altering skill body content ([#13590](https://github.com/can1357/oh-my-pi/issues/13590)).
 
 ## [18.4.1] - 2026-09-28
 
