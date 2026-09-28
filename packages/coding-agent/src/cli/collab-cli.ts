@@ -15,6 +15,14 @@ import {
 } from "../collab/registry";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { Settings } from "../config/settings";
+import { cfgCollabEnabled } from "../collab/settings";
+
+export class CollabDisabledError extends Error {
+	constructor() {
+		super("Collaboration is disabled by settings (collab.enabled)");
+	}
+}
 
 export interface CollabListCommandArgs {
 	/** Emit deterministic machine-readable JSON. */
@@ -47,6 +55,8 @@ export async function runCollabListCommand(
 	args: CollabListCommandArgs,
 	print: (line: string) => void = line => console.log(line),
 ): Promise<void> {
+	const settings = await Settings.loadReadOnly();
+	if (!cfgCollabEnabled.get(settings)) throw new CollabDisabledError();
 	const hosts = await listCollabHosts(args.registry);
 	if (args.json) {
 		const output: CollabListJsonOutput = { version: COLLAB_REGISTRY_VERSION, hosts };
@@ -90,6 +100,8 @@ export async function runCollabLinkCommand(
 	args: CollabLinkCommandArgs,
 	print: (line: string) => void = line => console.log(line),
 ): Promise<void> {
+	const settings = await Settings.loadReadOnly();
+	if (!cfgCollabEnabled.get(settings)) throw new CollabDisabledError();
 	const link = await resolveCollabHostLink(args.selector, args.view ? "view" : "control", args.registry);
 	if (args.json) {
 		const output: CollabLinkJsonOutput = { version: COLLAB_REGISTRY_VERSION, ...link };

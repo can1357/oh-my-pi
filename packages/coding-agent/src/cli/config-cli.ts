@@ -341,6 +341,11 @@ function shadowingSource(setting: AnySetting): { json: Record<string, string>; m
 						message: `$${name} overrides this value; unset it for the saved value to apply.`,
 					};
 		}
+		case "managed":
+			return {
+				json: { overriddenBy: provenance },
+				message: "Machine-managed settings override this value; change the managed config to make it effective.",
+			};
 		case "project":
 			return {
 				json: { overriddenBy: provenance },

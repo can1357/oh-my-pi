@@ -904,6 +904,7 @@ export class SettingsSelectorComponent implements Component {
 			description: def.description,
 			warning: def.warning,
 			changed: this.#isChanged(def, currentValue),
+			managed: def.managed,
 		};
 
 		switch (def.type) {

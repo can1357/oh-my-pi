@@ -99,6 +99,7 @@ export const isoResolve = nativeBindings.isoResolve ?? missingNativeExport("isoR
 export const isoStart = nativeBindings.isoStart ?? missingNativeExport("isoStart");
 export const isoStop = nativeBindings.isoStop ?? missingNativeExport("isoStop");
 export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport("listWorkspace");
+export const machineProgramDataDir = nativeBindings.machineProgramDataDir ?? missingNativeExport("machineProgramDataDir");
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
 export const macOSSpellCheckerAvailable = nativeBindings.macOSSpellCheckerAvailable ?? missingNativeExport("macOSSpellCheckerAvailable");

@@ -5,6 +5,18 @@
 import { register } from "../config/registry";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 
+export const cfgShareEnabled = register({
+	id: "share.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Collab",
+		label: "Session Sharing",
+		description: "Allow encrypted session links via /share and omp share (including custom share handlers)",
+	},
+});
+
 export const cfgShareServerUrl = register({
 	id: "share.serverUrl",
 	type: "string",

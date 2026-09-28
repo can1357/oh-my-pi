@@ -17,7 +17,7 @@ import { resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 
 import { cfgSecretsEnabled } from "../secrets/settings";
-import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "./settings";
+import { cfgShareEnabled, cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "./settings";
 
 export default class Share extends Command {
 	static description = commandHelp.description;
@@ -60,6 +60,11 @@ export default class Share extends Command {
 		// Settings resolve against the session's own project so its
 		// share.redactSecrets/secrets.enabled policy governs, not the invoking cwd's.
 		const settings = await Settings.loadReadOnly({ cwd: sm.getCwd() });
+		if (!cfgShareEnabled.get(settings)) {
+			process.stderr.write("error: Session sharing is disabled by settings (share.enabled)\n");
+			process.exitCode = 1;
+			return;
+		}
 		// Same leak boundary as /share: a share blob leaves the machine, so honor
 		// share.redactSecrets with the full obfuscator built against the session's
 		// own project directory (its secrets.yml, not the invoking cwd's).
@@ -69,6 +74,7 @@ export default class Share extends Command {
 				: undefined;
 
 		const result = await shareSession(sm, {
+			settings,
 			serverUrl: cfgShareServerUrl.get(settings),
 			store: flags.gist ? "gist" : cfgShareStore.get(settings),
 			obfuscator,

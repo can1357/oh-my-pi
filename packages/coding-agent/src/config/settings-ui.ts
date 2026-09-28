@@ -35,8 +35,9 @@ const CONDITIONS: Record<string, () => boolean> = {
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),
 };
 
-/** Description suffix telling the panel user that an environment variable is in play. */
-function envNote(setting: AnySetting): string {
+/** Description suffix telling the panel user about environment variable override or managed state. */
+function envNote(setting: AnySetting, isManaged: boolean): string {
+	if (isManaged) return " Machine-managed setting (read-only); change the managed config to modify.";
 	if (!setting.envName || setting.envValue() === undefined) return "";
 	return setting.envFallback
 		? ` Unset, it falls back to $${setting.envName}.`
@@ -54,7 +55,8 @@ export function createSettingsHost(): SettingsHost {
 		for (const setting of orderedSettings()) {
 			const ui = setting.ui;
 			if (ui?.tab !== tab) continue;
-			const note = envNote(setting);
+			const isManaged = isSettingsInitialized() && Settings.instance.isManaged(setting);
+			const note = envNote(setting, isManaged);
 			entries.push({
 				path: setting.id,
 				type: setting.type,
@@ -63,6 +65,7 @@ export function createSettingsHost(): SettingsHost {
 				enumValues: setting.enumValues,
 				credential: setting.isCredential,
 				condition: ui.condition ? CONDITIONS[ui.condition] : undefined,
+				managed: isManaged,
 			});
 		}
 	}

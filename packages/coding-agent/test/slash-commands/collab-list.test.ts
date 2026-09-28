@@ -47,7 +47,7 @@ function createHarness() {
 		editor: { setText },
 		showStatus,
 		showError,
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 	} as unknown as InteractiveModeContext;
 	ctx.collabController = new CollabController(ctx);
 	return { ctx, setText, showStatus, showError, runtime: { ctx } as BuiltinSlashCommandRuntime };

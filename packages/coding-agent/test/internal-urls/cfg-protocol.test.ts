@@ -14,6 +14,7 @@ import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionWith(settings: Settings, caller: Partial<ToolSession> = {}): ToolSession {
 	return { settings, hasUI: true, settingsApproval: true, taskDepth: 0, ...caller } as unknown as ToolSession;
@@ -145,6 +146,31 @@ describe("CfgProtocolHandler", () => {
 		answer = "once";
 		const retried = await write("cfg://advisor/enabled", "true", settings);
 		expect(retried.details?.cfg?.outcome).toBe("applied");
+	});
+
+	it("refuses session writes shadowed by machine policy before requesting approval", async () => {
+		const dir = TempDir.createSync("@pi-cfg-managed-");
+		try {
+			const managedConfigPath = dir.join("config.yml");
+			await Bun.write(managedConfigPath, "advisor:\n  enabled: false\n");
+			const settings = await Settings.loadReadOnly({
+				cwd: dir.path(),
+				agentDir: dir.path(),
+				managedConfigPath,
+			});
+			const asked: CfgChangeRequest[] = [];
+			setCfgApprovalHost({
+				approve: async request => (asked.push(request), "once"),
+				applied: () => {},
+				persistentSettings: settings,
+			});
+			await expect(write("cfg://advisor/enabled", "true", settings)).rejects.toThrow("controlled by machine config");
+			expect(asked).toEqual([]);
+			expect(cfgAdvisorEnabled.get(settings)).toBe(false);
+			expect((await read("cfg://advisor/enabled", settings)).content).toContain("source: machine config");
+		} finally {
+			dir.removeSync();
+		}
 	});
 
 	it("refuses a session change an environment variable overrides without asking the user", async () => {

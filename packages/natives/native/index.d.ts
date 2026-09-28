@@ -2143,6 +2143,26 @@ export interface ListWorkspaceResult {
 }
 
 /**
+ * Get the machine-wide ProgramData directory path.
+ *
+ * On Windows, resolves via SHGetKnownFolderPath with FOLDERID_ProgramData,
+ * ensuring machine-level policy configuration resolution is independent of
+ * process environment variables.
+ *
+ * On other platforms, throws an error indicating the API is Windows-only.
+ *
+ * # Returns
+ * The absolute path to the ProgramData directory as a UTF-8 string.
+ *
+ * # Throws
+ * - On non-Windows platforms: "machineProgramDataDir is only available on
+ *   Windows"
+ * - On Windows if the API call fails: "SHGetKnownFolderPath failed with
+ *   HRESULT: ..."
+ */
+export declare function machineProgramDataDir(): string
+
+/**
  * System UI appearance reported by native macOS APIs (`detectMacOSAppearance`
  * and observer).
  */

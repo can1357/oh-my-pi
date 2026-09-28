@@ -126,6 +126,8 @@ export interface SettingsDisplayEntry {
 	enumValues?: readonly string[];
 	credential?: boolean;
 	condition?: () => boolean;
+	/** True if this setting is controlled by machine policy (managed config) */
+	managed?: boolean;
 }
 
 export interface SettingsHost {
@@ -161,6 +163,7 @@ interface BaseSettingDef {
 	 * enums, submenus, and text inputs.
 	 */
 	condition?: () => boolean;
+	managed?: boolean;
 }
 
 export interface BooleanSettingDef extends BaseSettingDef {
@@ -227,6 +230,7 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		tab: ui.tab,
 		group: ui.group,
 		condition,
+		managed: entry.managed,
 	};
 
 	if (schemaType === "boolean") {

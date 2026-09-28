@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { cfgCollabEnabled } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -89,6 +90,16 @@ function mockStartedHostLinks(
 }
 
 describe("/collab slash command QR code rendering", () => {
+	it("blocks local discovery while disabled but still permits stopping a room", async () => {
+		const harness = await createRuntimeHarness();
+		cfgCollabEnabled.override(harness.ctx.settings, false);
+		await executeBuiltinSlashCommand("/collab list", harness.runtime);
+		expect(harness.showError).toHaveBeenCalledWith("Collaboration is disabled by settings (collab.enabled)");
+		await executeBuiltinSlashCommand("/collab stop", harness.runtime);
+		expect(harness.showStatus).toHaveBeenCalledWith("Collab stopped");
+		await harness.ctx.collabController.shutdown("test cleanup");
+	});
+
 	it("status preserves a view-only room's published access", async () => {
 		const harness = await createRuntimeHarness({ collabHost: fakeHost({ access: "view" }) });
 		await executeBuiltinSlashCommand("/collab status", harness.runtime);

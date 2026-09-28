@@ -645,4 +645,93 @@ describe("SettingsList", () => {
 		expect(list.routeSubmenuMouse({ leftClick: true } as never, 2, 7)).toBe(true);
 		expect(routed).toEqual([[2, 7, true]]);
 	});
+
+	it("prevents editing of managed settings", () => {
+		const changes: Array<[string, string]> = [];
+		const list = new SettingsList(
+			[
+				{
+					id: "share.enabled",
+					label: "Session Sharing",
+					currentValue: "false",
+					values: ["true", "false"],
+					managed: true,
+				},
+				{
+					id: "collab.enabled",
+					label: "Collaboration",
+					currentValue: "true",
+					values: ["true", "false"],
+					managed: false,
+				},
+			],
+			5,
+			testTheme,
+			(id, value) => {
+				changes.push([id, value]);
+			},
+			() => {
+				throw new Error("cancel should not be called");
+			},
+		);
+
+		// Navigate to the managed setting (first item)
+		expect(list.getSelectedItem()?.id).toBe("share.enabled");
+
+		// Try to activate/edit the managed setting with Enter
+		list.handleInput("\n");
+
+		// Managed setting should not be edited
+		expect(changes).toEqual([]);
+
+		// Navigate to the non-managed setting (second item)
+		list.handleInput("\x1b[B"); // Down arrow
+		expect(list.getSelectedItem()?.id).toBe("collab.enabled");
+
+		// Try to activate/edit the non-managed setting with Enter
+		list.handleInput("\n");
+
+		// Non-managed setting should be edited (cycled from true to false)
+		expect(changes).toEqual([["collab.enabled", "false"]]);
+	});
+
+	it("marks managed settings with the managed glyph", () => {
+		const managedTheme: SettingsListTheme = {
+			label: (text: string) => text,
+			value: (text: string) => text,
+			description: (text: string) => text,
+			cursor: "→ ",
+			hint: (text: string) => text,
+			managedMark: "[locked]",
+		};
+
+		const list = new SettingsList(
+			[
+				{
+					id: "share.enabled",
+					label: "Session Sharing",
+					currentValue: "false",
+					managed: true,
+				},
+				{
+					id: "collab.enabled",
+					label: "Collaboration",
+					currentValue: "true",
+					managed: false,
+				},
+			],
+			5,
+			managedTheme,
+			() => {},
+			() => {},
+		);
+
+		const lines = list.render(60);
+		// Render output should contain the managed mark for the first item
+		const managedLine = lines[0];
+		expect(managedLine).toContain("Session Sharing [locked]");
+
+		const nonManagedLine = lines[1];
+		expect(nonManagedLine).not.toContain("Collaboration [locked]");
+	});
 });

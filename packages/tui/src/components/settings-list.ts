@@ -40,16 +40,19 @@ export interface SettingItem {
 	changed?: boolean;
 	/** Render as a non-interactive section heading. Skipped by navigation and search. */
 	heading?: boolean;
+	/** True if this setting is controlled by machine policy (read-only, locked). */
+	managed?: boolean;
 }
 
 export interface SettingsListTheme {
-	label: (text: string, selected: boolean, changed: boolean) => string;
-	value: (text: string, selected: boolean, changed: boolean) => string;
+	label: (text: string, selected: boolean, changed: boolean, managed?: boolean) => string;
+	value: (text: string, selected: boolean, changed: boolean, managed?: boolean) => string;
 	description: (text: string) => string;
 	/** Style for risk notes and the row warning glyph. Falls back to `description` when omitted. */
 	warning?: (text: string) => string;
-	/** Glyph marking rows that carry a `warning`. Omitted hides the row marker. */
 	warningMark?: string;
+	/** Glyph marking rows that are managed/locked by policy. Omitted hides the row marker. */
+	managedMark?: string;
 	cursor: string;
 	hint: (text: string) => string;
 	/** Style for section heading rows (dimmed when outside the active section). Falls back to `hint` when omitted. */
@@ -489,6 +492,11 @@ export class SettingsList implements Component {
 		return item.warning && this.#theme.warningMark ? ` ${this.#theme.warningMark}` : "";
 	}
 
+	/** Managed/lock glyph suffix for a row that is controlled by machine policy, or "" when none applies. */
+	#managedMark(item: SettingItem): string {
+		return item.managed && this.#theme.managedMark ? ` ${this.#theme.managedMark}` : "";
+	}
+
 	#renderItemRow(
 		item: SettingItem,
 		index: number,
@@ -507,8 +515,9 @@ export class SettingsList implements Component {
 		const isSelected = index === this.#selectedIndex && !this.#sectionFocus;
 		const prefix = isSelected ? this.#theme.cursor : "  ";
 		const prefixWidth = visibleWidth(prefix);
-		const mark = this.#warningMark(item);
-		const labelPlain = item.label + mark;
+		const warningMark = this.#warningMark(item);
+		const managedMark = this.#managedMark(item);
+		const labelPlain = item.label + warningMark + managedMark;
 		const labelPad = padding(Math.max(0, maxLabelWidth - visibleWidth(labelPlain)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
@@ -524,8 +533,11 @@ export class SettingsList implements Component {
 		}
 		const warningStyle = this.#theme.warning ?? this.#theme.description;
 		const labelText =
-			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
-		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
+			this.#theme.label(item.label, isSelected, item.changed === true, item.managed) +
+			(warningMark ? warningStyle(warningMark) : "") +
+			(managedMark ? warningStyle(managedMark) : "") +
+			labelPad;
+		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true, item.managed);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
 		// keyboard selection (cursor glyph + accent) which stays where it is.
@@ -570,7 +582,7 @@ export class SettingsList implements Component {
 			);
 			const labelWidths = this.#filteredItems
 				.filter(item => !item.heading)
-				.map(item => visibleWidth(item.label + this.#warningMark(item)));
+				.map(item => visibleWidth(item.label + this.#warningMark(item) + this.#managedMark(item)));
 			const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
 			const itemRowsOverflow = this.#filteredItems.length > viewportHeight;
 			const itemRowWidth = Math.max(0, width - (itemRowsOverflow ? 1 : 0));
@@ -787,7 +799,7 @@ export class SettingsList implements Component {
 
 	#activateItem(): void {
 		const item = this.#filteredItems[this.#selectedIndex];
-		if (!item || item.heading) return;
+		if (!item || item.heading || item.managed) return;
 
 		if (item.submenu) {
 			// Open submenu, passing current value so it can pre-select correctly
