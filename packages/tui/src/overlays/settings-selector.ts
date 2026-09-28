@@ -1140,15 +1140,7 @@ export class SettingsSelectorComponent implements Component {
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
 	}
 
-	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {
-		if (def.path !== "providers.webSearchOrder") return def.options;
-		const excluded: unknown = this.#context.settings.get("providers.webSearchExclude");
-		if (!Array.isArray(excluded)) return def.options;
-		return def.options.filter(option => !excluded.includes(option.value));
-	}
-
 	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
-		const options = this.#getMultiSelectOptions(def);
 		const current: unknown = this.#context.settings.get(def.path);
 		const initial = Array.isArray(current)
 			? current.filter((entry): entry is string => typeof entry === "string")
@@ -1156,7 +1148,7 @@ export class SettingsSelectorComponent implements Component {
 		return new MultiSelectSubmenu(
 			def.label,
 			def.description,
-			options,
+			def.options,
 			initial,
 			def.ordered,
 			value => {
@@ -1168,7 +1160,7 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#formatMultiSelectValue(def: SettingDef & { type: "multiselect" }, value: unknown): string {
-		const options = this.#getMultiSelectOptions(def);
+		const { options } = def;
 		const labels = Array.isArray(value)
 			? value.flatMap(entry => {
 					if (typeof entry !== "string") return [];
