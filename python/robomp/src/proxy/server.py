@@ -1121,11 +1121,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo_dir = _workspace_repo_dir(settings, workspace_key)
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
+        try:
+            token = resolve_token_for_platform(settings, _platform(request))
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             repo_dir,
             repo,
-            _resolve_token_for_platform(settings, _platform(request)),
+            token,
             push=True,
             slot_uid=slot_uid,
             git_host=settings.git_host,
