@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { readDevinCliCredentials } from "@oh-my-pi/pi-ai/registry/oauth/devin-cli";
+import { devinCliCredentialPaths, readDevinCliCredentials } from "@oh-my-pi/pi-ai/registry/oauth/devin-cli";
 
 let tempDir = "";
 
@@ -60,5 +60,29 @@ describe("readDevinCliCredentials", () => {
 			'api_server_url = "https://server.enterprise.windsurf.com"\nwindsurf_api_key = "sk-ws-01-only-key"\nother_setting = "ignored"\n',
 		);
 		expect(readDevinCliCredentials(filePath)).toBe("sk-ws-01-only-key");
+	});
+});
+
+describe("devinCliCredentialPaths", () => {
+	it("probes the home XDG location first on Unix, then the macOS library fallback", () => {
+		const paths = devinCliCredentialPaths("/home/dev", {});
+		expect(paths).toEqual([
+			"/home/dev/.local/share/devin/credentials.toml",
+			"/home/dev/Library/Application Support/devin/credentials.toml",
+		]);
+	});
+
+	it("prefers XDG_DATA_HOME over the home location when set", () => {
+		const paths = devinCliCredentialPaths("/home/dev", { XDG_DATA_HOME: "/xdg-data" });
+		expect(paths[0]).toBe("/xdg-data/devin/credentials.toml");
+		expect(paths[1]).toBe("/home/dev/.local/share/devin/credentials.toml");
+	});
+
+	it("probes APPDATA before the home location on Windows", () => {
+		const paths = devinCliCredentialPaths("C:\\Users\\dev", { APPDATA: "C:\\Users\\dev\\AppData\\Roaming" }, "win32");
+		expect(paths).toEqual([
+			"C:\\Users\\dev\\.local\\share\\devin\\credentials.toml",
+			"C:\\Users\\dev\\AppData\\Roaming\\devin\\credentials.toml",
+		]);
 	});
 });
