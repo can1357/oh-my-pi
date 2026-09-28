@@ -145,9 +145,9 @@ export const cfgProvidersOpenaiCodexCodeMode = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Code Mode",
+		label: "Code Mode",
 		description:
-			"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+			"Route tools through eval's programmatic bridge. 'auto' enables Code Mode for code_mode_only models and GPT-5.6+ models; 'on' forces it for any model when the eval transport supports the bridge; 'off' keeps the direct tool surface.",
 	},
 });
 
@@ -158,9 +158,9 @@ export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Code Mode Direct Tools",
+		label: "Code Mode Direct Tools",
 		description:
-			"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
+			"Extra direct tools for Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
 	},
 });
 

@@ -70,6 +70,35 @@ describe("resolveCodeMode", () => {
 			}).active,
 		).toBe(false);
 	});
+	test("auto enables GPT 5.6 and newer revisions on any provider", () => {
+		for (const revision of ["5.6.0", "6.0.0"]) {
+			expect(
+				resolveCodeMode({
+					provider: "custom-gateway",
+					modelIdentity: { class: "openai", family: "gpt", revision },
+					setting: "auto",
+					enabledToolNames: ENABLED,
+					evalTransportAvailable: true,
+				}).active,
+			).toBe(true);
+		}
+	});
+	test("auto leaves pre-5.6 GPT and non-GPT models direct without a catalog flag", () => {
+		for (const modelIdentity of [
+			{ class: "openai", family: "gpt", revision: "5.5.0" },
+			{ class: "anthropic", family: "opus", revision: "5.6.0" },
+		]) {
+			expect(
+				resolveCodeMode({
+					provider: "custom-gateway",
+					modelIdentity,
+					setting: "auto",
+					enabledToolNames: ENABLED,
+					evalTransportAvailable: true,
+				}).active,
+			).toBe(false);
+		}
+	});
 	test("on: active without catalog flag", () => {
 		expect(
 			resolveCodeMode({
@@ -80,7 +109,7 @@ describe("resolveCodeMode", () => {
 			}).active,
 		).toBe(true);
 	});
-	test("non-codex provider: inactive even when on", () => {
+	test("on: active for non-Codex providers", () => {
 		expect(
 			resolveCodeMode({
 				provider: "anthropic",
@@ -88,7 +117,7 @@ describe("resolveCodeMode", () => {
 				enabledToolNames: ENABLED,
 				evalTransportAvailable: true,
 			}).active,
-		).toBe(false);
+		).toBe(true);
 	});
 	test("inactive when eval is unavailable", () => {
 		expect(
@@ -366,6 +395,16 @@ describe("Code Mode session reconciliation", () => {
 
 		await session.setModel(codeModel);
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
+	});
+
+	test("on keeps the collapsed surface after switching to a non-Codex model", async () => {
+		const { session, directModel } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "on" }));
+		await session.setActiveToolsByName(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+
+		await session.setModel(directModel);
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
 	});
 
 	test("a caller slate without eval keeps Code Mode inactive", async () => {
