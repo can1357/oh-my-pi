@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.0] - 2026-09-28
+
 ### Fixed
 
 - Prevented interrupted wait operations from appearing in the transcript when a queued completion or message is received.

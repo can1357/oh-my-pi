@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.0] - 2026-09-28
+
 ### Added
 
 - Added the `telemetry.otlpExportEnabled` setting under Settings → Providers → Privacy to disable OTLP trace, log, and metric export even when `OTEL_*` endpoints are configured; exporting remains enabled by default.
@@ -32,6 +34,7 @@
 - Fixed fast-model fallback selection so it no longer chooses Gemini or MiniMax models when no `smol` role is configured.
 - Fixed extension tool renderers using upstream pi’s `renderCall(args, theme, context)` signature failing to render.
 - Fixed Nix flake and NixOS module builds failing because the native package version stamp was not recognized.
+- Fixed Nix dependency-lock checks failing after obsolete stats chart dependencies were removed.
 
 ## [18.3.5] - 2026-09-27
 

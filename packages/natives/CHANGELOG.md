@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.0] - 2026-09-28
+
 ### Added
 
 - Added Windows path utilities for converting between long and 8.3 short path spellings without resolving symlinks or junctions. Import them from `@oh-my-pi/pi-natives/path`.

@@ -94,9 +94,9 @@ describe("decideCIGate", () => {
 		});
 	});
 
-	test("in-progress run waits", () => {
+	test("in-progress run is pending", () => {
 		expect(decideCIGate([{ sha: "h", runs: [run(2, "in_progress", null)] }])).toEqual({
-			kind: "wait",
+			kind: "pending",
 			sha: "h",
 			runId: 2,
 			ancestor: false,
@@ -113,7 +113,7 @@ describe("decideCIGate", () => {
 		expect(
 			decideCIGate([{ sha: "h", runs: [run(5, "queued", null), run(1, "completed", "success")] }]),
 		).toMatchObject({
-			kind: "wait",
+			kind: "pending",
 			runId: 5,
 		});
 	});
