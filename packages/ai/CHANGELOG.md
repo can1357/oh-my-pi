@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed extension-provided usage reports missing from broker-connected clients when the broker does not have that provider ([#13579](https://github.com/can1357/oh-my-pi/issues/13579)).
+- Fixed signed LiteLLM `thinking_blocks` being dropped on openai-completions tool-call turns ([#13407](https://github.com/can1357/oh-my-pi/issues/13407)).
+- Fixed Anthropic turns ending on a bare `aborted` error with no retry when the connection dropped mid-response (typically during long thinking). The first-party Anthropic transport runs on `node:https`, whose Bun shim reports a response cut off mid-body as `Error("aborted")` (ECONNRESET) — indistinguishable from a cancellation, so it classified as unknown. It now surfaces as "The socket connection was closed unexpectedly…", the same wording native `fetch` uses, so the drop classifies as transient and the turn is retried; caller aborts keep their original error ([#13384](https://github.com/can1357/oh-my-pi/pull/13384) by [@jerryfane](https://github.com/jerryfane))
+- Fixed a stale Z.AI quota block pinning sessions to a fallback model after live usage recovered ([#13343](https://github.com/can1357/oh-my-pi/issues/13343)).
+- Fixed OAuth credentials being re-minted on every provider 401 during an outage; recently minted tokens are reused for auth recovery ([#13350](https://github.com/can1357/oh-my-pi/issues/13350)) ([#13485](https://github.com/can1357/oh-my-pi/pull/13485) by [@ShivamB25](https://github.com/ShivamB25)).
+- Fixed Claude usage reports intermittently dropping an account's saved resets when the separate reset probe was rate-limited or timed out; the last known saved resets now stay visible until the probe answers again ([#13474](https://github.com/can1357/oh-my-pi/pull/13474) by [@schickling-assistant](https://github.com/schickling-assistant))
+- Fixed transient Windows `EPERM` when creating the provider in-flight lock failing the request instead of retrying ([#13334](https://github.com/can1357/oh-my-pi/pull/13334) by [@1Morganmore](https://github.com/1Morganmore)).
+- Fixed rolling per-minute TPM/RPM 429s worded as quota errors being treated as exhausted quota and ending the turn ([#13253](https://github.com/can1357/oh-my-pi/issues/13253)).
+- Fixed keyless Anthropic-compatible endpoints receiving `Authorization: Bearer N/A` and `X-Api-Key: N/A` headers ([#13043](https://github.com/can1357/oh-my-pi/pull/13043) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed legacy Windsurf Enterprise API keys being rejected because they were always sent with the Devin session-token prefix ([#12960](https://github.com/can1357/oh-my-pi/pull/12960)).
+- Fixed an exhausted Cursor "Other Models" pool blocking Grok and Composer, which Cursor bills to its own pool ([#13198](https://github.com/can1357/oh-my-pi/issues/13198)).
+- Fixed Anthropic OAuth requests leaving the agent system prompt without its own cache breakpoint: the breakpoint on the short Claude Code identity block now moves to the last system block, so a request whose messages miss the cache (such as the first after a compaction) reads the cached system prompt instead of writing it again ([#13104](https://github.com/can1357/oh-my-pi/issues/13104), [#13556](https://github.com/can1357/oh-my-pi/pull/13556) by [@aktanazat](https://github.com/aktanazat)).
+- Fixed the Anthropic system cache breakpoint covering working-directory-specific system text: it now sits before the first `<project-context>` or `<memories>` block, and on OAuth it replaces the identity-block breakpoint instead of taking a message breakpoint ([#13104](https://github.com/can1357/oh-my-pi/issues/13104)).
+
 ## [18.4.0] - 2026-09-28
 
 ### Breaking Changes

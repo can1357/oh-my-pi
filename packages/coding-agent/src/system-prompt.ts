@@ -1028,16 +1028,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
 	}
-	// Literal overrides render context files and append text in their wrapper.
-	// Both the bundled template and user templates receive them in the footer.
+	// Working-directory content (context files with their paths, workspace
+	// tree/roots, active repo) and session append text form one trailing
+	// `<project-context>` block after every static block, so sessions in
+	// different directories share the static prefix and the Anthropic head
+	// cache breakpoint lands right before this block.
 	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
+		.render(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt })
 		.trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
-	}
-	if (activeRepoContextPrompt) {
-		systemPrompt.push(activeRepoContextPrompt);
 	}
 
 	// Claim delivery only when the rendered block 0 actually carries the xd://

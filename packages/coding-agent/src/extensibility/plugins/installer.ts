@@ -189,6 +189,6 @@ export async function linkPlugin(localPath: string): Promise<void> {
 	// Whatever is there — a stale link, or a real directory from a git install.
 	await fs.rm(linkPath, { recursive: true, force: true });
 
-	// Create symlink using fs instead of shell command
-	await fs.symlink(absolutePath, linkPath);
+	// Junction on Windows: a plain directory symlink EPERMs outside developer mode.
+	await fs.symlink(absolutePath, linkPath, process.platform === "win32" ? "junction" : "dir");
 }

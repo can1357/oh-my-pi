@@ -32,6 +32,7 @@ rust_library(
         "//crates/pi-builtins",
         "//crates/pi-vfs",
         "//crates/vendor/brush-core",
+        "//crates/vendor/brush-parser",
     ],
 )
 

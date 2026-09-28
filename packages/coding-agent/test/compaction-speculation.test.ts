@@ -750,6 +750,43 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
+	it("speculates the next configured method after a native speculation failed for good", async () => {
+		useNativeCompactionModel();
+		maintenance = createMaintenance({ methodOrder: ["remote", "soft"] });
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValueOnce(
+				new compactionModule.NativeCompactionError(
+					new Error("Anthropic compaction response carried no compaction block (stop reason: length)"),
+				),
+			)
+			.mockImplementation(async preparation => ({
+				summary: "soft summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion;
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		// The failed native method is skipped; soft still runs in the background
+		// instead of on the blocking threshold pass.
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 500, CONTEXT_WINDOW);
+		expect(maintenance.speculationState).toBe("running");
+		expect(maintenance.deferThresholdCompactionToSpeculation(THRESHOLD + 1_000, CONTEXT_WINDOW)).toBe(true);
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, false, false, {
+			triggerContextTokens: THRESHOLD + 1_000,
+		});
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.method : undefined).toBe("soft");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("soft summary");
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
 	it("keeps speculating natively after a failure a retry can clear", async () => {
 		useNativeCompactionModel();
 		const compactSpy = vi

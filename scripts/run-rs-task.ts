@@ -26,6 +26,8 @@ const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
 	"brush-core",
 	"--exclude",
+	"brush-parser",
+	"--exclude",
 	"cfg_aliases",
 ] as const satisfies readonly string[];
 const TASK_COMMANDS = {

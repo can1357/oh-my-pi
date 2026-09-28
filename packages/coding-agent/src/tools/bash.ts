@@ -392,6 +392,40 @@ export interface BashToolInput {
 	pty?: boolean;
 }
 
+/**
+ * Treats a blank string as an unset field.
+ *
+ * Some tool-call layers materialize every optional argument, spelling "not set"
+ * as `""`; a whitespace-only service name is no more a name than a missing one.
+ */
+function blankToUndefined(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Drops readiness fields that carry no condition, and the whole spec when none
+ * survive. An empty `log` pattern would otherwise match the first byte of
+ * output and an empty `host` would break the TCP probe, so placeholder values
+ * must not reach {@link startService}.
+ */
+function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefined {
+	if (!ready) return undefined;
+	const log = blankToUndefined(ready.log);
+	const host = blankToUndefined(ready.host);
+	const port = Number.isFinite(ready.port) ? ready.port : undefined;
+	const timeout = Number.isFinite(ready.timeout) ? ready.timeout : undefined;
+	if (log === undefined && host === undefined && port === undefined && timeout === undefined) return undefined;
+	return { log, host, port, timeout };
+}
+
+/** Drops a record with no keys: `env: {}` sets nothing, so it requests nothing. */
+function nonEmptyRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!record) return undefined;
+	for (const _key in record) return record;
+	return undefined;
+}
+
 export interface BashToolOptions {}
 
 type ManagedBashJobCompletion =
@@ -903,7 +937,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		{ command: rawCommand, timeout: rawTimeout, cwd, name, ready, env, async: asyncRequested, pty }: BashToolInput,
+		{
+			command: rawCommand,
+			timeout: rawTimeout,
+			cwd,
+			name: rawName,
+			ready: rawReady,
+			env: rawEnv,
+			async: rawAsync,
+			pty,
+		}: BashToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
@@ -922,12 +965,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				command = cd.rest;
 			}
 		}
+		// Mode selection runs on normalized fields: a caller that materializes
+		// every optional argument with empty or placeholder values still asked
+		// for a plain command. Only `async: true` is an async request, a blank
+		// `name` is no service name, and service-only fields with nothing in
+		// them are not a service request.
+		const name = blankToUndefined(rawName);
+		const ready = normalizeReady(rawReady);
+		const env = nonEmptyRecord(rawEnv);
+		const asyncRequested = rawAsync === true;
+		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
-			if (asyncRequested !== undefined || rawTimeout !== undefined)
+			if (asyncRequested || rawTimeout !== undefined)
 				throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
 		} else if (ready !== undefined || env !== undefined) {
-			throw new ToolError("ready and env require a service name.");
+			// Nothing can honour ready/env without a service to attach them to;
+			// running the command the caller did ask for beats failing the call.
+			const ignored = [ready && "ready", env && "env"].filter(Boolean).join(" and ");
+			pendingNotices.push(`Ignored ${ignored}: service-only, and no service name was given.`);
 		}
 		if (asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
@@ -1046,7 +1102,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
 		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
-		const pendingNotices: string[] = [];
 		if (timeoutSec !== undefined) {
 			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, maxTimeout);
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);

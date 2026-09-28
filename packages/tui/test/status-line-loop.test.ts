@@ -60,13 +60,13 @@ function withIcon(icon: string, text: string): string {
 }
 
 describe("status line loop mode segment", () => {
-	it("shows that a bounded loop is waiting for its first prompt", () => {
+	it("warns that the next prompt becomes the repeated loop body", () => {
 		const rendered = renderSegment(
 			"mode",
 			createContext({ state: "waiting", limit: { kind: "iterations", initial: 10, remaining: 10 } }),
 		);
 
-		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop waiting 10/10"));
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop: next prompt repeats 10/10"));
 	});
 
 	it("shows the live remaining duration while a loop is running", () => {

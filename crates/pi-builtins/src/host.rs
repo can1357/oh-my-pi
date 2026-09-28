@@ -145,20 +145,22 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 
 fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
-		OpenFile::File(file) => file.metadata().ok().map(Metadata::from),
+		// `Metadata::from_file` keeps the handle identity a Windows path stat
+		// drops; without it `path_is_stdout` can never match on Windows.
+		OpenFile::File(file) => Metadata::from_file(file).ok(),
 		OpenFile::Vfs(file) => file.metadata().ok(),
 		OpenFile::Stdout(stdout) => {
 			#[cfg(unix)]
 			{
 				use std::os::fd::AsFd;
 				let handle = stdout.as_fd().try_clone_to_owned().ok()?;
-				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
 			}
 			#[cfg(windows)]
 			{
 				use std::os::windows::io::AsHandle;
 				let handle = stdout.as_handle().try_clone_to_owned().ok()?;
-				std::fs::File::from(handle).metadata().ok().map(Metadata::from)
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
 			}
 			#[cfg(not(any(unix, windows)))]
 			{

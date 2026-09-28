@@ -268,21 +268,29 @@ export class VibeSessionRegistry {
 	/**
 	 * Insert a bare worker record without the spawn machinery. Test-only —
 	 * lets focused runtime tests attach an optional synthetic in-flight job.
+	 * Keyed like a real spawn in the `test-parent-session` scope (null file), so
+	 * id lookups (`vibe_wait` with named sessions, `vibe_kill`) resolve.
 	 */
 	registerRecordForTests(record: {
 		id: string;
 		cli?: VibeCli;
 		ownerId: string;
 		state?: VibeSessionState;
+		killed?: boolean;
 		jobId?: string;
 	}): void {
 		const now = Date.now();
-		this.#records.set(record.id, {
-			id: record.id,
-			cli: record.cli ?? "fast",
+		const scope: VibeOwnerScope = {
 			ownerId: record.ownerId,
 			parentSessionId: "test-parent-session",
 			parentSessionFile: null,
+		};
+		this.#records.set(scopeKey(scope, record.id), {
+			id: record.id,
+			cli: record.cli ?? "fast",
+			ownerId: record.ownerId,
+			parentSessionId: scope.parentSessionId,
+			parentSessionFile: scope.parentSessionFile,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
 			createdAt: now,
@@ -292,7 +300,7 @@ export class VibeSessionRegistry {
 				: undefined,
 			queue: [],
 			turnCount: 0,
-			killed: false,
+			killed: record.killed ?? false,
 			suspended: false,
 			terminalPersisted: false,
 		});
@@ -545,6 +553,7 @@ export class VibeSessionRegistry {
 			id: record.id,
 			cli: record.cli,
 			state: record.state,
+			killed: record.killed,
 			model: record.resolvedModel,
 			turns: record.turnCount,
 			queued: record.queue.length,

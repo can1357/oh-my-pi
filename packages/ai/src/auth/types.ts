@@ -322,6 +322,9 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
+/** Why a delegated OAuth refresh was requested. */
+export type OAuthRefreshReason = "auth-recovery";
+
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
@@ -351,6 +354,9 @@ export type AuthStorageOptions = {
 	 * per-provider local refresh function. Receives the credential id so the
 	 * implementation can address remote credentials.
 	 *
+	 * `reason` is `"auth-recovery"` only for a provider-auth retry; generic and
+	 * managed MCP force-refresh calls leave it unset.
+	 *
 	 * Must return updated {@link OAuthCredentials} with at least `access` and
 	 * `expires`. `refresh` may be an opaque sentinel (e.g. `"__remote__"`) when
 	 * the actual refresh token never leaves the broker.
@@ -360,6 +366,7 @@ export type AuthStorageOptions = {
 		credentialId: number,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
 	) => Promise<OAuthCredentials>;
 	/**
 	 * Human-readable description of the credential store backing this
@@ -475,6 +482,8 @@ export type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
+	refreshReason?: OAuthRefreshReason;
 };
 
 /**
@@ -956,6 +965,16 @@ export interface KeysApi {
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver;
 }
 
+/** Controls whether a row-id refresh may reuse a token minted by this refresher. */
+export interface OAuthRefreshByIdOptions {
+	/**
+	 * Return the stored credential when it still holds a fresh access token this
+	 * refresher minted recently. Auth-recovery callers use this to avoid rotating
+	 * refresh tokens repeatedly when a provider rejects every valid bearer.
+	 */
+	reuseRecentMint?: boolean;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1034,9 +1053,10 @@ export interface OAuthApi {
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream
 	 * refresh attempt, which is required for providers that rotate refresh tokens
-	 * on every successful refresh.
+	 * on every successful refresh. Mints unconditionally unless
+	 * {@link OAuthRefreshByIdOptions.reuseRecentMint} is set.
 	 */
-	refresh(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry>;
 	/**
 	 * Refresh one stored OAuth credential under durable row ownership.
 	 */

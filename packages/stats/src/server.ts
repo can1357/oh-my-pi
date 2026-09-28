@@ -1,6 +1,5 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { $, type Server } from "bun";
@@ -63,35 +62,10 @@ const IS_BUN_COMPILED =
 const IS_PREBUILT = IS_BUN_COMPILED || Boolean(process.env.PI_BUNDLED || Bun.env.PI_BUNDLED);
 const USE_EMBEDDED_CLIENT = EMBEDDED_CLIENT_ARCHIVE !== null || IS_PREBUILT;
 
-const EMBEDDED_CLIENT_DIR_ROOT = path.join(os.tmpdir(), "omp-stats-client");
-let embeddedClientDirPromise: Promise<string> | null = null;
+let embeddedClientFilesPromise: Promise<Map<string, Blob>> | null = null;
 
-function sanitizeArchivePath(archivePath: string): string | null {
-	const normalized = archivePath.replaceAll("\\", "/").replace(/^\.\//, "");
-	if (!normalized || normalized === ".") return null;
-	if (normalized.includes("..") || path.isAbsolute(normalized)) return null;
-	return normalized;
-}
-
-async function extractEmbeddedClientArchive(archiveBytes: Buffer, outputDir: string): Promise<void> {
-	const archive = new Bun.Archive(archiveBytes);
-	const files = await archive.files();
-	const extractRoot = path.resolve(outputDir);
-
-	for (const [archivePath, file] of files) {
-		const sanitizedPath = sanitizeArchivePath(archivePath);
-		if (!sanitizedPath) continue;
-		const destinationPath = path.resolve(extractRoot, sanitizedPath);
-		if (!destinationPath.startsWith(extractRoot + path.sep)) {
-			throw new Error(`Archive entry escapes extraction directory: ${archivePath}`);
-		}
-		await Bun.write(destinationPath, file);
-	}
-}
-
-async function getEmbeddedClientDir(): Promise<string> {
-	if (!USE_EMBEDDED_CLIENT) return STATIC_DIR;
-	if (embeddedClientDirPromise) return embeddedClientDirPromise;
+async function getEmbeddedClientFiles(): Promise<Map<string, Blob>> {
+	if (embeddedClientFilesPromise) return embeddedClientFilesPromise;
 
 	if (!EMBEDDED_CLIENT_ARCHIVE) {
 		throw new Error(
@@ -99,22 +73,16 @@ async function getEmbeddedClientDir(): Promise<string> {
 		);
 	}
 
-	embeddedClientDirPromise = (async () => {
-		const bundleHash = Bun.hash(EMBEDDED_CLIENT_ARCHIVE).toString(16);
-		const outputDir = path.join(EMBEDDED_CLIENT_DIR_ROOT, bundleHash);
-		const markerPath = path.join(outputDir, "index.html");
-		try {
-			const marker = await fs.stat(markerPath);
-			if (marker.isFile()) return outputDir;
-		} catch {}
+	// Keep bundled assets in memory so OS temporary-file cleanup cannot break a live dashboard.
+	embeddedClientFilesPromise = new Bun.Archive(EMBEDDED_CLIENT_ARCHIVE).files().then(files => {
+		for (const [name, file] of files) {
+			// Archive entries are untyped blobs; infer MIME types just as disk-backed Bun files do.
+			files.set(name, new File([file], name, { type: Bun.file(name).type }));
+		}
+		return files;
+	});
 
-		await fs.rm(outputDir, { recursive: true, force: true });
-		await fs.mkdir(outputDir, { recursive: true });
-		await extractEmbeddedClientArchive(EMBEDDED_CLIENT_ARCHIVE, outputDir);
-		return outputDir;
-	})();
-
-	return embeddedClientDirPromise;
+	return embeddedClientFilesPromise;
 }
 
 async function getLatestMtime(dir: string): Promise<number> {
@@ -364,9 +332,14 @@ export async function handleApi(req: Request): Promise<Response> {
  * Handle static file requests.
  */
 async function handleStatic(requestPath: string): Promise<Response> {
-	const staticDir = await getEmbeddedClientDir();
+	if (USE_EMBEDDED_CLIENT) {
+		const files = await getEmbeddedClientFiles();
+		const file = files.get(requestPath.slice(1)) ?? files.get("index.html");
+		return file ? new Response(file) : new Response("Not Found", { status: 404 });
+	}
+
 	const filePath = requestPath === "/" ? "/index.html" : requestPath;
-	const fullPath = path.join(staticDir, filePath);
+	const fullPath = path.join(STATIC_DIR, filePath);
 
 	const file = Bun.file(fullPath);
 	if (await file.exists()) {
@@ -374,7 +347,7 @@ async function handleStatic(requestPath: string): Promise<Response> {
 	}
 
 	// SPA fallback
-	const index = Bun.file(path.join(staticDir, "index.html"));
+	const index = Bun.file(path.join(STATIC_DIR, "index.html"));
 	if (await index.exists()) {
 		return new Response(index);
 	}

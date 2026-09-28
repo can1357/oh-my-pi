@@ -902,6 +902,40 @@ describe("model thinking derivation", () => {
 		).toBe("budget");
 	});
 
+	it("keeps Bedrock Grok 4.6 on the native effort ladder including xhigh", () => {
+		// Regression: dotted Bedrock ids classified unknown and inherited
+		// budget + [minimal,low,medium,high], so --thinking xhigh snapped to high
+		// and Converse sent budget_tokens instead of reasoning.effort.
+		for (const id of ["us.xai.grok-4.6", "global.xai.grok-4.6", "xai.grok-4.6"]) {
+			const model = createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" });
+			expect(model.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			});
+			expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.XHigh);
+			expect(clampThinkingLevelForModel(model, Effort.Max)).toBe(Effort.XHigh);
+			expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Low);
+		}
+	});
+
+	it("keeps Bedrock Grok 4.3 on the budget wire", () => {
+		const model = createModel({ id: "xai.grok-4.3", api: "bedrock-converse-stream", provider: "amazon-bedrock" });
+		expect(model.thinking?.mode).toBe("budget");
+	});
+
+	it("keeps Bedrock Opus 5.5 on the first-party adaptive ladder including xhigh and max", () => {
+		// The class >=4.7 xhigh/max ladder omitted amazon-bedrock, and the
+		// Bedrock-only efforts rule stopped at <5.1, so --thinking max snapped
+		// to high while Converse already accepted adaptive output_config.effort.
+		for (const id of ["us.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-5-5"]) {
+			const model = createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" });
+			expect(model.thinking?.mode).toBe("anthropic-adaptive");
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+			expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.XHigh);
+			expect(clampThinkingLevelForModel(model, Effort.Max)).toBe(Effort.Max);
+		}
+	});
+
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
 		// Authored partial ladders are authoritative; rules only fill fields
 		// the spec omitted.

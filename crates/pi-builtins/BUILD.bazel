@@ -148,6 +148,7 @@ rust_library(
         "//crates/pi-vfs",
         "//crates/pi-walker",
         "//crates/vendor/brush-core",
+        "//crates/vendor/brush-parser",
     ],
 )
 

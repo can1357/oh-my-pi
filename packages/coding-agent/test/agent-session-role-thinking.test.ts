@@ -818,4 +818,34 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(result?.model.id).toBe(slowModel.id);
 		expect(session.model?.id).toBe(slowModel.id);
 	});
+
+	it("does not carry the previous session's auto-resolved level across /new (#13383)", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Classify this turn");
+		// First session classified to Medium; the cache is what `/new` must drop.
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+
+		await session.newSession();
+
+		// The configured auto mode survives, but the per-turn cache is gone,
+		// so the next turn reclassifies its own prompt from undefined.
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+		const provisional = resolveProvisionalAutoLevel(model);
+		const entries = session.sessionManager.getEntries().filter(e => e.type === "thinking_level_change");
+		expect(session.thinkingLevel).toBe(provisional);
+		expect(session.agent.state.thinkingLevel).toBe(provisional);
+		expect(entries.at(-1)).toMatchObject({ thinkingLevel: provisional, configured: AUTO_THINKING });
+	});
 });

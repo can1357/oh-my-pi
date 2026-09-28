@@ -514,11 +514,15 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Static terminal capability — terminals whose {@link TerminalInfo} marks
+ *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
+ *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
+ *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
+ *      outer terminal's support does not matter.
+ *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   3. GNU screen's explicit session marker (`STY`) always off, even if tmux is
+ *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
  *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   4. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
+ *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
  *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
  *      forwards it to outer terminals whose `terminal-features` include
  *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
@@ -526,11 +530,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  *      identical to today. Checked before the screen-family TERM heuristic
  *      because tmux's historical `default-terminal` is `screen-256color`, so
  *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   5. screen-family TERM without `TMUX` always off: screen never gained OSC 8
+ *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
  *      support.
- *   6. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
+ *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
  *      no version available, so off.
- *   7. Otherwise honor the static terminal capability.
+ *   8. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -538,6 +542,8 @@ export function shouldEnableHyperlinksByDefault(
 ): boolean {
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
+
+	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 

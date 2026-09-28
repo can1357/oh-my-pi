@@ -883,7 +883,8 @@ export class TUI extends Container {
 	// engine paints only the modal on the alt buffer and leaves every
 	// normal-screen accounting field (#previousFrameLength, #viewportTopRow, …)
 	// untouched, so exiting reconciles cleanly against the terminal-restored
-	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
+	// normal screen. #altPreviousLines is the last alt frame, diffed row by row
+	// against the next one.
 	#altActive = false;
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
@@ -2867,16 +2868,18 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
-				const previous = this.#providerPreparedRows[index];
-				const current = prepared.rows[index]!;
 				if (
-					this.#providerWindow[index] === prepared.lines[index] &&
-					previous !== undefined &&
-					previous.widthEpoch === current.widthEpoch &&
-					previous.imageProtocol === current.imageProtocol
+					!this.#rowNeedsRewrite(
+						this.#providerWindow,
+						this.#providerPreparedRows,
+						prepared.lines,
+						prepared.rows,
+						index,
+					)
 				) {
 					continue;
 				}
+				const current = prepared.rows[index]!;
 				buffer += `\x1b[${newTop + index + 1};1H${this.#lineRewriteSequence(
 					current,
 					width,
@@ -3440,6 +3443,29 @@ export class TUI extends Container {
 		return visibleWidth(above);
 	}
 
+	/**
+	 * Whether screen row `index` must be rewritten to turn the previously painted
+	 * frame into this one: its line, or the preparation it was painted with,
+	 * changed.
+	 */
+	#rowNeedsRewrite(
+		previousLines: readonly string[],
+		previousRows: readonly PreparedLine[],
+		lines: readonly string[],
+		rows: readonly PreparedLine[],
+		index: number,
+	): boolean {
+		const previous = previousRows[index];
+		const current = rows[index]!;
+		return (
+			previousLines[index] !== lines[index] ||
+			previous === undefined ||
+			previous.width !== current.width ||
+			previous.widthEpoch !== current.widthEpoch ||
+			previous.imageProtocol !== current.imageProtocol
+		);
+	}
+
 	#lineRewriteSequence(
 		line: PreparedLine,
 		width: number,
@@ -3549,9 +3575,11 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
-	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
-	 * native-scrollback byte. The hardware cursor stays hidden here.
+	 * Paint a frame on the alt buffer: only the rows that changed since the
+	 * previous frame, or every row when the height changed, a repaint is forced,
+	 * or a changed frame holds OSC 66 text before or after. Emits only
+	 * sync-output brackets, cursor moves, and per-row rewrites — never ED3 or
+	 * any native-scrollback byte. The hardware cursor stays hidden here.
 	 */
 	#emitAltFrame(prepared: PreparedLines, width: number, height: number, notifyPaint: boolean): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
@@ -3573,38 +3601,34 @@ export class TUI extends Container {
 			for (const seq of imageTransmits) transmitBuffer += seq;
 			this.terminal.write(transmitBuffer);
 		}
-		// Skip an identical repaint (the modal is mostly static between
-		// keystrokes) — unless a forced repaint (resetDisplay,
-		// requestRender(true)) is pending: the redraw gesture must repair a
-		// corrupted modal even when our cached frame is byte-identical.
+		// A forced repaint (resetDisplay, requestRender(true)) rewrites every row
+		// even when the cached frame is byte-identical: the redraw gesture must
+		// repair a corrupted modal. So does a changed frame with OSC 66 text in
+		// it, before or after: a scaled glyph spans the rows below its own and the
+		// terminal drops it when any of them is written, so those rows are not
+		// independent. Otherwise rewrite only the rows that changed (a keystroke
+		// in a modal touches a row or two), and skip an identical frame entirely.
 		const force = this.#forceViewportRepaintOnNextRender;
 		this.#forceViewportRepaintOnNextRender = false;
-		if (!force && this.#altPreviousLines.length === height) {
-			let same = true;
-			for (let r = 0; r < height; r++) {
-				const previous = this.#altPreparedRows[r];
-				const current = prepared.rows[r]!;
-				if (
-					prepared.lines[r] !== this.#altPreviousLines[r] ||
-					previous === undefined ||
-					previous.width !== current.width ||
-					previous.widthEpoch !== current.widthEpoch ||
-					previous.imageProtocol !== current.imageProtocol
-				) {
-					same = false;
-					break;
-				}
-			}
-			if (same) {
-				this.#altPreviousLines = prepared.lines;
-				this.#altPreparedRows = prepared.rows;
-				return;
-			}
-		}
-		let buffer = `${this.#paintBeginSequence}\x1b[H`;
+		const full =
+			force ||
+			this.#altPreviousLines.length !== height ||
+			((this.#altPreviousLines.some(isOsc66Line) || prepared.lines.some(isOsc66Line)) &&
+				prepared.rows.some((_row, r) =>
+					this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r),
+				));
+		let rowsBuffer = "";
 		for (let r = 0; r < height; r++) {
-			if (r > 0) buffer += "\n";
-			buffer += this.#lineRewriteSequence(
+			if (full) {
+				if (r > 0) rowsBuffer += "\n";
+			} else if (
+				this.#rowNeedsRewrite(this.#altPreviousLines, this.#altPreparedRows, prepared.lines, prepared.rows, r)
+			) {
+				rowsBuffer += `\x1b[${r + 1};1H`;
+			} else {
+				continue;
+			}
+			rowsBuffer += this.#lineRewriteSequence(
 				prepared.rows[r]!,
 				width,
 				r,
@@ -3613,10 +3637,10 @@ export class TUI extends Container {
 				this.#osc66SpacerGlyphWidth(prepared.lines, r),
 			);
 		}
-		buffer += this.#paintEndSequence;
-		this.terminal.write(buffer);
 		this.#altPreviousLines = prepared.lines;
 		this.#altPreparedRows = prepared.rows;
+		if (rowsBuffer === "") return;
+		this.terminal.write(`${this.#paintBeginSequence}${full ? "\x1b[H" : ""}${rowsBuffer}${this.#paintEndSequence}`);
 		this.#debugPaint = { lines: prepared.lines, windowTop: 0, altScreen: true };
 		if (notifyPaint) {
 			this.#notifyPaint({
@@ -3628,6 +3652,6 @@ export class TUI extends Container {
 				rows: height,
 			});
 		}
-		this.#fullRedrawCount += 1;
+		if (full) this.#fullRedrawCount += 1;
 	}
 }
