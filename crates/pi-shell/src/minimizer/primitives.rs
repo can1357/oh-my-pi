@@ -478,10 +478,11 @@ mod tests {
 		// Exact token match and non-match.
 		assert!(command_has_any_token("eslint --format json src", &["json"]));
 		assert!(!command_has_any_token("eslint --format json src", &["xml"]));
-		// Equals-form: --flag=value matches when the search token is the flag prefix.
+		// Equals-form: --flag=value matches when the search token is the flag
+		// prefix.
 		assert!(command_has_any_token("eslint --format=json src", &["--format"]));
-		// Value-only search does NOT match an equals-form part (token is prefix, not
-		// suffix).
+		// Value-only search does NOT match an equals-form part (token is prefix,
+		// not suffix).
 		assert!(
 			!command_has_any_token("eslint --format=json src", &["json"]),
 			"value after = must not match when token is not the flag prefix"

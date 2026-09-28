@@ -7,16 +7,20 @@
  */
 import * as path from "node:path";
 import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
-import {
-	DiffSide,
-	DiffStream,
-	type DiffStreamProgress,
-	type DiffStreamResult,
-	rasterizeSvg,
-} from "@oh-my-pi/pi-natives";
+import { DiffSide, DiffStream, type DiffStreamProgress, rasterizeSvg } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { BINARY_SNIFF_BYTES, isEnoent, isProbablyBinaryHeader } from "@oh-my-pi/pi-utils";
 import type { NumstatEntry } from "../../commit/types";
+import {
+	DIFF_CONTEXT_LINES,
+	type ChangeKind,
+	type ChangedFile,
+	type HeadCommit,
+	type ReviewImage,
+	type FileAssetSide,
+	type FileContents,
+	type FileStreamUpdate,
+} from "@oh-my-pi/pi-tui/apps/git/state";
 
 /** SHA of git's canonical empty tree: diff base for a root commit. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -45,88 +49,6 @@ const IMAGE_EXTENSIONS: Record<string, true> = {
 	".tiff": true,
 	".webp": true,
 };
-/** Context lines retained around each exact streamed hunk. */
-export const DIFF_CONTEXT_LINES = 3;
-
-export type ChangeKind = "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted";
-export type ChangeArea = "unstaged" | "staged" | "commit";
-
-/** One changed path shown in the sidebar file lists. */
-export interface ChangedFile {
-	readonly path: string;
-	/** Pre-rename path for renames/copies. */
-	readonly origPath?: string;
-	readonly kind: ChangeKind;
-	readonly area: ChangeArea;
-	readonly additions?: number;
-	readonly deletions?: number;
-}
-
-/** HEAD commit metadata for the clean-tree sidebar view. */
-export interface HeadCommit {
-	readonly sha: string;
-	readonly shortSha: string;
-	readonly subject: string;
-	readonly body: string;
-	readonly authorName: string;
-	readonly authorEmail: string;
-	readonly authorDate: string;
-	readonly parents: readonly string[];
-	/** Changed paths once their numstats have loaded. */
-	readonly files: readonly ChangedFile[];
-	/** Whether {@link files} contains the complete commit file list. */
-	readonly filesLoaded: boolean;
-}
-
-/** A terminal-ready image decoded from one Git file side. */
-export interface ReviewImage {
-	readonly data: string;
-	readonly mimeType: "image/png";
-	readonly sourceMimeType: string;
-	readonly widthPx: number;
-	readonly heightPx: number;
-	readonly byteLength: number;
-	/** Stable content identity for terminal graphics placement. */
-	readonly key: string;
-	/** Git LFS object id when the preview came from local LFS storage. */
-	readonly lfsOid?: string;
-}
-
-/** One side of a media or binary Git change. */
-export type FileAssetSide =
-	| { readonly kind: "empty" }
-	| { readonly kind: "text"; readonly byteLength: number; readonly lfsOid?: string }
-	| { readonly kind: "image"; readonly image: ReviewImage }
-	| { readonly kind: "binary"; readonly byteLength?: number; readonly lfsOid?: string }
-	| { readonly kind: "tooLarge"; readonly byteLength?: number; readonly lfsOid?: string }
-	| { readonly kind: "lfsMissing"; readonly oid: string; readonly byteLength: number };
-
-/** Diffable UTF-8 content for both sides of a file. */
-export interface TextFileContents {
-	readonly kind: "text";
-	readonly oldText: string;
-	readonly newText: string;
-	readonly streamResult: DiffStreamResult;
-}
-
-/** Non-text sides rendered as previews or explicit placeholders. */
-export interface AssetFileContents {
-	readonly kind: "asset";
-	readonly old: FileAssetSide;
-	readonly new: FileAssetSide;
-}
-
-/** Loaded file content selected for text diffing or asset preview. */
-export type FileContents = TextFileContents | AssetFileContents;
-
-/** Newly completed lines and state emitted while a file pair streams. */
-export interface FileStreamUpdate {
-	readonly oldLineOffset: number;
-	readonly oldLines: readonly string[];
-	readonly newLineOffset: number;
-	readonly newLines: readonly string[];
-	readonly progress: DiffStreamProgress;
-}
 interface LfsPointer {
 	readonly oid: string;
 	readonly size: number;
@@ -762,6 +684,34 @@ export class GitModel {
 	/** Unstage the given files (or everything when omitted). */
 	async unstage(files?: readonly ChangedFile[]): Promise<void> {
 		await this.#repo.unstage(files?.map(file => file.path) ?? []);
+	}
+
+	/**
+	 * Throw away the given files' changes. Unstaged entries revert the
+	 * worktree to the index (untracked files are deleted); staged entries
+	 * reset both index and worktree to HEAD, which also drops any unstaged
+	 * edits on the same path. Conflicted entries are skipped.
+	 */
+	async discard(files: readonly ChangedFile[]): Promise<void> {
+		const worktree: string[] = [];
+		const untracked: string[] = [];
+		const staged: string[] = [];
+		const stagedNew: string[] = [];
+		for (const file of files) {
+			if (file.kind === "conflicted") continue;
+			if (file.area === "unstaged") {
+				(file.kind === "untracked" ? untracked : worktree).push(file.path);
+			} else if (file.area === "staged") {
+				staged.push(file.path);
+				if (file.origPath) staged.push(file.origPath);
+				// Paths absent from HEAD stay on disk after the index reset; clean them like untracked files.
+				if (file.kind === "added" || file.kind === "renamed") stagedNew.push(file.path);
+			}
+		}
+		if (worktree.length > 0) await this.#repo.restore({ files: worktree, worktree: true });
+		if (staged.length > 0) await this.#repo.restore({ files: staged, source: "HEAD", staged: true, worktree: true });
+		const toClean = [...untracked, ...stagedNew];
+		if (toClean.length > 0) await this.#repo.clean({ paths: toClean });
 	}
 
 	/** Create (or amend) a commit from the staged changes. */

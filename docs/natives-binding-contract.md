@@ -9,7 +9,7 @@ This page defines the public JS/TS boundary between `@oh-my-pi/pi-natives` calle
 3. `gen-enums.ts` reads the declarations, rewrites napi-rs `const enum` declarations to runtime-usable declarations, and replaces the marked block in `native/index.js` with explicit class/function exports and literal enum objects.
 4. `native/index.js` loads the addon and binds that generated root surface.
 
-There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only a release-version sentinel for install/compiled loads, not every public symbol.
+There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/src/<module>` wrapper convention. The loader validates only the post-link release stamp (`__piNativesBuildVersion()`) for install/compiled loads, not every public symbol; a function export the loaded addon omits is `missingNativeExport(name)` — `undefined` on a current addon, and on a stale workspace addon a throwing stub that names the addon and the rebuild command (`bun run build:native`).
 
 ## Public entrypoints
 
@@ -28,19 +28,29 @@ Do not import unexported `native/*` implementation paths from package consumers.
 | Category                 | Representative public exports                                                                                                                                     | Rust owner                                                            | Call style           |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------- |
 | Search and workspace     | `grep`, `search`, `hasMatch`, `fuzzyFind`, `glob`, `invalidateFsScanCache`, `listWorkspace`                                                                       | `grep.rs`, `fd.rs`, `glob.rs`, `iofs.rs`, `workspace.rs`              | mixed sync/promise   |
-| AST and code structure   | `astGrep`, `astMatch`, `astEdit`, `blockRangeAt`, `enclosingBlockBoundaries`, `summarizeCode`                                                                     | `ast.rs`, `block.rs`, `summary.rs`                                    | mixed sync/promise   |
-| Diff and vectors         | `diffLines`, `diffWords`, `diffLineRuns`, `structuredPatchHunks`, `cosineSimilarityPairs`, `mmrRerankIndices`, `vectorIndexTopK`                                  | `diff.rs`, `vectors.rs`                                               | sync                 |
+| AST and code structure   | `astGrep`, `astMatch`, `astEdit`, `blockRangeAt`, `nodeChainAt`, `enclosingBlockBoundaries`, `summarizeCode`                                                       | `ast.rs`, `block.rs`, `summary.rs`                                    | mixed sync/promise   |
+| Diff and vectors         | `diffLines`, `diffWords`, `diffLineRuns`, `structuredPatchHunks`, `DiffStream`, `cosineSimilarityPairs`, `mmrRerankIndices`, `vectorIndexTopK`                     | `diff.rs`, `vectors.rs`                                               | sync                 |
 | Shell and PTY            | `executeShell`, `Shell`, `PtySession`                                                                                                                             | `shell.rs`, `pty.rs`                                                  | classes/promises     |
-| Process and files        | `Process`, `FileLock`                                                                                                                                             | `ps.rs`, `file_lock/mod.rs`                                           | classes/mixed        |
+| Process and files        | `Process`, `FileLock`, `execReplace`                                                                                                                              | `ps.rs`, `file_lock/mod.rs`                                           | classes/mixed        |
 | Desktop and clipboard    | `DesktopSession`, `copyToClipboard`, `readImageFromClipboard`                                                                                                     | `desktop/mod.rs`, `clipboard.rs`                                      | class, sync, promise |
 | Audio and live media     | `AudioCapture`, `AudioPlayback`, `LiveWebRtcPeer`                                                                                                                 | `audio.rs`, `live.rs`                                                 | classes/mixed        |
-| Text and highlighting    | `wrapTextWithAnsi`, `truncateToWidth`, `sliceWithWidth`, `extractSegments`, `visibleWidth`, `setHangulCompatJamoWidthOverride`, `highlightCode`, language queries | `text.rs`, `highlight.rs`                                             | sync                 |
-| Conversion and rendering | `htmlToMarkdown`, `encodeSixel`, `renderSnapcompactPng`, `snapcompactSupportedChars`                                                                              | `html.rs`, `sixel.rs`, `snapcompact.rs`                               | mixed sync/promise   |
-| Tokens and system        | `countTokens`, macOS appearance/power exports, `getWorkProfile`, `deviceCheckGenerateToken`                                                                       | `tokens.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `devicecheck.rs` | mixed                |
+| Text and highlighting    | `wrapTextWithAnsi`, `truncateToWidth`, `sliceWithWidth`, `extractSegments`, `visibleWidth`, `setHangulCompatJamoWidthOverride`, `highlightCode`, `HighlightStream`, language queries | `text.rs`, `highlight.rs`                                             | sync                 |
+| Conversion and rendering | `htmlToMarkdown`, `pdfToMarkdown`, `rasterizeSvg`, `encodeSixel`, `renderSnapcompactPng`, `snapcompactSupportedChars`                                              | `html.rs`, `pdf.rs`, `svg.rs`, `sixel.rs`, `snapcompact.rs`           | mixed sync/promise   |
+| Tokens and system        | `countTokens`, macOS appearance, cross-platform power exports, `getWorkProfile`, `deviceCheckGenerateToken`                                                                       | `tokens.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `devicecheck.rs` | mixed                |
+| Spelling (macOS)         | `macOSCheckSpelling`, `macOSAutocorrectWord`, `macOSSpellingGuesses`, `macOSSpellCheckerAvailable`                                            | `spelling.rs`                                                         | mixed sync/promise   |
+| Word prediction          | `TextPredictor` (`ngram`, `smollm`, and macOS-only `apple` engines; served to editors by the `text-predict` daemon)                                                | `predict.rs`, `crates/pi-predict`                                     | class/promises       |
+| Version control          | `vcsDiscover`, `vcsGitClone`, `vcsDetachGitDir`, `vcsJoinPatches`, `vcsValidateHunkSelections`, `VcsRepo`, `VcsGitRepo`, `VcsJjWorkspace`                          | `vcs.rs`                                                              | mixed sync/promise   |
+| Terminal output          | `TtyWriter`                                                                                                                                                       | `tty_writer.rs`                                                       | class                |
 | Isolation                | `isoBackend`, `isoProbe`, `isoResolve`, `isoIsUnavailableError`, `isoStart`, `isoStop`, `isoDiff`                                                                 | `iso.rs`                                                              | mixed sync/promise   |
 | Keys                     | `parseKey`, `matchesKey`, Kitty/legacy helpers                                                                                                                    | `keys.rs`                                                             | sync                 |
 
 Consult `native/index.d.ts` for exact option/result fields and signatures. Notable current signatures include `renderSnapcompactPng(...): Promise<string>`, `readImageFromClipboard(): Promise<ClipboardImage | undefined | null>`, and typed-array vector inputs/results.
+
+Newer surface members on existing exports (all present in `native/index.d.ts`):
+
+- `ShellRunResult.workingDir?` — shell working directory after command completion (added 16.3.0), letting hosts sync cwd without a hidden probe command.
+- `GrepOptions.maxCountPerFile?` — per-file content-mode match cap (added 15.10.11). Note `GrepOptions` has no `cache` field; directory grep is always uncached (`FuzzyFindOptions`/`GlobOptions` carry the opt-in `cache` flag).
+- `snapcompactSupportedChars(font, chars)` — font glyph-capability probe (added 16.2.7).
 
 ## Sync, Promise, and callback rules
 
@@ -62,6 +72,7 @@ Callback parameters generated from napi-rs `ThreadsafeFunction` use an error-fir
 The generated runtime enum objects currently are:
 
 - `AstMatchStrictness`
+- `DiffSide`
 - `Ellipsis`
 - `Encoding`
 - `FileType`
@@ -77,7 +88,7 @@ Numeric and string enum declarations constrain TypeScript callers but do not by 
 ## Import and error behavior
 
 - Importing the root throws if no compatible addon candidate loads. Lazy desktop/clipboard subpaths defer that failure until their wrapper is called.
-- Install and compiled candidates missing the expected version sentinel are rejected during loading. Workspace-development candidates skip sentinel validation.
+- Install and compiled candidates that do not report the package version through their release stamp are rejected during loading. Workspace-development candidates skip this validation.
 - A resident prior-version addon can produce a restart-specific mismatch; a stale file on disk produces a reinstall diagnosis.
 - The loader does not check the full export set. A same-version incomplete build can therefore load and later expose `undefined` members.
 - N-API conversion errors throw or reject before Rust business logic runs. Native task and async failures reject their returned promises.

@@ -1,0 +1,90 @@
+// Provider-wire compat for "kimi-code"; regenerated from the frozen census using deployment contract selectors.
+
+provider "kimi-code" {
+	default-model "kimi-for-coding"
+	discovery label="Kimi Code" {
+		env "KIMI_API_KEY"
+	}
+
+	class "kimi" {
+		// Replaces the native Kimi provider thinking-format branch.
+		thinking-format "zai"
+		family "k3" {
+			thinking-format "openai"
+		}
+	}
+	// Replaces streamKimi's TS fallback for models whose discovery metadata omits the protocol.
+	kimi-api-format "anthropic"
+	// Kimi Code derives cache routing from top-level `prompt_cache_key` on
+	// chat completions; replaces the provider check in the request builder.
+	supports-prompt-cache-key #true
+	thinking-mode "effort"
+	// /models omits `supports_image_in` for K2.5, which is vision-capable on
+	// the coding endpoint; the correction is rule-owned.
+	class "kimi" {
+		family "k2.5" {
+			input-modalities "text" "image"
+		}
+	}
+	class "unknown" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-format "kimi"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "kimi-for*" {
+		reasoning-content-field "reasoning_content"
+		supports-developer-role #false
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-format "zai"
+	}
+
+	// /coding/v1/models carries no pricing. `cost-fallback` seeds the public
+	// Moonshot list price only when discovery reports $0, so a future priced
+	// envelope keeps its real rates. `kimi-for-coding` is K2.8 Preview — no
+	// public API SKU exists yet, so it uses the K2.7 Code line rate.
+	models "k3" "k3-256k" {
+		cost-fallback {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+		}
+	}
+	models "kimi-for-coding" {
+		cost-fallback {
+			input 0.95
+			output 4.0
+			cache-read 0.19
+		}
+	}
+	models "kimi-for-coding-highspeed" {
+		cost-fallback {
+			input 1.9
+			output 8.0
+			cache-read 0.38
+		}
+	}
+	// Moonshot K2 list (`kimi-k2-0711-preview` / `kimi-k2-0905-preview`), not K2.6.
+	models "kimi-k2" {
+		cost-fallback {
+			input 0.6
+			output 2.5
+			cache-read 0.15
+		}
+	}
+	models "kimi-k2.5" {
+		cost-fallback {
+			input 0.6
+			output 3.0
+			cache-read 0.1
+		}
+	}
+	models "kimi-k2-turbo-preview" {
+		cost-fallback {
+			input 2.4
+			output 10.0
+			cache-read 0.6
+		}
+	}
+}

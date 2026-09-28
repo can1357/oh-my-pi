@@ -29,11 +29,21 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 - rejects `async: true` when `async.enabled` is false,
 - defaults `timeout` to 300 seconds; `0` explicitly disables the command deadline.
 
-There are no structured `head` or `tail` parameters. Before execution, internal URLs in the command and environment values are expanded to backing filesystem paths; an internal URL used as `cwd` is also resolved. Expansion can create parent directories for writable `local://` paths. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
+There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files; rendered resources are read-only; external programs never see virtual paths and cannot start in a virtual working directory. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
 
 ### Approval policy
 
-The bash tool has the `exec` approval tier. `bash.patterns` rules can explicitly `allow`, `deny`, or `prompt`: deny/prompt rules match the complete command or a tokenized compound-command segment, while allow rules must match the entire command and never allow shell-control syntax. A fixed set of critical destructive and remote-fetch-and-execute patterns always forces exec approval even if a user allow rule matched. Interception and approval are separate mechanisms: interception routes misuse toward dedicated tools; approval governs whether execution may proceed.
+The bash tool has the `exec` approval tier. `bash.patterns` rules can explicitly `allow`, `deny`, or `prompt`. By default, allow rules must match the entire command and cannot approve shell-control syntax. The opt-in `bash.allowCompoundCommands: true` additionally recognizes only flat chains of two or more literal commands separated by unquoted `&&`. It resolves the ordered rules independently against each original raw segment, with the first matching rule winning for that segment.
+
+Restrictions are combined conservatively across the chain: any explicit segment or whole-chain `deny` wins, otherwise any explicit `prompt` wins. A `deny` or `prompt` pattern matching the full chain but no individual segment remains a whole-chain restriction, while later broad restrictions do not override an earlier match for a segment. These restrictions resolve before the existing raw and canonical critical-command checks.
+
+Whole-chain restrictions are scanned with deny precedence, even when a matching prompt appears earlier. The centralized positive shell classifier permits compound recognition only for known POSIX-quoting shells (`sh`, `bash`, `dash`, `ash`, `ksh`, and `zsh`, including `.exe` names). Cmd, PowerShell, fish, and unknown shells retain legacy approval behavior; merely accepting `-c` for execution does not establish compatible quoting.
+
+After those checks, the chain receives an explicit `write`-tier allow only when every segment explicitly resolves to `allow`. If any segment is unmatched, bash retains its standalone `exec` tier with no explicit policy, so the generic approval resolver applies `tools.approval.bash` and then the active mode. Unmatched segments therefore inherit existing policy rather than always prompting.
+
+Literal quoted arguments are accepted, but expansions, assignments, other control operators, redirections, globbing, newlines, malformed syntax, and shell-state-changing builtins (`cd`, `source`, `eval`, and similar) do not qualify. These inputs retain legacy approval behavior. Critical destructive and remote-fetch-and-execute checks still inspect the whole raw and canonical input and its segments, so an allowed prefix cannot conceal a critical later segment. Approval does not rewrite execution: the shell receives the original command, preserving native `&&` short-circuiting.
+
+Pattern approval is not containment. Once approved, a process keeps the shell's ambient filesystem, network, and subprocess access. Interception and approval are also separate mechanisms: interception routes misuse toward dedicated tools; approval governs whether execution may proceed.
 
 These rules govern the **`bash` tool only**. They do not constrain shells started through other tools — notably `eval`, which can spawn a shell via subprocess (`subprocess.run(["bash", "-c", ...])`, `Bun.$`, etc.). A `bash.patterns` `deny` rule therefore does nothing when the same command is issued through `eval`. To harden against destructive commands across both surfaces, pair `bash.patterns` with a `tools.approval.eval` policy (`prompt` or `deny`); see [Tool approval mode](./approval-mode.md).
 
@@ -284,7 +294,7 @@ This component is wired by `CommandController.handleBashCommand()` and fed from 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, input handling/interception, async and PTY/non-PTY selection, result/error mapping, bash tool renderer.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
 - [`src/tools/bash-interceptor.ts`](../packages/coding-agent/src/tools/bash-interceptor.ts) — interceptor rule matching and blocked-command messages.
-- [`src/tools/bash-skill-urls.ts`](../packages/coding-agent/src/tools/bash-skill-urls.ts) — internal-URL expansion for commands, env values, and cwd.
+- [`src/internal-urls/url-filesystem.ts`](../packages/coding-agent/src/internal-urls/url-filesystem.ts) — router-backed shell filesystem for `scheme://` paths.
 - [`src/exec/bash-executor.ts`](../packages/coding-agent/src/exec/bash-executor.ts) — non-PTY executor, shell session reuse, cancellation wiring, output sink integration.
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
 - [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.
@@ -292,7 +302,7 @@ This component is wired by `CommandController.handleBashCommand()` and fed from 
 - [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
 - [`src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — truncation metadata shape + notice injection wrapper.
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level `executeBash`, message recording, abort lifecycle.
-- [`src/modes/components/bash-execution.ts`](../packages/coding-agent/src/modes/components/bash-execution.ts) — interactive `!` command execution component.
+- [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
 - [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
 - [`src/internal-urls/artifact-protocol.ts`](../packages/coding-agent/src/internal-urls/artifact-protocol.ts) — `artifact://<id>` resolution.

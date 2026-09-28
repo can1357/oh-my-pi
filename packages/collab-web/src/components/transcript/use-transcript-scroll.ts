@@ -48,6 +48,8 @@ export function useTranscriptScroll(
 ): {
 	rootRef: RefObject<HTMLDivElement | null>;
 	contentRef: RefObject<HTMLDivElement | null>;
+	/** Follow-lock shared with callers that force a tail jump (e.g. a `live` transition). */
+	lockRef: RefObject<boolean>;
 	showJump: boolean;
 	onScroll: () => void;
 	jumpToBottom: () => void;
@@ -110,5 +112,5 @@ export function useTranscriptScroll(
 		el.focus();
 	}, [applyDecision]);
 
-	return { rootRef, contentRef, showJump, onScroll, jumpToBottom };
+	return { rootRef, contentRef, lockRef, showJump, onScroll, jumpToBottom };
 }

@@ -14,11 +14,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
+
+/** Public homepage that inference gateways (OpenRouter, Vercel AI Gateway) credit omp traffic to. */
+export const APP_URL: string = "https://omp.sh/";
 
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
@@ -107,7 +111,8 @@ function readProfileFromEnvSafe(): string | undefined {
 	}
 }
 
-function getBaseConfigRoot(): string {
+/** Profile-independent config root (~/.omp), shared by every omp profile. */
+export function getBaseConfigRoot(): string {
 	return path.join(os.homedir(), getConfigDirName());
 }
 
@@ -150,6 +155,11 @@ function standardizeMacOSPath(p: string): string {
 	return p;
 }
 
+/** Keep the current directory's spelling while expanding Windows 8.3 aliases. */
+function standardizeProjectPath(p: string): string {
+	return process.platform === "win32" ? expandWindowsLongPath(p) : standardizeMacOSPath(p);
+}
+
 export function resolveEquivalentPath(inputPath: string): string {
 	const resolvedPath = path.resolve(inputPath);
 	try {
@@ -164,19 +174,31 @@ export function normalizePathForComparison(inputPath: string): string {
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
 }
 
+/**
+ * Compare paths already normalized by {@link normalizePathForComparison}.
+ *
+ * Returns the relative path (an empty string when the paths are equal), or
+ * `null` when the candidate is outside the root. Callers classifying one
+ * candidate against several static roots can normalize each side once and
+ * reuse the public helpers' containment semantics without repeating realpath
+ * work.
+ */
+export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
+	const relative = path.relative(normalizedRoot, normalizedCandidate);
+	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	return relative;
+}
+
 export function pathIsWithin(root: string, candidate: string): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
 	const normalizedCandidate = normalizePathForComparison(candidate);
-	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) !== null;
 }
 
 export function relativePathWithinRoot(root: string, candidate: string): string | null {
-	if (!pathIsWithin(root, candidate)) return null;
 	const normalizedRoot = normalizePathForComparison(root);
 	const normalizedCandidate = normalizePathForComparison(candidate);
-	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	return relative || null;
+	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) || null;
 }
 
 let projectDir: string | undefined;
@@ -184,29 +206,33 @@ let projectDir: string | undefined;
 /** Get the project directory. */
 export function getProjectDir(): string {
 	if (projectDir === undefined) {
+		let cwd: string | undefined;
 		try {
-			projectDir = standardizeMacOSPath(process.cwd());
+			cwd = process.cwd();
 		} catch {
 			const candidates = [process.env.PWD, os.homedir(), os.tmpdir()];
 			for (const candidate of candidates) {
 				if (!candidate || !path.isAbsolute(candidate)) continue;
 				try {
 					process.chdir(candidate);
-					projectDir = standardizeMacOSPath(candidate);
+					cwd = candidate;
 					break;
 				} catch {}
 			}
-			if (projectDir === undefined) {
+			if (cwd === undefined) {
 				throw new Error("Unable to determine an accessible working directory");
 			}
 		}
+		// Normalize outside the fallback: a native-addon failure is not an inaccessible cwd,
+		// and must surface as itself instead of relocating the process.
+		projectDir = standardizeProjectPath(cwd);
 	}
 	return projectDir;
 }
 
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	const resolved = standardizeMacOSPath(path.resolve(dir));
+	const resolved = standardizeProjectPath(path.resolve(dir));
 	process.chdir(resolved);
 	projectDir = resolved;
 }
@@ -588,9 +614,21 @@ export function getLogsDir(): string {
 	return dirs.rootSubdir("logs", "state");
 }
 
-/** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log). */
+/**
+ * Local-timezone `YYYY-MM-DD` day key (zero-padded), formatted exactly like
+ * the rotating log sink's file naming: log files are named `omp.<day>.<pid>.log`
+ * with the LOCAL day, not the UTC day `toISOString()` yields. Anything that
+ * computes "today's" log path or matches same-day log files by name must use
+ * this key, or between local midnight and UTC midnight it points at files that
+ * do not exist (e.g. 00:00–08:00 in UTC+8).
+ */
+export function localDay(date: Date): string {
+	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log, local-day named like the rotating sink). */
 export function getLogPath(date = new Date(), pid = process.pid): string {
-	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.${pid}.log`);
+	return path.join(getLogsDir(), `${APP_NAME}.${localDay(date)}.${pid}.log`);
 }
 
 /**
@@ -707,6 +745,11 @@ export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
 }
 
+/** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
+export function getBrowserProfilesDir(): string {
+	return dirs.rootSubdir("browser-profiles", "state");
+}
+
 /** Get DOCS_RS cache directory () */
 export function getDocsRsCacheDir(): string {
 	return dirs.rootSubdir("webcache", "cache");
@@ -734,11 +777,6 @@ export function getWorktreeDir(segment: string): string {
 	return path.join(getWorktreesDir(), segment);
 }
 
-/** Get the GPU cache path (~/.omp/gpu_cache.json). */
-export function getGpuCachePath(): string {
-	return dirs.rootSubdir("gpu_cache.json", "cache");
-}
-
 /**
  * Get the GitHub view cache database path (~/.omp/cache/github-cache.db).
  * Honors the `OMP_GITHUB_CACHE_DB` env var when set so tests can isolate the
@@ -757,6 +795,16 @@ export function getCommitCacheDbPath(): string {
 	const override = process.env.OMP_COMMIT_CACHE_DB;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
+}
+
+/**
+ * Get the judgment answer cache database path (~/.omp/cache/judgment-cache.db).
+ * Honors `OMP_JUDGMENT_CACHE_DB` so tests and operators can isolate the cache.
+ */
+export function getJudgmentCacheDbPath(): string {
+	const override = process.env.OMP_JUDGMENT_CACHE_DB;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "judgment-cache.db"), "cache");
 }
 
 /** Get the legacy Pi extension parse cache database path. */
@@ -913,6 +961,16 @@ export function getTerminalSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "terminal-sessions", "state");
 }
 
+/**
+ * Get the persistent registry of custom session files
+ * (~/.omp/agent/custom-session-files). Each `--session-dir`/`--session`
+ * transcript is recorded here as one marker file so storage GC can scan its
+ * exact path after its terminal breadcrumb is overwritten by a later session.
+ */
+export function getCustomSessionFilesDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "custom-session-files", "state");
+}
+
 /** Get the crash log path (~/.omp/agent/omp-crash.log). */
 export function getCrashLogPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "omp-crash.log", "state");
@@ -947,6 +1005,11 @@ export function getSecretPlaceholderKeyPath(): string {
 	const keyPath = dirs.agentSubdir(undefined, "secret-placeholder.key", "state");
 	adoptLegacyFile(path.join(dirs.agentDir, "secret-placeholder.key"), keyPath);
 	return keyPath;
+}
+
+/** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
+export function getTinyWorkerRuntimeDir(): string {
+	return dirs.rootSubdir(path.join("run", "tiny"), "state");
 }
 
 /** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */

@@ -54,12 +54,7 @@ export interface CleanseAssignment {
 	weight: number;
 }
 
-/** Outcome of an interactive cleanse target picker (CLI one-shot TUI or in-session overlay). */
-export type CleanseTargetChoice =
-	| { kind: "all" }
-	| { kind: "checker"; id: string }
-	| { kind: "request"; request: string }
-	| { kind: "cancel" };
+export type { CleanseTargetChoice } from "@oh-my-pi/pi-tui/apps/cleanse-picker";
 
 /** Terminal status of one cleanse run. */
 export type CleanseRunStatus = "clean" | "unresolved" | "unsupported" | "cancelled";

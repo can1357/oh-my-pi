@@ -4,11 +4,20 @@ import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
-	isSqliteBusyError,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
-import { AsyncDrain, getAgentDbPath, getDbBusyTimeoutMs, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import {
+	AsyncDrain,
+	checkpointWal,
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	getStatsDbPath,
+	isRecord,
+	logger,
+	openSqliteDatabase,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -115,12 +124,23 @@ function normalizeModelPerfSample(modelKey: string, sample: ModelPerfSample): Mo
 	return { modelKey, outputTokens, durationMs, ttftSamples: ttftMs !== undefined ? 1 : 0, ttftMs: ttftMs ?? 0 };
 }
 
+/**
+ * Named usage counters kept in agent.db, one `<kind>_usage` table each:
+ * `command` ranks slash-command autocomplete, `hint` retires learned composer hints.
+ */
+export type UsageKind = (typeof USAGE_KINDS)[number];
+const USAGE_KINDS = ["command", "hint"] as const;
+
+/** Prepared statements for one `<kind>_usage` table. */
+type UsageStatements = { upsert: Statement; list: Statement };
+
 /** Current agent.db schema version; bump when schema changes require migration. */
 export const SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** Singleton instances per database path */
 const instances = new Map<string, AgentStorage>();
+let cancelExitCleanup: (() => void) | undefined;
 
 /**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
@@ -136,8 +156,7 @@ export class AgentStorage {
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
-	#upsertCommandUsageStmt: Statement;
-	#listCommandUsageStmt: Statement;
+	#usageStmts: Record<UsageKind, UsageStatements>;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -145,22 +164,11 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#closing = false;
 
-	private constructor(dbPath: string) {
+	private constructor(db: Database, dbPath: string) {
+		this.#db = db;
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
-		this.#ensureDir(dbPath);
-		try {
-			this.#db = new Database(dbPath);
-		} catch (err) {
-			const dir = path.dirname(dbPath);
-			const dirExists = fs.existsSync(dir);
-			const errMsg = err instanceof Error ? err.message : String(err);
-			throw new Error(
-				`Failed to open agent database at '${dbPath}': ${errMsg}\n` +
-					`Directory '${dir}' exists: ${dirExists}\n` +
-					`Ensure the directory is writable and not corrupted.`,
-			);
-		}
 
 		this.#initializeSchema();
 		this.#hardenPermissions(dbPath);
@@ -191,11 +199,21 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#listModelPerfStmt = this.#db.prepare(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
 		);
-		this.#upsertCommandUsageStmt = this.#db.prepare(
-			`INSERT INTO command_usage (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
-ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
-		);
-		this.#listCommandUsageStmt = this.#db.prepare("SELECT name, count FROM command_usage");
+		this.#usageStmts = {
+			command: this.#prepareUsageStatements("command"),
+			hint: this.#prepareUsageStatements("hint"),
+		};
+	}
+
+	#prepareUsageStatements(kind: UsageKind): UsageStatements {
+		const table = `${kind}_usage`;
+		return {
+			upsert: this.#db.prepare(
+				`INSERT INTO ${table} (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
+ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
+			),
+			list: this.#db.prepare(`SELECT name, count FROM ${table}`),
+		};
 	}
 
 	/**
@@ -203,13 +221,6 @@ ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = 
 	 * AuthCredentialStore handles auth_credentials and cache tables.
 	 */
 	#initializeSchema(): void {
-		// Install the busy handler BEFORE any lock-taking statement (incl.
-		// `PRAGMA journal_mode=WAL`, which acquires an exclusive lock during WAL
-		// recovery). Without this, concurrent omp startups can crash here with
-		// `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY`. See issue #2421. Headless
-		// hosts bound the wait so lock contention cannot freeze the protocol
-		// loop for the full interactive timeout.
-		this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -235,6 +246,12 @@ CREATE TABLE IF NOT EXISTS command_usage (
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 
+CREATE TABLE IF NOT EXISTS hint_usage (
+	name TEXT PRIMARY KEY,
+	count INTEGER NOT NULL DEFAULT 0,
+	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -243,7 +260,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		const settingsInfo = this.#db.prepare("PRAGMA table_info(settings)").all() as Array<{ name?: string }>;
+		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
+		// connection (and agent.db) open after close() until GC collects it.
+		using settingsInfoStmt = this.#db.prepare("PRAGMA table_info(settings)");
+		const settingsInfo = settingsInfoStmt.all() as Array<{ name?: string }>;
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -259,7 +279,8 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			const row = this.#db.prepare("SELECT data FROM settings WHERE id = 1").get() as { data?: string } | undefined;
+			using legacyRowStmt = this.#db.prepare("SELECT data FROM settings WHERE id = 1");
+			const row = legacyRowStmt.get() as { data?: string } | undefined;
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -283,7 +304,7 @@ CREATE TABLE settings (
 );
 `);
 				if (settings) {
-					const insert = this.#db.prepare(
+					using insert = this.#db.prepare(
 						`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ${SQLITE_NOW_EPOCH})`,
 					);
 					for (const [key, value] of Object.entries(settings)) {
@@ -298,9 +319,8 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		const versionRow = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as
-			| { version?: number }
-			| undefined;
+		using versionStmt = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		const versionRow = versionStmt.get() as { version?: number } | undefined;
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -311,7 +331,8 @@ CREATE TABLE settings (
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
 		}
-		this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+		using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
+		recordVersionStmt.run(SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -328,7 +349,8 @@ CREATE TABLE settings (
 			// Purge the old aggregates and re-arm the stats.db backfill so
 			// history is re-imported through the corrected fold.
 			this.#db.run("DELETE FROM model_perf");
-			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
+			using clearBackfillStmt = this.#db.prepare("DELETE FROM meta WHERE key = ?");
+			clearBackfillStmt.run(MODEL_PERF_BACKFILL_KEY);
 		}
 	}
 
@@ -369,7 +391,8 @@ FROM model_usage_legacy
 	/**
 	 * Returns singleton instance for the given database path, creating if needed.
 	 * Retries on the `SQLITE_BUSY` family (including `SQLITE_BUSY_RECOVERY`) with
-	 * exponential backoff. See issue #2421.
+	 * exponential backoff. Corrupt stores are quarantined and initialized once
+	 * from an empty replacement. See issue #2421.
 	 * @param dbPath - Path to the SQLite database file (defaults to config path)
 	 * @returns AgentStorage instance for the given path
 	 */
@@ -377,45 +400,51 @@ FROM model_usage_legacy
 		const existing = instances.get(dbPath);
 		if (existing) return existing;
 
-		const maxRetries = 4;
-		const baseDelayMs = 100;
-		let lastError: Error | undefined;
-
-		for (let attempt = 0; attempt < maxRetries; attempt++) {
-			try {
-				const storage = new AgentStorage(dbPath);
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+		return openSqliteDatabase(
+			dbPath,
+			db => {
+				const storage = new AgentStorage(db, dbPath);
+				// Publish synchronously: concurrent opens must reuse this handle before the helper yields.
+				// Exit-only cleanup keeps the connection valid for continuing sessions.
+				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
 				instances.set(dbPath, storage);
 				return storage;
-			} catch (err) {
-				if (!isSqliteBusyError(err)) {
-					throw err;
-				}
-				lastError = err instanceof Error ? err : new Error(String(err));
-				if (attempt < maxRetries - 1) {
-					await Bun.sleep(baseDelayMs * 2 ** attempt);
-				}
-			}
-		}
-
-		throw new Error(
-			`Failed to open agent database at '${dbPath}' after ${maxRetries} attempts: ${lastError?.message}`,
-			{ cause: lastError },
+			},
+			{ recoverCorruption: true },
 		);
 	}
-	/** @internal Reset all singletons and close their databases — test-only. */
-	static resetInstance(): void {
+
+	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
+	static close(): void {
 		for (const storage of instances.values()) storage.#close();
 		instances.clear();
+		cancelExitCleanup?.();
+		cancelExitCleanup = undefined;
 	}
 
 	#close(): void {
+		this.#closing = true;
+		// Model-performance batches are synchronous once invoked, so this
+		// persists them before finalizing their statements during process exit.
+		void this.#perfDrain.flush();
+		// Best-effort: a database whose directory was removed (agent dir deleted underneath the
+		// process) cannot checkpoint, and that must not keep the remaining handles open.
+		try {
+			checkpointWal(this.#db);
+		} catch (error) {
+			logger.debug("AgentStorage: WAL checkpoint on close failed", { error: String(error) });
+		}
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
-		this.#upsertCommandUsageStmt.finalize();
-		this.#listCommandUsageStmt.finalize();
+		for (const kind of USAGE_KINDS) {
+			const stmts = this.#usageStmts[kind];
+			stmts.upsert.finalize();
+			stmts.list.finalize();
+		}
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -442,6 +471,15 @@ FROM model_usage_legacy
 			}
 		}
 		return settings as Settings;
+	}
+
+	/**
+	 * Drops legacy `settings` rows after they have been written to config.yml.
+	 * The table is only a migration source; leaving rows would resurrect values
+	 * if config.yml is later deleted.
+	 */
+	clearMigratedSettings(): void {
+		this.#db.run("DELETE FROM settings");
 	}
 
 	/**
@@ -476,30 +514,30 @@ FROM model_usage_legacy
 		}
 	}
 	/**
-	 * Records one slash-command invocation, bumping its usage count and
-	 * last-used timestamp. Frequency-ranked autocomplete reads these counts.
-	 * @param name - Canonical command name (e.g. "model", "skill:review")
+	 * Records one use of `name`, bumping its count and last-used timestamp.
+	 * Failures are logged, never thrown: usage counts are advisory.
+	 * @param name - Counter key, e.g. a canonical command name ("model", "skill:review") or hint id
 	 */
-	recordCommandUsage(name: string): void {
+	recordUsage(kind: UsageKind, name: string): void {
 		try {
-			this.#upsertCommandUsageStmt.run(name);
+			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
-			logger.warn("AgentStorage failed to record command usage", { name, error: String(error) });
+			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
 		}
 	}
 
 	/**
-	 * Gets slash-command usage counts keyed by canonical command name.
-	 * @returns Command name → invocation count
+	 * Gets usage counts of one kind; empty when the read fails.
+	 * @returns Counter key → use count
 	 */
-	listCommandUsage(): Record<string, number> {
+	listUsage(kind: UsageKind): Record<string, number> {
 		try {
-			const rows = this.#listCommandUsageStmt.all() as Array<{ name: string; count: number }>;
+			const rows = this.#usageStmts[kind].list.all() as Array<{ name: string; count: number }>;
 			const counts: Record<string, number> = {};
 			for (const row of rows) counts[row.name] = row.count;
 			return counts;
 		} catch (error) {
-			logger.warn("AgentStorage failed to list command usage", { error: String(error) });
+			logger.warn("AgentStorage failed to list usage", { kind, error: String(error) });
 			return {};
 		}
 	}
@@ -524,10 +562,9 @@ FROM model_usage_legacy
 	}
 
 	#flushModelPerf(rows: ModelPerfInsert[]): void {
-		// Kick the one-time history import too, so aggregates populate even if
-		// the user never opens /models. Additive merge makes ordering with live
-		// samples irrelevant.
-		this.#kickModelPerfBackfill();
+		// A close-triggered flush must persist only the queued live batch. Starting
+		// the async stats import here could commit aggregates without its marker.
+		if (!this.#closing) this.#kickModelPerfBackfill();
 		try {
 			this.#db.transaction((batch: ModelPerfInsert[]) => {
 				for (const row of batch) this.#foldModelPerf(row);
@@ -579,15 +616,15 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			const marker = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(MODEL_PERF_BACKFILL_KEY);
+			using markerStmt = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
+			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
 			const statsDbPath = getStatsDbPath();
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
-					this.#db
-						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-						.run(MODEL_PERF_BACKFILL_KEY, "complete");
+					using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+					markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
 					logger.info("AgentStorage imported model perf history from stats.db", { imported });
 				})
 				.catch(error => {
@@ -617,7 +654,7 @@ FROM model_usage_legacy
 		const statsDb = new Database(statsDbPath, { readonly: true });
 		try {
 			statsDb.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-			const select = statsDb.prepare(
+			using select = statsDb.prepare(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
@@ -666,7 +703,7 @@ LIMIT ?4`,
 				await Bun.sleep(0);
 			}
 			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
+				using upsert = this.#db.prepare(
 					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
@@ -718,7 +755,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const stmt = this.#db.prepare(
+		using stmt = this.#db.prepare(
 			provider
 				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
 				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
@@ -759,8 +796,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param credentials - New credentials to store
 	 * @returns Array of newly stored credentials with their database IDs
 	 */
-	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
-		return this.#authStore.replaceAuthCredentialsForProvider(provider, credentials);
+	replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
+		return this.#authStore.replaceAuthCredentials(provider, credentials);
 	}
 
 	/**
@@ -777,8 +814,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param id - Database row ID of the credential to disable
 	 * @param disabledCause - Human-readable cause stored with the disabled row
 	 */
-	deleteAuthCredential(id: number, disabledCause: string): void {
-		this.#authStore.deleteAuthCredential(id, disabledCause);
+	deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		return this.#authStore.deleteAuthCredential(id, disabledCause);
 	}
 
 	/**
@@ -786,8 +823,8 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param provider - Provider name whose credentials should be disabled
 	 * @param disabledCause - Human-readable cause stored with the disabled rows
 	 */
-	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
-		this.#authStore.deleteAuthCredentialsForProvider(provider, disabledCause);
+	deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
+		return this.#authStore.deleteAuthCredentials(provider, disabledCause);
 	}
 
 	/**
@@ -809,27 +846,6 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	cleanExpiredCache(): void {
 		this.#authStore.cleanExpiredCache();
-	}
-
-	/**
-	 * Ensures the parent directory for the database file exists.
-	 * @param dbPath - Path to the database file
-	 */
-	#ensureDir(dbPath: string): void {
-		const dir = path.dirname(dbPath);
-		try {
-			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code;
-			// EEXIST is fine - directory already exists
-			if (code !== "EEXIST") {
-				throw new Error(`Failed to create agent storage directory '${dir}': ${code || err}`);
-			}
-		}
-		// Verify directory was created
-		if (!fs.existsSync(dir)) {
-			throw new Error(`Agent storage directory '${dir}' does not exist after creation attempt`);
-		}
 	}
 
 	#hardenPermissions(dbPath: string): void {

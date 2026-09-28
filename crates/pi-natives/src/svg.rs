@@ -51,7 +51,8 @@ fn rasterize_svg_sync(input: &[u8], max_width_px: u32, max_height_px: u32) -> Re
 
 	let mut options = usvg::Options { fontdb: Arc::clone(&FONT_DB), ..usvg::Options::default() };
 	// Repository-controlled SVGs must not read arbitrary host files through an
-	// <image href="…"> reference. Embedded data URLs retain the default resolver.
+	// <image href="…"> reference. Embedded data URLs retain the default
+	// resolver.
 	options.image_href_resolver.resolve_string = Box::new(|_, _| None);
 	let tree = usvg::Tree::from_data(input, &options)
 		.map_err(|error| napi::Error::from_reason(format!("Failed to parse SVG: {error}")))?;

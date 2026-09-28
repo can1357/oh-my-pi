@@ -1,0 +1,5 @@
+class "stepfun" {
+	bounded "step"
+
+	family "step" glob="*step*"
+}

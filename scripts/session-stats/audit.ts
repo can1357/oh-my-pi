@@ -623,6 +623,7 @@ async function mapPool<T, R>(
 	limit: number,
 	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const out = new Array<R>(items.length);
 	let next = 0;
 	const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -1006,8 +1007,8 @@ async function openClassifier(modelSpec: string): Promise<Classifier> {
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
-	await storage.reload();
-	const apiKey = await storage.getApiKey(provider);
+	await storage.credentials.reload();
+	const apiKey = await storage.keys.get(provider);
 	if (!apiKey) {
 		throw new Error(`no credentials for provider "${provider}" (omp login or env var required)`);
 	}

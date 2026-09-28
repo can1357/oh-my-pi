@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { ModelDownloadActivity } from "../downloads/model-downloads";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -11,10 +12,10 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 } from "../subprocess/worker-client";
-import { tinyWorkerEnv } from "../tiny/title-client";
+import { tinyModelEnvKey, tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
-import type { SttModelKey } from "./models";
+import { getSttModelSpec, type SttModelKey } from "./models";
 
 type PendingRequest =
 	| { kind: "transcribe"; modelKey: SttModelKey; resolve: (text: string) => void; reject: (error: Error) => void }
@@ -128,8 +129,11 @@ export class SttClient {
 	#pending = new Map<string, PendingRequest>();
 	#streams = new Map<string, StreamState>();
 	#progressListeners = new Set<(event: SttProgressEvent) => void>();
+	#downloads = new ModelDownloadActivity(modelKey => getSttModelSpec(modelKey)?.label ?? modelKey);
 	#nextRequestId = 0;
 	#refed = false;
+	/** {@link tinyModelEnvKey} the current worker was spawned under. */
+	#workerEnvKey: string | undefined;
 	#spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound>;
 
 	constructor(spawnWorker: () => RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> = spawnSttWorker) {
@@ -267,7 +271,7 @@ export class SttClient {
 		this.#unsubscribeError?.();
 		this.#unsubscribeError = null;
 		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+			this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, "stt worker terminated");
 			if (pending.kind === "transcribe") pending.reject(new Error("stt worker terminated"));
 			else pending.resolve({ ok: false });
 		}
@@ -282,9 +286,15 @@ export class SttClient {
 	}
 
 	#ensureWorker(): RefCountedWorkerHandle<SttWorkerInbound, SttWorkerOutbound> {
-		if (this.#worker) return this.#worker;
+		const envKey = tinyModelEnvKey();
+		if (this.#worker) {
+			if (this.#workerEnvKey === envKey || this.#pending.size > 0 || this.#streams.size > 0) return this.#worker;
+			// Device/dtype changed while idle: retire the worker so the respawn uses the new env.
+			void this.terminate();
+		}
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
+		this.#workerEnvKey = envKey;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		return worker;
@@ -341,7 +351,7 @@ export class SttClient {
 			if (message.type === "error") {
 				const stream = this.#streams.get(message.id);
 				if (stream) {
-					this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
+					this.#emitProgress({ modelKey: stream.modelKey, status: "error" }, message.error);
 					stream.finish(() => stream.reject(new Error(message.error)));
 				}
 			}
@@ -357,18 +367,19 @@ export class SttClient {
 			return;
 		}
 		// message.type === "error"
-		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+		this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, message.error);
 		if (pending.kind === "transcribe") pending.reject(new Error(message.error));
 		else pending.resolve({ ok: false, error: message.error });
 	}
 
-	#emitProgress(event: SttProgressEvent): void {
+	#emitProgress(event: SttProgressEvent, error?: string): void {
+		this.#downloads.observe(event, error);
 		for (const listener of this.#progressListeners) listener(event);
 	}
 
 	#failStreams(error: Error): void {
-		for (const stream of [...this.#streams.values()]) {
-			this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
+		for (const stream of Array.from(this.#streams.values())) {
+			this.#emitProgress({ modelKey: stream.modelKey, status: "error" }, error.message);
 			stream.finish(() => stream.reject(error));
 		}
 	}
@@ -376,7 +387,7 @@ export class SttClient {
 	#handleWorkerError(error: Error): void {
 		logger.warn("stt: worker error", { error: error.message });
 		for (const pending of this.#pending.values()) {
-			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
+			this.#emitProgress({ modelKey: pending.modelKey, status: "error" }, error.message);
 			if (pending.kind === "transcribe") pending.reject(error);
 			else pending.resolve({ ok: false, error: error.message });
 		}

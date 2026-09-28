@@ -99,8 +99,10 @@ export interface RememberFacadeOptions {
 	readonly memory_type?: string | null;
 }
 
-export interface RecallFacadeOptions
-	extends Omit<RecallOptions, "temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"> {
+export interface RecallFacadeOptions extends Omit<
+	RecallOptions,
+	"temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"
+> {
 	readonly from_date?: string | null;
 	readonly to_date?: string | null;
 	readonly source?: string | null;
@@ -212,7 +214,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmEnabled = hasOwn(options, "llmEnabled")
 			? options.llmEnabled
 			: (nestedLlm?.enabled ??
-					(nestedLlm?.baseUrl !== undefined ||
+				  (nestedLlm?.baseUrl !== undefined ||
 						nestedLlm?.apiKey !== undefined ||
 						nestedLlm?.maxTokens !== undefined ||
 						nestedLlm?.complete !== undefined ||

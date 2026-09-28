@@ -101,10 +101,17 @@ Shared fields for every transport:
 - `enabled?: boolean` — skip this server when `false`, unless the active-profile user `enabledServers` allowlist names it
 - `timeout?: number` — MCP request timeout in milliseconds; `0` disables client-side MCP timeouts
 - `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
+- `instructions?: boolean` — include server-provided instructions in the system prompt (default: `true`). Set `false` to omit that server's instructions without disabling its tools. Like `requestIdFormat`, this is OMP-specific and is ignored in configs translated from other tools.
 - `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
 - `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth
 
+Disable instructions when a server's guidance conflicts with your tool policy or adds unwanted context to every request, including subagent requests. If no connected server contributes instructions, the MCP Server Instructions section is omitted entirely. `instructions` does not distinguish connections: when two entries under different names describe the same endpoint, only the higher-priority entry is kept, together with its own `instructions` value, so set the option on the entry that wins (see `/mcp list`). A changed value applies to an already-connected server after `/mcp reload`.
+
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
+
+Initial MCP discovery returns after a 250 ms window while slower connections continue in the background. Set `mcp.startupTimeoutMs` or override it with `OMP_MCP_STARTUP_TIMEOUT_MS` to change the window; `0` waits for the initial connection attempts to settle. In print mode (`-p`, `--mode text|json`), OMP additionally waits for all configured servers to load tools or fail before the first turn, up to `OMP_MCP_TIMEOUT_MS` (default 30 seconds). `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline too, so an unresponsive server can block print mode indefinitely. Servers still unavailable at the deadline are named on stderr; `OMP_MCP_REQUIRE_READY=1` instead exits with code 1 before the turn. These print-mode waits do not affect interactive, RPC, or ACP startup.
+
+Remote HTTP and SSE transports do not impose an additional socket-idle timeout. Without an applicable MCP deadline, a silent connection can wait indefinitely; cancel the call or close the transport to stop it. A quiet stream alone does not prove that its peer is still reachable.
 
 ### `stdio` transport
 
@@ -519,6 +526,12 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 ### The server exists in another tool's config but not in OMP
 
 Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+
+### A browser MCP server is configured but never loads
+
+OMP drops recognized browser-automation servers at config load, before any connection attempt, whenever the built-in browser prelude is available (`browser.enabled` defaults to `true`). The filter matches servers named `playwright`, `puppeteer`, `browserbase`, `browser-tools`, `browser-use` or `browser`, plus any server whose command or args reference a browser MCP package (for example `@playwright/mcp`) or whose URL points at browserbase.com or browser-use.com. The drop is silent: the server never reaches `/mcp list`, and no error or warning is recorded. This filter is separate from `disabledServers`.
+
+To run a browser MCP server instead of the native browser tool, set `browser.enabled: false` in your settings. `omp read` does not apply this filter.
 
 ### A namespaced server works but the editor rejects its name
 

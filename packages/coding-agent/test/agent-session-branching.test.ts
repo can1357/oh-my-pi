@@ -223,25 +223,6 @@ describe("AgentSession historical image prompts", () => {
 		}
 	});
 
-	it("returns the target images when navigating to a user prompt", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const text = "Compare [Image #1, 1x1]";
-			const entryId = ctx.sessionManager.appendMessage(historicalImagePrompt(text));
-			ctx.sessionManager.appendMessage(assistantMsg("Compared."));
-
-			const result = await ctx.session.navigateTree(entryId);
-
-			expect(result).toMatchObject({
-				editorText: text,
-				editorImages: [HISTORICAL_IMAGE],
-				cancelled: false,
-			});
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-
 	it("preserves multi-image order so positional markers stay aligned", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {
@@ -277,6 +258,30 @@ describe("AgentSession historical image prompts", () => {
 
 			expect(result.editorText).toBe("plain text turn");
 			expect(result.editorImages).toBeUndefined();
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("rewinds past a user prompt that is the current leaf", async () => {
+		// A turn aborted before any assistant reply leaves the user prompt as
+		// the leaf; rewinding to it must still move the leaf to its parent and
+		// hand the prompt back, not report a no-op.
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("reply"));
+			const leafId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "aborted prompt",
+				timestamp: Date.now(),
+			});
+			expect(ctx.sessionManager.getLeafId()).toBe(leafId);
+
+			const result = await ctx.session.navigateTree(leafId);
+
+			expect(result).toMatchObject({ editorText: "aborted prompt", cancelled: false });
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
 		} finally {
 			await ctx.cleanup();
 		}

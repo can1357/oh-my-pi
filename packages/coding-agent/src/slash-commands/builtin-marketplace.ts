@@ -422,6 +422,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 	},
 	{
 		name: "plugins",
+		aliases: ["plugin"],
 		icon: "package",
 		description: "View and manage installed plugins",
 		acpDescription: "Manage plugins",

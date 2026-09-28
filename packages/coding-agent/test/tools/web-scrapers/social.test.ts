@@ -68,18 +68,6 @@ describe.skipIf(SKIP)("handleReddit", () => {
 		expect(result?.content).toMatch(/\*\*.*\*\*/); // Contains bold formatting
 		expect(result?.notes).toContain("Fetched via Reddit JSON API");
 	});
-
-	it("fetches individual post", async () => {
-		// Use a more reliable recent post URL
-		const result = await handleReddit("https://www.reddit.com/r/programming/", 20000);
-		// Individual post may fail if post doesn't exist, check if we get data
-		if (result !== null) {
-			expect(result.method).toBe("reddit");
-			expect(result.contentType).toBe("text/markdown");
-			expect(result.content).toContain("# r/");
-			expect(result.notes).toContain("Fetched via Reddit JSON API");
-		}
-	});
 });
 
 describe.skipIf(SKIP)("handleStackOverflow", () => {
@@ -98,17 +86,6 @@ describe.skipIf(SKIP)("handleStackOverflow", () => {
 			expect(result.content).toContain("**Tags:");
 			expect(result.content).toContain("## Question");
 			expect(result.notes.some(note => note.includes("Fetched via Stack Exchange API"))).toBe(true);
-		}
-	});
-
-	it("handles other StackExchange sites", async () => {
-		const result = await handleStackOverflow("https://math.stackexchange.com/questions/1000/", 20000);
-		// API may fail, check gracefully
-		if (result !== null) {
-			expect(result.method).toBe("stackexchange");
-			expect(result.contentType).toBe("text/markdown");
-			expect(result.content).toContain("# ");
-			expect(result.notes).toContain("Fetched via Stack Exchange API");
 		}
 	});
 });

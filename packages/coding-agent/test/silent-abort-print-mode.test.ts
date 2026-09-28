@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import {
 	type AgentSession,
@@ -45,11 +46,12 @@ function createMockSession(
 	return {
 		state: { messages },
 		getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			onPersistenceError: () => () => {},
 		},
 		extensionRunner: undefined,
 		subscribe: () => () => {},
@@ -96,12 +98,13 @@ describe("Print-mode silent-abort regression", () => {
 		});
 
 		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
+		const exitCode = await runPrintMode(session, { mode: "text" });
 
 		// The silent-abort marker MUST NOT appear in stderr
 		const stderrText = stderrOutput.join("");
 		expect(stderrText).not.toContain(SILENT_ABORT_MARKER);
-		// process.exit MUST NOT have been called (clean termination)
+		// A silent abort reports success and never terminates the process itself
+		expect(exitCode).toBe(0);
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
@@ -125,13 +128,13 @@ describe("Print-mode silent-abort regression", () => {
 		});
 
 		const session = createMockSession([silentAbortMsg]);
-		await runPrintMode(session, { mode: "text" });
 
+		expect(await runPrintMode(session, { mode: "text" })).toBe(0);
 		expect(stderrOutput.join("")).toBe("");
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
-	it("writes real error messages to stderr and exits non-zero", async () => {
+	it("writes real error messages to stderr and returns a non-zero code", async () => {
 		const errorMsg = makeAssistantMessage({
 			stopReason: "error",
 			errorMessage: "Rate limit exceeded",
@@ -142,13 +145,14 @@ describe("Print-mode silent-abort regression", () => {
 		const session = createMockSession([errorMsg], async options => {
 			disposeOptions = options;
 		});
-		await runPrintMode(session, { mode: "text" });
+		const exitCode = await runPrintMode(session, { mode: "text" });
 
 		// A real error SHOULD be written to stderr
 		const stderrText = stderrOutput.join("");
 		expect(stderrText).toContain("Rate limit exceeded");
-		// process.exit(1) SHOULD have been called
-		expect(exitSpy).toHaveBeenCalledWith(1);
+		// The caller terminates with the returned code; runPrintMode never exits itself
+		expect(exitCode).toBe(1);
+		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
 	});
 

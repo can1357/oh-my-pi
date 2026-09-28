@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode 
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { applyToolProxy } from "../../extensibility/tool-proxy";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type {
 	RpcHostToolCallRequest,
@@ -38,9 +38,11 @@ export function isRpcHostToolUpdate(value: unknown): value is RpcHostToolUpdate 
 	return frame.type === "host_tool_update" && typeof frame.id === "string" && isAgentToolResult(frame.partialResult);
 }
 
-class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme = Theme>
-	implements AgentTool<TParams, unknown, TTheme>
-{
+class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme = Theme> implements AgentTool<
+	TParams,
+	unknown,
+	TTheme
+> {
 	declare name: string;
 	declare label: string;
 	declare description: string;

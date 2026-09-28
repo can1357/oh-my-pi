@@ -1,0 +1,6 @@
+class "ai21" {
+	bounded "jamba"
+	namespace "ai21"
+
+	family "jamba" glob="*jamba*"
+}

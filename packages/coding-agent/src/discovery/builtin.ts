@@ -25,7 +25,7 @@ import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { expandTilde } from "../tools/path-utils";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
@@ -64,7 +64,8 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	}
 	// Native user config is profile-scoped: getAgentDir() points at the active
 	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
-	const userDir = await ifNonEmptyDir(getAgentDir());
+	// A load that carries its own agentDir (an SDK session created with one) reads that dir.
+	const userDir = await ifNonEmptyDir(ctx.agentDir ?? getAgentDir());
 	if (userDir) {
 		result.push({ dir: userDir, level: "user" });
 	}
@@ -72,7 +73,7 @@ async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; lev
 	return result;
 }
 
-function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
+export function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: string; depth: number }> {
 	const ancestors: Array<{ dir: string; depth: number }> = [];
 	let current = cwd;
 	let depth = 0;
@@ -163,11 +164,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
+			const instructions = typeof serverConfig.instructions === "boolean" ? serverConfig.instructions : undefined;
+			if (instructions === undefined && serverConfig.instructions != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid instructions ${JSON.stringify(serverConfig.instructions)}, ignoring`,
+				);
+			}
+
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
+				instructions,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
@@ -238,42 +247,38 @@ registerProvider<MCPServer>(mcpCapability.id, {
 	load: loadMCPServers,
 });
 
-// System Prompt (SYSTEM.md)
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const items: SystemPrompt[] = [];
+	const warnings: string[] = [];
 
-	const userPath = path.join(getAgentDir(), "SYSTEM.md");
-	const userContent = await readFile(userPath);
-	if (userContent) {
-		items.push({
-			path: userPath,
-			content: userContent,
-			level: "user",
-			_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
-		});
-	}
+	const load = async (filePath: string, level: "user" | "project", kind: "text" | "template"): Promise<void> => {
+		const content = await readFile(filePath);
+		if (!content) return;
+		if (kind === "template" && !content.trim()) {
+			warnings.push(`Ignoring empty system prompt template at ${filePath}`);
+			return;
+		}
+		items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
+	};
 
+	// Project entries first: dedupe is first-wins, so a project literal or
+	// template claims its key before a same-scope user file can survive.
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
-		const projectContent = await readFile(projectPath);
-		if (projectContent) {
-			items.push({
-				path: projectPath,
-				content: projectContent,
-				level: "project",
-				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
-			});
-		}
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
 	}
+	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
+	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
 
-	return { items, warnings: [] };
+	return { items, warnings };
 }
 
 registerProvider<SystemPrompt>(systemPromptCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Custom system prompt from SYSTEM.md",
+	description: "Custom system prompt from SYSTEM.md and SYSTEM_TEMPLATE.md",
 	priority: PRIORITY,
 	load: loadSystemPrompt,
 });
@@ -378,18 +383,19 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		const result = await loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, level, {
 			extensions: ["md", "mdc"],
 			transform: (name, content, path, source) =>
-				buildRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(md|mdc)$/ }),
+				discoverRuleFromMarkdown(name, content, path, source, { stripNamePattern: /\.(md|mdc)$/ }),
 		});
 		items.push(...result.items);
 		if (result.warnings) warnings.push(...result.warnings);
 	}
 
 	// Top-level RULES.md is a sticky always-apply rule. Documented in
-	// https://omp.sh/docs/context-files as the file that gets "re-injected near
-	// the current turn so they keep hold across long conversations".
-	// User scope:    ~/.omp/agent/RULES.md
+	// https://omp.sh/docs/context-files: its full body is carried on every
+	// request (system-prompt text, or image frames under snapcompact
+	// system-prompt imaging) so it keeps its hold across long sessions.
+	// User scope:    <agentDir>/RULES.md (~/.omp/agent/RULES.md by default)
 	// Project scope: nearest .omp/RULES.md walking up from cwd to repoRoot
-	const userRulesFile = path.join(getAgentDir(), "RULES.md");
+	const userRulesFile = path.join(ctx.agentDir ?? getAgentDir(), "RULES.md");
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
@@ -412,9 +418,11 @@ async function loadStickyRulesFile(filePath: string, level: "user" | "project"):
 	if (!content) return null;
 	const source = createSourceMeta(PROVIDER_ID, filePath, level);
 	const ruleName = level === "project" ? "RULES@project" : "RULES";
-	const rule = buildRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
+	const rule = discoverRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
+	if (!rule) return null;
 	// Force alwaysApply regardless of frontmatter — the whole point of RULES.md
-	// is to be reattached every turn.
+	// is that its body is carried on every request instead of degrading to an
+	// on-demand rulebook entry.
 	return { ...rule, alwaysApply: true };
 }
 

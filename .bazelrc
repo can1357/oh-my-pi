@@ -6,7 +6,7 @@
 common --enable_platform_specific_config
 
 # Hermetic-ish action env: no host env leaks into action keys. Build scripts
-# that need host tools (cmake for audiopus_sys' bundled opus) get an explicit
+# that need host tools (cmake for opusic-sys' bundled Opus) get an explicit
 # PATH through crate annotations in MODULE.bazel.
 build --incompatible_strict_action_env
 

@@ -2,8 +2,9 @@
 name = "pi-shell"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 # Portions of the minimizer adapt MIT-licensed algorithms from rtk-ai/rtk.
 # See NOTICE at this crate root (packaged on publish).
@@ -15,6 +16,7 @@ workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 pi-builtins.workspace = true
+pi-vfs.workspace = true
 brush-core.workspace = true
 brush-parser.workspace = true
 clap.workspace = true
@@ -39,4 +41,5 @@ windows-sys.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile = "3"

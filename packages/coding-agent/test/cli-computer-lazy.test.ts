@@ -16,7 +16,7 @@ test("normal CLI startup keeps computer worker modules lazy", async () => {
 	);
 
 	// `--no-addons` is a process-local sentinel: evaluating the computer worker graph
-	// attempts to load the desktop addon and fails, while normal CLI startup must not.
+	// attempts to load the desktop addon and fails, while prelude registration must not.
 	const child = Bun.spawn([process.execPath, "--no-addons", probePath], { stdout: "pipe", stderr: "pipe" });
 	const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 	expect(exitCode, stderr).toBe(0);

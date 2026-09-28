@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentOptions, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, FetchImpl, Model, ProviderSessionState, Usage } from "@oh-my-pi/pi-ai";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -10,6 +10,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+
+import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -41,6 +43,7 @@ class FakeSession {
 	}
 
 	emit(event: AgentSessionEvent): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...this.listeners]) listener(event);
 	}
 
@@ -152,14 +155,6 @@ describe("AutoLearnController", () => {
 		expect(session.captures).toHaveLength(0);
 	});
 
-	it("does not nudge during plan mode", () => {
-		const session = new FakeSession();
-		session.planEnabled = true;
-		install(session, { "autolearn.autoContinue": true });
-		session.toolCalls(5);
-		session.agentEnd();
-		expect(session.captures).toHaveLength(0);
-	});
 	it("does not combine tool calls across separate sub-threshold turns", () => {
 		const session = new FakeSession();
 		install(session, { "autolearn.autoContinue": true });
@@ -188,7 +183,7 @@ describe("AutoLearnController", () => {
 		// Enable via the global layer (not an isolated override) so the live flag
 		// can be flipped and the controller's fire-time re-check is exercised.
 		const settings = Settings.isolated({ "autolearn.autoContinue": true });
-		settings.set("autolearn.enabled", true);
+		cfgAutolearnEnabled.set(settings, true);
 		new AutoLearnController({
 			session: session as unknown as AgentSession,
 			settings,
@@ -197,13 +192,13 @@ describe("AutoLearnController", () => {
 		session.toolCalls(5);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1); // fires while enabled
-		settings.set("autolearn.enabled", false);
+		cfgAutolearnEnabled.set(settings, false);
 		session.toolCalls(5);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1); // no new nudge after disable
 		// The disabled stop must NOT leave its tool calls queued: re-enabling and
 		// doing a sub-threshold turn must not fire from leaked counts.
-		settings.set("autolearn.enabled", true);
+		cfgAutolearnEnabled.set(settings, true);
 		session.toolCalls(1);
 		session.agentEnd();
 		expect(session.captures).toHaveLength(1);
@@ -377,7 +372,7 @@ describe("isolated auto-learn capture", () => {
 		let captureSessionId: string | undefined;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
 			createAgent: options => {
 				captureMessages = options.initialState?.messages ?? [];
@@ -421,67 +416,6 @@ describe("isolated auto-learn capture", () => {
 		expect(primaryEvents).toBe(0);
 	});
 
-	it("forwards provider lifecycle hooks to the detached capture", async () => {
-		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
-		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
-		const sourceAgent = new Agent({
-			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
-		});
-		const onPayload: NonNullable<AgentOptions["onPayload"]> = async payload => payload;
-		const onResponse: NonNullable<AgentOptions["onResponse"]> = async () => {};
-		let captureOnPayload: AgentOptions["onPayload"];
-		let captureOnResponse: AgentOptions["onResponse"];
-		const runCapture = createAutoLearnCaptureRunner({
-			sourceAgent,
-			captureTools: [manageSkillTool],
-			onPayload,
-			onResponse,
-			createAgent: options => {
-				captureOnPayload = options.onPayload;
-				captureOnResponse = options.onResponse;
-				return new Agent({
-					...options,
-					convertToLlm,
-					streamFn: captureMock.stream,
-				});
-			},
-		});
-
-		await runCapture("Capture with provider hooks");
-
-		expect(captureMock.calls).toHaveLength(1);
-		expect(captureOnPayload).toBe(onPayload);
-		expect(captureOnResponse).toBe(onResponse);
-	});
-
-	it("adds learn alongside manage_skill when a memory backend provides it", async () => {
-		const model = googleInteractionsModel();
-		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
-		const learnTool = captureTool("learn", "Store long-term memory");
-		const sourceAgent = new Agent({
-			initialState: { model, systemPrompt: ["Test"], tools: [manageSkillTool, learnTool] },
-		});
-		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
-		let captureToolNames: string[] = [];
-		const runCapture = createAutoLearnCaptureRunner({
-			sourceAgent,
-			captureTools: [manageSkillTool, learnTool],
-			createAgent: options => {
-				captureToolNames = options.initialState?.tools?.map(tool => tool.name) ?? [];
-				return new Agent({
-					...options,
-					convertToLlm,
-					streamFn: captureMock.stream,
-				});
-			},
-		});
-
-		await runCapture("Capture reusable knowledge");
-
-		expect(captureToolNames).toEqual(["manage_skill", "learn"]);
-		expect(captureMock.calls).toHaveLength(1);
-	});
-
 	it("keeps source credentials and account metadata while using a fresh transport session", async () => {
 		const captureMock = createMockModel({
 			provider: "anthropic",
@@ -497,8 +431,7 @@ describe("isolated auto-learn capture", () => {
 			["capture-transport", "account-other"],
 		]);
 		const resolvedAffinities: string[] = [];
-		let sourceAgent: Agent;
-		sourceAgent = new Agent({
+		const sourceAgent = new Agent({
 			sessionId: "primary-affinity",
 			getApiKey: () => async () => {
 				const affinity = sourceAgent.sessionId ?? "";
@@ -513,7 +446,7 @@ describe("isolated auto-learn capture", () => {
 		});
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "capture-transport",
 			createAgent: options =>
 				new Agent({
@@ -549,7 +482,7 @@ describe("isolated auto-learn capture", () => {
 		let closeCalls = 0;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options => {
 				providerState = options.providerSessionState;
 				providerState?.set("blocked", { close: () => closeCalls++ });

@@ -5,8 +5,8 @@
  */
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { sleep } from "bun";
 

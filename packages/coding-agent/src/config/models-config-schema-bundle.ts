@@ -1,5 +1,20 @@
-import { type } from "@oh-my-pi/omptype";
+import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { once } from "@oh-my-pi/pi-utils";
+
+function validateMaxContextWindow(
+	value: { maxContextWindow?: number; contextWindow?: number },
+	ctx: NarrowContext,
+): boolean {
+	if (
+		value.maxContextWindow !== undefined &&
+		(!Number.isSafeInteger(value.maxContextWindow) ||
+			value.maxContextWindow <= 0 ||
+			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
+	) {
+		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
+	}
+	return true;
+}
 
 export const getModelsConfigSchemaBundle = once(() => {
 	const OpenRouterRoutingSchema = type({
@@ -41,6 +56,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsForcedToolChoice?": "boolean",
 		"disableReasoningOnForcedToolChoice?": "boolean",
 		"disableReasoningOnToolChoice?": "boolean",
+		"disableReasoningWithTools?": "boolean",
 		"thinkingFormat?": '"openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template"',
 		"qwenTemplateReasoningEffort?": "boolean",
 		"openRouterRouting?": OpenRouterRoutingSchema,
@@ -53,10 +69,15 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
+		"supportsReasoningSummary?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
+		"supportsConfigurationUpdate?": "boolean",
+		"supportsSteering?": "boolean",
+		"stripImageInput?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
+		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
@@ -82,7 +103,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
 	);
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
@@ -184,8 +205,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 			cacheRead: "number",
 			cacheWrite: "number",
 		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
+		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
+		"maxContextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
@@ -219,7 +245,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return true;
+		return validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -236,8 +262,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 			"cacheRead?": "number",
 			"cacheWrite?": "number",
 		},
+		"promptCache?": {
+			"short?": "number",
+			"long?": "number",
+		},
 		"premiumMultiplier?": "number",
 		"contextWindow?": "number",
+		"maxContextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
@@ -264,13 +295,24 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return true;
+		return validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({
-		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
+		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "apple-foundation-models"',
 		"timeoutMs?": "number",
+		/**
+		 * Defaults to `true`. Set `false` to fetch the model list from
+		 * `{baseUrl}/models` without injecting `/v1` — for gateways that root
+		 * their OpenAI-compatible surface at a versioned path (e.g.
+		 * `https://api.opper.ai/v3/compat`) where the forced `/v1/models`
+		 * returns a different, smaller model list.
+		 */
+		"injectV1?": "boolean",
 	}).narrow((value, ctx) => {
+		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
+			return ctx.mustBe("injectV1 only on openai-models-list discovery");
+		}
 		if (
 			value.timeoutMs !== undefined &&
 			(typeof value.timeoutMs !== "number" || value.timeoutMs <= 0 || !Number.isFinite(value.timeoutMs))
@@ -305,6 +347,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"guardrailVersion?": "string",
 		/** Bedrock guardrail trace verbosity. */
 		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
+		/**
+		 * Bedrock invocation-log tags attached to every Converse request under this
+		 * provider (max 16 entries; keys/values limited to `[a-zA-Z0-9\s:_@$#=/+,-.]`).
+		 */
+		"requestMetadata?": { "[string]": "string" },
 		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's

@@ -5,7 +5,7 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 
 beforeEach(async () => {
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true, overrides: { doubleEscapeAction: "tree" } });
+	await Settings.init({ inMemory: true, overrides: { doubleEscapeAction: "none" } });
 });
 
 afterEach(() => {
@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 describe("/branch slash command", () => {
-	it("opens the branch selector when double-Escape opens the tree selector", async () => {
+	it("opens the branch selector even when double-Escape is disabled", async () => {
 		const showTreeSelector = vi.fn();
 		const showUserMessageSelector = vi.fn();
 		const setText = vi.fn();

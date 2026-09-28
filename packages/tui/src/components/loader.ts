@@ -1,9 +1,10 @@
 import type { TUI } from "../tui";
-import { getPaddingX, sliceByColumn, visibleWidth } from "../utils";
+import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
 
 const RENDER_INTERVAL_MS = 1000 / 30;
-const SPINNER_ADVANCE_MS = 80;
+/** Milliseconds between spinner-frame advances; exported so time-derived spinners elsewhere tick at the Loader cadence. */
+export const SPINNER_ADVANCE_MS = 80;
 const RENDER_BACKPRESSURE_MULTIPLIER = 9;
 const MAX_BACKPRESSURE_FRAME_COST_MS = 200;
 
@@ -28,6 +29,7 @@ export class Loader extends Text {
 	#layout?: readonly { leading: string; content: string; trailing: string }[];
 	#layoutFrames: readonly string[];
 	#layoutFrame: string;
+	#trailer?: () => string | undefined;
 
 	constructor(
 		ui: TUI,
@@ -102,6 +104,15 @@ export class Loader extends Text {
 				lines.push(`${leading}${content ? this.messageColorFn(content) : ""}${trailing}`);
 			}
 		}
+		if (this.#trailer && lines.length > 1) {
+			const trailer = this.#trailer();
+			if (trailer) {
+				// Text pads rows to full width; drop that pad before docking right.
+				const body = lines[1].trimEnd();
+				const gap = width - visibleWidth(body) - visibleWidth(trailer);
+				if (gap >= 2) lines[1] = body + padding(gap) + trailer;
+			}
+		}
 		return lines;
 	}
 
@@ -123,6 +134,12 @@ export class Loader extends Text {
 	/** Lifecycle teardown: stop the animation timer. Idempotent. */
 	dispose() {
 		this.stop();
+	}
+	/** Install a lazy right-docked suffix for the spinner row (e.g. a styled
+	 * session title). Re-evaluated every paint; dropped when the row leaves
+	 * less than a two-cell gap. */
+	setTrailer(trailer: (() => string | undefined) | undefined): void {
+		this.#trailer = trailer;
 	}
 
 	setMessage(message: string) {

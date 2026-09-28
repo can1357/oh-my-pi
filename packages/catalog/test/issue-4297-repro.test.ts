@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildAnthropicCompat } from "../src/compat/anthropic";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import type { ModelSpec } from "../src/types";
 
 function spec(overrides: Partial<ModelSpec<"anthropic-messages">> = {}): ModelSpec<"anthropic-messages"> {
@@ -24,7 +24,7 @@ describe("#4297 anthropic-messages replay-unsigned-thinking classification", () 
 		// non-signing third-party reasoning endpoint at config time — the
 		// default must not walk back #2005's native replay for the 3p
 		// majority.
-		expect(buildAnthropicCompat(spec()).replayUnsignedThinking).toBe(true);
+		expect(resolveModelPolicy(spec()).compat.replayUnsignedThinking).toBe(true);
 	});
 
 	it("keeps native replay on a Cloudflare-internal Claude gateway that is not the AI Gateway route", () => {
@@ -33,52 +33,52 @@ describe("#4297 anthropic-messages replay-unsigned-thinking classification", () 
 		// Opaque custom signing proxy — user marks it with the compat override
 		// and the transport surfaces the actionable error before then.
 		expect(
-			buildAnthropicCompat(
+			resolveModelPolicy(
 				spec({
 					id: "cf-anthropic/claude-opus-4-8",
 					name: "Claude Opus 4.8",
 					provider: "cf-anthropic",
 					baseUrl: "https://opencode.cloudflare.dev/anthropic",
 				}),
-			).replayUnsignedThinking,
+			).compat.replayUnsignedThinking,
 		).toBe(true);
 	});
 
 	it("demotes unsigned thinking on the Cloudflare AI Gateway `/anthropic` route (known signing host)", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({
 				provider: "cloudflare-ai-gateway",
 				baseUrl: "https://gateway.ai.cloudflare.com/v1/acct123/gate/anthropic",
 			}),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.signingEndpoint).toBe(true);
 		expect(compat.officialEndpoint).toBe(false);
 	});
 
 	it("demotes unsigned thinking on Google Vertex's publishers/anthropic route (known signing host)", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({
 				provider: "google-vertex",
 				baseUrl:
 					"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
 				id: "claude-sonnet-4@20250514",
 			}),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.signingEndpoint).toBe(true);
 		expect(compat.officialEndpoint).toBe(false);
 	});
 
 	it("demotes unsigned thinking on AWS Bedrock's anthropic runtime (known signing host)", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({
 				provider: "custom-bedrock",
 				baseUrl:
 					"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-opus-4-8-v1:0/invoke-with-response-stream",
 				id: "anthropic.claude-opus-4-8-v1:0",
 			}),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.signingEndpoint).toBe(true);
 		expect(compat.officialEndpoint).toBe(false);
@@ -89,7 +89,7 @@ describe("#4297 anthropic-messages replay-unsigned-thinking classification", () 
 			"https://my-project.inference.ai.azure.com/anthropic/v1",
 			"https://foundry-project.services.ai.azure.com/anthropic/v1",
 		]) {
-			const compat = buildAnthropicCompat(spec({ provider: "custom-azure", baseUrl }));
+			const compat = resolveModelPolicy(spec({ provider: "custom-azure", baseUrl })).compat;
 			expect(compat.replayUnsignedThinking).toBe(false);
 			expect(compat.signingEndpoint).toBe(true);
 			expect(compat.officialEndpoint).toBe(false);
@@ -97,32 +97,32 @@ describe("#4297 anthropic-messages replay-unsigned-thinking classification", () 
 	});
 
 	it("honors explicit `compat.replayUnsignedThinking: false` on custom signing proxies", () => {
-		expect(buildAnthropicCompat(spec({ compat: { replayUnsignedThinking: false } })).replayUnsignedThinking).toBe(
-			false,
-		);
+		expect(
+			resolveModelPolicy(spec({ compat: { replayUnsignedThinking: false } })).compat.replayUnsignedThinking,
+		).toBe(false);
 	});
 
 	it("preserves native unsigned-thinking replay for the Umans coding-plan anthropic proxy", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({ provider: "umans", baseUrl: "https://api.code.umans.ai/anthropic", id: "glm-5.2" }),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(true);
 	});
 
 	it("preserves native unsigned-thinking replay for MiniMax's Anthropic-messages proxies", () => {
 		expect(
-			buildAnthropicCompat(
+			resolveModelPolicy(
 				spec({ provider: "minimax", baseUrl: "https://api.minimax.io/anthropic", id: "minimax-m2" }),
-			).replayUnsignedThinking,
+			).compat.replayUnsignedThinking,
 		).toBe(true);
 		expect(
-			buildAnthropicCompat(
+			resolveModelPolicy(
 				spec({ provider: "minimax-cn", baseUrl: "https://api.minimaxi.com/anthropic", id: "minimax-m2" }),
-			).replayUnsignedThinking,
+			).compat.replayUnsignedThinking,
 		).toBe(true);
 	});
 
 	it("still demotes unsigned thinking on non-reasoning custom endpoints", () => {
-		expect(buildAnthropicCompat(spec({ reasoning: false })).replayUnsignedThinking).toBe(false);
+		expect(resolveModelPolicy(spec({ reasoning: false })).compat.replayUnsignedThinking).toBe(false);
 	});
 });

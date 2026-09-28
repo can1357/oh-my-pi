@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
 import { closeDb } from "./db";
+import { refreshRollups } from "./rollup";
 import { formatStatsDashboardUrl, startServer } from "./server";
 
 export {
@@ -16,14 +17,11 @@ export {
 	syncAllSessions,
 } from "./aggregator";
 export { closeDb } from "./db";
+export { refreshRollups } from "./rollup";
+export type { StatsJudge, StatsJudgeProvider } from "./frustration";
 export { getGainDashboardStats } from "./gain-aggregator";
-export { formatStatsDashboardUrl, startServer } from "./server";
-export type {
-	GainDashboardStats,
-	GainSource,
-	GainSourceTotals,
-	GainTimeSeriesPoint,
-} from "./shared-types";
+export { formatStatsDashboardUrl, type StartServerOptions, startServer } from "./server";
+export type { GainDashboardStats, GainSource, GainSourceTotals, GainTimeSeriesPoint } from "./shared-types";
 export type {
 	AggregatedStats,
 	DashboardStats,
@@ -158,7 +156,20 @@ Examples:
 	}
 
 	try {
-		// Sync first
+		if (!values.json && !values.sync) {
+			// The dashboard ingests sessions in the background and streams progress to the page.
+			const { port: actualPort } = await startServer(values.port, values.host);
+			console.log(`Dashboard available at: ${formatStatsDashboardUrl(values.host, actualPort)}`);
+			console.log("Press Ctrl+C to stop\n");
+			process.on("SIGINT", () => {
+				console.log("\nShutting down...");
+				closeDb();
+				process.exit(0);
+			});
+			return;
+		}
+
+		// One-shot reports need fully ingested, fully rolled-up data before printing.
 		const tty = process.stderr.isTTY === true;
 		process.stderr.write("Syncing session files...\n");
 		let lastWidth = 0;
@@ -181,31 +192,15 @@ Examples:
 			},
 		});
 		if (tty && lastWidth > 0) process.stderr.write(`\r${" ".repeat(lastWidth)}\r`);
+		await refreshRollups();
 		const total = await getTotalMessageCount();
-		console.log(`Synced ${processed} new entries from ${files} files (${total} total)\n`);
+		process.stderr.write(`Synced ${processed} new entries from ${files} files (${total} total)\n\n`);
 
 		if (values.json) {
-			const stats = await getDashboardStats();
-			console.log(JSON.stringify(stats, null, 2));
-			return;
-		}
-
-		if (values.sync) {
+			console.log(JSON.stringify(await getDashboardStats(), null, 2));
+		} else {
 			await printStats();
-			return;
 		}
-
-		// Start server
-		const { port: actualPort } = await startServer(values.port, values.host);
-		console.log(`Dashboard available at: ${formatStatsDashboardUrl(values.host, actualPort)}`);
-		console.log("Press Ctrl+C to stop\n");
-
-		// Keep process running
-		process.on("SIGINT", () => {
-			console.log("\nShutting down...");
-			closeDb();
-			process.exit(0);
-		});
 	} catch (error) {
 		console.error("Error:", error);
 		closeDb();

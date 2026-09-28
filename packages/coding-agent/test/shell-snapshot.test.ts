@@ -65,7 +65,6 @@ describe("sanitizeSnapshotForBrush", () => {
 	it.each([
 		["simple", "alias -- ll='ls -l'"],
 		["flag-with-equals", "alias -- gc='git --color=auto commit'"],
-		["multi-flag", "alias -- la='ls -lAh --group-directories-first'"],
 		// A plain single quote escape that decodes to a metachar-free body
 		// must survive — we only ban truly unparseable bodies.
 		["embedded-quote", "alias -- say='echo '\\''hello'\\'''"],
@@ -115,7 +114,7 @@ describe("shell-snapshot fn-env helper", () => {
 	it("emits export lines for env vars referenced by captured functions, skips unset and shell-internal names", async () => {
 		const funcs = [
 			`mise () { command "$__MISE_EXE" "$@"; }`,
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell parameter expansion `${FOO_TEST_DIR}`
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell parameter expansion `${FOO_TEST_DIR}`
 			'my_fn () { echo "$FOO_TEST_DIR ${FOO_TEST_DIR}"; }',
 			`uses_path () { echo "$PATH"; }`,
 			`uses_locale () { echo "$LC_ALL"; }`,

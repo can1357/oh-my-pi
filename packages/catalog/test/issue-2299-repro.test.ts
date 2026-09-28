@@ -19,7 +19,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context } from "@oh-my-pi/pi-ai/types";
-import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -44,7 +44,7 @@ describe("issue #2299 — NVIDIA NIM qwen thinking format", () => {
 			contextWindow: 262144,
 			reasoning: true,
 		};
-		const compat = buildOpenAICompat(spec);
+		const compat = resolveModelPolicy(spec).compat;
 		expect(compat.thinkingFormat).toBe("qwen-chat-template");
 	});
 
@@ -63,7 +63,7 @@ describe("issue #2299 — NVIDIA NIM qwen thinking format", () => {
 			contextWindow: 131072,
 			reasoning: true,
 		};
-		expect(buildOpenAICompat(dashscope).thinkingFormat).toBe("qwen");
+		expect(resolveModelPolicy(dashscope).compat.thinkingFormat).toBe("qwen");
 	});
 
 	it("emits chat_template_kwargs.enable_thinking — never top-level enable_thinking — on the wire", async () => {

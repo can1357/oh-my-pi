@@ -65,6 +65,8 @@ export interface GuestSnapshot {
 	uiRequest: CollabUiRequest | null;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
+	/** Snapshot download progress between `welcome` and its final chunk, else null. */
+	loading: { received: number; total: number } | null;
 }
 
 const MAX_NOTICES = 50;
@@ -105,7 +107,12 @@ export class GuestClient {
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
 	#header: SessionHeader | null = null;
-	#entries: readonly SessionEntry[] = [];
+	#entries: SessionEntry[] = [];
+	/**
+	 * Snapshot in flight since `welcome`: chunk entries, plus live `entry`
+	 * frames that arrived meanwhile (published after the snapshot, at the tail).
+	 */
+	#pendingSnapshot: { entries: SessionEntry[]; live: SessionEntry[]; total: number } | null = null;
 	#state: SessionState | null = null;
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
@@ -119,6 +126,14 @@ export class GuestClient {
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
+	/**
+	 * Published entries array, cached across commits: rebuilt only when
+	 * `#entries` is mutated (welcome/snapshot-chunk/entry frames). Every
+	 * other frame (streaming message_update, state, bus, agents) reuses the
+	 * same reference, so entry-identity consumers (Transcript memo,
+	 * useSyncExternalStore) skip their O(n) scans per token.
+	 */
+	#publishedEntries: readonly SessionEntry[] = [];
 
 	/** @throws Error when the link does not parse. */
 	constructor(link: string, displayName: string) {
@@ -129,9 +144,6 @@ export class GuestClient {
 		this.#socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: importRoomKey(parsed.key) });
 		this.#socket.onOpen = () => this.#handleOpen();
 		this.#socket.onFrame = frame => this.#applyFrameSafe(frame);
-		this.#socket.onControl = msg => {
-			if (msg.t === "room-closed") this.#end("room closed");
-		};
 		this.#socket.onClose = (reason, willReconnect) => this.#handleClose(reason, willReconnect);
 		this.#snapshot = this.#buildSnapshot();
 	}
@@ -223,6 +235,8 @@ export class GuestClient {
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
+			// The next welcome restarts the snapshot; drop the partial one.
+			this.#pendingSnapshot = null;
 			this.#commit();
 			return;
 		}
@@ -235,6 +249,7 @@ export class GuestClient {
 		this.#clearSnapshotProgressTimer();
 		this.#phase = "ended";
 		this.#endedReason = reason;
+		this.#pendingSnapshot = null;
 		for (const [, pending] of this.#pendingTranscripts) {
 			clearTimeout(pending.timer);
 			pending.resolve(null);
@@ -285,10 +300,17 @@ export class GuestClient {
 	#applyFrame(frame: HostFrame): void {
 		switch (frame.t) {
 			case "welcome":
-				// Reset accumulator: a fresh welcome arriving mid-load (reconnect)
-				// supersedes any partially-streamed snapshot from the prior session.
+				// A fresh welcome (first join or reconnect) restarts the snapshot.
+				// Entries already on screen stay until the new snapshot replaces
+				// them once complete, so a resync never blanks the transcript.
 				this.#header = frame.header;
-				this.#entries = [];
+				if (frame.entryCount === 0) {
+					this.#entries = [];
+					this.#publishedEntries = [];
+					this.#pendingSnapshot = null;
+				} else {
+					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
+				}
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -310,24 +332,40 @@ export class GuestClient {
 				this.#endedReason = null;
 				break;
 			case "snapshot-chunk": {
-				// Stream transcript fragments into the live snapshot. The host
-				// always closes the train with `final: true`; that flip is what
-				// moves the guest from "waiting" to "live".
-				this.#entries = [...this.#entries, ...frame.entries];
-				if (frame.final) {
-					this.#clearSnapshotProgressTimer();
-					this.#phase = "live";
-				} else {
+				// Buffer fragments and publish the transcript once, when the
+				// snapshot completes (as the TUI guest does). Intermediate chunks
+				// only advance `loading`: publishing entries per chunk re-renders
+				// the transcript per chunk, and a 50 MB session is ~100 chunks.
+				const pending = this.#pendingSnapshot;
+				if (pending === null) return;
+				pending.entries.push(...frame.entries);
+				// Complete on `final` or once every promised entry arrived, so a
+				// lost final chunk doesn't strand a fully received transcript.
+				if (!frame.final && pending.entries.length < pending.total) {
 					this.#armSnapshotProgressTimer();
+					break;
 				}
+				this.#entries = pending.entries;
+				this.#entries.push(...pending.live);
+				this.#publishedEntries = [...this.#entries];
+				this.#pendingSnapshot = null;
+				this.#clearSnapshotProgressTimer();
+				this.#phase = "live";
 				break;
 			}
 			case "entry":
-				this.#entries = [...this.#entries, frame.entry];
+				// The committed row supersedes the finished stream ghost, even when
+				// the row is buffered behind an in-flight snapshot.
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
 					this.#stream = null;
 					this.#streamDone = false;
 				}
+				if (this.#pendingSnapshot !== null) {
+					this.#pendingSnapshot.live.push(frame.entry);
+					break;
+				}
+				this.#entries.push(frame.entry);
+				this.#publishedEntries = [...this.#entries];
 				break;
 			case "event":
 				this.#applyEvent(frame.event);
@@ -508,7 +546,11 @@ export class GuestClient {
 			phase: this.#phase,
 			endedReason: this.#endedReason,
 			header: this.#header,
-			entries: this.#entries,
+			// Publish the cached array: identical reference until an
+			// entry-mutating frame replaces it, so non-entry frames
+			// (streaming updates, state, bus) don't invalidate entry-identity
+			// consumers per token.
+			entries: this.#publishedEntries,
 			state: this.#state,
 			agents: this.#agents,
 			progress: this.#progress,
@@ -520,6 +562,10 @@ export class GuestClient {
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			notices: this.#notices,
+			loading: this.#pendingSnapshot && {
+				received: this.#pendingSnapshot.entries.length,
+				total: this.#pendingSnapshot.total,
+			},
 		};
 	}
 

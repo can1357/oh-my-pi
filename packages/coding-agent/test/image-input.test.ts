@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { loadImageInput } from "../src/utils/image-loading";
+import { InvalidImageDataError } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 describe("readImageMetadata", () => {
 	let testDir: string;
@@ -55,5 +57,17 @@ describe("readImageMetadata", () => {
 
 		const metadata = await readImageMetadata(textPath);
 		expect(metadata).toBeNull();
+	});
+
+	it("rejects a PNG whose compressed stream is missing bytes", async () => {
+		const whole = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const imagePath = path.join(testDir, "middle-elided.png");
+		fs.writeFileSync(imagePath, Buffer.concat([whole.subarray(0, 20), whole.subarray(40)]));
+
+		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
+		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
 	});
 });

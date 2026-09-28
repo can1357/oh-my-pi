@@ -1,8 +1,17 @@
 import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
-import type { GuestSnapshot } from "../../lib/client";
+import type { ConnectionPhase, GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
+import { OmpMark } from "./OmpMark";
 import { ThemeToggle } from "./ThemeToggle";
+
+const PHASE_LABEL: Record<ConnectionPhase, string> = {
+	connecting: "Connecting",
+	waiting: "Joining",
+	live: "Live",
+	reconnecting: "Reconnecting",
+	ended: "Ended",
+};
 
 export interface HeaderBarProps {
 	snapshot: GuestSnapshot;
@@ -28,6 +37,10 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 	return (
 		<header className="sh-header">
 			<div className="sh-header-left">
+				<span className="sh-brand" aria-label="omp collab">
+					<OmpMark />
+					<span className="sh-brand-slash">/</span>
+				</span>
 				<span className="sh-title" title={title}>
 					{title}
 				</span>
@@ -38,6 +51,10 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 				)}
 			</div>
 			<div className="sh-header-right">
+				<span className={`sh-status sh-status-${phase}`} title={`connection: ${phase}`}>
+					<span className={`sh-dot sh-dot-${phase}`} />
+					{PHASE_LABEL[phase]}
+				</span>
 				{readOnly && (
 					<span className="sh-chip" title="you joined with a read-only link — watching only">
 						read-only
@@ -69,7 +86,6 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 						))}
 					</span>
 				)}
-				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
 				<ThemeToggle />
 				<button
 					type="button"

@@ -45,11 +45,11 @@ pub fn mode_for(command: &str, config: &MinimizerConfig) -> MinimizerMode {
 			}
 		},
 		plan::CommandPlan::Chain { segments } => {
-			// Only route a chain through the segmented runner when the minimizer is
-			// enabled, the legacy kill-switch is off, at least one segment is
-			// eligible, and no segment can permanently rewire the shell's own file
-			// descriptors (`exec >out`). Any failed guard restores the pre-PR
-			// single-exec passthrough behaviour.
+			// Only route a chain through the segmented runner when the minimizer
+			// is enabled, the legacy kill-switch is off, at least one segment
+			// is eligible, and no segment can permanently rewire the shell's
+			// own file descriptors (`exec >out`). Any failed guard restores the
+			// pre-PR single-exec passthrough behaviour.
 			if config.enabled
 				&& !config.legacy_filters_active()
 				&& chain_has_eligible_segment(&segments, config)
@@ -691,8 +691,8 @@ only_on_exit = [0]
 		let npx = apply("npx eslint src/", &input, 1, &cfg);
 		let direct = apply("eslint src/", &input, 1, &cfg);
 		// Label differs by program token (npx -> "builtin", eslint -> "eslint"),
-		// but it must NOT be the overlay label and the TEXT must be the un-mutated
-		// lint output — same lines, no max_lines truncation.
+		// but it must NOT be the overlay label and the TEXT must be the
+		// un-mutated lint output — same lines, no max_lines truncation.
 		assert_ne!(
 			npx.filter, "pipeline+builtin",
 			"npx def overlaid the routed eslint filter output"
@@ -920,11 +920,12 @@ strip_lines_matching = [".*"]
 
 	#[test]
 	fn git_diff_chain_differing_formats_stays_opaque() {
-		// `git diff --name-only && git diff --stat` share the `diff` subcommand but
-		// select incompatible renderers. Routing the combined buffer through one
-		// (the whole-chain command carries BOTH `--name-only` and `--stat`, so the
-		// diff filter would treat it as a stat buffer) corrupts the listing
-		// segment's output. Diverging diff formats must stay opaque.
+		// `git diff --name-only && git diff --stat` share the `diff` subcommand
+		// but select incompatible renderers. Routing the combined buffer
+		// through one (the whole-chain command carries BOTH `--name-only` and
+		// `--stat`, so the diff filter would treat it as a stat buffer)
+		// corrupts the listing segment's output. Diverging diff formats must
+		// stay opaque.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input =
 			"src/a.rs\nsrc/b.rs\n src/a.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
@@ -1001,10 +1002,11 @@ strip_lines_matching = [".*"]
 	}
 	#[test]
 	fn mixed_chain_stays_opaque_in_whole_buffer_minimization() {
-		// A mixed chain (`git status` + unrelated `echo`) must NOT route the whole
-		// interleaved capture through the first segment's filter: `condense_status`
-		// rebuilds from its own parse and would drop the `echo` segment's output.
-		// Stay opaque and preserve the captured bytes verbatim.
+		// A mixed chain (`git status` + unrelated `echo`) must NOT route the
+		// whole interleaved capture through the first segment's filter:
+		// `condense_status` rebuilds from its own parse and would drop the
+		// `echo` segment's output. Stay opaque and preserve the captured bytes
+		// verbatim.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let input = "## main\n M file.rs\nIMPORTANT side-effect line\n";
 		let out = apply("git status && echo IMPORTANT side-effect line", input, 0, &cfg);
@@ -1169,9 +1171,10 @@ strip_lines_matching = [".*"]
 		}
 		let out = apply("rails db:migrate", &input, 0, &cfg);
 		assert!(out.changed);
-		// Only the def's max_lines=40 cap should fire; filter_rake's head_tail must
-		// NOT also condense. Both now emit `[…Nln elided…]`, so a single marker
-		// proves no double truncation (two would mean both stages fired).
+		// Only the def's max_lines=40 cap should fire; filter_rake's head_tail
+		// must NOT also condense. Both now emit `[…Nln elided…]`, so a single
+		// marker proves no double truncation (two would mean both stages
+		// fired).
 		assert_eq!(
 			out.text.matches("ln elided…]").count(),
 			1,
@@ -1210,7 +1213,8 @@ strip_lines_matching = [".*"]
 		             assertions, 1 failures, 0 errors, 0 skips\n";
 		let rails = apply("rails test", input, 1, &cfg);
 		let rake = apply("rake test", input, 1, &cfg);
-		// Must NOT be an overlay label; minitest filter gets its own program label.
+		// Must NOT be an overlay label; minitest filter gets its own program
+		// label.
 		assert_ne!(
 			rails.filter, "pipeline+builtin",
 			"rails-migrate def overlaid the routed minitest filter output"

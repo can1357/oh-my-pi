@@ -65,9 +65,8 @@ describe("Fireworks Kimi K2 maxTokens cap (#1849)", () => {
 		expect(clampFireworksKimiMaxTokens("glm-5.1", 65_536)).toBe(65_536);
 	});
 
-	it("ships the capped maxTokens in the bundled Fireworks/Fire Pass catalog", () => {
-		const entries: Array<["fireworks" | "firepass", string]> = [
-			["firepass", "kimi-k2.6-turbo"],
+	it("ships the capped maxTokens in the bundled Fireworks catalog", () => {
+		const entries: Array<["fireworks", string]> = [
 			["fireworks", "kimi-k2.5"],
 			["fireworks", "kimi-k2.6"],
 		];

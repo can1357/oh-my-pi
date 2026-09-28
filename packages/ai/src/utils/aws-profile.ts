@@ -97,7 +97,7 @@ function profileHasCredentialSource(
 ): boolean {
 	if (seen.has(profile)) return false;
 	seen.add(profile);
-	const merged = { ...(configIni?.[profile] ?? {}), ...(credentialsIni?.[profile] ?? {}) };
+	const merged = { ...configIni?.[profile], ...credentialsIni?.[profile] };
 	if (merged.role_arn) {
 		if (merged.web_identity_token_file) return true;
 		if (merged.mfa_serial) return false;

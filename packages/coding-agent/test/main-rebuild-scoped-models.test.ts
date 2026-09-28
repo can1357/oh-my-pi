@@ -206,6 +206,7 @@ describe("buildSessionOptions --models scope selection", () => {
 
 		expect(options.modelPattern).toBeUndefined();
 		expect(options.model?.id).toBe("a");
+		expect(options.rebindModelAfterDiscovery).toBe(true);
 		expect(options.scopedModels?.map(entry => entry.model.id)).toEqual(["a"]);
 	});
 });

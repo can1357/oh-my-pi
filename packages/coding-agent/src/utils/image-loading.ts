@@ -1,21 +1,20 @@
 import * as fs from "node:fs/promises";
+import {
+	MAX_IMAGE_INPUT_BYTES,
+	SUPPORTED_INPUT_IMAGE_MIME_TYPES,
+	modelLacksWebpSupport,
+	ImageInputTooLargeError,
+	InvalidImageDataError,
+	imageDecodeFailureReason,
+} from "@oh-my-pi/pi-tui/chat/image-loading";
 import * as path from "node:path";
-import type {
-	Context,
-	ImageContent,
-	Message,
-	Model,
-	OpenAIResponsesHistoryPayload,
-	TextContent,
-} from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { formatBytes, isRecord, logger, readImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
 
-export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
-export const SUPPORTED_INPUT_IMAGE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES;
 /** Largest edge rasterized from SVG before it enters the image pipeline. */
 const SVG_IMAGE_MAX_EDGE_PX = 2048;
 const MODEL_BOUNDARY_IMAGE_CACHE_MAX_SIZE = 64 * 1024 * 1024;
@@ -128,8 +127,8 @@ async function normalizeNativeResponsesItem(item: Record<string, unknown>): Prom
 }
 
 async function normalizeNativeResponsesHistoryPayload(
-	payload: OpenAIResponsesHistoryPayload | undefined,
-): Promise<OpenAIResponsesHistoryPayload | undefined> {
+	payload: ProviderPayload | undefined,
+): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return payload;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
@@ -139,36 +138,6 @@ async function normalizeNativeResponsesHistoryPayload(
 		items?.push(normalizedItem);
 	}
 	return items ? { ...payload, items } : payload;
-}
-
-/**
- * Ollama and its local-backend family decode image input through llama.cpp /
- * `stb_image`, which is compiled without WebP support, so a WebP upload fails
- * with an opaque HTTP 400. Detect those models so the resize pipeline encodes
- * to PNG/JPEG instead — the automatic equivalent of `OMP_NO_WEBP=1`.
- */
-export function modelLacksWebpSupport(
-	model: Pick<Model, "provider" | "api" | "imageInputDecoder"> | undefined,
-): boolean {
-	if (!model) return false;
-	return (
-		model.imageInputDecoder === "stb" ||
-		model.provider === "ollama" ||
-		model.provider === "ollama-cloud" ||
-		model.provider === "llama.cpp" ||
-		model.provider === "lm-studio" ||
-		model.provider === "local-server" ||
-		model.api === "ollama-chat"
-	);
-}
-
-/**
- * `true` when `model` cannot decode WebP, otherwise `undefined` so the
- * `OMP_NO_WEBP` env fallback in {@link resizeImage} still applies. Feed straight
- * into {@link ImageResizeOptions.excludeWebP}.
- */
-export function webpExclusionForModel(model: Pick<Model, "provider" | "api"> | undefined): true | undefined {
-	return modelLacksWebpSupport(model) ? true : undefined;
 }
 
 export interface LoadImageInputOptions {
@@ -202,18 +171,6 @@ export interface LoadedImageInput {
 	bytes: number;
 }
 
-export class ImageInputTooLargeError extends Error {
-	readonly bytes: number;
-	readonly maxBytes: number;
-
-	constructor(bytes: number, maxBytes: number) {
-		super(`Image file too large: ${formatBytes(bytes)} exceeds ${formatBytes(maxBytes)} limit.`);
-		this.name = "ImageInputTooLargeError";
-		this.bytes = bytes;
-		this.maxBytes = maxBytes;
-	}
-}
-
 interface LoadInMemoryImageInputOptions {
 	image: ImageContent;
 	resolvedPath: string;
@@ -227,6 +184,14 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 	const inputBytes = Buffer.byteLength(options.image.data, "base64");
 	if (inputBytes > options.maxBytes) {
 		throw new ImageInputTooLargeError(inputBytes, options.maxBytes);
+	}
+
+	// Decode before anything else: a payload that cannot be decoded is rejected
+	// by the provider for the whole request, so it must fail here — where the
+	// caller still has a path to act on — instead of entering the transcript.
+	const decodeFailure = await imageDecodeFailureReason(options.image);
+	if (decodeFailure !== null) {
+		throw new InvalidImageDataError(options.resolvedPath, options.image.mimeType, decodeFailure);
 	}
 
 	let outputData = options.image.data;
@@ -260,24 +225,6 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 		dimensionNote,
 		bytes: outputBytes,
 	};
-}
-
-/** Converts an image to PNG, rejecting when the runtime cannot decode or encode it. */
-export async function convertImageToPng(image: ImageContent): Promise<ImageContent> {
-	const bytes = Buffer.from(image.data, "base64");
-	const data = await new Bun.Image(bytes).png().toBase64();
-	return { ...image, data, mimeType: "image/png" };
-}
-
-export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {
-	if (SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
-		return image;
-	}
-	try {
-		return await convertImageToPng(image);
-	} catch {
-		return null;
-	}
 }
 
 export interface NormalizeModelContextImagesOptions {

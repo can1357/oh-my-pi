@@ -37,6 +37,12 @@ export interface LoadContext {
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
 	/**
+	 * Native user config dir for this load. Unset means the process-global
+	 * `getAgentDir()`; an SDK session created with its own `agentDir` passes it
+	 * so user-level rules and tools come from that dir.
+	 */
+	agentDir?: string;
+	/**
 	 * Session-local extension roots for sub-discovery. When set, extension
 	 * discovery uses these lanes instead of the invocation-scoped snapshot or
 	 * the process defaults, so post-startup reloads stay byte-identical to the
@@ -44,6 +50,14 @@ export interface LoadContext {
 	 * sessions carry their value explicitly (or via the invocation scope).
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** Provider IDs explicitly requested by caller in LoadOptions */
+	explicitProviders?: Set<string>;
+	/**
+	 * Scan foreign `~/` sources even when not opted in. Set for
+	 * `includeDisabled` (dashboard) loads so opted-out items are listed
+	 * and can be switched on.
+	 */
+	includeOptOutUserSources?: boolean;
 }
 
 /**
@@ -94,9 +108,11 @@ export interface LoadOptions<T = unknown> {
 	excludeProviders?: string[];
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
+	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */
+	agentDir?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
-	/** Include items disabled via settings. Default: false */
+	/** Include disabled items without letting them shadow enabled items. Default: false */
 	includeDisabled?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
@@ -137,6 +153,14 @@ export interface SourceMeta {
 	path: string;
 	/** Whether this came from user-level, project-level, or native config */
 	level: "user" | "project" | "native";
+	/**
+	 * Registry or CLI source that supplied a plugin root, when the provider
+	 * tracks it (currently `claude-plugins`: `"claude"` for `~/.claude/plugins`,
+	 * `"omp"` for omp's own registry, `"plugin-dir"` for `--plugin-dir`). Lets
+	 * user-scope gating distinguish omp's own installs from the foreign Claude
+	 * tree — see `isSourceEnabled` in `extensibility/skills.ts` (#10743).
+	 */
+	origin?: string;
 }
 
 /**

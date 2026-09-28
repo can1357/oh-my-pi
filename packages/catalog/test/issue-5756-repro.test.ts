@@ -14,6 +14,7 @@ import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { moonshotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -158,5 +159,55 @@ describe("issue #5756 — moonshot kimi-k3 pricing and wire format", () => {
 		expect(body.reasoning_effort).toBe("max");
 		expect("thinking" in body).toBe(false);
 		expect(body.max_tokens).toBe(131_072);
+	});
+});
+describe("unbundled Moonshot variants (no reference row)", () => {
+	// `kimi-k3` / `kimi-k2.6` above ride bundled references, which bypass the
+	// mapper's no-reference branch entirely. These ids have no bundled row, so
+	// they exercise the exact #5756/#2113 failure paths: the mapper seeds only
+	// live facts (structured reasoning, official K3 pricing, model-limits
+	// fallbacks) and the built model derives rule-owned input/thinking.
+	async function discoverUnbundled(): Promise<Map<string, ModelSpec<"openai-completions">>> {
+		const body = {
+			object: "list",
+			data: [
+				{ id: "kimi-k3-turbo", object: "model", owned_by: "moonshot" },
+				{ id: "kimi-k2.6-turbo", object: "model", owned_by: "moonshot" },
+			],
+		};
+		const fetchMock = (async (_input: string | URL | Request): Promise<Response> =>
+			new Response(JSON.stringify(body), {
+				headers: { "content-type": "application/json" },
+			})) as typeof fetch;
+		const models = await moonshotModelManagerOptions({ apiKey: "test-key", fetch: fetchMock }).fetchDynamicModels?.();
+		return new Map((models ?? []).map(model => [model.id, model]));
+	}
+
+	it("seeds an unbundled K3-family id with official pricing, limits, and mandatory reasoning (#5756)", async () => {
+		const k3 = (await discoverUnbundled()).get("kimi-k3-turbo");
+		if (!k3) throw new Error("kimi-k3-turbo not discovered");
+		// Raw spec: live/seed facts only — modalities and the ladder stay unset.
+		expect(k3.reasoning).toBe(true);
+		expect(k3.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+		expect(k3.contextWindow).toBe(1_048_576);
+		expect(k3.maxTokens).toBe(131_072);
+		expect(k3.input).toEqual(["text"]);
+		expect(k3.thinking).toBeUndefined();
+		// Built model: rule-owned modalities and the census K3 effort surface.
+		const built = buildModel(k3);
+		expect(built.input).toEqual(["text", "image"]);
+		expect(built.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(built.thinking?.requiresEffort).toBe(true);
+		expect(built.thinking?.defaultLevel).toBe(Effort.Max);
+	});
+
+	it("derives the K2.x thinking block and modalities for an unbundled K2.6 variant (#2113)", async () => {
+		const k26 = (await discoverUnbundled()).get("kimi-k2.6-turbo");
+		if (!k26) throw new Error("kimi-k2.6-turbo not discovered");
+		expect(k26.reasoning).toBe(true);
+		expect(k26.thinking).toBeUndefined();
+		const built = buildModel(k26);
+		expect(built.input).toEqual(["text", "image"]);
+		expect(built.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 	});
 });

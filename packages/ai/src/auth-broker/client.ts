@@ -8,11 +8,12 @@
 
 import { type } from "@oh-my-pi/omptype";
 import { readSseEvents } from "@oh-my-pi/pi-utils";
-import type { AuthCredential, DisabledCredentialSummary } from "../auth-storage";
+import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
 	ClientUsageSummaryResponse,
+	CredentialBlockDeleteRequest,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlocksDeleteResponse,
@@ -326,8 +327,13 @@ export class AuthBrokerClient {
 		});
 	}
 
-	async refreshCredential(id: number, signal?: AbortSignal): Promise<CredentialRefreshResponse> {
-		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh`, {
+	async refreshCredential(
+		id: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<CredentialRefreshResponse> {
+		const suffix = reason === "auth-recovery" ? "?reason=auth-recovery" : "";
+		return this.#request<CredentialRefreshResponse>("POST", `/v1/credential/${id}/refresh${suffix}`, {
 			schema: "credentialRefreshResponseSchema",
 			signal,
 		});
@@ -389,6 +395,18 @@ export class AuthBrokerClient {
 		});
 	}
 
+	async deleteCredentialBlock(
+		id: number,
+		block: CredentialBlockDeleteRequest,
+		signal?: AbortSignal,
+	): Promise<CredentialBlocksDeleteResponse> {
+		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/block`, {
+			body: block,
+			schema: "credentialBlocksDeleteResponseSchema",
+			signal,
+		});
+	}
+
 	async deleteCredentialBlocks(id: number, signal?: AbortSignal): Promise<CredentialBlocksDeleteResponse> {
 		return this.#request<CredentialBlocksDeleteResponse>("DELETE", `/v1/credential/${id}/blocks`, {
 			schema: "credentialBlocksDeleteResponseSchema",
@@ -445,7 +463,7 @@ export class AuthBrokerClient {
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
 		const url = `${this.#baseUrl}${path}`;
-		const headers: Record<string, string> = { Accept: "application/json", ...(opts.headers ?? {}) };
+		const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
 		if (auth) headers.Authorization = `Bearer ${this.#token}`;
 		let payload: string | undefined;
 		if (opts.body !== undefined) {

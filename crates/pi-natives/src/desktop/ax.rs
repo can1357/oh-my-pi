@@ -515,6 +515,10 @@ mod tests {
 			Ok(AxHandle::Test(1))
 		}
 
+		fn window_id(&mut self, _: &AxHandle, _: &[DesktopWindow]) -> CoreResult<String> {
+			unreachable!("window ownership is not exercised by tree traversal tests")
+		}
+
 		fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 			let AxHandle::Test(id) = h else {
 				unreachable!()

@@ -1,4 +1,4 @@
-import { formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
+import { format, formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
 import type { MessageStats } from "../types";
 
 export function formatInteger(value: number): string {
@@ -23,11 +23,26 @@ export function formatEstimatedCost(value: number, unpricedRequests: number, dig
 	return value === 0 && unpricedRequests > 0 ? "N/A" : formatCost(value, digits);
 }
 
-/** Format one request's cost, distinguishing unpriced SuperGrok usage from free usage. */
-export function formatMessageCost(message: Pick<MessageStats, "provider" | "usage">, digits?: number): string {
-	const unpricedRequests =
-		message.provider === "xai-oauth" && message.usage.totalTokens > 0 && message.usage.cost.total === 0 ? 1 : 0;
-	return formatEstimatedCost(message.usage.cost.total, unpricedRequests, digits);
+/**
+ * Whether one request's zero cost means unknown spend rather than free usage.
+ * Mirrors the server's `unpricedRequestSql`: `xai-oauth` is billed through a
+ * subscription, and `costUnpriced` marks a row the ingest path could not price
+ * (a scheduled card with no recoverable request timestamp).
+ */
+export function isUnpricedMessage(message: Pick<MessageStats, "provider" | "usage" | "costUnpriced">): boolean {
+	return (
+		message.usage.totalTokens > 0 &&
+		message.usage.cost.total === 0 &&
+		(message.provider === "xai-oauth" || message.costUnpriced === true)
+	);
+}
+
+/** Format one request's cost, distinguishing unpriced usage from free usage. */
+export function formatMessageCost(
+	message: Pick<MessageStats, "provider" | "usage" | "costUnpriced">,
+	digits?: number,
+): string {
+	return formatEstimatedCost(message.usage.cost.total, isUnpricedMessage(message) ? 1 : 0, digits);
 }
 
 export function formatPercent(value: number, digits = 1): string {
@@ -41,6 +56,14 @@ export function formatDurationMs(value: number | null, digits?: number): string 
 	return `${sec.toFixed(d)}s`;
 }
 
+/** Wall-clock length: seconds below a minute, then `17m 41s` / `2h 05m`. */
+export function formatElapsed(ms: number): string {
+	if (ms < 60_000) return formatDurationMs(ms);
+	const totalMin = Math.floor(ms / 60_000);
+	if (totalMin < 60) return `${totalMin}m ${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}s`;
+	return `${Math.floor(totalMin / 60)}h ${String(totalMin % 60).padStart(2, "0")}m`;
+}
+
 export function formatTokensPerSecond(value: number | null): string {
 	if (value === null) return "-";
 	return value.toFixed(1);
@@ -48,6 +71,16 @@ export function formatTokensPerSecond(value: number | null): string {
 
 export function formatRelativeTime(timestamp: number): string {
 	return formatDistanceToNow(new Date(timestamp), { addSuffix: true });
+}
+
+/** Absolute local date and time to the second ("Sep 28, 14:03:22"). */
+export function formatTimestamp(timestamp: number): string {
+	return format(new Date(timestamp), "MMM d, HH:mm:ss");
+}
+
+/** Project folder as stored by ingest (`/work-pi/`), without the slashes. */
+export function formatFolder(folder: string): string {
+	return folder.replace(/^\/+|\/+$/g, "") || "(root)";
 }
 
 export function formatBytes(value: number): string {

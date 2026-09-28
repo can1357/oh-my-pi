@@ -61,7 +61,7 @@
  *       --name <regex>       only inline functions whose name matches
  *       --max-statements <n> max tail statements (default: 3)
  *       --list               report candidates, make no edits
- *       --no-format          skip the biome format pass after --write
+ *       --no-format          skip the oxfmt format pass after --write
  *       --strict-effects     hoist every used argument (exact call semantics)
  *   -v, --verbose            print per-function skip reasons
  */
@@ -965,13 +965,13 @@ export function inlineFile(sourceFile: SourceFile, opts: Options): string[] {
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 
 async function formatFile(file: string): Promise<void> {
-	const biome = path.join(REPO_ROOT, "node_modules/.bin/biome");
-	const res = await $`${biome} format --write ${file}`.quiet().nothrow();
+	const oxfmt = path.join(REPO_ROOT, "node_modules/.bin/oxfmt");
+	const res = await $`bun ${oxfmt} ${file}`.quiet().nothrow();
 	if (res.exitCode !== 0) {
-		// Biome ignores paths outside its config globs; the inliner already
+		// oxfmt ignores paths outside its config globs; the inliner already
 		// self-indents, so this is a notice, not a failure.
 		const first = res.stderr.toString().trim().split("\n")[0] ?? "";
-		console.warn(`  note: biome did not format ${file} (output is self-indented). ${first}`);
+		console.warn(`  note: oxfmt did not format ${file} (output is self-indented). ${first}`);
 	}
 }
 

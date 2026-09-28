@@ -10,8 +10,6 @@
 # cc toolchain for x86_64-pc-windows-msvc cross builds from linux.
 
 package(default_visibility = ["//visibility:public"])
-# cc shim consumed by the sha2-asm crate annotation in MODULE.bazel.
-exports_files(["sha2-asm-cc.sh"])
 
 _MUSL_RUST_TOOLCHAINS = {
     "linux-x64-to-musl-x64": (
@@ -79,6 +77,21 @@ _MSVC_EXEC_HOSTS = {
             "@platforms//cpu:x86_64",
         ],
         toolchain = "@msvc_cc//:cc_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for name, exec_cv in _MSVC_EXEC_HOSTS.items()
+]
+
+# aarch64-pc-windows-msvc variant (@msvc_cc_arm64, xwin aarch64 splat).
+[
+    toolchain(
+        name = "msvc-arm64-cc-from-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:windows",
+            "@platforms//cpu:aarch64",
+        ],
+        toolchain = "@msvc_cc_arm64//:cc_toolchain",
         toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
     )
     for name, exec_cv in _MSVC_EXEC_HOSTS.items()

@@ -6,7 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
+import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -85,10 +85,10 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 }
 
 describe("ModelRegistry command-resolved models.yml values", () => {
-	test("does not run a command-backed value outside an enterable project", () => {
-		const enterable = spyOn(piUtils, "directoryIsEnterableSync").mockReturnValue(false);
+	test("does not run a command-backed value outside an enterable project", async () => {
+		const enterable = spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
 		try {
-			expect(resolveConfigValue("!printf %s home-secret")).toBeUndefined();
+			expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
 		} finally {
 			enterable.mockRestore();
 		}
@@ -137,8 +137,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(models.length).toBeGreaterThan(1);
 		for (const model of models) {
-			expect(model.headers?.Authorization).toBe("Bearer cmd-api-key");
-			expect(model.headers?.["X-Api-Key"]).toBe("cmd-header");
+			const headers = await registry.resolveModelHeaders(model);
+			expect(headers?.Authorization).toBe("Bearer cmd-api-key");
+			expect(headers?.["X-Api-Key"]).toBe("cmd-header");
 		}
 		expect(await registry.getApiKey(models[0])).toBe("cmd-api-key");
 	});
@@ -166,8 +167,37 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const model = registry.find("custom-proxy", "custom-model");
 
 		expect(model).toBeDefined();
-		expect(model?.headers?.["X-Model-Key"]).toBe("cmd-model-header");
-		expect(model?.headers?.Authorization).toBe("Bearer cmd-api-key");
+		const headers = await registry.resolveModelHeaders(model!);
+		expect(headers?.["X-Model-Key"]).toBe("cmd-model-header");
+		expect(headers?.Authorization).toBe("Bearer cmd-api-key");
+	});
+
+	test("runtime API keys win without executing configured credential commands", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "configured-key");
+		fs.writeFileSync(counterFile, "");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		authStorage.keys.setRuntime("custom-proxy", "runtime-key");
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		expect(await registry.getApiKey(model)).toBe("runtime-key");
+		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("runtime-key");
+		expect(await Bun.file(counterFile).text()).toBe("");
 	});
 
 	test("401 reruns a command-backed API key and updates live auth headers", async () => {
@@ -195,6 +225,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
 		fs.writeFileSync(tokenFile, "fresh-key");
 
 		const attemptedKeys: string[] = [];
@@ -210,7 +241,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(result).toBe("ok");
 		expect(attemptedKeys).toEqual(["stale-key", "fresh-key"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-		expect(model.headers?.Authorization).toBe("Bearer fresh-key");
+		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer fresh-key");
 	});
 
 	test("failed 401 refresh discards the rejected command-backed key", async () => {
@@ -238,6 +269,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
 		fs.writeFileSync(tokenFile, "FAIL");
 
 		const refreshed = await registry.resolver(model)({
@@ -249,10 +281,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(refreshed).toBeUndefined();
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
-		expect(model.headers?.Authorization).toBeUndefined();
+		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
 	});
 
-	test("resolveCommandConfig caches failed executions so they do not retry", async () => {
+	test("command resolution backs off after failed executions", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
 		fs.writeFileSync(counterFile, "");
 
@@ -272,8 +304,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		// Init triggers the first command resolution.
+		// Catalog construction records the command without executing it.
 		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
 
 		const dummyModel: Model<Api> = buildModel({
 			id: "foo",
@@ -321,10 +354,11 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
-		// Reading the header proxy caches the stale value, as the first live
-		// request would. The rotation below is only observed on the retry if the
-		// 401 path actually invalidates the command cache and re-runs it.
-		expect(model.headers?.["x-tenant-token"]).toBe("stale-tenant");
+		// Materializing the request headers caches the stale command result, as
+		// the first live request would. The rotation below is only observed on
+		// retry if the 401 path invalidates the command cache and re-runs it.
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+		expect(await registry.getApiKey(model)).toBe("stale-bearer");
 		// The credential backend rotates both tokens out-of-band.
 		fs.writeFileSync(bearerFile, "fresh-bearer");
 		fs.writeFileSync(tenantFile, "fresh-tenant");
@@ -376,7 +410,8 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
-		expect(model.headers?.["x-tenant-token"]).toBe("stale-tenant");
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+		expect(await registry.getApiKey(model)).toBe("stale-bearer");
 		fs.writeFileSync(bearerFile, "fresh-bearer");
 		fs.writeFileSync(tenantFile, "fresh-tenant");
 
@@ -424,7 +459,348 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
-		expect(model.headers?.["x-tenant-token"]).toBe("stale-tenant");
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+		expect(await registry.getApiKey(model)).toBe("stale-bearer");
+		fs.writeFileSync(bearerFile, "fresh-bearer");
+		fs.writeFileSync(tenantFile, "fresh-tenant");
+
+		const seen: Array<{ auth?: string; tenant?: string }> = [];
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const streamHandle = streamSimple(model, context, {
+			apiKey: registry.resolver(model),
+			fetch: refreshGateFetch(seen),
+			maxTokens: 16,
+		});
+		for await (const _event of streamHandle) {
+			// drain
+		}
+		const result = await streamHandle.result();
+
+		expect(result.stopReason).not.toBe("error");
+		expect(seen).toEqual([
+			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
+			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
+		]);
+	});
+
+	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		fs.writeFileSync(tokenFile, "initial");
+		const config = `!${stdoutFileCommand(tokenFile)}`;
+
+		expect(await resolveConfigValue(config)).toBe("initial");
+		fs.writeFileSync(tokenFile, "rotated");
+		expect(await resolveConfigValue(config)).toBe("initial");
+
+		invalidateAllCommandConfigs();
+		expect(await resolveConfigValue(config)).toBe("rotated");
+	});
+
+	test("deduplicates concurrent resolution of the same command", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "shared-key");
+		fs.writeFileSync(counterFile, "");
+		const config = `!${trackedTokenCommand(tokenFile, counterFile)}`;
+
+		const values = await Promise.all([
+			resolveConfigValue(config),
+			resolveConfigValue(config),
+			resolveConfigValue(config),
+		]);
+
+		expect(values).toEqual(["shared-key", "shared-key", "shared-key"]);
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("refresh('online') re-runs a command-backed API key after the backend rotates", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		fs.writeFileSync(tokenFile, "fresh-key");
+		// Background / policy reloads must not spawn credential helpers.
+		await registry.refresh("online-if-uncached");
+		await registry.refresh("offline");
+		// Passive online discovery (unscoped /models hub open) must not either.
+		await registry.refresh("online");
+		expect(await registry.getApiKey(model)).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		// User-facing recovery: `omp models refresh`, TUI F5.
+		await registry.refresh("online", { refreshCommandCredentials: true });
+		expect(await registry.getApiKey(model)).toBe("fresh-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+		const refreshed = registry.find("custom-proxy", "custom-model");
+		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.Authorization).toBe("Bearer fresh-key");
+	});
+
+	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		// Helper is healthy again, but the 30s failure backoff would still block
+		// getApiKey until process restart — unless online refresh clears it.
+		fs.writeFileSync(tokenFile, "recovered-key");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		await registry.refresh("online", { refreshCommandCredentials: true });
+		expect(await registry.getApiKey(model)).toBe("recovered-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(counterFile, "");
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+
+		fs.writeFileSync(tokenFile, "fresh-key");
+		// Hover / auto-refresh: live catalog, same cached credential.
+		await registry.refreshProvider("custom-proxy", "online");
+		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("stale-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("refreshProvider('online') invalidates only that provider's command cache", async () => {
+		const tokenA = path.join(tempDir, "token-a.txt");
+		const tokenB = path.join(tempDir, "token-b.txt");
+		const counterA = path.join(tempDir, "counter-a.txt");
+		const counterB = path.join(tempDir, "counter-b.txt");
+		fs.writeFileSync(tokenA, "a-stale");
+		fs.writeFileSync(tokenB, "b-stale");
+		fs.writeFileSync(counterA, "");
+		fs.writeFileSync(counterB, "");
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"proxy-a": {
+						baseUrl: "https://a.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenA, counterA)}`,
+						models: [{ id: "model-a", name: "A" }],
+					},
+					"proxy-b": {
+						baseUrl: "https://b.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenB, counterB)}`,
+						models: [{ id: "model-b", name: "B" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(await registry.getApiKeyForProvider("proxy-a")).toBe("a-stale");
+		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
+		expect(fs.readFileSync(counterA, "utf8")).toBe("1");
+		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
+
+		fs.writeFileSync(tokenA, "a-fresh");
+		fs.writeFileSync(tokenB, "b-fresh");
+		await registry.refreshProvider("proxy-a", "online", { refreshCommandCredentials: true });
+
+		expect(await registry.getApiKeyForProvider("proxy-a")).toBe("a-fresh");
+		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
+		expect(fs.readFileSync(counterA, "utf8")).toBe("11");
+		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
+	});
+
+	test("refreshProvider('online') re-runs extension-registered command-backed headers", async () => {
+		const providerHeaderFile = path.join(tempDir, "provider-header.txt");
+		const modelHeaderFile = path.join(tempDir, "model-header.txt");
+		const providerCounter = path.join(tempDir, "provider-counter.txt");
+		const modelCounter = path.join(tempDir, "model-counter.txt");
+		fs.writeFileSync(providerHeaderFile, "stale-provider");
+		fs.writeFileSync(modelHeaderFile, "stale-model");
+		fs.writeFileSync(providerCounter, "");
+		fs.writeFileSync(modelCounter, "");
+		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		registry.registerProvider("ext-proxy", {
+			baseUrl: "https://ext.example.com/v1",
+			api: "openai-completions",
+			apiKey: "literal-key",
+			headers: { "x-tenant-token": `!${trackedTokenCommand(providerHeaderFile, providerCounter)}` },
+			models: [
+				{
+					id: "ext-model",
+					name: "Ext",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+					headers: { "x-model-token": `!${trackedTokenCommand(modelHeaderFile, modelCounter)}` },
+				},
+			],
+		});
+
+		const model = registry.find("ext-proxy", "ext-model");
+		if (!model) throw new Error("Expected extension model");
+		const initialHeaders = await registry.resolveModelHeaders(model);
+		expect(initialHeaders?.["x-tenant-token"]).toBe("stale-provider");
+		expect(initialHeaders?.["x-model-token"]).toBe("stale-model");
+		expect(fs.readFileSync(providerCounter, "utf8")).toBe("1");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("1");
+
+		fs.writeFileSync(providerHeaderFile, "fresh-provider");
+		fs.writeFileSync(modelHeaderFile, "fresh-model");
+		await registry.refreshProvider("ext-proxy", "online", { refreshCommandCredentials: true });
+
+		const refreshed = registry.find("ext-proxy", "ext-model");
+		const refreshedHeaders = refreshed ? await registry.resolveModelHeaders(refreshed) : undefined;
+		expect(refreshedHeaders?.["x-tenant-token"]).toBe("fresh-provider");
+		expect(refreshedHeaders?.["x-model-token"]).toBe("fresh-model");
+		expect(fs.readFileSync(providerCounter, "utf8")).toBe("11");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
+	});
+
+	test("refreshProvider re-runs fetchDynamicModels header commands after explicit credential refresh", async () => {
+		const modelHeaderFile = path.join(tempDir, "dynamic-header.txt");
+		const modelCounter = path.join(tempDir, "dynamic-counter.txt");
+		fs.writeFileSync(modelHeaderFile, "stale-dynamic");
+		fs.writeFileSync(modelCounter, "");
+		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		registry.registerProvider("dyn-proxy", {
+			baseUrl: "https://dyn.example.com/v1",
+			api: "openai-completions",
+			apiKey: "literal-key",
+			fetchDynamicModels: async () => [
+				{
+					id: "dyn-model",
+					name: "Dyn",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+					headers: { "x-model-token": `!${trackedTokenCommand(modelHeaderFile, modelCounter)}` },
+				},
+			],
+		});
+
+		await registry.refreshProvider("dyn-proxy", "online");
+		const model = registry.find("dyn-proxy", "dyn-model");
+		if (!model) throw new Error("Expected dynamic model");
+		expect((await registry.resolveModelHeaders(model))?.["x-model-token"]).toBe("stale-dynamic");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("1");
+
+		fs.writeFileSync(modelHeaderFile, "fresh-dynamic");
+		await registry.refreshProvider("dyn-proxy", "online");
+		const cached = registry.find("dyn-proxy", "dyn-model");
+		expect(cached && (await registry.resolveModelHeaders(cached))?.["x-model-token"]).toBe("stale-dynamic");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("1");
+
+		await registry.refreshProvider("dyn-proxy", "online", { refreshCommandCredentials: true });
+		const refreshed = registry.find("dyn-proxy", "dyn-model");
+		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.["x-model-token"]).toBe("fresh-dynamic");
+		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
+	});
+
+	test("401 refreshes a fetchDynamicModels command-backed header", async () => {
+		const bearerFile = path.join(tempDir, "bearer.txt");
+		const tenantFile = path.join(tempDir, "tenant.txt");
+		fs.writeFileSync(bearerFile, "stale-bearer");
+		fs.writeFileSync(tenantFile, "stale-tenant");
+		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		registry.registerProvider("dyn-proxy", {
+			baseUrl: "https://dyn.example.com/v1",
+			api: "openai-completions",
+			apiKey: `!${stdoutFileCommand(bearerFile)}`,
+			authHeader: true,
+			fetchDynamicModels: async () => [
+				{
+					id: "dyn-model",
+					name: "Dyn",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+					headers: { "x-tenant-token": `!${stdoutFileCommand(tenantFile)}` },
+				},
+			],
+		});
+
+		await registry.refreshProvider("dyn-proxy", "online");
+		const model = registry.find("dyn-proxy", "dyn-model");
+		if (!model) throw new Error("Expected dynamic model");
+		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
+		expect(await registry.getApiKey(model)).toBe("stale-bearer");
 		fs.writeFileSync(bearerFile, "fresh-bearer");
 		fs.writeFileSync(tenantFile, "fresh-tenant");
 

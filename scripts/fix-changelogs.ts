@@ -585,6 +585,7 @@ export function collapseChangelogTail(
 	if (headingLines.length <= 2) return { content, collapsedReleases: 0 };
 
 	// cumulativeBytes[i] = byte length of lines[0..i) with a trailing newline per line.
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const cumulativeBytes = new Array<number>(lines.length + 1);
 	cumulativeBytes[0] = 0;
 	for (let index = 0; index < lines.length; index++) {

@@ -14,6 +14,8 @@ const DISCOVERY_FETCH_TIMEOUT_MS = 10_000;
 export interface OAuthEndpoints {
 	authorizationUrl: string;
 	tokenUrl: string;
+	/** Authorization-server issuer URL used for metadata discovery. */
+	issuerUrl?: string;
 	clientId?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
@@ -29,6 +31,11 @@ function readRegistrationUrl(metadata: Record<string, unknown>): string | undefi
 		metadata.registrationUrl ??
 		metadata.registration_uri ??
 		metadata.registrationUri;
+	return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function readIssuerUrl(metadata: Record<string, unknown>): string | undefined {
+	const value = metadata.issuer ?? metadata.issuer_url ?? metadata.issuerUrl;
 	return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
@@ -119,7 +126,15 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			(obj.resource_uri as string | undefined) ||
 			(obj.resourceUri as string | undefined);
 
-		return { authorizationUrl, tokenUrl, registrationUrl: readRegistrationUrl(obj), clientId, scopes, resource };
+		return {
+			authorizationUrl,
+			tokenUrl,
+			issuerUrl: readIssuerUrl(obj),
+			registrationUrl: readRegistrationUrl(obj),
+			clientId,
+			scopes,
+			resource,
+		};
 	};
 
 	const clientIdFromAuthUrl = (authorizationUrl: string): string | undefined => {
@@ -192,6 +207,7 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			return {
 				authorizationUrl,
 				tokenUrl,
+				issuerUrl: challengeValues.get("issuer") || challengeValues.get("issuer_url"),
 				registrationUrl:
 					challengeValues.get("registration_endpoint") ||
 					challengeValues.get("registration_url") ||
@@ -231,7 +247,10 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 	const authServerUrl = extractMcpAuthServerUrl(error, serverUrl);
 	// Extract resource_metadata URL from challenge entries in error message
 	const resourceMetaMatch = error.message.match(/resource_metadata\s*=\s*"([^"]+)"/i);
-	const resourceMetadataUrl = resourceMetaMatch?.[1];
+	// RFC 9728 / MCP: when WWW-Authenticate omits resource_metadata, still probe
+	// the path-inserted protected-resource URL. Origin-root authorization-server
+	// documents on shared gateways often name a different issuer.
+	const resourceMetadataUrl = resourceMetaMatch?.[1] ?? rfc9728ProtectedResourceMetadataUrl(serverUrl);
 
 	// Try to extract OAuth endpoints
 	const oauth = extractOAuthEndpoints(error);
@@ -257,6 +276,19 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 
 	// Check if it might be API key based
 	const errorMsg = error.message.toLowerCase();
+	// A JSON 401 that mentions JWT is a bearer/OAuth challenge, not a static
+	// API key. The generic "token"/"bearer" heuristic below would otherwise
+	// classify it as apikey and skip protected-resource discovery.
+	if (/\bjwt\b/.test(errorMsg) && errorMsg.includes("token")) {
+		return {
+			requiresAuth: true,
+			authType: "oauth",
+			authServerUrl,
+			resourceMetadataUrl,
+			scopes: challengeScopes,
+			message: "Server requires OAuth authentication. Launching authorization flow...",
+		};
+	}
 	if (
 		errorMsg.includes("api key") ||
 		errorMsg.includes("api_key") ||
@@ -324,6 +356,23 @@ function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
 }
 
 /**
+ * RFC 9728: insert `/.well-known/oauth-protected-resource` between the origin
+ * and the resource path. Origin-root protected-resource metadata on API
+ * gateways often names a shared login hub, not the issuer that minted the
+ * client's `client_id`.
+ */
+export function rfc9728ProtectedResourceMetadataUrl(serverUrl: string | undefined): string | undefined {
+	if (!serverUrl) return undefined;
+	try {
+		const parsed = new URL(serverUrl);
+		const path = parsed.pathname.replace(/\/+$/, "");
+		return `${parsed.origin}/.well-known/oauth-protected-resource${path}`;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Read space-separated OAuth scopes off a metadata document. Accepts either
  * an array (RFC 8414 `scopes_supported`) or a space-separated string
  * (`scopes` / `scope`), matching what MCP gateways emit under
@@ -379,13 +428,25 @@ export async function discoverOAuthEndpoints(
 	opts?: { fetch?: FetchImpl; protectedResource?: string; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
-	const wellKnownPaths = [
+	const issuerWellKnownPaths = [
 		"/.well-known/oauth-authorization-server",
 		"/.well-known/openid-configuration",
 		"/.well-known/oauth-protected-resource",
 		"/oauth/metadata",
 		"/.mcp/auth",
-		"/authorize", // Some MCP servers expose OAuth config here
+		"/authorize",
+	];
+	// Resource-server fallback: probe protected-resource metadata before
+	// origin-root authorization-server / OpenID documents. Gateways that front
+	// many tenants commonly publish a generic AS at the origin that is not the
+	// authorization server for this MCP URL.
+	const resourceWellKnownPaths = [
+		"/.well-known/oauth-protected-resource",
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/openid-configuration",
+		"/oauth/metadata",
+		"/.mcp/auth",
+		"/authorize",
 	];
 	const urlsToQuery: Array<{ url: string; issuerCandidate: boolean }> = [];
 	const visitedAuthServers = new Set<string>();
@@ -438,6 +499,7 @@ export async function discoverOAuthEndpoints(
 			return {
 				authorizationUrl: String(metadata.authorization_endpoint),
 				tokenUrl: String(metadata.token_endpoint),
+				issuerUrl: readIssuerUrl(metadata),
 				registrationUrl: readRegistrationUrl(metadata),
 				clientId:
 					typeof metadata.client_id === "string"
@@ -462,6 +524,7 @@ export async function discoverOAuthEndpoints(
 				return {
 					authorizationUrl: oauthData.authorization_url || String(oauthData.authorizationUrl),
 					tokenUrl: oauthData.token_url || String(oauthData.tokenUrl),
+					issuerUrl: readIssuerUrl(oauthData) ?? readIssuerUrl(metadata),
 					registrationUrl: readRegistrationUrl(oauthData),
 					clientId:
 						typeof oauthData.client_id === "string"
@@ -483,9 +546,10 @@ export async function discoverOAuthEndpoints(
 	};
 
 	for (const base of urlsToQuery) {
+		const wellKnownPaths = base.issuerCandidate ? issuerWellKnownPaths : resourceWellKnownPaths;
 		for (const path of wellKnownPaths) {
 			// Try each well-known path at both the absolute origin and relative
-			const urlsToTry = buildWellKnownUrls(path, base.url);
+			const urlsToTry = buildWellKnownUrls(path, base.url, base.issuerCandidate);
 			for (const url of urlsToTry) {
 				try {
 					const response = await fetchImpl(url.toString(), {
@@ -544,7 +608,8 @@ export async function discoverOAuthEndpoints(
 	return null;
 }
 
-function buildWellKnownUrls(wellKnownPath: string, baseUrl: string): URL[] {
+/** Build ordered metadata URL candidates for OAuth and OIDC discovery. */
+export function buildWellKnownUrls(wellKnownPath: string, baseUrl: string, issuerCandidate: boolean): URL[] {
 	let parsed: URL;
 	try {
 		parsed = new URL(baseUrl);
@@ -566,22 +631,41 @@ function buildWellKnownUrls(wellKnownPath: string, baseUrl: string): URL[] {
 	const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
 	const relUrl = new URL(wellKnownPath.slice(1), `${parsed.origin}${prefixPath}/`);
 
-	const candidates: URL[] = [absUrl];
-	const seen = new Set<string>([absUrl.href]);
+	const candidates: URL[] = [];
+	const seen = new Set<string>();
 	const push = (u: URL): void => {
 		if (!seen.has(u.href)) {
 			candidates.push(u);
 			seen.add(u.href);
 		}
 	};
-	push(relUrl);
 
-	// RFC 8414 §3.1 path-ful issuer form: /.well-known/<suffix>/<issuer-path>.
-	// Only meaningful for well-known metadata documents.
-	if (wellKnownPath.startsWith("/.well-known/")) {
-		const pathfulUrl = new URL(`${wellKnownPath}${normalizedPath}`, parsed.origin);
-		push(pathfulUrl);
+	if (!issuerCandidate) {
+		// RFC 9728: probe path-inserted metadata first — origin-root documents on
+		// shared gateways often describe a different issuer than the path-scoped
+		// resource — then the parent-relative gateway fallback.
+		if (wellKnownPath.startsWith("/.well-known/")) {
+			push(new URL(`${wellKnownPath}${normalizedPath}`, parsed.origin));
+		}
+		push(relUrl);
+	} else if (wellKnownPath === "/.well-known/openid-configuration") {
+		// OIDC Discovery §4 standard form is <issuer>/.well-known/openid-configuration;
+		// try it before the parent-relative and RFC 8414 compatibility fallbacks.
+		push(new URL(`${normalizedPath}${wellKnownPath}`, parsed.origin));
+		push(relUrl);
+		push(new URL(`${wellKnownPath}${normalizedPath}`, parsed.origin));
+	} else if (wellKnownPath.startsWith("/.well-known/")) {
+		// RFC 8414 §3.1 standard form is /.well-known/<suffix>/<issuer-path>;
+		// try it before the parent-relative and path-appended compatibility fallbacks.
+		push(new URL(`${wellKnownPath}${normalizedPath}`, parsed.origin));
+		push(relUrl);
+		push(new URL(`${normalizedPath}${wellKnownPath}`, parsed.origin));
+	} else {
+		// Non-metadata paths only have the parent-relative gateway fallback.
+		push(relUrl);
 	}
+	push(relUrl);
+	push(absUrl);
 
 	return candidates;
 }

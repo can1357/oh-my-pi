@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed extracted facts still being recalled after their source memory was invalidated or expired. ([#12825](https://github.com/can1357/oh-my-pi/pull/12825) by [@Jpei1994](https://github.com/Jpei1994))
+
+## [18.3.3] - 2026-09-27
+
+### Fixed
+
+- Fixed recall search matching query terms inside unrelated words, improving result relevance and ensuring exact matches are prioritized.
+- Fixed sleep summaries replacing shortened terms within larger words, preventing unintended word corruption.
+
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved SQLite vector search and import performance by reducing repeated database metadata checks.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.
+- Fixed recall continuing to serve a stale, pre-embedding ranking for up to an hour after background embeddings finished, when the enhanced recall cache is enabled.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed working-memory recall returning too few or no results after matching memories were invalidated.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

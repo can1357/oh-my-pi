@@ -1,10 +1,12 @@
 //! The deliberately small git-CLI escape hatch.
 //!
-//! Two categories are allowed to spawn `git`, per the hybrid policy:
+//! Three categories are allowed to spawn `git`, per the hybrid policy:
 //! - **Credential-bound network transfers** — clone/fetch/push must reuse the
 //!   user's ssh config and credential helpers, which are subprocess-based by
 //!   design; no library reaches auth parity (and gitoxide has no send-pack).
 //! - **Reftable ref access** — no in-process reftable implementation exists.
+//! - **Whole-worktree status/untracked walks** — a subprocess contains gitoxide
+//!   worker-thread spawn failures under host resource exhaustion.
 //!
 //! The runner ports the hardened subprocess contract of the TS wrapper:
 //! non-interactive env (`GIT_TERMINAL_PROMPT=0`, askpass rejection, `LC_ALL`
@@ -35,7 +37,7 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 pub const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
-const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated after 8 MiB]\n";
+const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated at the capture limit]\n";
 
 /// Captured result of a completed git invocation.
 #[derive(Debug, Clone)]
@@ -91,11 +93,47 @@ fn hardened_args(args: &[String], read_only: bool) -> Vec<String> {
 	out
 }
 
+/// Environment sink for the two command builders. `std::process::Command` and
+/// `tokio::process::Command` share no trait, and duplicating the contract per
+/// builder is how the synchronous path silently lost the `LC_ALL` removal that
+/// [`is_dubious_ownership`] depends on.
+trait EnvSink {
+	fn set(&mut self, key: &str, value: &str);
+	fn unset(&mut self, key: &str);
+}
+
+impl EnvSink for std::process::Command {
+	fn set(&mut self, key: &str, value: &str) {
+		self.env(key, value);
+	}
+
+	fn unset(&mut self, key: &str) {
+		self.env_remove(key);
+	}
+}
+
+impl EnvSink for tokio::process::Command {
+	fn set(&mut self, key: &str, value: &str) {
+		self.env(key, value);
+	}
+
+	fn unset(&mut self, key: &str) {
+		self.env_remove(key);
+	}
+}
+
 /// Apply the non-interactive environment contract to a command builder:
-/// prompts rejected, editors disabled, ambient repo-location overrides
-/// stripped, `LC_MESSAGES=C` for parseable errors while preserving a UTF-8
-/// character locale.
-fn apply_env(cmd: &mut tokio::process::Command) {
+/// prompts rejected, editors disabled, ambient repo-location and pathspec
+/// overrides stripped, `LC_MESSAGES=C` for parseable errors while preserving a
+/// UTF-8 character locale. `LC_ALL` must go: it outranks `LC_MESSAGES`, so
+/// leaving it inherited would hand back localized diagnostics.
+///
+/// The `*_PATHSPECS` variables are global pathspec modes, so an inherited
+/// `GIT_LITERAL_PATHSPECS=1` would make the `:(literal)` magic this crate
+/// builds match a filename containing that prefix (i.e. nothing), and
+/// `GIT_ICASE_PATHSPECS=1` would match case variants the caller did not ask
+/// for. Explicit magic is only explicit once they are gone.
+fn apply_env(cmd: &mut impl EnvSink) {
 	for stripped in [
 		"GIT_DIR",
 		"GIT_COMMON_DIR",
@@ -103,22 +141,26 @@ fn apply_env(cmd: &mut tokio::process::Command) {
 		"GIT_INDEX_FILE",
 		"GIT_OBJECT_DIRECTORY",
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_LITERAL_PATHSPECS",
+		"GIT_GLOB_PATHSPECS",
+		"GIT_NOGLOB_PATHSPECS",
+		"GIT_ICASE_PATHSPECS",
 	] {
-		cmd.env_remove(stripped);
+		cmd.unset(stripped);
 	}
 	if let Some(lc_all) = std::env::var_os("LC_ALL") {
 		let lc_all = lc_all.to_string_lossy().into_owned();
 		if is_utf8_locale(&lc_all) {
-			cmd.env("LC_CTYPE", lc_all);
+			cmd.set("LC_CTYPE", &lc_all);
 		}
 	}
-	cmd.env_remove("LC_ALL");
-	cmd.env("LC_MESSAGES", "C");
-	cmd.env("GIT_OPTIONAL_LOCKS", "0");
-	cmd.env("GIT_ASKPASS", "true");
-	cmd.env("GIT_EDITOR", "true");
-	cmd.env("GIT_TERMINAL_PROMPT", "0");
-	cmd.env("SSH_ASKPASS", "false");
+	cmd.unset("LC_ALL");
+	cmd.set("LC_MESSAGES", "C");
+	cmd.set("GIT_OPTIONAL_LOCKS", "0");
+	cmd.set("GIT_ASKPASS", "true");
+	cmd.set("GIT_EDITOR", "true");
+	cmd.set("GIT_TERMINAL_PROMPT", "0");
+	cmd.set("SSH_ASKPASS", "false");
 }
 
 /// Loose match for a UTF-8 character locale (`en_US.UTF-8`, `C.utf8`, …).
@@ -204,9 +246,66 @@ pub(crate) async fn run_checked(
 	run(cwd, args, options).await?.into_checked(args)
 }
 
-/// Synchronous bounded runner for render paths (reftable ref reads). Enforces
-/// [`SYNC_TIMEOUT`] by polling so a stalled git cannot freeze rendering.
-pub(crate) fn run_sync(cwd: &Path, args: &[String]) -> Result<CliOutput> {
+/// Whether `err` means the git binary could not be launched at all (missing
+/// binary or deleted cwd), as opposed to git running and failing. Callers with
+/// an in-process fallback (e.g. porcelain status) branch on this.
+pub(crate) fn is_spawn_failure(err: &Error) -> bool {
+	matches!(err, Error::Backend { context: "git spawn", .. })
+}
+
+/// Whether captured output hit [`OUTPUT_LIMIT_BYTES`] and therefore lost
+/// bytes. Callers whose output is a value rather than a diagnostic (path
+/// lists) must retry in-process or fail, never return the short result.
+pub(crate) fn is_truncated(text: &str) -> bool {
+	text.ends_with(TRUNCATION_MARKER)
+}
+
+/// Whether git refused the checkout under its `safe.directory` ownership
+/// check (`fatal: detected dubious ownership`, exit 128), which happens
+/// whenever the process user differs from the checkout owner — a
+/// host-mounted repository inside a container is the common case.
+///
+/// `open::open_options` opens user-chosen checkouts with `Trust::Full` on
+/// purpose, so the in-process walk has no such objection: a caller with a
+/// gitoxide fallback must take it rather than surface an error the
+/// library-backed path would never have produced.
+///
+/// [`apply_env`] pins `LC_MESSAGES=C` and drops the `LC_ALL` that would
+/// outrank it, so the English wording is what git emits. `safe.directory` is
+/// matched as well: it is a config key, so it survives translation even if a
+/// host manages to localize the diagnostic anyway.
+pub(crate) fn is_dubious_ownership(err: &Error) -> bool {
+	matches!(
+		err,
+		Error::Cli { exit_code: 128, stderr, .. }
+			if stderr.contains("dubious ownership") || stderr.contains("safe.directory")
+	)
+}
+
+/// Whether `err` describes a CLI that could not do the work at all while the
+/// in-process gitoxide path still can.
+pub(crate) fn prefers_in_process(err: &Error) -> bool {
+	is_spawn_failure(err) || is_dubious_ownership(err)
+}
+
+/// Synchronous bounded runner with a caller-chosen deadline; render paths pass
+/// [`SYNC_TIMEOUT`] so a stalled git cannot freeze the UI. Stdout/stderr are
+/// drained concurrently with capped retention, so output larger than the OS
+/// pipe buffer can never stall the child into a spurious timeout.
+pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result<CliOutput> {
+	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
+}
+
+/// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
+/// than a constant read inside the reader threads so a test can exercise the
+/// truncation contract on one call without lowering the limit for every other
+/// invocation in the process.
+pub(crate) fn run_sync_capped(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+) -> Result<CliOutput> {
 	let argv = hardened_args(args, true);
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
@@ -214,43 +313,78 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String]) -> Result<CliOutput> {
 		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
-	// The sync and async builders expose the same env API surface; reuse the
-	// async configurator through a tokio wrapper would allocate a runtime, so
-	// mirror the pins directly.
-	for stripped in [
-		"GIT_DIR",
-		"GIT_COMMON_DIR",
-		"GIT_WORK_TREE",
-		"GIT_INDEX_FILE",
-		"GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
-	] {
-		cmd.env_remove(stripped);
-	}
-	cmd.env("LC_MESSAGES", "C");
-	cmd.env("GIT_OPTIONAL_LOCKS", "0");
-	cmd.env("GIT_TERMINAL_PROMPT", "0");
+	apply_env(&mut cmd);
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
+	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
+	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
 
-	let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
-	loop {
+	let deadline = std::time::Instant::now() + timeout;
+	let status = loop {
 		match child.try_wait()? {
-			Some(status) => {
-				let output = child.wait_with_output()?;
-				return Ok(CliOutput {
-					exit_code: status.code().unwrap_or(-1),
-					stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-					stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
-				});
-			},
+			Some(status) => break Some(status),
 			None if std::time::Instant::now() >= deadline => {
 				let _ = child.kill();
 				let _ = child.wait();
-				return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
+				break None;
 			},
 			None => std::thread::sleep(Duration::from_millis(10)),
 		}
+	};
+	// The child has exited (or been killed), so the pipes reach EOF and the
+	// readers terminate; join can only block briefly on the final drain.
+	let stdout = stdout.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let stderr = stderr.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let Some(status) = status else {
+		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
+	};
+	Ok(CliOutput { exit_code: status.code().unwrap_or(-1), stdout, stderr })
+}
+
+/// Drain a child stream on a helper thread, mirroring [`read_capped`].
+///
+/// `None` when the stream is absent or the thread cannot be spawned (e.g.
+/// under the same memory pressure that motivates the CLI path); dropping the
+/// stream then closes the pipe, so a chatty child fails with EPIPE and
+/// surfaces as a non-zero exit instead of a hang.
+fn spawn_sync_reader(
+	name: &'static str,
+	stream: Option<impl std::io::Read + Send + 'static>,
+	limit: usize,
+) -> Option<std::thread::JoinHandle<String>> {
+	let stream = stream?;
+	std::thread::Builder::new()
+		.name(name.into())
+		.spawn(move || read_capped_sync(stream, limit))
+		.ok()
+}
+
+/// Synchronous mirror of [`read_capped`]: cap retention at `limit` while
+/// draining to EOF so the child never blocks.
+fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
+	let mut retained: Vec<u8> = Vec::new();
+	let mut buf = [0u8; 8 * 1024];
+	let mut truncated = false;
+	loop {
+		let n = match stream.read(&mut buf) {
+			Ok(0) | Err(_) => break,
+			Ok(n) => n,
+		};
+		if truncated {
+			continue;
+		}
+		let remaining = limit - retained.len();
+		if n <= remaining {
+			retained.extend_from_slice(&buf[..n]);
+		} else {
+			retained.extend_from_slice(&buf[..remaining]);
+			truncated = true;
+		}
 	}
+	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	if truncated {
+		text.push_str(TRUNCATION_MARKER);
+	}
+	text
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
@@ -429,4 +563,88 @@ pub async fn clone(
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Set on the re-executed child; carries the fixture repository it should
+	/// probe. Its presence is what tells the test body which side it is on.
+	const ENV_PROBE_REPO: &str = "PI_VCS_TEST_ENV_PROBE_REPO";
+
+	/// Asks git to report the ambient variables it was started with. A `!`-alias
+	/// is the only way to make git print its own environment.
+	const ENV_PROBE_ALIAS: &str = r#"!printf 'LC_ALL=[%s] LC_CTYPE=[%s] LC_MESSAGES=[%s] LITERAL=[%s] ICASE=[%s]' "$LC_ALL" "$LC_CTYPE" "$LC_MESSAGES" "$GIT_LITERAL_PATHSPECS" "$GIT_ICASE_PATHSPECS""#;
+
+	/// Two guarantees this crate builds on top of, both of which depend on what
+	/// the child process actually receives:
+	///
+	/// - The ownership fallback reads git's diagnostic, and `LC_ALL` outranks
+	///   `LC_MESSAGES`, so an inherited one hands back a translated message that
+	///   [`is_dubious_ownership`] cannot match.
+	/// - The `:(literal)` magic this crate builds is only explicit once the
+	///   global pathspec modes are gone; `GIT_LITERAL_PATHSPECS=1` would turn
+	///   the prefix into filename text and match nothing.
+	///
+	/// Asserted through [`run_sync`] rather than [`apply_env`] directly, because
+	/// the regression this covers was the synchronous builder not calling the
+	/// helper. The variables have to be present before the process starts, and
+	/// `set_var` in a running test binary is observable by every other thread,
+	/// so the probe runs in a re-executed copy of this test binary spawned with
+	/// them already in its environment.
+	#[test]
+	fn sync_runner_pins_message_locale_and_scrubs_pathspec_modes() {
+		if let Some(repo) = std::env::var_os(ENV_PROBE_REPO) {
+			let out = run_sync(
+				Path::new(&repo),
+				&["-c".to_owned(), format!("alias.envprobe={ENV_PROBE_ALIAS}"), "envprobe".to_owned()],
+				SYNC_TIMEOUT,
+			)
+			.expect("run alias");
+
+			assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
+			assert!(out.stdout.contains("LC_ALL=[]"), "LC_ALL leaked: {out:?}");
+			assert!(out.stdout.contains("LC_MESSAGES=[C]"), "messages not pinned: {out:?}");
+			// The character locale is preserved so paths keep round-tripping as
+			// UTF-8; only the message locale is forced.
+			assert!(
+				out.stdout.contains("LC_CTYPE=[fr_FR.UTF-8]"),
+				"UTF-8 character locale dropped: {out:?}"
+			);
+			assert!(out.stdout.contains("LITERAL=[]"), "literal pathspec mode leaked: {out:?}");
+			assert!(out.stdout.contains("ICASE=[]"), "icase pathspec mode leaked: {out:?}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("tempdir");
+		let init = std::process::Command::new("git")
+			.args(["init", "-q", "-b", "main"])
+			.current_dir(dir.path())
+			.status()
+			.expect("spawn git init");
+		assert!(init.success(), "git init failed");
+
+		let name = format!(
+			"{}::sync_runner_pins_message_locale_and_scrubs_pathspec_modes",
+			module_path!()
+				.split_once("::")
+				.expect("crate-qualified module path")
+				.1
+		);
+		let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+			.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+			.env(ENV_PROBE_REPO, dir.path())
+			.env("LC_ALL", "fr_FR.UTF-8")
+			.env("GIT_LITERAL_PATHSPECS", "1")
+			.env("GIT_ICASE_PATHSPECS", "1")
+			.output()
+			.expect("re-exec test binary");
+		assert!(
+			child.status.success(),
+			"environment probe failed:\n{}{}",
+			String::from_utf8_lossy(&child.stdout),
+			String::from_utf8_lossy(&child.stderr)
+		);
+	}
 }

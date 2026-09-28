@@ -134,7 +134,7 @@ describe("renderHtmlToText: Jina response validation", () => {
 		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
 			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
-			storage.replaceAuthCredentialsForProvider("jina", [{ type: "api_key", key: "stored-jina-key" }]);
+			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);
 			const settings = Settings.isolated({ "providers.fetch": "jina" });
 			let requestHeaders: Headers | undefined;
 			const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
@@ -156,7 +156,7 @@ describe("renderHtmlToText: Jina response validation", () => {
 			expect(result.method).toBe("jina");
 			expect(requestHeaders?.get("authorization")).toBe("Bearer stored-jina-key");
 		} finally {
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 			await tempDir.remove().catch(() => {});
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;

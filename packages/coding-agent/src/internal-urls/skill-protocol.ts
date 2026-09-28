@@ -12,33 +12,80 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
-import { getActiveSkills } from "../extensibility/skills";
-import { isMarkdownPath } from "../utils/lang-from-path";
-import { buildDirectoryResource } from "./filesystem-resource";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
-
-function getContentType(filePath: string): InternalResource["contentType"] {
-	if (isMarkdownPath(filePath)) return "text/markdown";
-	return "text/plain";
-}
+import { getActiveSkills, type Skill } from "../extensibility/skills";
+import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
+import {
+	buildDirectoryResource,
+	contentTypeForPath,
+	ensureCreatableWithinRoot,
+	UrlContainmentError,
+	validateRelativePath,
+} from "./filesystem-resource";
+import type {
+	InternalResource,
+	InternalUrl,
+	LocateOptions,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeHost,
+	SchemeSpec,
+	UrlCompletion,
+} from "./types";
 
 /**
- * Validate that a path is safe (no traversal, no absolute paths).
+ * Path a skill:// URL addresses, after traversal and plugin-root containment
+ * checks. A bare URL addresses the skill's instruction file, or its base
+ * directory when `directory` is set. The path may not exist; with `create`, a
+ * missing plugin-skill target is only returned when writing it stays in the plugin root.
  */
-export function validateRelativePath(relativePath: string): void {
-	if (path.isAbsolute(relativePath)) {
-		throw new Error("Absolute paths are not allowed in skill:// URLs");
+async function skillTargetPath(
+	url: InternalUrl,
+	skills: readonly Skill[],
+	directory: boolean,
+	create = false,
+): Promise<string> {
+	const skillName = url.rawHost || url.hostname;
+	if (!skillName) {
+		throw new Error("skill:// URL requires a skill name: skill://<name>");
 	}
 
-	const normalized = path.normalize(relativePath);
-	if (
-		relativePath.split(/[\\/]/).includes("..") ||
-		normalized.startsWith("..") ||
-		normalized.includes("/../") ||
-		normalized.includes("/..")
-	) {
-		throw new Error("Path traversal (..) is not allowed in skill:// URLs");
+	const skill = skills.find(s => s.name === skillName);
+	if (!skill) {
+		const available = skills.map(s => s.name);
+		const availableStr = available.length > 0 ? available.join(", ") : "none";
+		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}
+
+	const urlPath = url.pathname;
+	let resolvedPath: string;
+	if (!urlPath || urlPath === "/") {
+		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
+	} else {
+		const relativePath = decodeURIComponent(urlPath.slice(1));
+		validateRelativePath(relativePath, "skill");
+		resolvedPath = path.resolve(skill.baseDir, relativePath);
+		const resolvedBaseDir = path.resolve(skill.baseDir);
+		if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
+			throw new Error("Path traversal is not allowed");
+		}
+	}
+	// Agent Plugin skills (§4.1): every target, including the bare instruction
+	// file and base directory, must canonically resolve within the plugin root.
+	// Symlinks may target other files inside the same package.
+	if (!skill.containRoot) return resolvedPath;
+	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
+	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
+	if (contained.status === "outside") throw new UrlContainmentError(escape);
+	if (contained.status === "ok") return contained.realPath;
+	if (create) {
+		try {
+			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
+		} catch (error) {
+			// Same wording as the read path: the plugin root, not a per-skill root, bounds the package.
+			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
+		}
+	}
+	return resolvedPath;
 }
 
 /**
@@ -46,53 +93,21 @@ export function validateRelativePath(relativePath: string): void {
  */
 export class SkillProtocolHandler implements ProtocolHandler {
 	readonly scheme = "skill";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = {
+		backing: "file",
+		selectors: "lines",
+		immutable: true,
+		unbounded: true,
+		linkable: true,
+	};
+
+	/** Advertised only when loaded skills are readable through an active tool. */
+	promptDoc(host: SchemeHost): string | undefined {
+		return host.skillUriAccess ? skillDoc.trim() : undefined;
+	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const skills = context?.skills ?? getActiveSkills();
-
-		const skillName = url.rawHost || url.hostname;
-		if (!skillName) {
-			throw new Error("skill:// URL requires a skill name: skill://<name>");
-		}
-
-		const skill = skills.find(s => s.name === skillName);
-		if (!skill) {
-			const available = skills.map(s => s.name);
-			const availableStr = available.length > 0 ? available.join(", ") : "none";
-			throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
-		}
-
-		let targetPath: string;
-		const urlPath = url.pathname;
-		const hasRelativePath = urlPath && urlPath !== "/" && urlPath !== "";
-
-		if (hasRelativePath) {
-			const relativePath = decodeURIComponent(urlPath.slice(1));
-			validateRelativePath(relativePath);
-			targetPath = path.join(skill.baseDir, relativePath);
-
-			const resolvedPath = path.resolve(targetPath);
-			const resolvedBaseDir = path.resolve(skill.baseDir);
-			if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
-				throw new Error("Path traversal is not allowed");
-			}
-			// Agent Plugin skills (§4.1): the resource must canonically resolve
-			// within the plugin root; a dangling or unresolvable path fails closed.
-			// Symlinks may target other files inside the same package.
-			if (skill.containRoot) {
-				const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
-				if (contained.status === "outside") {
-					throw new Error(`skill:// path resolves outside the plugin root: ${url.href}`);
-				}
-				if (contained.status === "missing") {
-					throw new Error(`File not found: ${resolvedPath}`);
-				}
-				targetPath = contained.realPath;
-			}
-		} else {
-			targetPath = context?.pathOnly === true ? skill.baseDir : skill.filePath;
-		}
+		const targetPath = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
 
 		let stats: fsTypes.Stats;
 		try {
@@ -115,11 +130,28 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		return {
 			url: url.href,
 			content,
-			contentType: getContentType(targetPath),
+			contentType: contentTypeForPath(targetPath),
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: targetPath,
 			notes: [],
 		};
+	}
+
+	/**
+	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
+	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not.
+	 */
+	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
+		const skills = context?.skills ?? getActiveSkills();
+		const targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
+		if (options?.create) return targetPath;
+		try {
+			await fs.stat(targetPath);
+			return targetPath;
+		} catch (error) {
+			if (isEnoent(error)) return null;
+			throw error;
+		}
 	}
 
 	async complete(): Promise<UrlCompletion[]> {

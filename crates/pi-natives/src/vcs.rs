@@ -11,7 +11,10 @@ use napi_derive::napi;
 use pi_vcs::types as core;
 use tokio_util::sync::CancellationToken;
 
-use crate::task;
+use crate::{
+	iso::{IsoBackendKind, from_napi_kind, to_napi_kind},
+	task,
+};
 
 /// Build the JS `VcsError` on the JS thread and hand it to napi as the
 /// rejection/throw value. napi retains a reference to the constructed object,
@@ -36,6 +39,10 @@ fn rich_error(env: Env, err: pi_vcs::Error) -> napi::Error {
 		Ok(napi::Error::from(object.to_unknown()))
 	})();
 	built.unwrap_or_else(|_| napi::Error::from_reason(message))
+}
+
+fn canceled_error(env: Env, _reason: task::AbortReason) -> napi::Error {
+	rich_error(env, pi_vcs::Error::Canceled)
 }
 /// Run a tokio-backed VCS future, rejecting with the rich `VcsError` built on
 /// the JS thread. A deferred promise is used because napi future rejections
@@ -65,15 +72,12 @@ fn path_string(path: impl AsRef<Path>) -> String {
 }
 fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
 	signal.and_then(|value| {
-		let aborted = value
-			.coerce_to_object()
-			.and_then(|object| object.get_named_property::<bool>("aborted"))
-			.unwrap_or(false);
-		let signal = AbortSignal::from_unknown(value).ok()?;
 		let token = CancellationToken::new();
-		if aborted {
+		if task::signal_aborted(&value) {
 			token.cancel();
+			return Some(token);
 		}
+		let signal = AbortSignal::from_unknown(value).ok()?;
 		let abort = token.clone();
 		signal.on_abort(move || abort.cancel());
 		Some(token)
@@ -119,6 +123,22 @@ pub struct VcsWorktreeEntry {
 	pub branch:   Option<String>,
 	pub detached: bool,
 }
+/// Worktree creation options.
+#[napi(object)]
+pub struct VcsWorktreeAddOptions {
+	pub detach:       bool,
+	pub clone:        bool,
+	pub backend:      Option<IsoBackendKind>,
+	/// Carry the source checkout's uncommitted changes into the new worktree
+	/// (target must be the source `HEAD`).
+	pub keep_changes: Option<bool>,
+}
+/// Worktree creation outcome.
+#[napi(object)]
+pub struct VcsWorktreeAddResult {
+	pub cloned_with: Option<IsoBackendKind>,
+	pub clone_error: Option<String>,
+}
 /// Commit author identity.
 #[napi(object)]
 pub struct VcsCommitAuthor {
@@ -151,12 +171,17 @@ pub struct VcsShowResult {
 #[napi(object)]
 #[derive(Default)]
 pub struct VcsDiffOptions {
-	pub cached:  Option<bool>,
-	pub base:    Option<String>,
-	pub head:    Option<String>,
-	pub files:   Option<Vec<String>>,
-	pub context: Option<u32>,
-	pub binary:  Option<bool>,
+	pub cached:    Option<bool>,
+	pub base:      Option<String>,
+	pub head:      Option<String>,
+	pub files:     Option<Vec<String>>,
+	pub context:   Option<u32>,
+	pub binary:    Option<bool>,
+	/// Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+	/// this many bytes, instead of buffering an arbitrarily large string.
+	/// Carried as a double so a budget past 2^32 reaches the renderer intact
+	/// (a `u32` field would wrap it); values beyond `usize` saturate.
+	pub max_bytes: Option<f64>,
 }
 /// Status query options.
 #[napi(object)]
@@ -305,12 +330,13 @@ impl From<core::ShowResult> for VcsShowResult {
 impl From<VcsDiffOptions> for core::DiffOptions {
 	fn from(v: VcsDiffOptions) -> Self {
 		Self {
-			cached:  v.cached.unwrap_or(false),
-			base:    v.base,
-			head:    v.head,
-			files:   v.files.unwrap_or_default(),
-			context: v.context,
-			binary:  v.binary.unwrap_or(false),
+			cached:    v.cached.unwrap_or(false),
+			base:      v.base,
+			head:      v.head,
+			files:     v.files.unwrap_or_default(),
+			context:   v.context,
+			binary:    v.binary.unwrap_or(false),
+			max_bytes: v.max_bytes.map(|v| v as usize),
 		}
 	}
 }
@@ -409,6 +435,30 @@ impl TryFrom<VcsHunkSelection> for core::HunkSelection {
 	}
 }
 
+/// Convert a panic escaping a VCS operation into a typed [`pi_vcs::Error`].
+///
+/// gitoxide `.expect(...)`s on fallible OS work in places — e.g. worker-thread
+/// spawn inside its parallel status walk fails under memory pressure (Windows
+/// `ERROR_COMMITMENT_LIMIT`, os error 1455) and the panic resumes on the
+/// joining thread. The task-level guard in [`task`] keeps the process alive
+/// either way, but its rejection bypasses [`rich_error`]; catching here
+/// preserves the structured `VcsError` contract (name/code/stderr) for every
+/// failure mode.
+fn catch_panic<T>(tag: &'static str, f: impl FnOnce() -> pi_vcs::Result<T>) -> pi_vcs::Result<T> {
+	// AssertUnwindSafe: the captured repo handles are read-mostly caches; an
+	// abandoned operation cannot leave them logically corrupt.
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+		Ok(result) => result,
+		Err(payload) => {
+			// Extract the message BEFORE disposal: disposal is the one
+			// remaining step that can panic again.
+			let message = crate::crash_handler::panic_payload(&*payload);
+			task::dispose_panic_payload(payload);
+			Err(pi_vcs::Error::backend(tag, format!("native panic: {message}")))
+		},
+	}
+}
+
 fn blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	tag: &'static str,
 	repo: Arc<pi_vcs::git::GitRepo>,
@@ -416,11 +466,11 @@ fn blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::git::GitRepo) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
-		f(&repo)
+		catch_panic(tag, || f(&repo))
 	})
 }
 fn repo_blocking<T: Send + 'static + ToNapiValue + TypeName>(
@@ -430,11 +480,11 @@ fn repo_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::Repo) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
-		f(&repo)
+		catch_panic(tag, || f(&repo))
 	})
 }
 
@@ -448,6 +498,15 @@ pub struct VcsRepo {
 #[napi]
 pub fn vcs_discover(env: Env, dir: String) -> Result<Option<VcsRepo>> {
 	pi_vcs::detect(Path::new(&dir))
+		.map(|repo| repo.map(|inner| VcsRepo { inner }))
+		.map_err(|err| rich_error(env, err))
+}
+
+/// Discover the repository presenting a directory: equal-root jj+git ties
+/// prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
+#[napi]
+pub fn vcs_discover_for_display(env: Env, dir: String) -> Result<Option<VcsRepo>> {
+	pi_vcs::detect_for_display(Path::new(&dir))
 		.map(|repo| repo.map(|inner| VcsRepo { inner }))
 		.map_err(|err| rich_error(env, err))
 }
@@ -821,11 +880,26 @@ impl VcsGitRepo {
 		&self,
 		path: String,
 		ref_name: String,
-		detach: bool,
+		options: VcsWorktreeAddOptions,
 		signal: Option<Unknown>,
-	) -> Promise<()> {
+	) -> Promise<VcsWorktreeAddResult> {
 		blocking("vcs.worktreeAdd", self.inner.clone(), signal, move |r| {
-			r.worktree_add(Path::new(&path), &ref_name, detach)
+			let clone = if !options.clone {
+				core::WorktreeClone::Off
+			} else if let Some(kind) = options.backend {
+				core::WorktreeClone::Prefer(from_napi_kind(kind))
+			} else {
+				core::WorktreeClone::Auto
+			};
+			r.worktree_add(Path::new(&path), &ref_name, core::WorktreeAddOptions {
+				detach: options.detach,
+				clone,
+				keep_changes: options.keep_changes.unwrap_or(false),
+			})
+			.map(|result| VcsWorktreeAddResult {
+				cloned_with: result.cloned_with.map(to_napi_kind),
+				clone_error: result.clone_error,
+			})
 		})
 	}
 
@@ -875,6 +949,17 @@ impl VcsGitRepo {
 		blocking("vcs.revListRange", self.inner.clone(), signal, move |r| {
 			r.rev_list_range(&base, &head)
 		})
+	}
+
+	/// Best common ancestor of two revisions.
+	#[napi]
+	pub fn merge_base(
+		&self,
+		a: String,
+		b: String,
+		signal: Option<Unknown>,
+	) -> Promise<Option<String>> {
+		blocking("vcs.mergeBase", self.inner.clone(), signal, move |r| r.merge_base(&a, &b))
 	}
 
 	/// Commits touching a file.
@@ -1309,7 +1394,7 @@ pub fn vcs_detach_git_dir(
 	signal: Option<Unknown>,
 ) -> Promise<String> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped("vcs.detachGitDir", ct, rich_error, move |ct| {
+	task::blocking_mapped("vcs.detachGitDir", ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
@@ -1370,11 +1455,11 @@ fn jj_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	f: impl FnOnce(&pi_vcs::jj::JjWorkspace) -> pi_vcs::Result<T> + Send + 'static,
 ) -> Promise<T> {
 	let ct = task::CancelToken::new(None, signal);
-	task::blocking_mapped(tag, ct, rich_error, move |ct| {
+	task::blocking_mapped(tag, ct, rich_error, canceled_error, move |ct| {
 		if ct.heartbeat().is_err() {
 			return Err(pi_vcs::Error::Canceled);
 		}
-		f(&ws)
+		catch_panic(tag, || f(&ws))
 	})
 }
 #[napi]
@@ -1429,5 +1514,29 @@ impl VcsJjWorkspace {
 		jj_blocking("vcs.jjChangedFiles", self.inner.clone(), signal, move |w| {
 			w.changed_files(&files, snapshot)
 		})
+	}
+}
+#[cfg(test)]
+mod tests {
+	use super::catch_panic;
+
+	/// A gix-style panic (e.g. worker-thread spawn `.expect(...)` hitting
+	/// `ERROR_COMMITMENT_LIMIT`) must surface as a typed backend error carrying
+	/// the operation tag and panic message — never as an unwind.
+	#[test]
+	fn catch_panic_converts_native_panics_into_backend_errors() {
+		let err = catch_panic("vcs.test", || -> pi_vcs::Result<()> {
+			panic!("valid name: Os {{ code: 1455 }}")
+		})
+		.unwrap_err();
+		match err {
+			pi_vcs::Error::Backend { context, message } => {
+				assert_eq!(context, "vcs.test");
+				assert!(message.contains("1455"), "panic message lost: {message}");
+			},
+			other => panic!("unexpected error variant: {other}"),
+		}
+		// Non-panicking work passes through untouched.
+		assert_eq!(catch_panic("vcs.test", || Ok(7)).unwrap(), 7);
 	}
 }

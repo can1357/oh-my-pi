@@ -125,7 +125,7 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 		"x-omp-install-id": getInstallId(),
 		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
 		"x-omp-app": getAppName(),
-		...(model.headers ?? {}),
+		...model.headers,
 	};
 	if (apiKey && !headers.Authorization) {
 		headers.Authorization = `Bearer ${apiKey}`;
@@ -236,10 +236,6 @@ export function streamPiNative<TApi extends Api>(
 			}
 
 			if (!sawTerminal) {
-				// SSE closed before a terminal event reached us — synthesize one
-				// so awaiters of `.result()` resolve instead of hanging forever.
-				// Matches the gateway's own defensive fallback in
-				// `pi-native-server.encodeStream`.
 				const aborted = abortTracker.wasCallerAbort();
 				const partial = makeSyntheticAssistant(model as Model<Api>);
 				if (aborted) {
@@ -247,8 +243,16 @@ export function streamPiNative<TApi extends Api>(
 					partial.errorMessage = "stream closed without terminal event";
 					stream.push({ type: "error", reason: "aborted", error: partial });
 				} else {
-					partial.stopReason = "stop";
-					stream.push({ type: "done", reason: "stop", message: partial });
+					stream.fail(
+						new AIError.ProviderResponseError(
+							"pi-native stream read error: stream closed before a terminal response event",
+							{
+								provider: model.provider,
+								kind: "incomplete-stream",
+							},
+						),
+					);
+					return;
 				}
 			}
 			stream.end();

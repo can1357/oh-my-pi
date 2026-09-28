@@ -231,9 +231,7 @@ function sortRows(rows: ReportRow[], by: typeof sortBy): ReportRow[] {
 const entries = (
 	await Promise.all(
 		resolvedDirs.map(async d =>
-			(
-				await fs.readdir(d, { withFileTypes: true })
-			)
+			(await fs.readdir(d, { withFileTypes: true }))
 				.filter(e => e.isFile() && e.name.endsWith(".md"))
 				.map(e => path.join(d, e.name)),
 		),

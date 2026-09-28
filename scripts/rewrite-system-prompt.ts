@@ -56,7 +56,6 @@ const PROMPT_GLOBS = [
 	"packages/agent/src/compaction/prompts/*.md",
 	"packages/ai/src/prompts/*.md",
 	"packages/typescript-edit-benchmark/src/prompts/*.md",
-	"packages/hashline/src/prompt.md",
 ];
 
 /** Matches one inline token that must survive a rewrite untouched. */
@@ -174,6 +173,7 @@ export function preservesTokens(rewritten: string, tokens: readonly string[]): b
  * otherwise read as prose and get rewritten.
  */
 export function blockSkipMask(lines: readonly string[]): boolean[] {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const skip = new Array<boolean>(lines.length).fill(false);
 	let start = 0;
 	// Leading YAML frontmatter: `---` on the first line, closed by the next `---`.
@@ -238,6 +238,7 @@ async function mapPool<T, R>(
 	limit: number,
 	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let next = 0;
 	const width = Math.max(1, Math.min(limit, items.length));

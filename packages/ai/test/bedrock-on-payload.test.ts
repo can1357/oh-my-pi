@@ -3,9 +3,10 @@
 // upstream. The replacement contract matches anthropic / openai-responses /
 // google: await the hook and use its non-undefined return as the request body.
 import { describe, expect, it, vi } from "bun:test";
-import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
+import { type BedrockOptions, streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function model(): Model<"bedrock-converse-stream"> {
 	return buildModel({
@@ -31,6 +32,8 @@ const context: Context = {
 // response parsing, and the stream's outcome is irrelevant to the assertion.
 async function captureSentBody(
 	onPayload: (payload: unknown) => unknown | Promise<unknown>,
+	target: Model<"bedrock-converse-stream"> = model(),
+	options: Partial<BedrockOptions> = {},
 ): Promise<Record<string, any>> {
 	const { promise, resolve } = Promise.withResolvers<Record<string, any>>();
 	const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -47,7 +50,12 @@ async function captureSentBody(
 		);
 	}) as unknown as typeof fetch;
 
-	const stream = streamBedrock(model(), context, { bearerToken: "test-token", fetch: fetchMock, onPayload });
+	const stream = streamBedrock(target, context, {
+		...options,
+		bearerToken: "test-token",
+		fetch: fetchMock,
+		onPayload,
+	});
 	void (async () => {
 		try {
 			for await (const _ of stream) {
@@ -76,5 +84,27 @@ describe("bedrock onPayload replacement", () => {
 		const body = await captureSentBody(async () => undefined);
 
 		expect(body.messages[0].content[0].text).toBe("hi");
+	}, 10_000);
+
+	it("sends Fable 5.1 thinking-binding controls through additional fields", async () => {
+		const target = buildModel({
+			id: "us.anthropic.claude-fable-5-1-v1:0",
+			name: "Claude Fable 5.1",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+		});
+		const body = await captureSentBody(async () => undefined, target, { reasoning: Effort.High });
+
+		expect(body.additionalModelRequestFields.thinking.block_binding).toEqual({
+			prefix_mismatch_behavior: "drop_block",
+		});
+		expect(body.additionalModelRequestFields.anthropic_beta).toContain("thinking-binding-controls-2026-08-01");
+		expect(body.additionalModelResponseFieldPaths).toEqual(["/input_transformations"]);
 	}, 10_000);
 });

@@ -7,10 +7,11 @@
  * them into a combined `answer` string on the SearchResponse.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { getDefault, settings } from "../../../config/settings";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { settings } from "../../../config/settings";
 import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
-import { parseSSE } from "../../../mcp/json-rpc";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
@@ -18,18 +19,20 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
+import { cfgExaEnabled, cfgExaSearchDelayMs } from "../../settings";
+
 const EXA_API_URL = "https://api.exa.ai/search";
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 const EXA_MCP_SOURCE = "oh-my-pi";
 const MAX_EXA_SNIPPET_CHARS = 500;
-const DEFAULT_EXA_SEARCH_DELAY_MS = getDefault("exa.searchDelayMs");
+const DEFAULT_EXA_SEARCH_DELAY_MS = cfgExaSearchDelayMs.default;
 
 let nextExaSearchRequestAt = 0;
 let exaSearchThrottle = Promise.resolve();
 
 function configuredExaSearchDelayMs(): number {
 	try {
-		const delayMs = settings.get("exa.searchDelayMs");
+		const delayMs = cfgExaSearchDelayMs.get(settings);
 		return Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
 	} catch {
 		return DEFAULT_EXA_SEARCH_DELAY_MS;
@@ -146,13 +149,13 @@ interface ExaSearchResponse {
 	searchTime?: number;
 }
 function asRecord(value: unknown): Record<string, unknown> | null {
-	if (typeof value !== "object" || value === null) return null;
-	return value as Record<string, unknown>;
+	return isRecord(value) ? value : null;
 }
 
 function parseJsonContent(text: string): unknown | null {
 	try {
-		return JSON.parse(text) as unknown;
+		const parsed: unknown = JSON.parse(text);
+		return parsed;
 	} catch {
 		return null;
 	}
@@ -356,6 +359,8 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
 	await waitForExaSearchSlot(params.signal);
+	const requestId = Math.random().toString(36).slice(2);
+	const signal = withHardTimeout(params.signal, params.timeoutMs);
 	const response = await fetchImpl(`${EXA_MCP_URL}?${query.toString()}`, {
 		method: "POST",
 		headers: {
@@ -365,14 +370,14 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 		},
 		body: JSON.stringify({
 			jsonrpc: "2.0",
-			id: Math.random().toString(36).slice(2),
+			id: requestId,
 			method: "tools/call",
 			params: {
 				name: "web_search_exa",
 				arguments: buildExaMcpArgs(params),
 			},
 		}),
-		signal: withHardTimeout(params.signal, params.timeoutMs),
+		signal,
 	});
 	if (!response.ok) {
 		const errorText = await response.text();
@@ -391,31 +396,27 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 			response.status,
 		);
 	}
-	const mcpResponse = parseSSE(await response.text()) as {
-		result?: {
-			content?: Array<{ type: string; text?: string }>;
-			isError?: boolean;
-		};
-		error?: {
-			code: number;
-			message: string;
-		};
-	} | null;
-	if (!mcpResponse) {
-		throw new Error("Failed to parse MCP response");
-	}
+	const mcpResponse = await readMcpJsonRpcResponse(response, requestId, signal);
 	if (mcpResponse.error) {
 		throw new Error(`MCP error: ${mcpResponse.error.message}`);
 	}
-	if (mcpResponse.result?.isError) {
-		const message = mcpResponse.result.content
-			?.find(item => item.type === "text" && typeof item.text === "string")
-			?.text?.trim();
+	const mcpResult = asRecord(mcpResponse.result);
+	if (mcpResult?.isError === true) {
+		let message: string | undefined;
+		if (Array.isArray(mcpResult.content)) {
+			for (const item of mcpResult.content) {
+				const part = asRecord(item);
+				if (part?.type === "text" && typeof part.text === "string") {
+					message = part.text.trim();
+					break;
+				}
+			}
+		}
 		throw new SearchProviderError("exa", message || "Exa MCP returned an error");
 	}
 	const responsePayload = normalizeExaMcpPayload(mcpResponse.result);
 	if (isSearchResponse(responsePayload)) {
-		return responsePayload as ExaSearchResponse;
+		return responsePayload;
 	}
 
 	const parsed = parseExaMcpTextPayload(responsePayload);
@@ -432,11 +433,11 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 	// so the env-key and keyless-MCP fallbacks below stay intact, then drive the
 	// authStorage path through the central force-refresh/rotate retry policy.
 	const storedKey = params.authStorage
-		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal })
+		? await params.authStorage.keys.get("exa", params.sessionId, { signal: params.signal })
 		: undefined;
 	const keyOrResolver: ApiKey | undefined =
 		storedKey && params.authStorage
-			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
+			? params.authStorage.keys.resolver("exa", { sessionId: params.sessionId })
 			: getEnvApiKey("exa");
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
@@ -483,7 +484,7 @@ export class ExaProvider extends SearchProvider {
 
 	isAvailable(authStorage: AuthStorage): boolean {
 		if (!this.#settingsAllowSearch()) return false;
-		return !!getEnvApiKey("exa") || authStorage.hasAuth("exa");
+		return !!getEnvApiKey("exa") || authStorage.keys.source("exa") !== undefined;
 	}
 
 	/**
@@ -499,7 +500,7 @@ export class ExaProvider extends SearchProvider {
 
 	#settingsAllowSearch(): boolean {
 		try {
-			if (settings.get("exa.enabled") === false) {
+			if (cfgExaEnabled.get(settings) === false) {
 				return false;
 			}
 		} catch {

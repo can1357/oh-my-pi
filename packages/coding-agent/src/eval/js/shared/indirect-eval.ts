@@ -11,13 +11,18 @@
  * stack frames to the user cell instead of `<anonymous>`.
  */
 export function indirectEval(source: string, filename?: string): unknown {
-	const withPragma = filename ? `${source}\n//# sourceURL=${filename}` : source;
+	// ECMAScript line terminators would end the comment and turn the remainder
+	// of an attacker-controlled filename into executable source. Encode only
+	// those separators so ordinary absolute paths remain readable in stacks;
+	// the runtime keeps the untouched filename separately for import bases.
+	const sourceUrl = filename?.replace(/[\r\n\u2028\u2029]/g, separator => encodeURIComponent(separator));
+	const withPragma = sourceUrl ? `${source}\n//# sourceURL=${sourceUrl}` : source;
 	// Read `eval` via a property access so the call site is *indirect* (global scope),
 	// not direct (this module's lexical scope). The cast erases the DOM lib return type.
 	// We deliberately avoid `node:vm` because Bun crashes the parent with SIGTRAP when
 	// Worker.terminate() fires mid-`vm.runInContext` synchronous loop — indirect eval is
 	// the executor for user code in the worker.
-	// biome-ignore lint/security/noGlobalEval: see comment above — this is the executor.
+	// oxlint-disable-next-line no-eval -- this is the executor.
 	const geval = globalThis.eval as (src: string) => unknown;
 	return geval(withPragma);
 }

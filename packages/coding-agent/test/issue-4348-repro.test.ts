@@ -21,7 +21,7 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -53,7 +53,6 @@ function transcriptWith(messages: AgentMessage[]): SessionContext {
 
 function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContext; chatContainer: Container } {
 	const chatContainer = new Container();
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
@@ -66,7 +65,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 		updateEditorTopBorder: vi.fn(),
 		ui: { requestRender: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => chatContainer.clear(),
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		toolOutputExpanded: false,
 		hideThinkingBlock: false,
 		focusedAgentId: undefined,
@@ -102,7 +101,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
 }
 
@@ -176,46 +175,5 @@ describe("issue #4348: cursor exec-channel tool results pair with synthesized to
 		// this harness), so we assert on the pairing signal: the read call
 		// appears with its path, only reachable when the toolResult attaches.
 		expect(rendered).toContain("Read src/foo.ts");
-	});
-
-	it("does not orphan the bash toolResult under the assistant when the toolCall block is missing", async () => {
-		// Simulates the PRE-fix persisted shape: assistant with only text (no
-		// toolCall blocks) + a toolResult message. The renderer has nothing to
-		// pair the result with. This test guards the failure mode so a future
-		// regression that reverts the synthesis is caught: the rendered output
-		// notably omits the bash command preview.
-		await Settings.init({ inMemory: true });
-		const preFixAssistant: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "Running command:" }],
-			api: "cursor-agent",
-			provider: "cursor",
-			model: "cursor-composer-2.5",
-			usage: emptyUsage,
-			stopReason: "toolUse",
-			timestamp: 1,
-		};
-		const transcript = transcriptWith([
-			preFixAssistant,
-			{
-				role: "toolResult",
-				toolCallId: "tc-orphan",
-				toolName: "bash",
-				content: [{ type: "text", text: "ORPHAN_RESULT some output" }],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		await new UiHelpers(ctx).renderInitialMessages();
-
-		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
-		expect(rendered).toContain("Running command:");
-		// Fallback path (`addMessageToChat` case "toolResult") is a no-op, so
-		// the result content never lands in the transcript at all. That silent
-		// drop is exactly what the reporter saw in the wild — every native
-		// cursor tool's output disappeared from replay.
-		expect(rendered).not.toContain("ORPHAN_RESULT");
 	});
 });

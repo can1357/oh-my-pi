@@ -36,7 +36,8 @@ Current root capabilities include:
 
 - search, globbing, workspace scans, AST matching/editing, code summaries, syntax highlighting, text layout, token counting, and structured diffs;
 - shell, PTY, process, file-lock, isolation, and work-profile primitives;
-- desktop capture/input/accessibility, clipboard, audio capture/playback, live WebRTC, device-check, SIXEL, snapcompact rendering, and vector ranking.
+- desktop capture/input/accessibility, clipboard, audio capture/playback, live WebRTC, device-check, SIXEL, snapcompact rendering, and vector ranking;
+- PDF inspection/Markdown conversion, SVG rasterization, macOS spelling services, and in-process Git/Jujutsu operations.
 
 ## Loader and distribution
 
@@ -47,6 +48,7 @@ Current root capabilities include:
 - `darwin-x64`
 - `darwin-arm64`
 - `win32-x64`
+- `win32-arm64`
 
 x64 builds have `modern` (x86-64-v3/AVX2) and `baseline` (x86-64-v2) variants. `PI_NATIVE_VARIANT=modern|baseline` overrides automatic detection. Automatic detection reads `/proc/cpuinfo` on Linux, calls `sysctl` on macOS, or queries `System.Runtime.Intrinsics.X86.Avx2` in PowerShell on Windows. Its result is inherited by subsequent workers and child processes through the private `__PI_NATIVE_VARIANT_CACHE` environment entry. Non-x64 builds use an unsuffixed filename.
 
@@ -70,9 +72,9 @@ After an addon loads successfully, the loader best-effort removes cache director
 
 ## Load validation and runtime initialization
 
-Every install or compiled candidate must expose the version sentinel computed from `package.json#version`, such as `__piNativesV17_2_5`. Workspace loads skip this check. The loader does not validate a complete symbol list.
+Every install or compiled candidate must report `package.json#version` from `__piNativesBuildVersion()`. The version is not compiled in: `scripts/stamp-native-version.ts` writes it into a fixed placeholder slot after linking, on every `scripts/bazel-natives.ts` install, local cargo build, and Nix package build (`nix/package.nix`), so a release bump does not recompile the addon crate. Workspace loads skip this check. The loader does not validate a complete symbol list.
 
-After `require(...)` and sentinel validation, the loader calls `__ompInstallTokioRuntime()` when present. Rust deliberately avoids creating worker threads during `#[module_init]`, while the dynamic-loader lock is held. The post-load hook installs bounded Windows Tokio/Rayon pools; older addons without the hook use napi-rs defaults. Hook failure is best-effort and appears only in startup markers when enabled.
+After `require(...)` and version validation, the loader calls `__ompInstallTokioRuntime()` when present. Rust deliberately avoids creating worker threads during `#[module_init]`, while the dynamic-loader lock is held. The post-load hook installs bounded Windows Tokio/Rayon pools; older addons without the hook use napi-rs defaults. Hook failure is best-effort and appears only in startup markers when enabled.
 
 Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr around addon loading, extraction, and runtime installation.
 
@@ -80,10 +82,10 @@ Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr around 
 
 `crates/pi-natives/src/lib.rs` registers the current modules:
 
-- platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `iofs`, `power`, `prof`, `ps`, `pty`, `shell`;
-- media/live: `audio`, `live`, `sixel`, `snapcompact`;
-- code/data: `ast`, `block`, `diff`, `fd`, `glob`, `glob_util`, `grep`, `highlight`, `html`, `keys`, `summary`, `text`, `tokens`, `vectors`, `workspace`;
-- isolation/task support: `iso`, `task`, crate-private `utils`, and test-only `testing`;
+- platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `iofs`, `power`, `prof`, `ps`, `pty`, `shell`, `spelling`, `tty_writer`, `vcs`;
+- media/live: `audio`, `live`, `sixel`, `snapcompact`, `svg`;
+- code/data: `ast`, `block`, `diff`, `fd`, `glob`, `glob_util`, `grep`, `highlight`, `html`, `keys`, `pdf`, `summary`, `text`, `tokens`, `utok`, `vectors`, `workspace`;
+- isolation/task support: `iso`, `task`, plus N-API boundary/conversion helpers (`js`, crate-private `utils`, test-only `testing`);
 - language metadata re-exported from `pi_ast::language`.
 
 Rust `#[napi]` functions, classes, objects, and enums generate the declaration surface. Default snake_case Rust names become camelCase JavaScript names.
@@ -101,7 +103,7 @@ For the supporting-crate map, see [`native-crates.md`](./native-crates.md). For 
 1. A consumer imports the eager root or a lazy subpath.
 2. `loadNative()` computes mode, platform, variant, filenames, and ordered candidates.
 3. Embedded extraction or Windows staging may prepend a cache candidate.
-4. Candidates are required in order and install/compiled loads are sentinel-validated.
+4. Candidates are required in order and install/compiled loads are release-stamp-validated.
 5. The optional post-load runtime hook runs, then stale cache versions are cleaned up best-effort.
 6. The root binds generated named exports; lazy subpaths invoke selected bindings through wrappers.
 7. Callers invoke N-API functions/classes; napi-rs performs argument and result conversion.

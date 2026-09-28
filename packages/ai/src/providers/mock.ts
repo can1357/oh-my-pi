@@ -42,9 +42,11 @@
  *   expect(mock.calls).toHaveLength(2);
  */
 
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { registerCustomApi } from "../api-registry";
 import * as AIError from "../error";
 import type {
+	AnthropicFallbackCreditHandle,
 	Api,
 	AssistantMessage,
 	Context,
@@ -85,6 +87,8 @@ export interface MockResponse {
 	stopReason?: StopReason;
 	/** Structured terminal stop classification, e.g. Anthropic refusal metadata. */
 	stopDetails?: StopDetails | null;
+	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
+	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** Error text paired with an explicit `"error"` stop reason. */
 	errorMessage?: string;
 	/** Usage stats. Missing fields default to 0; missing `cost.total` is recomputed from components. */
@@ -177,6 +181,7 @@ export class MockModel implements Model<MockApi> {
 	readonly contextWindow: number;
 	readonly maxTokens: number;
 	readonly compat = undefined;
+	readonly identity: Model["identity"];
 
 	/** Recorded calls in invocation order. */
 	readonly calls: MockCall[] = [];
@@ -191,6 +196,7 @@ export class MockModel implements Model<MockApi> {
 		this.id = options.id ?? "mock-model";
 		this.name = options.id ?? "mock-model";
 		this.provider = options.provider ?? "mock";
+		this.identity = classifyModel(this.provider, this.id, { lenient: true });
 		this.baseUrl = options.baseUrl ?? "mock://";
 		this.reasoning = options.reasoning ?? false;
 		this.cost = options.cost ?? ZERO_COST;
@@ -400,6 +406,7 @@ async function runMock(
 
 	partial.stopReason = reason;
 	partial.stopDetails = response.stopDetails;
+	partial.fallbackCreditHandle = response.fallbackCreditHandle;
 	partial.errorMessage = response.errorMessage;
 	partial.usage = mergeUsage(response.usage);
 	partial.duration = performance.now() - perfStart;

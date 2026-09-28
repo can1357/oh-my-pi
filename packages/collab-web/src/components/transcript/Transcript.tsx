@@ -1,8 +1,8 @@
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight, ChevronsDown } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { ActiveTool } from "../../lib/client";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
@@ -19,6 +19,24 @@ export interface TranscriptProps {
 	compact?: boolean; // dense variant for the agent drawer
 	/** Sub-session drill-down capabilities forwarded to tool renderers. */
 	host?: ToolRenderHost;
+	/** Main connection phase; absent for the agent drawer's compact transcript. */
+	phase?: ConnectionPhase;
+}
+
+interface ScrollGeometry {
+	scrollTop: number;
+	readonly scrollHeight: number;
+	readonly clientHeight: number;
+}
+
+interface TailLock {
+	current: boolean;
+}
+
+/** Scroll to the tail while locked; `force` re-arms the lock for a `live` transition. */
+export function followTranscriptTail(element: ScrollGeometry, lock: TailLock, force = false): void {
+	if (force) lock.current = true;
+	if (lock.current) element.scrollTop = element.scrollHeight;
 }
 
 function Row({
@@ -282,44 +300,112 @@ function JumpPill({ visible, onJump }: { visible: boolean; onJump: () => void })
 	);
 }
 
-export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host } = props;
+/**
+ * Rows mounted at the tail. Large sessions carry thousands of entries; mounting
+ * all of them makes every streamed token re-reconcile and re-lay-out the whole
+ * transcript. Older rows mount a window at a time from the top.
+ */
+const WINDOW = 100;
+/** Distance from the top (px) at which scrolling up mounts the previous window. */
+const EARLIER_TRIGGER_PX = 200;
 
+export function Transcript(props: TranscriptProps): ReactNode {
+	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+
+	// null follows the tail. A number pins the first mounted entry while the
+	// reader is scrolled away from the bottom, so appended entries never
+	// unmount rows above the reader and shift the page under them.
+	const [pinnedStart, setPinnedStart] = useState<number | null>(null);
+	const tailStart = Math.max(0, entries.length - WINDOW);
+	const start = pinnedStart === null ? tailStart : Math.min(pinnedStart, tailStart);
+	const visible = useMemo(() => entries.slice(start), [entries, start]);
+
+	// A tool result always follows its call, so visible rows only pair with visible results.
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();
-		for (const entry of entries) {
+		for (const entry of visible) {
 			if (entry.type === "message" && entry.message.role === "toolResult") {
 				map.set(entry.message.toolCallId, entry.message);
 			}
 		}
 		return map;
-	}, [entries]);
+	}, [visible]);
 
 	const isCompact = compact === true;
-	const { rootRef, contentRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
+	const { rootRef, contentRef, lockRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
 		!isCompact,
 		entries,
 		stream,
 		activeTools,
 		working,
 	);
+	/**
+	 * First visible row and its offset from the viewport top, captured before
+	 * mounting earlier rows. Restoring against the row, not the total height
+	 * delta, stays exact when the same commit also appends live entries.
+	 */
+	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
 
-	const renderedToolIds = new Set<string>();
-	for (const entry of entries) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		for (const block of entry.message.content) {
-			if (block.type === "toolCall") renderedToolIds.add(block.id);
+	// A `live` transition (initial connect or reconnect) jumps to the latest message
+	// regardless of the prior scroll position. Absent for the agent drawer's compact transcript.
+	useEffect(() => {
+		const el = rootRef.current;
+		if (phase !== "live" || el === null) return;
+		setPinnedStart(null);
+		followTranscriptTail(el, lockRef, true);
+	}, [phase]);
+
+	// Keep the reader's content in place when earlier rows mount above it.
+	useLayoutEffect(() => {
+		const el = rootRef.current;
+		const before = prependRef.current;
+		if (el === null || before === null) return;
+		prependRef.current = null;
+		if (!before.anchor.isConnected) return;
+		el.scrollTop += before.anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
+	}, [start]);
+
+	const showEarlier = (): void => {
+		const el = rootRef.current;
+		const content = contentRef.current;
+		if (el === null || content === null || start === 0 || prependRef.current !== null) return;
+		const top = el.getBoundingClientRect().top;
+		for (const row of content.children) {
+			if (row.classList.contains("tr-earlier")) continue;
+			const rect = row.getBoundingClientRect();
+			if (rect.bottom <= top) continue;
+			prependRef.current = { anchor: row, offset: rect.top - top };
+			break;
 		}
-	}
-	if (stream !== null) {
-		for (const block of stream.content) {
-			if (block.type === "toolCall") renderedToolIds.add(block.id);
+		setPinnedStart(Math.max(0, start - WINDOW));
+	};
+
+	// Tool calls committed anywhere in the session: rescanned when entries change,
+	// not per streaming token or tool output update.
+	const committedToolIds = useMemo(() => {
+		const ids = new Set<string>();
+		for (const entry of entries) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			for (const block of entry.message.content) {
+				if (block.type === "toolCall") ids.add(block.id);
+			}
 		}
-	}
-	const tailTools: ActiveTool[] = [];
-	for (const tool of activeTools.values()) {
-		if (!renderedToolIds.has(tool.toolCallId)) tailTools.push(tool);
-	}
+		return ids;
+	}, [entries]);
+
+	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
+	const tailTools = useMemo(() => {
+		const tail: ActiveTool[] = [];
+		for (const tool of activeTools.values()) {
+			if (committedToolIds.has(tool.toolCallId)) continue;
+			if (stream?.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId)) continue;
+			tail.push(tool);
+		}
+		return tail;
+	}, [committedToolIds, stream, activeTools]);
+
+	// While the snapshot downloads the banner reports progress; an empty transcript isn't "no activity".
+	const settled = phase === undefined || phase === "live";
 
 	const scroller = (
 		<div
@@ -327,11 +413,29 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			className={`tr-root${isCompact ? " tr-root--compact" : ""}`}
 			tabIndex={isCompact ? undefined : -1}
 			aria-label={isCompact ? undefined : "Transcript"}
-			onScroll={onScroll}
+			onScroll={() => {
+				const el = rootRef.current;
+				if (el === null) return;
+				onScroll();
+				// Back at the bottom: drop the pin so the window trims to the tail again.
+				if (lockRef.current) {
+					if (pinnedStart !== null) setPinnedStart(null);
+				} else if (pinnedStart === null) {
+					setPinnedStart(start);
+				}
+				if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
+			}}
 		>
 			<div ref={contentRef} className="tr-content">
-				{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
-				{entries.map(entry => (
+				{settled && entries.length === 0 && stream === null && !working && (
+					<div className="tr-empty">no activity yet</div>
+				)}
+				{start > 0 && (
+					<button type="button" className="tr-earlier" onClick={showEarlier}>
+						show {start.toLocaleString("en-US")} earlier
+					</button>
+				)}
+				{visible.map(entry => (
 					<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
 				))}
 				{stream !== null && (

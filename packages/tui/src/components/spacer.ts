@@ -20,7 +20,6 @@ export class Spacer implements Component {
 		this.#lines = lines;
 		this.#cached = undefined;
 	}
-
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}
@@ -28,6 +27,7 @@ export class Spacer implements Component {
 	render(_width: number): readonly string[] {
 		let cached = this.#cached;
 		if (cached === undefined) {
+			// oxlint-disable-next-line unicorn/no-new-array -- cached line allocation
 			cached = new Array(this.#lines).fill("");
 			this.#cached = cached;
 		}

@@ -1,0 +1,8 @@
+// Apple Foundation Models: the on-device system language model (macOS 27+,
+// Apple silicon), bridged in-process by pi-natives. Models are discovered at
+// runtime from the model's availability; nothing is bundled.
+
+provider "apple" {
+	default-model "on-device"
+	allow-unauthenticated #true
+}

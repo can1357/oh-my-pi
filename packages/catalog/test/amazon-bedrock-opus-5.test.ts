@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBedrockCompat } from "@oh-my-pi/pi-catalog/compat/bedrock";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { MODELS_DEV_PROVIDER_DESCRIPTORS, mapModelsDevToModels } from "@oh-my-pi/pi-catalog/provider-models";
 import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -137,13 +137,14 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				contextWindow: 1_000_000,
 				maxTokens: 128_000,
 			};
-			expect(buildBedrockCompat(spec)).toEqual({
+			expect(resolveModelPolicy(spec).compat).toEqual({
 				promptCacheMode: "explicit",
 				supportsLongPromptCacheRetention: true,
 				promptCacheMinimumTokens: 512,
 				promptCacheMaximumCheckpoints: 4,
 				// reasoning:true adaptive-thinking family → 900s keepalive-free idle floor.
 				streamIdleTimeoutMs: 900_000,
+				streamRevision: "possible",
 			});
 		}
 	});

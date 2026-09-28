@@ -14,7 +14,17 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 - eager root: `native/index.js` with generated `native/index.d.ts`;
 - lazy desktop wrapper: `native/desktop.js` / `desktop.d.ts`;
-- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`.
+- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`;
+- lazy vcs wrapper: `native/vcs.js` / `vcs.d.ts` (`@oh-my-pi/pi-natives/vcs`).
+
+The vcs subpath exposes the backend-neutral `Vcs*` repository API (added in
+18.0.9, with `VcsGitRepo.mergeBase()` following in 18.0.10): discovery and
+Git/Jujutsu operations through `git()` / `repo()` / `require()` / `requireGit()`
+returning `VcsGitRepo` / `VcsRepo` / `VcsJjWorkspace` handles (refs and status,
+diffs, staging, commits, branches, worktrees, patch application, stash,
+cherry-pick, CLI-backed push/fetch/clone, all cancellation-aware), plus the
+JS-side error helpers (`isVcsError`) and the `watch(repo, onChange)` head-change
+watcher built on `VcsRepo.watchTarget()`.
 
 Two commands serve different purposes:
 
@@ -113,7 +123,7 @@ Run the narrow scenario against the addon you just built. When diagnosing a cand
 bun -e 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url); const mod = require(process.argv[1]); console.log(Object.keys(mod).sort())' -- /path/to/pi_natives.<tag>[-variant].node
 ```
 
-Confirm the export and the package-version sentinel are present. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
+Confirm the export is present and `__piNativesBuildVersion()` reports the package version. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
 
 ## Common failures
 
@@ -129,7 +139,7 @@ Remove only the stale local artifacts/cache identified by loader diagnostics, th
 
 ### Same-version incomplete addon
 
-The sentinel proves release version, not the complete export set. A locally produced same-version binary can pass loading while missing a newly generated member. Inspect `Object.keys` on the actual candidate and rebuild it; do not weaken the caller.
+The release stamp proves release version, not the complete export set. A locally produced same-version binary can pass loading while missing a newly generated member. Inspect `Object.keys` on the actual candidate and rebuild it; do not weaken the caller.
 
 ### Runtime enum missing
 

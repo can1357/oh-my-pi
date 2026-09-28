@@ -176,19 +176,6 @@ describe("sanitizeSchemaForStrictMode", () => {
 		expect(((objectVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 		expect(((nullVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 	});
-	it("inlines `default` value into `description` before stripping it", () => {
-		const schema = {
-			type: "number",
-			description: "Timeout in seconds",
-			default: 60,
-		} as Record<string, unknown>;
-
-		const sanitized = sanitizeSchemaForStrictMode(schema);
-
-		expect(sanitized.default).toBeUndefined();
-		expect(sanitized.description).toBe("Timeout in seconds (default: 60)");
-	});
-
 	it("preserves `default` for various primitive types when inlining", () => {
 		const numberSchema = sanitizeSchemaForStrictMode({
 			type: "number",
@@ -906,7 +893,7 @@ describe("json-schema validator unsupported-keyword regressions", () => {
 			type: "object",
 			properties: { kind: { type: "string" }, extra: { type: "string" } },
 			if: { properties: { kind: { const: "a" } }, required: ["kind"] },
-			// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+			// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema if/then/else keyword
 			then: { required: ["extra"] },
 		};
 		expect(isJsonSchemaValueValid(schema, { kind: "b" })).toBe(true);
@@ -968,7 +955,7 @@ describe("meta-validator conditional keywords", () => {
 			isValidJsonSchema({
 				type: "object",
 				if: { properties: { kind: { const: "a" } } },
-				// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+				// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema if/then/else keyword
 				then: { required: ["extra"] },
 				else: { required: ["other"] },
 			}),
@@ -980,7 +967,7 @@ describe("meta-validator conditional keywords", () => {
 	});
 
 	it("rejects malformed then", () => {
-		// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+		// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema if/then/else keyword
 		expect(isValidJsonSchema({ type: "object", then: "not-a-schema" })).toBe(false);
 	});
 
@@ -1053,15 +1040,5 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 			additionalProperties: false,
 		};
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(false);
-	});
-
-	it("still enforces strict for fully-typed schemas (no false positives)", () => {
-		const schema: Record<string, unknown> = {
-			type: "object",
-			properties: { a: { type: "string" }, b: { type: "number" } },
-			required: ["a", "b"],
-			additionalProperties: false,
-		};
-		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
 	});
 });

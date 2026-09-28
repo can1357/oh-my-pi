@@ -1,0 +1,61 @@
+---
+source: brush-parser/src/parser/tests/and_or_lists.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "cmd1 && cmd2; cmd3 || cmd4",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cmd1",
+                  loc: "[location]",
+                )),
+              )),
+            ],
+          ),
+          additional: [
+            And(Pipeline(
+              seq: [
+                Simple(SimpleCommand(
+                  word_or_name: Some(Word(
+                    value: "cmd2",
+                    loc: "[location]",
+                  )),
+                )),
+              ],
+            )),
+          ],
+        ), Sequence),
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cmd3",
+                  loc: "[location]",
+                )),
+              )),
+            ],
+          ),
+          additional: [
+            Or(Pipeline(
+              seq: [
+                Simple(SimpleCommand(
+                  word_or_name: Some(Word(
+                    value: "cmd4",
+                    loc: "[location]",
+                  )),
+                )),
+              ],
+            )),
+          ],
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

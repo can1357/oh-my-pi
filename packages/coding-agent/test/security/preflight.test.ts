@@ -68,8 +68,25 @@ describe("security preflight", () => {
 		const first = await plan();
 		const second = await plan();
 		expect(first.fingerprint).toBe(second.fingerprint);
-		expect(first.account.credentialId).toBe(17);
+		expect(first.account).toEqual({ provider: "openai-codex", credentialId: 17, accountId: "workspace_fixture" });
 		expect(first.model).toEqual({ provider: "openai-codex", modelId: "gpt-5.6-sol", thinkingLevel: "xhigh" });
+	});
+
+	test("rejects an authentication provider that differs from the pinned model", async () => {
+		await expect(
+			createSecurityScanPlan(
+				{
+					cwd: repositoryRoot,
+					target: { kind: "repository" },
+					outputRoot: stateRoot,
+					model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-opus-4-8" },
+					account: { provider: "bedrock-mantle", api: "openai-responses" },
+					config: {},
+					workflowFingerprint: "fixture",
+				},
+				adapter,
+			),
+		).rejects.toThrow("authentication provider mismatch");
 	});
 
 	test("tree mutation makes a plan stale", async () => {

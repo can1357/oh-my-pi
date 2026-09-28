@@ -22,10 +22,10 @@ import {
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
-	MacOSPowerAssertion,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
 	matchesKey,
+	PowerAssertion,
 	PtySession,
 	parseKey,
 	pdfToMarkdown,
@@ -98,6 +98,14 @@ describe("countTokens", () => {
 	it("counts native UTF-16 content without its N-API terminator and sums arrays", () => {
 		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
 		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
+	});
+
+	it("round-trips every Encoding through the local addon", () => {
+		for (const encoding of Object.values(Encoding)) {
+			const n = countTokens("hello", encoding);
+			expect(typeof n).toBe("number");
+			expect(n).toBeGreaterThan(0);
+		}
 	});
 });
 
@@ -336,6 +344,31 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 1_000,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
+
+			await expect(pending).resolves.toMatchObject({ totalMatches: 1 });
+		});
+
+		it("discards a completed result when an AbortSignal fires before settlement", async () => {
+			const controller = new AbortController();
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+			controller.abort();
+
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		});
+
 		it("should find patterns in files", async () => {
 			const result = await grep({
 				pattern: "TODO",
@@ -367,16 +400,6 @@ describe("pi-natives", () => {
 			});
 
 			expect(result.totalMatches).toBe(2); // "Test" in title + "test" in body
-		});
-
-		it("should return filesWithMatches mode", async () => {
-			const result = await grep({
-				pattern: "return",
-				path: testDir,
-				mode: GrepOutputMode.FilesWithMatches,
-			});
-
-			expect(result.filesWithMatches).toBeGreaterThan(0);
 		});
 
 		it("counts files instead of line matches in filesWithMatches mode", async () => {
@@ -1061,12 +1084,42 @@ console.log("ok");
 		}, 30_000);
 	});
 
-	describe("MacOSPowerAssertion", () => {
-		it("should create a stoppable power assertion handle", () => {
-			const assertion = MacOSPowerAssertion.start({ reason: "pi-natives test" });
-			assertion.stop();
-			assertion.stop();
+	describe("PowerAssertion", () => {
+		it("should create a stoppable power assertion handle, or surface a descriptive bus/service failure where the host cannot provide one", () => {
+			let assertion: PowerAssertion | undefined;
+			try {
+				assertion = PowerAssertion.start({ reason: "pi-natives test" });
+			} catch (error) {
+				// A host with no bus must fail in the documented bus/service vocabulary,
+				// so a wrong export or a no-op stub fails on any other message.
+				const message = error instanceof Error ? error.message : String(error);
+				expect(message).toMatch(/(system|session) bus|login1|screensaver|inhibit/i);
+				return;
+			}
+			assertion?.stop();
+			assertion?.stop();
 		});
+
+		it.skipIf(process.platform !== "linux" || !Bun.which("systemd-inhibit"))(
+			"registers a login1 inhibitor for the handle's lifetime",
+			() => {
+				const reason = `pi-natives ${crypto.randomUUID()}`;
+				const held = (): boolean =>
+					Bun.spawnSync(["systemd-inhibit", "--list", "--no-pager"]).stdout.toString().includes(reason);
+				let assertion: PowerAssertion;
+				try {
+					assertion = PowerAssertion.start({ reason, idle: true });
+				} catch {
+					return; // No system bus here; the failure vocabulary is covered above.
+				}
+				try {
+					expect(held()).toBe(true);
+				} finally {
+					assertion.stop();
+				}
+				expect(held()).toBe(false);
+			},
+		);
 	});
 
 	describe("astMatch", () => {

@@ -131,7 +131,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("keeps both openai-codex credentials when accountId matches but emails differ", async () => {
 		if (!authStorage || !store || !dbPath) throw new Error("test setup failed");
 
-		await authStorage.set("openai-codex", [
+		await authStorage.credentials.set("openai-codex", [
 			createCredential({ suffix: "first", accountId: "shared-team", email: "first.user@example.com" }),
 			createCredential({ suffix: "second", accountId: "shared-team", email: "second.user@example.com" }),
 		]);
@@ -144,7 +144,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("dedupes openai-codex credentials when email matches but accountId differs", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("openai-codex", [
+		await authStorage.credentials.set("openai-codex", [
 			createCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 			createCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		]);
@@ -161,7 +161,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("dedupes openai-codex credentials when matching email exists only in JWT profile claim but accountId differs", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
-		await authStorage.set("openai-codex", [
+		await authStorage.credentials.set("openai-codex", [
 			createJwtOnlyCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 			createJwtOnlyCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		]);
@@ -177,10 +177,10 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("updates in-place when a codex credential with matching email replaces another account", async () => {
 		if (!store || !dbPath) throw new Error("test setup failed");
 
-		store.replaceAuthCredentialsForProvider("openai-codex", [
+		await store.replaceAuthCredentials("openai-codex", [
 			createJwtOnlyCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 		]);
-		store.replaceAuthCredentialsForProvider("openai-codex", [
+		await store.replaceAuthCredentials("openai-codex", [
 			createJwtOnlyCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		]);
 
@@ -194,11 +194,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("updates in-place via AuthStorage.set when email matches across accounts", async () => {
 		if (!authStorage || !store || !dbPath) throw new Error("test setup failed");
 
-		await authStorage.set(
+		await authStorage.credentials.set(
 			"openai-codex",
 			createCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 		);
-		await authStorage.set(
+		await authStorage.credentials.set(
 			"openai-codex",
 			createCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		);
@@ -223,9 +223,9 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const credC = createCredential({ suffix: "third", accountId: "account-c", email: "user-c@example.com" });
 
 		// Simulate login flow: each login merges existing + new
-		await authStorage.set("openai-codex", credA);
-		await authStorage.set("openai-codex", [credA, credB]);
-		await authStorage.set("openai-codex", [credA, credB, credC]);
+		await authStorage.credentials.set("openai-codex", credA);
+		await authStorage.credentials.set("openai-codex", [credA, credB]);
+		await authStorage.credentials.set("openai-codex", [credA, credB, credC]);
 
 		// All three accounts should remain active — no credential was replaced
 		const credentials = store.listAuthCredentials("openai-codex");
@@ -236,15 +236,15 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("saveOAuth preserves unrelated codex accounts across reauth", async () => {
 		if (!store || !dbPath) throw new Error("test setup failed");
 
-		store.saveOAuth(
+		await store.saveOAuth(
 			"openai-codex",
 			createCredential({ suffix: "first", accountId: "account-a", email: "user-a@example.com" }),
 		);
-		store.saveOAuth(
+		await store.saveOAuth(
 			"openai-codex",
 			createCredential({ suffix: "second", accountId: "account-b", email: "user-b@example.com" }),
 		);
-		store.saveOAuth(
+		await store.saveOAuth(
 			"openai-codex",
 			createCredential({ suffix: "third", accountId: "account-c", email: "user-c@example.com" }),
 		);
@@ -261,20 +261,20 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const freshStore = await SqliteAuthCredentialStore.open(dbPath);
 		const staleAuthStorage = new AuthStorage(staleStore);
 		try {
-			staleStore.saveOAuth(
+			await staleStore.saveOAuth(
 				"openai-codex",
 				createCredential({ suffix: "first", accountId: "account-a", email: "user-a@example.com" }),
 			);
-			await staleAuthStorage.reload();
+			await staleAuthStorage.credentials.reload();
 
 			// Another writer adds a second account after staleAuthStorage has already cached provider state.
-			freshStore.saveOAuth(
+			await freshStore.saveOAuth(
 				"openai-codex",
 				createCredential({ suffix: "second", accountId: "account-b", email: "user-b@example.com" }),
 			);
 
 			// Reauth from the stale process should update only account A, not disable account B.
-			staleStore.saveOAuth(
+			await staleStore.saveOAuth(
 				"openai-codex",
 				createCredential({ suffix: "reauth", accountId: "account-a", email: "user-a@example.com" }),
 			);
@@ -290,13 +290,13 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("prunes existing JWT-only codex duplicates on reload when email matches", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.replaceAuthCredentialsForProvider("openai-codex", [
+		await store.replaceAuthCredentials("openai-codex", [
 			createJwtOnlyCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 			createJwtOnlyCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		]);
 
 		const reloaded = new AuthStorage(store);
-		await reloaded.reload();
+		await reloaded.credentials.reload();
 
 		const credentials = store.listAuthCredentials("openai-codex");
 		expect(credentials).toHaveLength(1);
@@ -309,13 +309,13 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("dedupes openai-codex credentials after reload when email matches even if accountId differs", async () => {
 		if (!store) throw new Error("test setup failed");
 
-		store.replaceAuthCredentialsForProvider("openai-codex", [
+		await store.replaceAuthCredentials("openai-codex", [
 			createCredential({ suffix: "first", accountId: "account-a", email: "shared.user@example.com" }),
 			createCredential({ suffix: "second", accountId: "account-b", email: "shared.user@example.com" }),
 		]);
 
 		const reloaded = new AuthStorage(store);
-		await reloaded.reload();
+		await reloaded.credentials.reload();
 
 		const credentials = store.listAuthCredentials("openai-codex");
 		expect(credentials).toHaveLength(1);
@@ -330,7 +330,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		it("keeps both anthropic credentials when accountId matches but emails differ", async () => {
 			if (!authStorage || !store || !dbPath) throw new Error("test setup failed");
 
-			await authStorage.set("anthropic", [
+			await authStorage.credentials.set("anthropic", [
 				createCredential({ suffix: "first", accountId: "shared-org", email: "first.user@example.com" }),
 				createCredential({ suffix: "second", accountId: "shared-org", email: "second.user@example.com" }),
 			]);
@@ -343,7 +343,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		it("dedupes anthropic credentials when email matches but accountId differs", async () => {
 			if (!authStorage || !store) throw new Error("test setup failed");
 
-			await authStorage.set("anthropic", [
+			await authStorage.credentials.set("anthropic", [
 				createCredential({ suffix: "first", accountId: "org-a", email: "shared.user@example.com" }),
 				createCredential({ suffix: "second", accountId: "org-b", email: "shared.user@example.com" }),
 			]);
@@ -411,7 +411,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	it("stores the disable cause when a credential is soft-disabled", async () => {
 		if (!store || !dbPath) throw new Error("test setup failed");
 
-		store.replaceAuthCredentialsForProvider("openai-codex", [
+		await store.replaceAuthCredentials("openai-codex", [
 			createCredential({ suffix: "only", accountId: "account-a", email: "only@example.com" }),
 		]);
 
@@ -419,10 +419,112 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		if (!credential) throw new Error("expected stored credential");
 
 		const disabledCause = "oauth refresh failed: invalid_grant";
-		store.deleteAuthCredential(credential.id, disabledCause);
+		await store.deleteAuthCredential(credential.id, disabledCause);
 
 		expect(store.listAuthCredentials("openai-codex")).toHaveLength(0);
 		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([disabledCause]);
+	});
+
+	it("re-keys stored SingularityAPI credentials into the product that accepts them", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const splitDbPath = path.join(tempDir, "singularityapi-split-agent.db");
+		const legacyDb = new Database(splitDbPath);
+		legacyDb.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 7);
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+				updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+			);
+			CREATE TABLE auth_credential_blocks (
+				credential_id INTEGER NOT NULL,
+				provider_key TEXT NOT NULL,
+				block_scope TEXT NOT NULL DEFAULT '',
+				blocked_until_ms INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (credential_id, provider_key, block_scope)
+			);
+		`);
+		const insertCredential = legacyDb.prepare(
+			"INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		// One row per product, both stored under the retired shared id: the
+		// gateway key carries the `sk-sapi-` prefix, the lane key does not.
+		insertCredential.run(
+			"singularityapi",
+			"api_key",
+			JSON.stringify({ key: "sk-sapi-live-abc", source: "login" }),
+			null,
+			LEGACY_TIMESTAMP,
+			LEGACY_TIMESTAMP,
+		);
+		insertCredential.run(
+			"singularityapi",
+			"api_key",
+			JSON.stringify({ key: "sk-sing-lane-abc", source: "login" }),
+			null,
+			LEGACY_TIMESTAMP,
+			LEGACY_TIMESTAMP,
+		);
+		legacyDb
+			.prepare(
+				"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(2, "singularityapi:api_key", "shared", LEGACY_TIMESTAMP, LEGACY_TIMESTAMP);
+		legacyDb.close();
+
+		const migratedStore = await SqliteAuthCredentialStore.open(splitDbPath);
+		try {
+			expect(readAuthSchemaVersion(splitDbPath)).toBe(8);
+			const inspect = new Database(splitDbPath, { readonly: true });
+			try {
+				const readKeys = (provider: string): string[] => {
+					// Rows were inserted by this test above; the cast names their shape.
+					const rows = inspect
+						.prepare("SELECT data FROM auth_credentials WHERE provider = ? ORDER BY id ASC")
+						.all(provider) as Array<{ data: string }>;
+					return rows.map(row => {
+						const parsed: unknown = JSON.parse(row.data);
+						if (
+							typeof parsed !== "object" ||
+							parsed === null ||
+							!("key" in parsed) ||
+							typeof parsed.key !== "string"
+						) {
+							throw new Error("credential payload is missing a string key");
+						}
+						return parsed.key;
+					});
+				};
+				// Each key lands on the product that accepts it — a gateway key on the
+				// lanes would 401, and leaving either under the retired id would make
+				// it invisible to both providers.
+				expect(readKeys("singularityapi-dev")).toEqual(["sk-sapi-live-abc"]);
+				expect(readKeys("singularityapi-tech")).toEqual(["sk-sing-lane-abc"]);
+				expect(readKeys("singularityapi")).toEqual([]);
+				// Rate-limit state travels with the credential: a block recorded under
+				// the old provider key must not be dropped, nor outlive the rename.
+				// Rows were inserted by this test above; the cast names their shape.
+				const blockRows = inspect
+					.prepare("SELECT provider_key FROM auth_credential_blocks ORDER BY credential_id ASC")
+					.all() as Array<{ provider_key: string }>;
+				expect(blockRows.map(row => row.provider_key)).toEqual(["singularityapi-tech:api_key"]);
+			} finally {
+				inspect.close();
+			}
+		} finally {
+			migratedStore.close();
+		}
 	});
 
 	it("creates fresh auth schema without unixepoch defaults", async () => {
@@ -431,7 +533,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const freshDbPath = path.join(tempDir, "fresh-schema-agent.db");
 		const freshStore = await SqliteAuthCredentialStore.open(freshDbPath);
 		try {
-			expect(readAuthSchemaVersion(freshDbPath)).toBe(7);
+			expect(readAuthSchemaVersion(freshDbPath)).toBe(8);
 			expect(readTableSql(freshDbPath, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(freshDbPath, "auth_credentials")).toContain("strftime('%s','now')");
 		} finally {
@@ -449,7 +551,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
 			);
-			INSERT INTO auth_schema_version(id, version) VALUES (1, 8);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
 			CREATE TABLE auth_credentials (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				provider TEXT NOT NULL,
@@ -465,7 +567,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(futureDbPath);
 		try {
-			expect(readAuthSchemaVersion(futureDbPath)).toBe(8);
+			expect(readAuthSchemaVersion(futureDbPath)).toBe(9);
 		} finally {
 			reopenedStore.close();
 		}
@@ -478,7 +580,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const first = await SqliteAuthCredentialStore.open(reopenDbPath);
 		// api_key rows never derive an identity_key, so this leaves a NULL row
 		// the boot-time backfill scan must skip without a no-op UPDATE.
-		first.saveApiKey("openai", "sk-reopen-noop");
+		await first.saveApiKey("openai", "sk-reopen-noop");
 		first.close();
 
 		// PRAGMA data_version, read from a second connection, increments whenever
@@ -491,7 +593,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 			const reopened = await SqliteAuthCredentialStore.open(reopenDbPath);
 			try {
 				expect(reopened.listAuthCredentials("openai")).toHaveLength(1);
-				expect(readAuthSchemaVersion(reopenDbPath)).toBe(7);
+				expect(readAuthSchemaVersion(reopenDbPath)).toBe(8);
 			} finally {
 				reopened.close();
 			}
@@ -547,7 +649,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
 		try {
-			expect(readAuthSchemaVersion(legacyDbPath)).toBe(7);
+			expect(readAuthSchemaVersion(legacyDbPath)).toBe(8);
 			expect(readTableSql(legacyDbPath, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(legacyDbPath, "auth_credentials")).toContain("strftime('%s','now')");
 			expect(readStoredIdentityRows(legacyDbPath, "openai-codex")).toEqual([
@@ -675,8 +777,8 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 
 		try {
 			// 1. Setup a legacy api_key credential
-			await authStorage.set("unit-login-upgrade", { type: "api_key", key: "sk-legacy-key" });
-			expect(await authStorage.getApiKey("unit-login-upgrade")).toBe("sk-legacy-key");
+			await authStorage.credentials.set("unit-login-upgrade", { type: "api_key", key: "sk-legacy-key" });
+			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("sk-legacy-key");
 
 			// 2. Register custom oauth provider
 			let loginReturns: (Omit<OAuthCredential, "type"> & { type?: string }) | null = null;
@@ -686,12 +788,12 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				sourceId: "auth-storage-login-upgrade-test",
 				login: async () => {
 					if (!loginReturns) throw new Error("no credentials");
-					const { type, ...rest } = loginReturns;
+					const { type: _type, ...rest } = loginReturns;
 					return rest;
 				},
 				refreshToken: async () => {
 					if (!loginReturns) throw new Error("no credentials");
-					const { type, ...rest } = loginReturns;
+					const { type: _type, ...rest } = loginReturns;
 					return rest;
 				},
 			});
@@ -704,14 +806,14 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				projectId: "project-1",
 				email: "user-1@example.com",
 			};
-			await authStorage.login("unit-login-upgrade", {
+			await authStorage.oauth.login("unit-login-upgrade", {
 				onAuth: () => {},
 				onPrompt: async () => "",
 			});
 
 			// Legacy api_key should be gone/replaced, and first oauth account is active.
 			// getApiKey should now return the first OAuth access token (since the api_key is gone).
-			expect(await authStorage.getApiKey("unit-login-upgrade")).toBe("access-token-1");
+			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("access-token-1");
 			const firstRows = readStoredIdentityRows(dbPath, "unit-login-upgrade");
 			expect(firstRows).toEqual([
 				{ identity_key: null, disabled_cause: "replaced by oauth login" },
@@ -726,7 +828,7 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				projectId: "project-2",
 				email: "user-2@example.com",
 			};
-			await authStorage.login("unit-login-upgrade", {
+			await authStorage.oauth.login("unit-login-upgrade", {
 				onAuth: () => {},
 				onPrompt: async () => "",
 			});
@@ -753,25 +855,25 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 			new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 
 		try {
-			await authStorage.login("nvidia", {
+			await authStorage.oauth.login("nvidia", {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 				fetch: fetchMock,
 			});
-			await authStorage.login("nvidia", {
+			await authStorage.oauth.login("nvidia", {
 				onAuth: () => {},
 				onPrompt: async () => prompts.shift() ?? "",
 				fetch: fetchMock,
 			});
 
-			expect(authStorage.listStoredCredentials("nvidia").map(entry => entry.credential)).toEqual([
+			expect(authStorage.credentials.list("nvidia").map(entry => entry.credential)).toEqual([
 				{ type: "api_key", key: "nvapi-first", source: "login" },
 				{ type: "api_key", key: "nvapi-second", source: "login" },
 			]);
 
 			const selectedKeys = new Set<string>();
 			for (let index = 0; index < 64; index += 1) {
-				const key = await authStorage.getApiKey("nvidia", `session-${index}`);
+				const key = await authStorage.keys.get("nvidia", `session-${index}`);
 				if (key) selectedKeys.add(key);
 			}
 			expect(selectedKeys).toEqual(new Set(["nvapi-first", "nvapi-second"]));
@@ -815,15 +917,15 @@ describe("AuthStorage persistent session stickiness", () => {
 				projectId: "project-2",
 				email: "user-2@example.com",
 			};
-			await authStorage.set("unit-session-stickiness", [credential1, credential2]);
+			await authStorage.credentials.set("unit-session-stickiness", [credential1, credential2]);
 
 			// 2. Resolve initial key for session-1
-			const key1 = await authStorage.getApiKey("unit-session-stickiness", "session-1");
+			const key1 = await authStorage.keys.get("unit-session-stickiness", "session-1");
 			expect(key1).toBe("access-token-2");
 
 			// 3. Rotate session-1's sticky credential to the sibling
-			await authStorage.rotateSessionCredential("unit-session-stickiness", "session-1");
-			const key2 = await authStorage.getApiKey("unit-session-stickiness", "session-1");
+			await authStorage.limits.rotate("unit-session-stickiness", "session-1");
+			const key2 = await authStorage.keys.get("unit-session-stickiness", "session-1");
 			expect(key2).toBe("access-token-1");
 
 			// 4. Close AuthStorage to simulate process restart
@@ -831,10 +933,10 @@ describe("AuthStorage persistent session stickiness", () => {
 
 			// 5. Re-instantiate AuthStorage using the same DB
 			authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)));
-			await authStorage.reload();
+			await authStorage.credentials.reload();
 
 			// 6. Retrieve the sticky key again for session-1 (should still be access-token-1)
-			const key3 = await authStorage.getApiKey("unit-session-stickiness", "session-1");
+			const key3 = await authStorage.keys.get("unit-session-stickiness", "session-1");
 			expect(key3).toBe("access-token-1");
 
 			authStorage.close();
@@ -857,13 +959,13 @@ describe("AuthStorage persistent session stickiness", () => {
 		const remainingCredentials = initialCredentials.slice(1);
 
 		let authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)));
-		await authStorage.set(provider, initialCredentials);
-		let rows = authStorage.listStoredCredentials(provider);
+		await authStorage.credentials.set(provider, initialCredentials);
+		let rows = authStorage.credentials.list(provider);
 
 		const control = new AuthStorage(
 			new SqliteAuthCredentialStore(new Database(path.join(tempDir, "sticky-control.db"))),
 		);
-		await control.set(provider, remainingCredentials);
+		await control.credentials.set(provider, remainingCredentials);
 		let session: string | undefined;
 		let stuckId = -1;
 		let stuckIndex = -1;
@@ -872,8 +974,8 @@ describe("AuthStorage persistent session stickiness", () => {
 		try {
 			for (let i = 0; i < 256 && session === undefined; i++) {
 				const candidate = `sticky-probe-${i}`;
-				const token = await authStorage.getApiKey(provider, candidate);
-				const expectedFreshToken = await control.getApiKey(provider, candidate);
+				const token = await authStorage.keys.get(provider, candidate);
+				const expectedFreshToken = await control.keys.get(provider, candidate);
 				const index = rows.findIndex(row => (row.credential as OAuthCredential).access === token);
 				if (index >= 1 && index <= rows.length - 2 && token !== expectedFreshToken) {
 					session = candidate;
@@ -889,15 +991,15 @@ describe("AuthStorage persistent session stickiness", () => {
 		expect(session).toBeDefined();
 		expect(freshToken).toBeDefined();
 
-		expect(await authStorage.removeCredential(provider, rows[0].id)).toBe(true);
+		expect(await authStorage.credentials.removeById(provider, rows[0].id)).toBe(true);
 		authStorage.close();
 
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)));
-		await authStorage.reload();
-		rows = authStorage.listStoredCredentials(provider);
+		await authStorage.credentials.reload();
+		rows = authStorage.credentials.list(provider);
 		expect(rows.findIndex(row => row.id === stuckId)).toBe(stuckIndex - 1);
 
-		const resolved = await authStorage.getApiKey(provider, session);
+		const resolved = await authStorage.keys.get(provider, session);
 		authStorage.close();
 		expect(resolved).toBe(freshToken);
 		expect(resolved).not.toBe(stuckToken);

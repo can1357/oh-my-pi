@@ -9,11 +9,11 @@ const LEGACY_TIMESTAMP = 1_700_000_000;
 let tempDir: TempDir | null = null;
 
 beforeEach(() => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 });
 
 afterEach(async () => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	if (tempDir) {
 		await Bun.sleep(0);
 		await tempDir.remove().catch(() => {});
@@ -85,6 +85,7 @@ it("collapses duplicate prompts and keeps the latest project metadata", async ()
 			created_at: 2,
 			cwd: "/projects/second",
 			sessionId: "second-session",
+			useCount: 2,
 		},
 	]);
 
@@ -95,6 +96,7 @@ it("collapses duplicate prompts and keeps the latest project metadata", async ()
 	expect(latest?.cwd).toBe("/projects/latest");
 	expect(latest?.sessionId).toBe("latest-session");
 	expect(latest?.created_at).toBeGreaterThan(2);
+	expect(latest?.useCount).toBe(3);
 	expect(storage.search("shared", 10).map(entry => entry.sessionId)).toEqual(["latest-session"]);
 
 	const verify = new Database(dbPath);
@@ -104,6 +106,48 @@ it("collapses duplicate prompts and keeps the latest project metadata", async ()
 		verify.close();
 	}
 });
+it("adds use_count to a rebuilt store in place, without another rebuild", async () => {
+	tempDir = TempDir.createSync("@omp-history-storage-use-count-");
+	const dbPath = tempDir.join("history.db");
+	const v1Db = new Database(dbPath);
+	v1Db.exec(`
+		CREATE TABLE history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			prompt TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+			cwd TEXT,
+			session_id TEXT
+		);
+		PRAGMA user_version = 1;
+	`);
+	v1Db
+		.prepare("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?, ?)")
+		.run(7, "counted prompt", LEGACY_TIMESTAMP, "/tmp/v1", "v1-session");
+	v1Db.close();
+
+	const storage = HistoryStorage.open(dbPath);
+	expect(storage.getRecent(10)).toEqual([
+		{
+			id: 7,
+			prompt: "counted prompt",
+			created_at: LEGACY_TIMESTAMP,
+			cwd: "/tmp/v1",
+			sessionId: "v1-session",
+			useCount: 1,
+		},
+	]);
+	await storage.add("counted prompt", "/tmp/again", "again-session");
+	expect(storage.getRecent(10).map(entry => [entry.id, entry.useCount])).toEqual([[7, 2]]);
+	HistoryStorage.close();
+
+	const verify = new Database(dbPath);
+	try {
+		expect(verify.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(1);
+	} finally {
+		verify.close();
+	}
+});
+
 it("normalizes per-line trailing whitespace so padded resubmissions upsert instead of duplicating", async () => {
 	tempDir = TempDir.createSync("@omp-history-storage-normalize-");
 	const storage = HistoryStorage.open(tempDir.join("history.db"));
@@ -121,12 +165,14 @@ it("collapses preexisting whitespace-padded duplicates on open, keeping the late
 	tempDir = TempDir.createSync("@omp-history-storage-padded-");
 	const dbPath = tempDir.join("history.db");
 	HistoryStorage.open(dbPath);
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 
 	const raw = new Database(dbPath);
-	const insert = raw.prepare("INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?)");
-	insert.run("keep me tidy\nplease", 1, "/projects/old", "old-session");
-	insert.run("keep me tidy   \nplease", 2, "/projects/new", "new-session");
+	const insert = raw.prepare(
+		"INSERT INTO history (prompt, created_at, cwd, session_id, use_count) VALUES (?, ?, ?, ?, ?)",
+	);
+	insert.run("keep me tidy\nplease", 1, "/projects/old", "old-session", 4);
+	insert.run("keep me tidy   \nplease", 2, "/projects/new", "new-session", 1);
 	raw.run("PRAGMA user_version = 0");
 	raw.close();
 
@@ -138,6 +184,7 @@ it("collapses preexisting whitespace-padded duplicates on open, keeping the late
 		created_at: 2,
 		cwd: "/projects/new",
 		sessionId: "new-session",
+		useCount: 5,
 	});
 	// FTS was rebuilt after the delete+update, so no stale index rows remain.
 	expect(storage.search("tidy", 10).map(entry => entry.sessionId)).toEqual(["new-session"]);

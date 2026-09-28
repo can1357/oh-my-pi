@@ -11,7 +11,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const PNG_B64 = Buffer.from("not-actually-a-png, but bytes are opaque here").toString("base64");
 const BLOB_URL = "https://blobs.example.com/0123456789abcdef0123456789abcdef.png";
-
 const userMessage: Message = {
 	role: "user",
 	content: [

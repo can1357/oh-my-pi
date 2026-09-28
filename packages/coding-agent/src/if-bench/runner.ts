@@ -19,11 +19,13 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
-import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelString } from "../config/model-resolver";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { Action } from "./actions";
 import { applyActions, initialArray, makeActions } from "./actions";
-import type { CatPlacement, IfBenchFailure } from "./protocol";
+import type { IfBenchFailure, IfBenchObserver } from "@oh-my-pi/pi-tui/apps/if-bench-board";
+import type { CatPlacement } from "./protocol";
 import { assessResponse, buildSystemPrompt, buildTurnPrompt } from "./protocol";
 
 /** Outcome of one turn: what was asked, what came back, and how it scored. */
@@ -71,14 +73,6 @@ export interface IfBenchSummary {
 	failures: number;
 }
 
-/** Live-progress sink; every hook is optional so JSON mode can pass nothing. */
-export interface IfBenchObserver {
-	modelStarted?(label: string): void;
-	turnStarted?(label: string, turn: number, actions: number): void;
-	turnFinished?(label: string, record: IfBenchTurnRecord): void;
-	modelFinished?(report: IfBenchModelReport): void;
-}
-
 export interface IfBenchRunOptions {
 	targets: readonly BenchTarget[];
 	runtime: BenchRuntime;
@@ -91,7 +85,7 @@ export interface IfBenchRunOptions {
 	stream: StreamSimpleFn;
 	now: () => number;
 	randomSessionId: () => string;
-	observer?: IfBenchObserver;
+	observer?: IfBenchObserver<IfBenchTurnRecord, IfBenchModelReport>;
 	/** Sleep between refusal-retry attempts; tests inject a no-op. Defaults to `Bun.sleep`. */
 	sleep?: (ms: number) => Promise<void>;
 }
@@ -119,7 +113,7 @@ const REFUSAL_MAX_ATTEMPTS = 8;
 const REFUSAL_BACKOFF_MS = [0, 5_000, 15_000, 30_000, 60_000, 90_000, 120_000, 180_000];
 
 function isCyberRefusal(error: string | undefined): boolean {
-	return error !== undefined && /^Refusal \(/.test(error);
+	return error !== undefined && error.startsWith("Refusal (");
 }
 
 function assistantText(message: AssistantMessage): string {
@@ -138,6 +132,7 @@ function errorText(error: unknown): string {
 export async function runIfBench(options: IfBenchRunOptions): Promise<IfBenchSummary> {
 	const reports: IfBenchModelReport[] = [];
 	const queue = options.targets.map((target, index) => ({ target, index }));
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const ordered: IfBenchModelReport[] = new Array(options.targets.length);
 
 	const worker = async (): Promise<void> => {
