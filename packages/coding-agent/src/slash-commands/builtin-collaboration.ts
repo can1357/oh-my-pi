@@ -5,6 +5,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
+import { hasInFlightCollabHosting, stopCollabHosting } from "../collab/start-hosting";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
@@ -335,6 +336,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const { verb, rest } = parseSubcommand(args);
 			if (verb === "stop") {
 				await ctx.collabController.stop("host stopped");
+				await stopCollabHosting(ctx);
 				ctx.showStatus("Collab stopped");
 				return;
 			}
@@ -422,6 +424,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
+			const currentHost =
+				ctx.collabHost && !ctx.collabHost.ending && ctx.collabHost.sessionId === ctx.sessionManager.getSessionId()
+					? ctx.collabHost
+					: undefined;
+			if (currentHost && !ctx.collabController.host) {
+				showCollabLink(ctx, currentHost, view ? "Read-only collab session active" : "Collab session active", view);
+				return;
+			}
+			if (hasInFlightCollabHosting(ctx)) {
+				ctx.showError("A collab hosting session is already starting");
+				return;
+			}
 			const access = view ? "view" : "control";
 			const existing = ctx.collabController.host;
 			let host: CollabHost;
@@ -450,6 +464,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				ctx.showError("Usage: /join <link>");
 				return;
 			}
+			if (hasInFlightCollabHosting(ctx)) {
+				ctx.showError("Stop hosting first (/collab stop)");
+				return;
+			}
 			if (ctx.collabGuest) {
 				ctx.showError("Already in a collab session (/leave first)");
 				return;
@@ -459,6 +477,16 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				if (!ctx.collabController.host) await ctx.collabController.stop("joining another session");
 				// Recheck after teardown: a concurrent manual start may have won.
 				if (ctx.collabController.host) {
+					ctx.showError("Stop hosting first (/collab stop)");
+					return;
+				}
+				const activeProgrammaticHost =
+					ctx.collabHost &&
+					!ctx.collabHost.ending &&
+					ctx.collabHost.sessionId === ctx.sessionManager.getSessionId()
+						? ctx.collabHost
+						: undefined;
+				if (activeProgrammaticHost) {
 					ctx.showError("Stop hosting first (/collab stop)");
 					return;
 				}
@@ -484,8 +512,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await ctx.collabGuest.leave("left");
 				return;
 			}
-			const wasHosting = ctx.collabHost !== undefined;
+			const wasHosting = ctx.collabHost !== undefined || hasInFlightCollabHosting(ctx);
 			await ctx.collabController.stop("host stopped");
+			await stopCollabHosting(ctx);
 			if (wasHosting) {
 				ctx.showStatus("Collab stopped");
 				return;
