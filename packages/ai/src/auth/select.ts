@@ -6,7 +6,13 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
-import { credentialBlockScopesForRequest, DEFAULT_BLOCK_MS, providerTypeKey, type CredentialBlocks } from "./blocks";
+import {
+	AUTH_BLOCK_SCOPE,
+	credentialBlockScopesForRequest,
+	DEFAULT_BLOCK_MS,
+	providerTypeKey,
+	type CredentialBlocks,
+} from "./blocks";
 import type { AccountPolicies } from "./policy";
 import { authCredentialEquals, type CredentialPool } from "./pool";
 import {
@@ -749,7 +755,7 @@ export class CredentialSelector {
 								providerKey,
 								latestIndex,
 								Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-								blockScope,
+								AUTH_BLOCK_SCOPE,
 							);
 						}
 					}
@@ -1049,6 +1055,7 @@ export class CredentialSelector {
 					providerKey,
 					selection.index,
 					Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+					AUTH_BLOCK_SCOPE,
 				);
 			}
 		}

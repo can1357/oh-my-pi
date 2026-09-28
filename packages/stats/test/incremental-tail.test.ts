@@ -169,18 +169,22 @@ describe("incremental stats ingestion", () => {
 		});
 	}
 
-	it("reads only appended bytes after reopening the database and retains priority accounting", async () => {
-		const file = await session(
+	it("limits reads to appended or replaced transcripts across restarts and retains priority accounting", async () => {
+		const content =
 			tier("priority") +
-				JSON.stringify({ type: "custom", padding: "x".repeat(2_000_000) }) +
-				"\n" +
-				assistant("first"),
+			JSON.stringify({ type: "custom", padding: "x".repeat(2_000_000) }) +
+			"\n" +
+			assistant("first");
+		const file = await session(content);
+		await Bun.write(
+			path.join(path.dirname(file), "unrelated.jsonl"),
+			`${JSON.stringify({ type: "custom", padding: "y".repeat(2_000_000) })}\n`,
 		);
 		await syncAllSessions({ workers: 1 });
 		closeDb();
 		const tail = assistant("second");
 		await fs.appendFile(file, tail);
-		const prototype = Object.getPrototypeOf(Bun.file(file)) as Bun.BunFile;
+		const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(file));
 		const original = prototype.bytes;
 		let readBytes = 0;
 		const observer = spyOn(prototype, "bytes").mockImplementation(async function (this: Bun.BunFile) {
@@ -190,12 +194,18 @@ describe("incremental stats ingestion", () => {
 		});
 		try {
 			await syncAllSessions({ workers: 1 });
+			expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
+
+			await fs.copyFile(file, `${file}.replacement`);
+			await fs.rename(`${file}.replacement`, file);
+			readBytes = 0;
+			await syncAllSessions({ workers: 1 });
+			expect(readBytes).toBeLessThan(Buffer.byteLength(content + tail) + 4096);
 		} finally {
 			observer.mockRestore();
 		}
 		expect(getOverallStats().totalRequests).toBe(2);
 		expect(getOverallStats().totalPremiumRequests).toBe(2);
-		expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
 	});
 
 	for (const operation of ["replace", "truncate"] as const) {
@@ -336,12 +346,10 @@ describe("incremental stats ingestion", () => {
 
 	it("stops pooled ingestion after a committed-batch callback interrupts sync, then resumes without duplicates", async () => {
 		const folder = path.join(getSessionsDir(), "--tmp--tail");
-		const count = 130;
-		await Promise.all(
-			Array.from({ length: count }, (_, index) =>
-				Bun.write(path.join(folder, `${index}.jsonl`), assistant(`entry-${index}`)),
-			),
-		);
+		const count = 1025;
+		for (let index = 0; index < count; index++) {
+			await Bun.write(path.join(folder, `${index}.jsonl`), assistant(`entry-${index}`));
+		}
 		let reports = 0;
 		let committed: string[] = [];
 		await expect(
@@ -361,6 +369,7 @@ describe("incremental stats ingestion", () => {
 		closeDb();
 		await initDb();
 		expect(reports).toBe(1);
+		expect(committed.length).toBeLessThan(count);
 		expect(
 			getRecentRequests(count)
 				.map(row => row.entryId)

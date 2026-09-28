@@ -13,16 +13,21 @@ interface ResetFixture {
 	target: ResetCreditTarget;
 	posts: ResetPost[];
 	baseUrlResolver: () => string;
+	usageRequests: string[];
 	state: {
 		program: "cedar_ember" | "juniper_tide";
 		nextGrant: string;
 		usable: boolean;
 		remaining: number;
 		weeklyUsed: number;
+		discoveryStatus?: number;
+		genericUsageEnabled?: boolean;
 		response: unknown;
 		responseStatus: number;
 		postGate?: Promise<void>;
 		postArrived?: () => void;
+		usageGate?: Promise<void>;
+		usageArrived?: () => void;
 	};
 }
 
@@ -42,6 +47,7 @@ async function fixture(): Promise<ResetFixture> {
 		responseStatus: 200,
 	};
 	const posts: ResetPost[] = [];
+	const usageRequests: string[] = [];
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
@@ -56,6 +62,17 @@ async function fixture(): Promise<ResetFixture> {
 				return Response.json(state.response, { status: state.responseStatus });
 			}
 			if (url.pathname === "/api/oauth/usage") {
+				usageRequests.push(url.search);
+				state.usageArrived?.();
+				await state.usageGate;
+				// The incident's generic broker usage path is unavailable; live reset discovery still answers.
+				if (!url.search && !state.genericUsageEnabled) return new Response("usage throttled", { status: 429 });
+				if (url.search && state.discoveryStatus) {
+					return new Response("discovery throttled", {
+						status: state.discoveryStatus,
+						headers: { "retry-after": "7" },
+					});
+				}
 				const hour = 3_600_000;
 				return Response.json({
 					five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * hour).toISOString() },
@@ -123,6 +140,7 @@ async function fixture(): Promise<ResetFixture> {
 		storage,
 		posts,
 		state,
+		usageRequests,
 		target: { provider: "anthropic", credentialId: account.credentialId, creditId: "saved-reset" },
 		baseUrlResolver: () => server.url.origin,
 	};
@@ -144,6 +162,72 @@ describe("Claude saved reset account safety", () => {
 		});
 		expect(removed.code).toBe("no_account");
 		expect(f.posts.length).toBe(1);
+	});
+
+	it("lists exact account quota evidence without a second generic usage request", async () => {
+		const f = await fixture();
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		for (const status of statuses) {
+			expect(status.report?.metadata).toMatchObject({
+				accountId: "shared-account",
+				email: "same@example.com",
+				orgId: status.orgId,
+			});
+			expect(status.report?.limits.map(limit => [limit.id, limit.amount?.usedFraction])).toEqual([
+				["anthropic:5h", 1],
+				["anthropic:7d", 0.4],
+				["anthropic:7d:fable", 1],
+			]);
+			expect(Date.now() - (status.report?.fetchedAt ?? 0)).toBeLessThan(5_000);
+		}
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+	});
+
+	it("coalesces live discovery while one caller aborts without cancelling its peer", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const options = { provider: "anthropic", baseUrlResolver: f.baseUrlResolver };
+		const cancelled = f.storage.resets.list({ ...options, sessionId: "first-task", signal: controller.signal }).then(
+			() => false,
+			() => true,
+		);
+		await arrived.promise;
+		const surviving = f.storage.resets.list({
+			...options,
+			sessionId: "second-task",
+			signal: AbortSignal.timeout(5_000),
+		});
+		controller.abort();
+		expect(await cancelled).toBe(true);
+		release.resolve();
+		const statuses = await surviving;
+		expect(statuses.map(status => status.report?.metadata?.orgId).sort()).toEqual(["org-a", "org-b"]);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+	});
+
+	it("returns provider throttle timing without spending or retrying discovery", async () => {
+		const f = await fixture();
+		f.state.discoveryStatus = 429;
+		const statuses = await f.storage.resets.list({ provider: "anthropic", baseUrlResolver: f.baseUrlResolver });
+		expect(statuses.map(status => status.retryAfterMs)).toEqual([7_000, 7_000]);
+		expect(statuses.every(status => status.error !== undefined)).toBe(true);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1", "?cedar_ember=1&skip_spend=1"]);
+		expect(f.posts).toEqual([]);
+	});
+
+	it("allows fresh usage after a confirmed reset despite an earlier failed usage probe", async () => {
+		const f = await fixture();
+		await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+		expect(f.usageRequests).toContain("");
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+		f.state.genericUsageEnabled = true;
+		const reports = await f.storage.usage.reports({ baseUrlResolver: f.baseUrlResolver });
+		expect(reports?.some(report => report.metadata?.orgId === "org-b")).toBe(true);
 	});
 
 	it("does not spend a new offer under an old confirmation", async () => {
@@ -184,6 +268,24 @@ describe("Claude saved reset account safety", () => {
 		expect(f.posts).toHaveLength(1);
 	});
 
+	it("spends a new grant once the lost response's grant has left the live offer", async () => {
+		const f = await fixture();
+		f.state.responseStatus = 502;
+		f.state.response = { error: "upstream response lost" };
+		await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		// The lost claim consumed its grant; the account later hit a wall again with a new one.
+		f.state.nextGrant = "next-grant";
+		f.state.responseStatus = 200;
+		f.state.response = { result: "reset", resets_left: 1, cleared: ["five_hour"] };
+		const retry = await f.storage.resets.redeem({
+			target: { ...f.target, creditId: "next-grant" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(retry.code).toBe("reset");
+		expect(f.posts).toHaveLength(2);
+		expect(f.posts[1]?.body.request_id).not.toBe(f.posts[0]?.body.request_id);
+	});
+
 	it("does not retry an uncertain Juniper spend without an idempotency key", async () => {
 		const f = await fixture();
 		f.state.program = "juniper_tide";
@@ -216,7 +318,7 @@ describe("Claude saved reset account safety", () => {
 
 	it("clears the restored shared block but retains an exhausted uncovered model tier", async () => {
 		const f = await fixture();
-		for (const blockScope of ["", "tier:fable"]) {
+		for (const blockScope of ["", "tier:fable", "auth", "account-policy"]) {
 			f.storage.blocks.upsert({
 				credentialId: f.target.credentialId,
 				providerKey: "anthropic:oauth",
@@ -224,6 +326,25 @@ describe("Claude saved reset account safety", () => {
 				blockedUntilMs: Date.now() + 3_600_000,
 			});
 		}
+		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(outcome.ok).toBe(true);
+		expect(
+			f.storage.blocks
+				.list([f.target.credentialId])
+				.map(block => block.blockScope)
+				.sort(),
+		).toEqual(["account-policy", "auth", "tier:fable"]);
+		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1"]);
+	});
+
+	it("preserves an uncovered tier wall even when only a legacy global block existed", async () => {
+		const f = await fixture();
+		f.storage.blocks.upsert({
+			credentialId: f.target.credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: Date.now() + 3_600_000,
+		});
 		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.ok).toBe(true);
 		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual(["tier:fable"]);

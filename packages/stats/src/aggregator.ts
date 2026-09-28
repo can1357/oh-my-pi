@@ -11,7 +11,8 @@ import {
 	getBehaviorOverall,
 	getBehaviorTimeSeries,
 	getCostTimeSeries,
-	getFileOffset,
+	type FileOffset,
+	getFileOffsets,
 	getMessageById,
 	getMessageCount,
 	getModelPerformanceSeries,
@@ -59,8 +60,10 @@ import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
 const STATS_SYNC_LOCK_RETRY_MS = 25;
 const STATS_SYNC_LOCK_WAIT_MS = 60 * 60 * 1000;
 // Bound queued results by both file count and derived rows; never hold a SQLite transaction across I/O.
-const SYNC_BATCH_FILES = 64;
-const SYNC_BATCH_ROWS = 4096;
+const SYNC_BATCH_FILES = 512;
+const SYNC_BATCH_ROWS = 8192;
+const SYNC_METADATA_FILES = 128;
+const SYNC_INLINE_READS = 8;
 
 /**
  * Serialize stats ingestion and archive reconciliation across processes.
@@ -96,7 +99,7 @@ export interface SyncOptions {
 	/**
 	 * Worker pool size. Defaults to a sensible value derived from the host
 	 * (capped to avoid drowning a small machine in workers). Set to `1` to
-	 * force serial parsing without spawning workers.
+	 * parse on the calling thread without spawning workers. File I/O is pipelined.
 	 */
 	workers?: number;
 }
@@ -226,7 +229,8 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 /**
  * Sync all session files to the database.
  *
- * `workers: 1` parses inline. Larger pools fan parsing out across workers
+ * `workers: 1` pipelines file reads and parses inline, committing in discovery order.
+ * Larger pools fan parsing out across workers
  * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
  * the calling thread. Bounded batches commit rows and cursors atomically without
  * holding a database transaction open during file I/O.
@@ -261,6 +265,9 @@ async function syncAllSessionsLocked(
 	let pending: ParsedSession[] = [];
 	let pendingRows = 0;
 	let failed = false;
+	let metadataStart = 0;
+	let metadataEnd = 0;
+	let metadata: Promise<{ fileStats?: fs.Stats; stored?: FileOffset }[]> = Promise.resolve([]);
 
 	const report = (sessionFile: string) => {
 		completed++;
@@ -293,42 +300,60 @@ async function syncAllSessionsLocked(
 	};
 	if (files.length === 0) return finish();
 
-	const processFile = async (
-		sessionFile: string,
+	const prepareFile = async (
+		index: number,
 		parse: (
 			sessionFile: string,
 			fromOffset: number,
 			state?: SessionParserState,
 			replay?: boolean,
 		) => Promise<ParseSessionResult>,
-	): Promise<void> => {
-		let fileStats: fs.Stats;
-		try {
-			fileStats = await fs.promises.stat(sessionFile);
-		} catch {
-			if (!failed) report(sessionFile);
-			return;
+	): Promise<ParsedSession | null> => {
+		if (index >= metadataEnd) {
+			const batch = files.slice(index, index + SYNC_METADATA_FILES);
+			const offsets = getFileOffsets(batch);
+			metadataStart = index;
+			metadataEnd = index + batch.length;
+			metadata = Promise.all(
+				batch.map(async sessionFile => {
+					try {
+						const fileStats = await fs.promises.stat(sessionFile);
+						return { fileStats, stored: offsets.get(sessionFile) };
+					} catch {
+						return {};
+					}
+				}),
+			);
 		}
-		if (failed) return;
-		const lastModified = fileStats.mtimeMs;
-		const stored = getFileOffset(sessionFile);
+		// Capture the position before awaiting: another worker can start the next metadata batch.
+		const metadataIndex = index - metadataStart;
+		const { fileStats, stored } = (await metadata)[metadataIndex];
+		if (failed || !fileStats) return null;
 		if (
 			!replay &&
 			stored?.parserState &&
-			stored.lastModified === lastModified &&
+			stored.lastModified === fileStats.mtimeMs &&
 			stored.parserState.size === fileStats.size &&
 			matchesSessionFile(stored.parserState, fileStats)
 		) {
+			return null;
+		}
+
+		const sessionFile = files[index];
+		const unknownIdentity = stored !== undefined && !stored.parserState;
+		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
+		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+		if (unknownIdentity && result.parserState) result.reset = true;
+		return { sessionFile, result, rebuild: !stored?.parserState, replay };
+	};
+
+	const acceptFile = (sessionFile: string, parsed: ParsedSession | null) => {
+		if (!parsed) {
 			report(sessionFile);
 			return;
 		}
-
-		const unknownIdentity = stored !== null && !stored.parserState;
-		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
-		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
-		if (failed) return;
-		if (unknownIdentity && result.parserState) result.reset = true;
-		pending.push({ sessionFile, result, rebuild: replay || !stored?.parserState });
+		pending.push(parsed);
+		const { result } = parsed;
 		pendingRows +=
 			result.stats.length +
 			result.userStats.length +
@@ -340,8 +365,18 @@ async function syncAllSessionsLocked(
 
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
 	if (requestedWorkers === 1) {
-		for (const sessionFile of files) {
-			await processFile(sessionFile, parseSessionFile);
+		for (let start = 0; start < files.length; start += SYNC_INLINE_READS) {
+			const results = await Promise.allSettled(
+				Array.from({ length: Math.min(SYNC_INLINE_READS, files.length - start) }, (_, offset) =>
+					prepareFile(start + offset, parseSessionFile),
+				),
+			);
+			// Preserve fork ownership order and drain reads before a callback can release the sync lock.
+			for (let offset = 0; offset < results.length; offset++) {
+				const result = results[offset];
+				if (result.status === "rejected") throw result.reason;
+				acceptFile(files[start + offset], result.value);
+			}
 		}
 		return finish();
 	}
@@ -355,10 +390,10 @@ async function syncAllSessionsLocked(
 			while (!failed) {
 				const idx = cursor++;
 				if (idx >= files.length) return;
-				const sessionFile = files[idx];
-				await processFile(sessionFile, (file, fromOffset, parserState, replay) =>
+				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) =>
 					dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
 				);
+				if (!failed) acceptFile(files[idx], parsed);
 			}
 		} catch (error) {
 			failed = true;

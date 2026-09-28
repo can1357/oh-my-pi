@@ -12,8 +12,7 @@ beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
 }, 15_000);
 
-const SKIP_TEXT =
-	"Skipped due to pending peer interrupt. Do not count this skipped result as completed work or verification. After the interrupt is handled on the next step, retry the skipped tool if it is still needed.";
+const SKIP_TEXT = "Skipped due to a queued background completion (job or supervised process).";
 
 function renderSkippedEdit(details: unknown): string {
 	const tui = new TUI(new VirtualTerminal(120, 20));
@@ -23,56 +22,23 @@ function renderSkippedEdit(details: unknown): string {
 }
 
 describe("mid-turn steering skip rendering", () => {
-	it("renders both pending and in-flight interrupt skips as info, not errors", async () => {
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("dark theme missing");
-		const errorIcon = Bun.stripANSI(formatStatusIcon("error", uiTheme));
-		const infoIcon = Bun.stripANSI(formatStatusIcon("info", uiTheme));
+	it("renders pending and in-flight interrupt skips as nothing", () => {
 		const skipDetails = [
 			{ __synthetic: true, source: "interrupt_skipped", executed: false },
 			{ __interrupted: true, source: "interrupt_skipped", execution: "started" },
 		];
 
 		for (const details of skipDetails) {
-			const rendered = renderSkippedEdit(details);
-
-			expect(rendered).toContain(infoIcon);
-			expect(rendered).not.toContain(errorIcon);
-			// The bespoke edit error frame must be gone — a skip is not a failure.
-			expect(rendered).not.toContain("╭");
-			expect(rendered).toContain("Skipped due to pending peer interrupt");
+			expect(renderSkippedEdit(details)).toBe("");
 		}
-	}, 15_000);
-
-	it("keeps the card tint on the truncation ellipsis after the styled line's reset", async () => {
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("dark theme missing");
-		const pendingBg = uiTheme.getBgAnsi("toolPendingBg");
-		const tui = new TUI(new VirtualTerminal(60, 20));
-		const component = new ToolExecutionComponent("edit", { path: "a.ts" }, {}, undefined, tui);
-		component.updateResult(
-			{
-				content: [{ type: "text", text: SKIP_TEXT }],
-				details: { __synthetic: true, source: "interrupt_skipped", executed: false },
-			},
-			false,
-		);
-
-		const line = component.render(60).find(l => l.includes("Skipped") && l.includes("…"));
-		if (!line) throw new Error("expected a truncated skip line");
-		// truncateToWidth closes the styled text with a full SGR reset before the
-		// ellipsis; the card background must be re-opened after it.
-		const beforeEllipsis = line.slice(0, line.indexOf("…"));
-		expect(beforeEllipsis.slice(beforeEllipsis.lastIndexOf("\x1b[0m"))).toContain(pendingBg);
-	}, 15_000);
+	});
 
 	it("still renders a genuine edit failure as an error", async () => {
 		const uiTheme = await getThemeByName("dark");
 		if (!uiTheme) throw new Error("dark theme missing");
 		const errorIcon = Bun.stripANSI(formatStatusIcon("error", uiTheme));
 
-		// A real tool failure carries no synthetic discriminator and must keep the
-		// error styling — the fix only neutralizes benign interrupt skips.
+		// A real tool failure carries no synthetic discriminator and remains visible.
 		const rendered = renderSkippedEdit({});
 
 		expect(rendered).toContain(errorIcon);

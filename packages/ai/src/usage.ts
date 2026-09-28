@@ -490,6 +490,8 @@ export interface CredentialRankingStrategy {
 	 * non-empty limits with none exhausted.
 	 */
 	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
+	/** Whether fresh reports can heal legacy account-wide quota backoffs. */
+	healsGlobalBlocks?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;
