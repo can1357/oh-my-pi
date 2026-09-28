@@ -16,29 +16,37 @@ import type { OAuthController } from "./types";
 
 const DEVIN_CLI_CREDENTIALS_PATH = path.join(os.homedir(), ".local/share/devin/credentials.toml");
 
-export async function loginDevinCliHook(_callbacks: OAuthController): Promise<string> {
+/**
+ * Parse and validate the CLI credential file. Split from the hook so tests can
+ * exercise the failure partitions against fixture files instead of `$HOME`.
+ */
+export function readDevinCliCredentials(filePath: string): string {
 	let text: string;
 	try {
-		text = await fs.promises.readFile(DEVIN_CLI_CREDENTIALS_PATH, "utf8");
+		text = fs.readFileSync(filePath, "utf8");
 	} catch {
 		throw new AIError.OAuthError(
-			`No Devin CLI credentials found at ${DEVIN_CLI_CREDENTIALS_PATH}. Run \`devin auth login\` once, then retry this login.`,
+			`No Devin CLI credentials found at ${filePath}. Run \`devin auth login\` once, then retry this login.`,
 			{ kind: "configuration", provider: "devin-cli" },
 		);
 	}
+	return parseDevinCliCredentials(filePath, text);
+}
+
+function parseDevinCliCredentials(filePath: string, text: string): string {
 	let parsed: { windsurf_api_key?: unknown };
 	try {
 		parsed = Bun.TOML.parse(text) as { windsurf_api_key?: unknown };
 	} catch (error) {
 		throw new AIError.OAuthError(
-			`Devin CLI credentials at ${DEVIN_CLI_CREDENTIALS_PATH} are not valid TOML: ${error instanceof Error ? error.message : String(error)}`,
+			`Devin CLI credentials at ${filePath} are not valid TOML: ${error instanceof Error ? error.message : String(error)}`,
 			{ kind: "validation", provider: "devin-cli" },
 		);
 	}
 	const key = typeof parsed.windsurf_api_key === "string" ? parsed.windsurf_api_key.trim() : "";
 	if (!key) {
 		throw new AIError.OAuthError(
-			`Devin CLI credentials at ${DEVIN_CLI_CREDENTIALS_PATH} carry no windsurf_api_key. Run \`devin auth login\` once, then retry this login.`,
+			`Devin CLI credentials at ${filePath} carry no windsurf_api_key. Run \`devin auth login\` once, then retry this login.`,
 			{ kind: "validation", provider: "devin-cli" },
 		);
 	}
@@ -46,4 +54,8 @@ export async function loginDevinCliHook(_callbacks: OAuthController): Promise<st
 	// unprefixed form, and the api_server_url in the file matches the host the
 	// devin provider and its usage endpoint already default to.
 	return key;
+}
+
+export async function loginDevinCliHook(_callbacks: OAuthController): Promise<string> {
+	return readDevinCliCredentials(DEVIN_CLI_CREDENTIALS_PATH);
 }
