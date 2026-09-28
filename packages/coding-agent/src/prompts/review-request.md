@@ -23,7 +23,7 @@ _No files to review._
 
 ### Distribution Guidelines
 
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
+Use the `task` tool with a `tasks` array. Set `agent: "reviewer"` inside every `tasks[]` item (`tasks[].agent`), never at the top level or omitted.
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
 {{#if multiAgent}}
 Group files by locality, e.g.:

@@ -238,6 +238,19 @@ describe("task.batch validation", () => {
 		expect(text).toContain("not part of the batch shape");
 	});
 
+	it("rejects a misplaced specialist before spawning any agent", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("misplaced-specialist", {
+			context: "Inspect changes without edits",
+			agent: "custom-auditor",
+			tasks: [{ task: "Inspect the patch" }],
+		});
+		expect(getFirstText(result)).toContain("tasks[].agent");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	it("rejects empty task arrays and items without tasks", async () => {
 		const empty = await executeText({ tasks: [] }, { "task.batch": true });
 		expect(empty).toContain("Missing `tasks`");
