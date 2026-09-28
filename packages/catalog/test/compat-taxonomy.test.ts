@@ -104,6 +104,19 @@ describe("classifyModel", () => {
 			expect(classifyModel("llama.cpp", model)).toEqual({ class: "unknown" });
 		}
 	});
+
+	test("Bedrock dotted Grok ids classify as xai with a revision", () => {
+		// AWS Converse ids bury the vendor in dots (`us.xai.grok-4.6`). An
+		// unbounded `namespace "xai"` never splits on `.`, so these used to
+		// land in class unknown and inherit the Bedrock budget default.
+		for (const id of ["us.xai.grok-4.6", "global.xai.grok-4.6", "xai.grok-4.6"]) {
+			expect(classifyModel("amazon-bedrock", id)).toEqual({
+				class: "xai",
+				family: "grok",
+				revision: "4.6.0",
+			});
+		}
+	});
 });
 
 describe("collapse and variant vocabulary", () => {

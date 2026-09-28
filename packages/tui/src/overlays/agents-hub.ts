@@ -29,6 +29,8 @@ import type { AgentSource } from "../tools/task";
 import { shortenPath } from "../render/render-utils";
 import { getEditorTheme, theme } from "../theme";
 import { matchesAppFollowUp, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { formatKeyHint, formatKeyHints } from "../app-keybindings";
+import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import {
 	buildBrowserItems,
 	ModelBrowser,
@@ -79,7 +81,7 @@ interface SidebarEntry extends HubSidebarEntry<"all" | "source" | "new" | "separ
 type ListRow = { kind: "agent"; agent: HubAgent } | { kind: "new" };
 
 /** The per-agent knob a strip or the model browser is editing. */
-type PropertyKind = "model" | "prewalk" | "advisor";
+export type PropertyKind = "model" | "prewalk" | "advisor";
 
 type StripChip = HubStripChip<
 	| { kind: "toggle" }
@@ -108,8 +110,10 @@ export interface AgentsHubDeps {
 	resolvePatterns: (patterns: string[]) => string | undefined;
 	effectivePrewalkPattern: (agent: HubAgent) => string | undefined;
 	effectiveAdvisorPattern: (agent: HubAgent) => string | undefined;
-	setDisabledAgents: (names: string[]) => void;
-	setOverrides: (property: PropertyKind, overrides: Record<string, string>) => void;
+	/** Persist one agent's enabled state; other agents are untouched. */
+	setAgentDisabled: (name: string, options: { disabled: boolean }) => void;
+	/** Persist one agent's override for `property`; `undefined` clears it. Other agents are untouched. */
+	setAgentOverride: (property: PropertyKind, name: string, value: string | undefined) => void;
 	generateAgent: (description: string, onText: (text: string) => void) => Promise<string>;
 	saveAgent: (scope: "project" | "user", spec: GeneratedAgentSpec) => Promise<string>;
 }
@@ -339,22 +343,9 @@ export class AgentsHubComponent implements Component {
 
 	#toggleAgent(agent: HubAgent): void {
 		agent.disabled = !agent.disabled;
-		const disabled = this.#allAgents
-			.filter(entry => entry.disabled)
-			.map(entry => entry.name)
-			.sort((a, b) => a.localeCompare(b));
-		this.#deps.setDisabledAgents(disabled);
+		this.#deps.setAgentDisabled(agent.name, { disabled: agent.disabled });
 		this.#notice = `${agent.name} ${agent.disabled ? "disabled" : "enabled"}`;
 		this.#tui.requestRender();
-	}
-
-	#persistRecord(property: PropertyKind): void {
-		const overrides: Record<string, string> = {};
-		for (const agent of this.#allAgents) {
-			const value = this.#overrideFor(agent, property)?.trim();
-			if (value) overrides[agent.name] = value;
-		}
-		this.#deps.setOverrides(property, overrides);
 	}
 
 	#overrideFor(agent: HubAgent, property: PropertyKind): string | undefined {
@@ -381,7 +372,7 @@ export class AgentsHubComponent implements Component {
 				agent.advisorOverride = trimmed;
 				break;
 		}
-		this.#persistRecord(property);
+		this.#deps.setAgentOverride(property, agent.name, trimmed);
 		this.#notice = this.#describeProperty(agent, property);
 		this.#tui.requestRender();
 	}
@@ -980,7 +971,10 @@ export class AgentsHubComponent implements Component {
 			const { agent, property } = this.#assigning;
 			const what = property === "model" ? "model override" : `${property} model`;
 			return truncateToWidth(
-				theme.fg("accent", ` Picking ${what} for ${theme.bold(agent.name)} — Enter assigns, Esc cancels`),
+				theme.fg(
+					"accent",
+					` Picking ${what} for ${theme.bold(agent.name)} — ${formatKeyHint("enter")} assigns, ${editorKey("tui.select.cancel")} cancels`,
+				),
 				width,
 			);
 		}
@@ -1152,26 +1146,35 @@ export class AgentsHubComponent implements Component {
 	}
 
 	#footerHint(): string {
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		if (this.#strip) {
 			if (this.#strip.kind === "pattern") {
 				const property = this.#strip.property;
 				const values = property === "model" ? "a model pattern" : '"on", "off", or a model pattern';
-				return `Enter ${values} (role aliases like @smol and :level suffixes work; empty clears) · Esc back`;
+				return `Enter ${values} (role aliases like @smol and :level suffixes work; empty clears) · ${cancel} back`;
 			}
-			return this.#strip.property ? "←/→ choose · Enter apply · Esc back" : "←/→ choose · Enter open · Esc cancel";
+			const choose = formatKeyHints(["left", "right"]);
+			return this.#strip.property
+				? `${choose} choose · ${enter} apply · ${cancel} back`
+				: `${choose} choose · ${enter} open · ${cancel} cancel`;
 		}
 		if (this.#assigning) {
-			return "Enter pick · ↑/↓ models · type to search · Esc cancel";
+			return `${enter} pick · ${upDown} models · type to search · ${cancel} cancel`;
 		}
 		if (this.#createActive) {
-			if (this.#createSpec) return "Enter save · Tab scope · r regenerate · Esc cancel";
+			const tab = formatKeyHint("tab");
+			if (this.#createSpec)
+				return `${enter} save · ${tab} scope · ${formatKeyHint("r")} regenerate · ${cancel} cancel`;
 			if (this.#createGenerating) return "Generating…";
-			return "Ctrl+Q/Ctrl+Enter generate · Enter newline · Tab scope · Esc cancel";
+			const generate = formatKeyHints(boundKeys("app.message.followUp", ["ctrl+q", "ctrl+enter"]));
+			return `${generate} generate · ${enter} newline · ${tab} scope · ${cancel} cancel`;
 		}
 		if (this.#focus === "scope") {
-			return "↑/↓ scopes · →/Enter agents · Esc close";
+			return `${upDown} scopes · ${formatKeyHints(["right", "enter"])} agents · ${cancel} close`;
 		}
-		return "Enter configure · Space enable/disable · ↑/↓ rows · type to search · Ctrl+R reload · Esc close";
+		return `${enter} configure · ${formatKeyHint("space")} enable/disable · ${upDown} rows · type to search · ${formatKeyHint("ctrl+r")} reload · ${cancel} close`;
 	}
 
 	#renderFooter(width: number): string {

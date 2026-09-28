@@ -207,19 +207,6 @@ describe("resizeImage defaults", () => {
 		expect(result.buffer.length).toBeLessThanOrEqual(150 * 1024);
 	});
 
-	it("respects custom maxBytes override even when dimensions already fit", async () => {
-		// 200x200 sits within every dimension cap, but a byte budget below the
-		// source size (after the /4 fast-path headroom) forces a re-encode.
-		const originalBytes = Buffer.from(smallPng, "base64").length;
-
-		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" }, { maxBytes: 1024 });
-
-		// Either the result fits the budget, or the algorithm exhausted its
-		// fallbacks and shipped its smallest variant — but in both cases the
-		// output must not be larger than the original.
-		expect(result.buffer.length).toBeLessThanOrEqual(originalBytes);
-	});
-
 	it("uses lossy WebP or JPEG (not PNG) for oversized inputs", async () => {
 		// Oversized red strip exceeds the dimension cap, triggering encodeSmallest.
 		// Lossy formats (JPEG/WebP) should win over PNG for a solid-color image

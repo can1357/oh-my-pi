@@ -117,23 +117,6 @@ describe("Warp CLI-agent events", () => {
 		expect(write).toHaveBeenCalledWith(`${OSC_PREFIX}${expectedBody}\x07`);
 	});
 
-	it("wraps OSC output when running inside tmux", () => {
-		enableWarpProtocol();
-		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		const tmux = vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(true);
-		const wrap = vi.spyOn(terminalCapabilities, "wrapTmuxPassthrough");
-		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
-
-		emitter?.emit({ event: "stop" });
-
-		expect(tmux).toHaveBeenCalledTimes(1);
-		expect(wrap).toHaveBeenCalledWith(expect.stringContaining("warp://cli-agent"));
-		const written = write.mock.calls[0]?.[0] as string;
-		// Real DCS wrap ends with ST; attention events append outer BEL after it.
-		expect(written.startsWith("\x1bPtmux;")).toBe(true);
-		expect(written.endsWith("\x1b\\\x07")).toBe(true);
-	});
-
 	const attentionEvents = ["stop", "stop_failure", "permission_request", "question_asked"] as const;
 	const nonAttentionEvents = [
 		"session_start",

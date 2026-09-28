@@ -162,26 +162,18 @@ export class STTController {
 		// modelRoles.dictation mid-session re-runs preflight for the new model.
 		if (this.#resolvedModelKey === modelKey) return modelKey;
 		try {
-			// Only clear the status line when preflight emitted progress; the
-			// cached-model fast path emits nothing.
-			let wroteStatus = false;
-			const status = (msg: string): void => {
-				wroteStatus = true;
-				options.showStatus(msg);
-			};
 			// Loading the multi-hundred-MB speech model into the worker is what made
 			// the old "Checking STT dependencies…" step slow. Don't pay it before
 			// recording: when the weights are already cached, start now and warm the
 			// model in the background — the stream/transcribe paths load it on demand
 			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks, with explicit progress, so we
-			// never record silently against missing weights.
+			// Only a genuine first-use download blocks (its progress shows in the
+			// download HUD), so we never record silently against missing weights.
 			if (await isSttModelCached(modelKey)) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
+				await downloadSttModel(modelKey);
 			}
-			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {

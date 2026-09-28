@@ -42,10 +42,10 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 ## Discovery locations (loader API)
 
-`discoverAndLoadCustomTools(configuredPaths, cwd, builtInToolNames)` merges:
+`discoverAndLoadCustomTools(configuredPaths, cwd, builtInToolNames, pushPendingAction?, agentDir?)` merges:
 
 1. Capability providers (`toolCapability`), including:
-   - Native OMP config (`~/.omp/agent/tools`, `.omp/tools`)
+   - Native OMP config (`<agentDir>/tools`, default `~/.omp/agent/tools`; `.omp/tools`)
    - Claude config (`~/.claude/tools`, `.claude/tools`)
    - Codex config (`~/.codex/tools`, `.codex/tools`)
    - Claude marketplace plugin cache provider
@@ -167,6 +167,8 @@ Optional rendering hooks:
 - `renderResult(result, options, theme)`
 
 The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
+
+`renderCall`'s `options` argument additionally answers the `Theme` API, so a renderer written against upstream pi's `renderCall(args, theme, context)` order styles correctly under omp.
 
 Runtime behavior in TUI:
 

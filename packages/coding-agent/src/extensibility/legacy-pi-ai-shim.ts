@@ -28,6 +28,7 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
@@ -142,6 +143,20 @@ export * from "@oh-my-pi/pi-ai";
 export { calculateCost, getBundledModel, getBundledModels, getBundledProviders, modelsAreEqual, Type };
 export const getModel = getBundledModel;
 export const getModels = getBundledModels;
+
+const ANTHROPIC_MESSAGES_API = {
+	stream: streamAnthropic,
+	streamSimple: (model: Model<"anthropic-messages">, context: Context, options?: SimpleStreamOptions) =>
+		streamSimple(model, context, options),
+};
+
+/**
+ * Expose OMP's Anthropic transport through the legacy `/compat` provider
+ * factory used by extensions such as `pi-background-tasks`.
+ */
+export function anthropicMessagesApi() {
+	return ANTHROPIC_MESSAGES_API;
+}
 
 /**
  * Stream OpenAI Responses through the historical simple-options contract.

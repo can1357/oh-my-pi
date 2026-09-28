@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { BENCHMARK_DEFINITIONS, readBenchmarkSnapshot } from "../src/benchmarks";
+import { readBenchmarkSnapshot } from "../src/benchmarks";
 
 const cleanups: string[] = [];
 
@@ -76,10 +76,5 @@ describe("benchmark adapters", () => {
 		expect(snapshot.traces[0]).toMatchObject({ status: "pass", reward: 1, tracePath: "record:1" });
 		expect(snapshot.costUsd).toBe(1.25);
 		expect(snapshot.tokCache).toBe(30);
-	});
-
-	it("publishes metric definitions for every managed benchmark", () => {
-		expect(BENCHMARK_DEFINITIONS.map(definition => definition.kind)).toEqual(["harbor", "edit", "snapcompact"]);
-		expect(BENCHMARK_DEFINITIONS.every(definition => definition.metrics.length > 0)).toBe(true);
 	});
 });

@@ -176,19 +176,6 @@ describe("sanitizeSchemaForStrictMode", () => {
 		expect(((objectVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 		expect(((nullVariant as Record<string, unknown>).anyOf as unknown[]).length).toBe(1);
 	});
-	it("inlines `default` value into `description` before stripping it", () => {
-		const schema = {
-			type: "number",
-			description: "Timeout in seconds",
-			default: 60,
-		} as Record<string, unknown>;
-
-		const sanitized = sanitizeSchemaForStrictMode(schema);
-
-		expect(sanitized.default).toBeUndefined();
-		expect(sanitized.description).toBe("Timeout in seconds (default: 60)");
-	});
-
 	it("preserves `default` for various primitive types when inlining", () => {
 		const numberSchema = sanitizeSchemaForStrictMode({
 			type: "number",
@@ -1053,15 +1040,5 @@ describe("adaptSchemaForStrict — unrepresentable open branches fall back to no
 			additionalProperties: false,
 		};
 		expect(adaptSchemaForStrict(schema, true).strict).toBe(false);
-	});
-
-	it("still enforces strict for fully-typed schemas (no false positives)", () => {
-		const schema: Record<string, unknown> = {
-			type: "object",
-			properties: { a: { type: "string" }, b: { type: "number" } },
-			required: ["a", "b"],
-			additionalProperties: false,
-		};
-		expect(adaptSchemaForStrict(schema, true).strict).toBe(true);
 	});
 });

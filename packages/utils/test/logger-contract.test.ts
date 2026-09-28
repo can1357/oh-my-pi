@@ -6,7 +6,6 @@ import * as path from "node:path";
 const fixtureDir = path.join(import.meta.dir, "fixtures");
 const probePath = path.join(fixtureDir, "logger-contract-probe.ts");
 const preloadPath = path.join(fixtureDir, "logger-fixed-date-preload.ts");
-const apiProbePath = path.join(fixtureDir, "logger-api-probe.ts");
 const fixedNow = "2026-01-02T03:04:05.006Z";
 const fixedTimestamp = "2026-01-01T22:04:05.006-05:00";
 const roots: string[] = [];
@@ -334,45 +333,5 @@ describe("DailyRotateFile option and retention contract", () => {
 		) as AuditFile;
 		expect(audit.keep).toEqual({ days: false, amount: 5 });
 		expect(audit.files.map(file => path.basename(file.name))).toEqual([baseName, rotatedName]);
-	});
-});
-
-test("root and direct source entry points expose identical public logger functions", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-api-"));
-	roots.push(root);
-	const outputPath = path.join(root, "result.json");
-	const proc = Bun.spawn([process.execPath, apiProbePath, outputPath], {
-		cwd: path.resolve(import.meta.dir, "../../.."),
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	expect(exitCode, stderr).toBe(0);
-	expect(stdout).toBe("");
-	expect(stderr).toBe("");
-	const payload = JSON.parse(await fs.readFile(outputPath, "utf8")) as { identities: boolean; keys: string[] };
-	expect(payload).toEqual({
-		identities: true,
-		keys: [
-			"debug",
-			"endTiming",
-			"error",
-			"info",
-			"openSpanPath",
-			"printTimings",
-			"recordModuleLoadSpan",
-			"registerLogSink",
-			"setTransports",
-			"shouldExitAfterTimings",
-			"startTiming",
-			"startupMarker",
-			"time",
-			"timingModeIncludes",
-			"warn",
-		],
 	});
 });

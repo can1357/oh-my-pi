@@ -150,6 +150,32 @@ JS helpers are asynchronous; Python file helpers are synchronous while `tool.<na
 
 `display()` captures JSON-compatible structures, images, markdown, or text according to the backend.
 
+### MCP structured results
+
+MCP calls return an object with `text` and MCP-specific `details`. When the server
+supplies `structuredContent`, it is available as `details.structuredContent`:
+
+```js
+const result = await tool.mcp__example_page({});
+if (result.hasError) throw new Error(result.text);
+const page = result.details.structuredContent;
+if (page === undefined) throw new Error("Server did not return structured data");
+display(page.next_cursor);
+```
+
+Python callers use `result["details"].get("structuredContent")`. The property is
+absent when the server supplies no structured result; OMP does not infer it from
+JSON-looking text. Error results can also carry structured data, so check
+`hasError` before treating a payload as a successful result.
+
+`text` remains the model-facing rendering, including any JSON echo and output
+truncation notices. Truncation does not trim `details.structuredContent`: code
+receives the complete server-supplied object even when the rendering spills. Use
+server-side pagination/bounds for large data and display only the fields needed
+by the model. The object is not validated against the server's output schema or
+treated as trusted. Ordinary tools keep their existing return shapes, including
+bare strings for text-only results without details.
+
 ### `completion()`
 
 A stateless, tool-free one-shot model call that returns a `CompletionHandle` immediately:
@@ -170,7 +196,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
-- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and **do not share the caller's eval executor** (`shareEvalSession=false`).
+- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and get their own eval executors, like every subagent.
 
 ### `wait()`
 
@@ -221,4 +247,4 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - State is isolated by language; resetting Python does not reset JS.
 - Current schema tokens are only `py` and `js`; long language names are renderer/approval formatting aliases, not wire values.
 - The former multi-cell `cells` payload, `*** Cell` parser, sniffing fallback, and constrained `eval.lark` grammar are removed.
-- Parent and ordinary task subagents may share an inherited eval executor id; children created by eval's own `agent()` explicitly do not.
+- Every agent session, including `task`, `agent()`, workpool, and vibe subagents, owns a private eval executor id; subagents never inherit their parent's kernels or VM state.

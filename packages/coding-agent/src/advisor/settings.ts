@@ -81,3 +81,18 @@ export const cfgAdvisorMaxNotesPerUpdate = register({
 		condition: "advisorEnabled",
 	},
 });
+
+export const cfgAdvisorEvictStaleResults = register({
+	id: "advisor.evictStaleResults",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Evict Stale Results",
+		description:
+			"Before each review, replace the advisor's read/grep/glob output from older reviews with a short placeholder. The latest review is kept.",
+		condition: "advisorEnabled",
+	},
+});

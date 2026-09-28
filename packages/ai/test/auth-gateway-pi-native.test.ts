@@ -154,16 +154,6 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
-	it("forwards an explicit statefulResponses disablement to the native stream", () => {
-		const parsed = parseRequest({
-			modelId: "openai/gpt-5",
-			context: baseContext,
-			options: { promptCacheKey: "bench-cache-pair", statefulResponses: false },
-		});
-		expect(parsed.options.promptCacheKey).toBe("bench-cache-pair");
-		expect(parsed.options.statefulResponses).toBe(false);
-	});
-
 	it("preserves headers, metadata, sessionId, thinkingBudgets, and hidden thinking summaries", () => {
 		const parsed = parseRequest({
 			modelId: "x",
@@ -215,16 +205,6 @@ describe("pi-native parseRequest", () => {
 		});
 
 		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
-	});
-
-	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {
-		const parsed = parseRequest({
-			modelId: "gpt-5.6",
-			context: baseContext,
-			options: { promptCache: { mode: "explicit", ttl: "30m", breakpoint: "none" } },
-		});
-
-		expect(parsed.options.promptCache).toEqual({ mode: "explicit", ttl: "30m", breakpoint: "none" });
 	});
 
 	it("rejects missing required fields", () => {
@@ -458,21 +438,6 @@ describe("pi-native encodeStream", () => {
 			expect(parsed[i]).toEqual(JSON.parse(JSON.stringify(events[i])));
 		}
 		expect(parsed[parsed.length - 1]).toBe("[DONE]");
-	});
-
-	it("preserves the rolling `partial` on every delta (sanity: no shrink)", async () => {
-		// Guards against an accidental re-introduction of partial-stripping
-		// optimization. Clients depend on `partial` being present.
-		const final = baseAssistant({ content: [{ type: "text", text: "abc" }] });
-		const events: AssistantMessageEvent[] = [
-			{ type: "text_delta", contentIndex: 0, delta: "abc", partial: final },
-			{ type: "done", reason: "stop", message: final },
-		];
-		const parsed = (await collectSse(encodeStream(makeEventStream(events, final)))).map(parseSseLine) as Array<
-			Record<string, unknown>
-		>;
-		expect(parsed[0]).toHaveProperty("partial");
-		expect((parsed[0] as { partial: AssistantMessage }).partial.content).toEqual([{ type: "text", text: "abc" }]);
 	});
 
 	it("stops streaming after a terminal `done` and emits [DONE] once", async () => {

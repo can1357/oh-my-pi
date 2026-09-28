@@ -959,7 +959,9 @@ async function addBunCacheActualDir(
 	packageNames: Set<string> | undefined,
 ): Promise<void> {
 	try {
-		const manifest = (await Bun.file(path.join(dirPath, "package.json")).json()) as Partial<
+		// `fs.promises` rather than `Bun.file().json()`: on Windows, Bun's rejected read of a
+		// missing file holds no loop handle, so the loop can drain mid-await (#13470).
+		const manifest = JSON.parse(await fs.promises.readFile(path.join(dirPath, "package.json"), "utf8")) as Partial<
 			Record<"name" | "version", unknown>
 		>;
 		if (typeof manifest.name !== "string" || typeof manifest.version !== "string") return;

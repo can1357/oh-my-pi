@@ -21,7 +21,7 @@
   - `packages/mnemopi/src/core/memory.ts` — local memory runtime used by `remember(...)`.
 
 ## Registration / Visibility
-- Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls enqueue or perform memory writes.
+- Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
 - The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
@@ -31,7 +31,7 @@
 
 | Field | Type | Required | Description |
 |---|---|---:|---|
-| `items` | `Array<{ content: string; context?: string }>` | Yes | One or more memories to store. `minItems: 1`. Each item must be self-contained; `context` is optional per-item provenance. |
+| `items` | `Array<{ content: string; context?: string; scope?: "project" \| "global" }>` | Yes | One or more memories to store. `minItems: 1`. Each item must be self-contained; `context` is optional per-item provenance. `scope` is in the schema and tool description only when `memory.backend = "mnemopi"` and `mnemopi.scoping` is `global` or `per-project-tagged`; omitted means `project`. |
 
 ## Outputs
 The output depends on the active `memory.backend`.
@@ -53,10 +53,12 @@ Mnemopi:
 2. `execute(...)` re-reads `memory.backend` and dispatches to the matching session state.
 3. If the backend is `mnemopi`:
    - it fetches `session.getMnemopiSessionState()` and throws if the backend was not started;
+   - if any item has `scope: "global"`, it resolves `state.getGlobalRetainTarget()` first; under `per-project` scoping that throws `Mnemopi global scope requires global or per-project-tagged scoping.` and nothing in the batch is stored;
    - for each item, it calls `state.rememberScoped(item.content, ...)` with `source: "coding-agent-retain"`, `importance: 0.75`, `scope: "bank"`, `extract: true`, `extractEntities: true`, `veracity: "tool"`, `memoryType: "fact"`, and metadata `{ session_id, cwd, context, tool: "retain" }`;
-   - writes go to the scoped retain bank; exact duplicate content in the same session updates the existing working-memory row in the Mnemopi core.
+   - project items go to the scoped retain bank and global items to the global target (passed as `rememberScoped`'s third argument); exact duplicate content in the same session updates the existing working-memory row in the Mnemopi core.
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
+   - any `scope: "global"` item rejects the batch with `Global memory scope is only available with the Mnemopi backend.` before anything is queued (untagged Hindsight retains are not supported yet);
    - each input item is handed to `HindsightSessionState.enqueueRetain(...)`;
    - `HindsightRetainQueue.enqueue(...)` appends the item and either flushes immediately when the queue reaches `RETAIN_FLUSH_BATCH_SIZE`, or starts a debounce timer for `RETAIN_FLUSH_INTERVAL_MS`;
    - on flush, `HindsightRetainQueue.#doFlush(...)` verifies ownership, best-effort ensures the bank exists via `ensureBankExists(...)`, maps items to `MemoryItemInput` with `context ?? config.retainContext`, `metadata.session_id`, and bank-scope tags, then sends one async `retainBatch(...)` request.
@@ -69,9 +71,9 @@ Mnemopi:
   - `per-project` — bank id gets `-<project label>` appended, where the label is the git primary checkout root basename (cwd basename outside a repo).
   - `per-project-tagged` — shared bank plus `project:<project label>` tags on retained memories.
 - Mnemopi bank scoping from `computeMnemopiBankScope(...)`:
-  - `global` — retain and recall use the shared bank.
-  - `per-project` — retain and recall use a project bank derived from the absolute cwd basename plus a hash of that absolute cwd.
-  - `per-project-tagged` — retain writes to the cwd-derived project bank; recall also reads the shared bank.
+  - `global` — retain and recall use the shared bank; `scope: "global"` writes there too.
+  - `per-project` — retain and recall use a project bank derived from the absolute cwd basename plus a hash of that absolute cwd; `scope: "global"` is not offered.
+  - `per-project-tagged` — retain writes to the cwd-derived project bank, or to the shared bank for `scope: "global"` items; recall also reads the shared bank.
   - Per-project recall may add safe legacy banks whose stored working-memory rows all match the active cwd; scanning is capped at 64 candidate bank directories.
 - Session scope:
   - tool-called retains are per-session work for the active backend;

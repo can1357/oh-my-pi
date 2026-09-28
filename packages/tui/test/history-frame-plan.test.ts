@@ -245,6 +245,30 @@ describe("terminal frame plans", () => {
 		expect(plainBuffer(terminal)).toEqual(["history one", "history two", "editor", "status 8............"]);
 		tui.stop();
 	});
+	it("places the cursor from a moved marker row and hides it once the marker is gone", () => {
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["alpha", `ed${CURSOR_MARKER}it`, "status"] });
+		const tui = new TUI(terminal, true, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		// Every row moved, so each is reused by content rather than position.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: [`ed${CURSOR_MARKER}it`, "status", "alpha"] };
+		tui.requestRender(true);
+		let written = terminal.writes.join("");
+		expect(written).not.toContain(CURSOR_MARKER);
+		expect(written).toContain("\x1b[1;3H\x1b[?25h");
+
+		// The marker-free row now matches the stripped row painted last frame.
+		terminal.writes.length = 0;
+		provider.plan = { viewport: ["status", "alpha", "edit"] };
+		tui.requestRender(true);
+		written = terminal.writes.join("");
+		expect(written).not.toContain("\x1b[?25h");
+		expect(written).toContain("\x1b[?25l");
+		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["status", "alpha", "edit", ""]);
+		tui.stop();
+	});
 	it("keeps live viewport rows out of tmux-style preserved-clear scrollback on a scrolling append", () => {
 		// Viewport at row 0 fills the screen: the protective erase is emitted
 		// full-screen, which tmux would archive as the #9780 duplication.

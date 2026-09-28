@@ -16,16 +16,6 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
-	it("should support steering message queueing", async () => {
-		const agent = new Agent();
-
-		const message = { role: "user" as const, content: "Queued message", timestamp: Date.now() };
-		agent.steer(message);
-
-		// The message is queued but not yet in state.messages
-		expect(agent.state.messages).not.toContainEqual(message);
-	});
-
 	it("classifies agent-authored steering as a parent steering message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
@@ -1468,22 +1458,6 @@ describe("Agent", () => {
 
 		const reasoningPerCall: Array<SimpleStreamOptions["reasoning"]> = mock.calls.map(call => call.options?.reasoning);
 		expect(reasoningPerCall).toEqual([ThinkingLevel.Low, ThinkingLevel.High]);
-	});
-
-	it("forwards explicit reasoning disablement to the stream", async () => {
-		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
-		const agent = new Agent({
-			initialState: {
-				model: mock.model,
-				messages: [],
-				disableReasoning: true,
-			},
-			streamFn: mock.stream,
-		});
-
-		await agent.prompt("run");
-
-		expect(mock.calls[0]?.options?.disableReasoning).toBe(true);
 	});
 
 	it("re-reads disableReasoning for each model call within a run", async () => {

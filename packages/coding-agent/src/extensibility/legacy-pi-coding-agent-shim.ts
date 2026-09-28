@@ -67,6 +67,7 @@ import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
+import { resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
@@ -539,12 +540,15 @@ export function createBashToolDefinition(cwd: string, options?: BashToolOptions)
 					onUpdate,
 				);
 			}
+			// The registry tool takes no per-call environment: `env` is service-launch
+			// configuration and is rejected outside it. A hook's env reaches `!` user
+			// shells through `shellEnv` above and the `operations` branch through its
+			// exec options.
 			return tool.execute(
 				toolCallId,
 				{
 					command: spawn?.command ?? command,
 					cwd: spawn?.cwd ?? cwd,
-					env: spawn?.env,
 					timeout,
 				},
 				signal,
@@ -583,11 +587,19 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 			return new Text(`${themedTitle(theme, "grep")} ${themedMuted(theme, `/${pattern}/ in ${searchPath}`)}`, 0, 0);
 		},
 		renderResult: legacyRenderResult,
-		execute: (toolCallId, params, signal, onUpdate) => {
+		execute: async (toolCallId, params, signal, onUpdate) => {
 			const rawPattern = stringField(params, "pattern") ?? "";
 			const pattern = booleanField(params, "literal") ? piEscapeRegexLiteral(rawPattern) : rawPattern;
 			const searchPath = stringField(params, "path") ?? ".";
 			const glob = stringField(params, "glob");
+			let isFile = false;
+			if (glob) {
+				try {
+					isFile = (await fs.promises.stat(resolveToCwd(searchPath, cwd))).isFile();
+				} catch {
+					// Leave unresolved paths and URLs to the built-in grep resolver.
+				}
+			}
 			const context = numberField(params, "context");
 			// The new grep reads context from settings fixed at construction; build a
 			// per-call tool when the model passes an explicit legacy `context`.
@@ -602,7 +614,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 				toolCallId,
 				{
 					pattern,
-					path: glob ? piJoinPath(searchPath, glob) : searchPath,
+					path: glob && !isFile ? piJoinPath(searchPath, glob) : searchPath,
 					case: booleanField(params, "ignoreCase") ? false : undefined,
 				},
 				signal,

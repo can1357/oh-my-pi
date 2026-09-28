@@ -37,8 +37,8 @@ provider "cursor" {
 	}
 	class "xai" {
 		family "grok" {
-			revision ">=4.5 <4.7" {
-				// Cursor advertised Grok 4.5/4.6 Context window 256k (product
+			revision ">=4.5 <4.8" {
+				// Cursor advertised Grok 4.5/4.6/4.7 Context window 256k (product
 				// cap; not xAI native 500k). Max context is unmarked.
 				context-window-floor 256000
 			}
@@ -61,6 +61,10 @@ provider "cursor" {
 	// Cursor-only families verified to accept selectedImages even though the
 	// roster carries no modality metadata.
 	models "cursor-grok-4" "cursor-grok-4.*" "cursor-grok-4-*" "cursor-grok-4:*" "cursor-grok-4_*" {
+		input-modalities "text" "image"
+	}
+	// Grok 4.7 wire ids drop the cursor- prefix (grok-4.7-low, grok-4.7-xhigh-fast).
+	models "grok-4" "grok-4.*" "grok-4-*" "grok-4:*" "grok-4_*" {
 		input-modalities "text" "image"
 	}
 	models "composer-2.5" "composer-2.5.*" "composer-2.5-*" "composer-2.5:*" "composer-2.5_*" {
@@ -86,5 +90,592 @@ provider "cursor" {
 	// residue: Cursor's Gemini 3.7 Flash lane drops the minimal tier.
 	models "gemini-3.7-flash*" {
 		thinking-efforts "low" "medium" "high"
+	}
+
+	// Cursor API-equivalent pricing, direct from
+	// https://cursor.com/docs/models-and-pricing (per million tokens).
+	// GetUsableModels carries no pricing, so these cost-patch rules are the
+	// only source — never mirrored from another provider's card.
+	// Ids absent from the Cursor docs (composer-1/1.5, gpt-5.1 non-Codex,
+	// kimi-k2.5, grok-code-fast-1, default/Auto) stay unpriced rather than
+	// proxied. Teams/Enterprise $0.25/M token rate, 10% residency uplift,
+	// and legacy Max Mode +20% are plan-specific and excluded.
+
+	// Claude 4 Sonnet: $3/$15, cache $0.30/$3.75.
+	models "claude-4-sonnet" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 3.75
+		}
+	}
+	// Claude 4.5 Opus: $5/$25, cache $0.50/$6.25.
+	models "claude-4.5-opus-high" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude 4.5 Sonnet: $3/$15, cache $0.30/$3.75.
+	models "claude-4.5-sonnet" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 3.75
+		}
+	}
+	// Claude 4.6 Opus: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
+	models "claude-4.6-opus-high" "claude-4.6-opus-max" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude 4.6 Sonnet: $3/$15, cache $0.30/$3.75. Up to 1M same rates.
+	models "claude-4.6-sonnet-medium" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 3.75
+		}
+	}
+	// Claude Fable 5: $10/$50, cache $1.00/$12.50. About 2x Opus 5.
+	models "claude-fable-5-high" "claude-fable-5-low" "claude-fable-5-max" "claude-fable-5-medium" "claude-fable-5-xhigh" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 12.5
+		}
+	}
+	// Claude Fable 5.1: $10/$50, cache reads discounted to $0.25/M.
+	models "claude-fable-5-1-high" "claude-fable-5-1-low" "claude-fable-5-1-max" "claude-fable-5-1-medium" "claude-fable-5-1-xhigh" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 0.25
+			cache-write 12.5
+		}
+	}
+	// Claude 4.7 Opus: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
+	models "claude-opus-4-7-high" "claude-opus-4-7-low" "claude-opus-4-7-max" "claude-opus-4-7-medium" "claude-opus-4-7-xhigh" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude Opus 4.7 fast mode: $30/$150, cache $3.00/$37.50. Research preview.
+	models "claude-opus-4-7-high-fast" "claude-opus-4-7-low-fast" "claude-opus-4-7-max-fast" "claude-opus-4-7-medium-fast" "claude-opus-4-7-xhigh-fast" {
+		cost-patch {
+			input 30.0
+			output 150.0
+			cache-read 3.0
+			cache-write 37.5
+		}
+	}
+	// Claude Opus 4.8: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
+	models "claude-opus-4-8-high" "claude-opus-4-8-low" "claude-opus-4-8-max" "claude-opus-4-8-medium" "claude-opus-4-8-xhigh" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude Opus 4.8 Fast: 3x below Opus 4.7 fast mode per the docs note,
+	// i.e. $10/$50, cache $1.00/$12.50.
+	models "claude-opus-4-8-high-fast" "claude-opus-4-8-low-fast" "claude-opus-4-8-max-fast" "claude-opus-4-8-medium-fast" "claude-opus-4-8-xhigh-fast" {
+		cost-patch {
+			input 10.0
+			output 50.0
+			cache-read 1.0
+			cache-write 12.5
+		}
+	}
+	// Claude Opus 5: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
+	models "claude-opus-5-high" "claude-opus-5-low" "claude-opus-5-medium" "claude-opus-5-thinking-max" "claude-opus-5-thinking-xhigh" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude Opus 5 Fast: the docs name the fast wire ids but publish no
+	// fast multiplier, so fast bills at the base Opus 5 card.
+	models "claude-opus-5-high-fast" "claude-opus-5-low-fast" "claude-opus-5-medium-fast" "claude-opus-5-thinking-max-fast" "claude-opus-5-thinking-xhigh-fast" {
+		cost-patch {
+			input 5.0
+			output 25.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	// Claude Opus 5.5: $4/$20, cache $0.20/$5.00. 20% cheaper than Opus 5;
+	// up to 1M same rates. Regional +10% endpoints excluded.
+	models "claude-opus-5-5" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 5.0
+		}
+	}
+	// Claude Opus 5.5 Fast: the docs name the fast wire id but publish no
+	// fast multiplier, so fast bills at the base Opus 5.5 card.
+	models "claude-opus-5-5-fast" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 5.0
+		}
+	}
+	// Claude Sonnet 5: $2/$10, cache $0.20/$2.50. Up to 1M same rates.
+	models "claude-sonnet-5-high" "claude-sonnet-5-low" "claude-sonnet-5-max" "claude-sonnet-5-medium" "claude-sonnet-5-xhigh" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	// Composer 2.5: $0.50/$2.50, cache read $0.20, no write fee.
+	models "composer-2.5" {
+		cost-patch {
+			input 0.5
+			output 2.5
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	// Composer 2.5 Fast: $3/$15, cache read $0.50, no write fee.
+	models "composer-2.5-fast" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// Grok 4.5: $2/$6, cache read $0.50, no write fee.
+	models "cursor-grok-4.5" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// Grok 4.5 Fast: $4/$18, cache read $1.00. Output is 3x base per docs.
+	models "cursor-grok-4.5-fast" {
+		cost-patch {
+			input 4.0
+			output 18.0
+			cache-read 1.0
+			cache-write 0
+		}
+	}
+	// Grok 4.6: $2/$6, cache read $0.50, no write fee.
+	models "cursor-grok-4.6" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// Grok 4.6 Fast: $4/$12, cache read $1.00.
+	models "cursor-grok-4.6-fast" {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0
+		}
+	}
+	// Grok 4.7: $2/$6, cache read $0.50. Long context (>256k) bills at 2x
+	// standard rates up to 500k. Covers both the legacy cursor-grok-4.7
+	// prefix and the observed grok-4.7-<effort> wire ids. Absolute tier
+	// rates: the multiplier form derives from the row's live base price,
+	// which is still zero when GetUsableModels specs build in one pass.
+	models "grok-4.7*" "cursor-grok-4.7*" {
+		cost-patch {
+			input 2.0
+			output 6.0
+			cache-read 0.5
+			cache-write 0
+		}
+		long-context-cost {
+			input-threshold 256000
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0
+		}
+	}
+	// Grok 4.7 Fast: $4/$12, cache read $1.00. Fast mode for long context
+	// (>256k) bills at 3x standard rates.
+	models "grok-4.7*-fast" "cursor-grok-4.7*-fast" priority=1 {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0
+		}
+		long-context-cost {
+			input-threshold 256000
+			input 6.0
+			output 18.0
+			cache-read 1.5
+			cache-write 0
+		}
+	}
+	// Gemini 3 Flash: $0.50/$3.00, cache read $0.05.
+	models "gemini-3-flash" {
+		cost-patch {
+			input 0.5
+			output 3.0
+			cache-read 0.05
+			cache-write 0
+		}
+	}
+	// Gemini 3 Pro: $2/$12, cache read $0.20.
+	models "gemini-3-pro" {
+		cost-patch {
+			input 2.0
+			output 12.0
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	// Gemini 3.1 Pro: $2/$12, cache read $0.20.
+	models "gemini-3.1-pro" {
+		cost-patch {
+			input 2.0
+			output 12.0
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	// Gemini 3.5 Flash: $1.50/$9.00, cache read $0.15.
+	models "gemini-3.5-flash" {
+		cost-patch {
+			input 1.5
+			output 9.0
+			cache-read 0.15
+			cache-write 0
+		}
+	}
+	// Gemini 3.6 Flash: $1.50/$7.50, cache read $0.15.
+	models "gemini-3.6-flash" {
+		cost-patch {
+			input 1.5
+			output 7.5
+			cache-read 0.15
+			cache-write 0
+		}
+	}
+	// Gemini 3.7 Flash: $0.75/$3.50, cache read $0.075.
+	models "gemini-3.7-flash" {
+		cost-patch {
+			input 0.75
+			output 3.5
+			cache-read 0.075
+			cache-write 0
+		}
+	}
+	// Gemini 3.8 Flash: $0.75/$3.50, cache read $0.075.
+	models "gemini-3.8-flash" {
+		cost-patch {
+			input 0.75
+			output 3.5
+			cache-read 0.075
+			cache-write 0
+		}
+	}
+	// GLM 5.2: $1.40/$4.40, cache read $0.26.
+	models "glm-5.2" {
+		cost-patch {
+			input 1.4
+			output 4.4
+			cache-read 0.26
+			cache-write 0
+		}
+	}
+	// GPT-5 Mini: $0.25/$2.00, cache read $0.025.
+	models "gpt-5-mini" {
+		cost-patch {
+			input 0.25
+			output 2.0
+			cache-read 0.025
+			cache-write 0
+		}
+	}
+	// GPT-5.1 Codex Max: $1.25/$10.00, cache read $0.125.
+	models "gpt-5.1-codex-max" "gpt-5.1-codex-max-high" {
+		cost-patch {
+			input 1.25
+			output 10.0
+			cache-read 0.125
+			cache-write 0
+		}
+	}
+	// GPT-5.1 Codex Mini: $0.25/$2.00, cache read $0.025.
+	models "gpt-5.1-codex-mini" {
+		cost-patch {
+			input 0.25
+			output 2.0
+			cache-read 0.025
+			cache-write 0
+		}
+	}
+	// GPT-5.2: $1.75/$14.00, cache read $0.175.
+	models "gpt-5.2" "gpt-5.2-high" "gpt-5.2-low" "gpt-5.2-xhigh" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.2 Fast: the docs publish no fast multiplier, so fast bills at
+	// the base GPT-5.2 card.
+	models "gpt-5.2-fast" "gpt-5.2-high-fast" "gpt-5.2-low-fast" "gpt-5.2-xhigh-fast" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.2 Codex: $1.75/$14.00, cache read $0.175.
+	models "gpt-5.2-codex" "gpt-5.2-codex-high" "gpt-5.2-codex-low" "gpt-5.2-codex-xhigh" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.2 Codex Fast: no fast multiplier published; base card applies.
+	models "gpt-5.2-codex-fast" "gpt-5.2-codex-high-fast" "gpt-5.2-codex-low-fast" "gpt-5.2-codex-xhigh-fast" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.3 Codex: $1.75/$14.00, cache read $0.175. The spark preview SKU
+	// has no separate Cursor card, so it bills at the base Codex rate.
+	models "gpt-5.3-codex" "gpt-5.3-codex-high" "gpt-5.3-codex-low" "gpt-5.3-codex-xhigh" "gpt-5.3-codex-spark-preview" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.3 Codex Fast: no fast multiplier published; base card applies.
+	models "gpt-5.3-codex-fast" "gpt-5.3-codex-high-fast" "gpt-5.3-codex-low-fast" "gpt-5.3-codex-xhigh-fast" {
+		cost-patch {
+			input 1.75
+			output 14.0
+			cache-read 0.175
+			cache-write 0
+		}
+	}
+	// GPT-5.4: $2.50/$15.00, cache read $0.25. The 2x long-context input
+	// tariff has no published threshold, so no long tier is modeled.
+	models "gpt-5.4" {
+		cost-patch {
+			input 2.5
+			output 15.0
+			cache-read 0.25
+			cache-write 0
+		}
+	}
+	// GPT-5.4 Fast: 2x pricing per docs, i.e. $5/$30, cache read $0.50.
+	models "gpt-5.4-fast" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// GPT-5.4 Mini: $0.75/$4.50, cache read $0.075.
+	models "gpt-5.4-mini" {
+		cost-patch {
+			input 0.75
+			output 4.5
+			cache-read 0.075
+			cache-write 0
+		}
+	}
+	// GPT-5.4 Nano: $0.20/$1.25, cache read $0.02.
+	models "gpt-5.4-nano" {
+		cost-patch {
+			input 0.2
+			output 1.25
+			cache-read 0.02
+			cache-write 0
+		}
+	}
+	// GPT-5.5: $5/$30, cache read $0.50. Fast runs higher at unpublished
+	// rates and the 2x long-context input tariff has no published
+	// threshold, so neither is modeled beyond the base card.
+	models "gpt-5.5" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// GPT-5.5 Fast: higher fast rates are unpublished; base card applies.
+	models "gpt-5.5-fast" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 0
+		}
+	}
+	// GPT-5.6 Luna: $0.20/$1.20, cache $0.02/$0.25. Long context (>272k)
+	// bills 2x input pricing; output stays at the base rate per the docs
+	// wording, while cache rates double with input.
+	models "gpt-5.6-luna" {
+		cost-patch {
+			input 0.2
+			output 1.2
+			cache-read 0.02
+			cache-write 0.25
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 0.4
+			output 1.2
+			cache-read 0.04
+			cache-write 0.5
+		}
+	}
+	// GPT-5.6 Luna Fast: 2x pricing, i.e. $0.40/$2.40, cache $0.04/$0.50.
+	models "gpt-5.6-luna-fast" {
+		cost-patch {
+			input 0.4
+			output 2.4
+			cache-read 0.04
+			cache-write 0.5
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 0.8
+			output 2.4
+			cache-read 0.08
+			cache-write 1.0
+		}
+	}
+	// GPT-5.6 Sol: $4/$20, cache $0.40/$5.00. Promotional base through
+	// 2026-11-21 per docs; the card below is the published promo rate.
+	models "gpt-5.6-sol" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.4
+			cache-write 5.0
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 8.0
+			output 20.0
+			cache-read 0.8
+			cache-write 10.0
+		}
+	}
+	// GPT-5.6 Sol Fast: 2x pricing, i.e. $8/$40, cache $0.80/$10.00.
+	models "gpt-5.6-sol-fast" {
+		cost-patch {
+			input 8.0
+			output 40.0
+			cache-read 0.8
+			cache-write 10.0
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 16.0
+			output 40.0
+			cache-read 1.6
+			cache-write 20.0
+		}
+	}
+	// GPT-5.6 Terra: $2/$12, cache $0.20/$2.50.
+	models "gpt-5.6-terra" {
+		cost-patch {
+			input 2.0
+			output 12.0
+			cache-read 0.2
+			cache-write 2.5
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 4.0
+			output 12.0
+			cache-read 0.4
+			cache-write 5.0
+		}
+	}
+	// GPT-5.6 Terra Fast: 2x pricing, i.e. $4/$24, cache $0.40/$5.00.
+	models "gpt-5.6-terra-fast" {
+		cost-patch {
+			input 4.0
+			output 24.0
+			cache-read 0.4
+			cache-write 5.0
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 8.0
+			output 24.0
+			cache-read 0.8
+			cache-write 10.0
+		}
+	}
+	// Kimi K2.7 Code: $0.95/$4.00, cache read $0.19.
+	models "kimi-k2.7-code" {
+		cost-patch {
+			input 0.95
+			output 4.0
+			cache-read 0.19
+			cache-write 0
+		}
+	}
+	// Kimi K3: $3/$15, cache read $0.30. Up to 1M same rates, no write fee.
+	models "kimi-k3-high" "kimi-k3-low" "kimi-k3-max" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 0
+		}
+	}
+	// Muse Spark 1.3: $1.25/$4.25, cached input $0.15, no write charge.
+	models "muse-spark-1.3" {
+		cost-patch {
+			input 1.25
+			output 4.25
+			cache-read 0.15
+			cache-write 0
+		}
 	}
 }

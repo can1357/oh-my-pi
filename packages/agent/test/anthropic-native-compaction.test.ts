@@ -441,9 +441,10 @@ describe("compact() Anthropic native lane", () => {
 			const { calls, completeImpl } = recordingCompleteImpl(() =>
 				assistantMessage(model, { ...stop, content: [{ type: "text", text: "not a summary" }] }),
 			);
-			await expect(
-				compact(makePreparation(), model, "sk-ant-test", undefined, undefined, { completeImpl }),
-			).rejects.toBeInstanceOf(NativeCompactionError);
+			const failure = compact(makePreparation(), model, "sk-ant-test", undefined, undefined, { completeImpl });
+			await expect(failure).rejects.toBeInstanceOf(NativeCompactionError);
+			// The log line is the only place a user sees why native compaction fell back.
+			await expect(failure).rejects.toThrow(`stop reason: ${stop.stopDetails?.type}`);
 			expect(calls).toHaveLength(1);
 		}
 		expect(completeSimple).not.toHaveBeenCalled();

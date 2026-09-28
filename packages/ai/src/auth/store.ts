@@ -13,6 +13,7 @@ import type {
 	AuthCredential,
 	DisabledCredentialSummary,
 	OAuthCredential,
+	OAuthRefreshReason,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 } from "./types";
@@ -157,12 +158,15 @@ export interface CredentialUpstream {
 	 * `signal` propagates the agent's cancel (ESC, request abort, …) all the
 	 * way to the broker fetch so a hung connection can't strand the caller
 	 * for `timeoutMs * (maxRetries + 1)`.
+	 * `reason` distinguishes provider-auth recovery from generic/MCP refreshes
+	 * that must always mint a new access token.
 	 */
 	refreshOAuthCredential(
 		provider: Provider,
 		credentialId: number,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
 	): Promise<OAuthCredentials>;
 	/**
 	 * Optional async pre-read hook invoked after AuthStorage selects a stored

@@ -2,9 +2,47 @@
 
 ## [Unreleased]
 
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added tool_execution_end events that fire as each tool call settles for live UI updates
+
+### Changed
+
+- Emitted tool result messages in the order of tool calls, preserving call order regardless of completion order
+- Reduced repeated token-counting work with a bounded, model-scoped cache of exact text and short-message fragment counts.
+
+### Fixed
+
+- Fixed an issue where streaming tool call arguments could be incorrectly modified in-place
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed fitted output caps overshooting the context window by a few tokens on strict Chat Completions hosts (e.g. llama.cpp), causing 400s.
+- Fixed native remote compaction sending requests already estimated past the model's context window (e.g. after re-expanding history behind another provider's native boundary); it now fails fast so the next configured compaction method runs ([#13502](https://github.com/can1357/oh-my-pi/issues/13502))
+- Fixed V2 remote compaction retrying a standalone stream `error` event three times and reporting it as `stream closed before response.completed`; the upstream status, code, and message (e.g. `context_too_large`) are now surfaced ([#13502](https://github.com/can1357/oh-my-pi/issues/13502))
+
+## [18.4.0] - 2026-09-28
+
+### Changed
+
+- Updated telemetry attribute names from the `pi.*` namespace to the `omp.*` namespace.
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added live steering support, allowing models to receive and act on user steering messages during an active stream.
+
+## [18.3.2] - 2026-09-25
+
 ### Fixed
 
 - Fixed tool calls that put their payload in the intent field `i` (for example a file body in `write`) silently running with the leftover arguments; they now fail with an error telling the model to retry ([#13140](https://github.com/can1357/oh-my-pi/issues/13140), [#13141](https://github.com/can1357/oh-my-pi/pull/13141) by [@radkawar](https://github.com/radkawar))
+- Fixed the Anthropic compaction failure log omitting why no compaction block came back; it now names the stop reason ([#13300](https://github.com/can1357/oh-my-pi/pull/13300) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.3.1] - 2026-09-25
 

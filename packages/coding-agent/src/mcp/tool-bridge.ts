@@ -229,6 +229,7 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * reaches the model through the standard content channel — and the eval
  * `tool.*` and subagent proxy bridges that read the same result. Subject to the
  * usual spill/byte-cap machinery like any other text block.
+ * Programmatic consumers use details.structuredContent instead of parsing this rendering.
  */
 function formatStructuredContent(structured: Record<string, unknown>): string {
 	let json: string;
@@ -287,6 +288,7 @@ function buildResult(
 		}
 	}
 	const structured = result.structuredContent;
+	if (structured !== undefined) details.structuredContent = structured;
 	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
 		const rendered = formatStructuredContent(structured);
 		if (rendered.length > 0) {

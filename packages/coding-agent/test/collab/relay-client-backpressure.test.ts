@@ -76,6 +76,12 @@ class BackpressuredWebSocket {
 		this.onopen?.(new Event("open"));
 	}
 
+	/** Reopen as a host the relay accepted: its first relay message confirms the provisional reclaim open. */
+	openAccepted(): void {
+		this.open();
+		this.onmessage?.({ data: JSON.stringify({ t: "peer-joined", peer: 1 }) } as MessageEvent);
+	}
+
 	close(): void {
 		if (this.readyState === BackpressuredWebSocket.CLOSED) return;
 		this.readyState = BackpressuredWebSocket.CLOSED;
@@ -248,7 +254,7 @@ describe("CollabSocket send backpressure", () => {
 			while (BackpressuredWebSocket.instances.length < 2 && Date.now() < appeared) await Bun.sleep(20);
 			const second = BackpressuredWebSocket.instances[1];
 			if (!second) throw new Error("socket never retried after the transient drop");
-			second.open();
+			second.openAccepted();
 			socket.send({ t: "error", message: "welcome stand-in for the new guest" }, 9);
 
 			const deadline = Date.now() + 3_000;
@@ -284,7 +290,7 @@ describe("CollabSocket send backpressure", () => {
 			while (BackpressuredWebSocket.instances.length < 2 && Date.now() < appeared) await Bun.sleep(20);
 			const second = BackpressuredWebSocket.instances[1];
 			if (!second) throw new Error("socket never retried after the transient drop");
-			second.open();
+			second.openAccepted();
 
 			// The recreated room hands out ids from 1 again, so retiring an id must
 			// not outlive the connection that retired it.
@@ -914,7 +920,7 @@ describe("CollabSocket send backpressure", () => {
 				"socket never retried after the transient drop",
 			);
 			const second = BackpressuredWebSocket.instances[1]!;
-			second.open();
+			second.openAccepted();
 			expect(closes.map(close => close.willReconnect)).toEqual([true]);
 
 			// Now it fails. A bad frame from a connection that is over says nothing
@@ -1136,7 +1142,7 @@ describe("CollabSocket send backpressure", () => {
 				() => BackpressuredWebSocket.instances.length > 1,
 				"socket never retried after the transient drop",
 			);
-			BackpressuredWebSocket.instances[1]!.open();
+			BackpressuredWebSocket.instances[1]!.openAccepted();
 
 			expect(socket.isServing(4)).toBe(true);
 			expect(stillTheAsker()).toBe(false);
@@ -1194,7 +1200,7 @@ describe("CollabSocket send backpressure", () => {
 				"socket never retried after the transient drop",
 			);
 			const second = BackpressuredWebSocket.instances[1]!;
-			second.open();
+			second.openAccepted();
 			const fresh = socket.addressee(1);
 
 			// Releasing the old room's capture is correct to refuse, but it must not

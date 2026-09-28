@@ -16,12 +16,12 @@ import type { SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
+import type { EvalPreludeDefinition } from "./eval/preludes";
 import { SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
-import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -558,10 +558,12 @@ export interface BuildSystemPromptOptions {
 	securityEnabled?: boolean;
 	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
 	settingsApproval?: boolean;
-	/** Whether the browser eval prelude is enabled for this session. */
-	browserEnabled?: boolean;
-	/** Whether the computer eval prelude is enabled for this session. */
-	computerEnabled?: boolean;
+	/**
+	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
+	 * appended as its own block after the rendered template, so custom templates
+	 * keep it; names also set the `browserEnabled`/`computerEnabled` template flags.
+	 */
+	evalPreludes?: readonly Pick<EvalPreludeDefinition, "name" | "guidance">[];
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced in the workstation block. */
 	model?: string;
 	/** Whether to surface `model` in the workstation block. Default: true. */
@@ -664,8 +666,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
-		browserEnabled = false,
-		computerEnabled = false,
+		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
 		personality = "default",
@@ -994,8 +995,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
-		browserEnabled,
-		computerEnabled,
+		browserEnabled: evalPreludes.some(prelude => prelude.name === "browser"),
+		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),
 		includeWorkspaceTree,
 		renderMermaid,
 		reactions,
@@ -1023,19 +1024,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rendered = prompt.render(systemPromptTemplate, data);
 	}
 	const systemPrompt = [rendered];
-	if (computerEnabled) {
-		systemPrompt.push(computerSafetyPrompt.trim());
+	for (const prelude of evalPreludes) {
+		const guidance = prelude.guidance?.trim();
+		if (guidance) systemPrompt.push(guidance);
 	}
-	// Literal overrides render context files and append text in their wrapper.
-	// Both the bundled template and user templates receive them in the footer.
+	// Working-directory content (context files with their paths, workspace
+	// tree/roots, active repo) and session append text form one trailing
+	// `<project-context>` block after every static block, so sessions in
+	// different directories share the static prefix and the Anthropic head
+	// cache breakpoint lands right before this block.
 	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
+		.render(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt })
 		.trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
-	}
-	if (activeRepoContextPrompt) {
-		systemPrompt.push(activeRepoContextPrompt);
 	}
 
 	// Claim delivery only when the rendered block 0 actually carries the xd://
