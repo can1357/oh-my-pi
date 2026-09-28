@@ -6,6 +6,8 @@ import { Spacer } from "../../components/spacer";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { Input } from "../../components/input";
+import { formatKeyHint } from "../../app-keybindings";
+import { editorKey } from "../../chrome/keybinding-hints";
 import { matchesKey } from "../../keys";
 import { type SgrMouseEvent } from "../../mouse";
 import { wrapTextWithAnsi } from "../../utils";
@@ -19,7 +21,7 @@ function loginUrlLink(url: string): string {
 }
 
 function loginCopyHint(): string {
-	return theme.fg("dim", "(clipboard copy attempted; Alt+C retries)");
+	return theme.fg("dim", `(clipboard copy attempted; ${formatKeyHint("alt+c")} retries)`);
 }
 
 class CopyablePromptInput implements Component, Focusable {
@@ -230,7 +232,7 @@ export class SignInTab implements SetupTab {
 		this.#host.restoreFocus();
 		this.#host.requestRender();
 		try {
-			await this.#authStorage.login(providerId as OAuthProvider, {
+			await this.#authStorage.oauth.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
 				onBrowserSession: (request, signal) => this.#host.ctx.captureBrowserSession(request, signal),
 				onAuth: info => {
@@ -290,7 +292,7 @@ export class SignInTab implements SetupTab {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
 					theme.fg("error", `Login failed: ${message}`),
-					theme.fg("dim", "Choose another provider or press Esc to continue."),
+					theme.fg("dim", `Choose another provider or press ${editorKey("tui.select.cancel")} to continue.`),
 				];
 				this.#authUrl = undefined;
 				this.#authLaunchUrl = undefined;

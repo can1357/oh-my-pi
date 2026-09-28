@@ -68,7 +68,9 @@ pub struct DesktopCapabilities {
 	pub input: bool,
 	pub ax: bool,
 	pub background_window_input: bool,
-	pub delivery_modes: Vec<String>,
+	/// Whether window input accepts `takeover: true` (briefly activate the
+	/// target and post real input).
+	pub takeover: bool,
 	pub capture_permission: String,
 	pub input_permission: String,
 	pub ax_permission: String,
@@ -84,7 +86,7 @@ impl DesktopCapabilities {
 			input: false,
 			ax: false,
 			background_window_input: false,
-			delivery_modes: Vec::new(),
+			takeover: false,
 			capture_permission: "unavailable".to_string(),
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),
@@ -109,10 +111,12 @@ pub struct CaptureCaps {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct PointerOptions {
-	pub button:        Option<String>,
-	pub count:         Option<u32>,
-	pub modifiers:     Option<Vec<String>>,
-	pub delivery_mode: Option<String>,
+	pub button:    Option<String>,
+	pub count:     Option<u32>,
+	pub modifiers: Option<Vec<String>>,
+	/// Briefly activate the target window and post real input instead of the
+	/// default background delivery.
+	pub takeover:  Option<bool>,
 }
 
 #[napi(object)]

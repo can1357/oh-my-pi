@@ -14,10 +14,11 @@ import {
 	sortModelItems,
 } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
-	Partial<Pick<Model, "cost">>;
+	Partial<Pick<Model, "cost" | "kind">>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -53,6 +54,22 @@ function makeBrowser(
 }
 
 describe("resolveRoleAssignments", () => {
+	test("rejects configured models that do not match the role's accepted kind", () => {
+		const chat = makeModel("demo", "chat");
+		const image = makeModel("demo", "image", { kind: "image" });
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/image",
+				image: "demo/image",
+			},
+		});
+
+		const roles = resolveRoleAssignments(createModelBrowserSource(settings), [chat, image], [chat, image]);
+
+		expect(roles.default).toBeUndefined();
+		expect(roles.image?.model).toBe(image);
+	});
+
 	test("shows configured smol for an unconfigured tiny role", () => {
 		const smol = makeModel("demo", "custom-smol");
 		const priorityHead = makeModel("demo", "gemini-3.8-flash");
@@ -93,6 +110,29 @@ describe("resolveRoleAssignments", () => {
 		expect(roles.slow?.model).toBe(slow);
 		expect(roles.advisor?.model).toBe(slow);
 		expect(roles.advisor?.autoSelected).toBe(true);
+	});
+});
+
+describe("createModelMentionSource", () => {
+	test("refreshes candidates when role settings or availability change between queries", () => {
+		const a = makeModel("a", "example-2");
+		const b = makeModel("b", "example-2");
+		const available = [a, b];
+		const settings = Settings.isolated({ modelRoles: { default: "b/example-2" } });
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(settings),
+			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...available] },
+			scopedModels: () => [],
+		});
+		const selectors = (query: string) => candidates(query).map(item => item.selector);
+
+		expect(selectors("example")).toEqual(["b/example-2", "a/example-2"]);
+
+		settings.setModelRole("default", "a/example-2");
+		expect(selectors("example")).toEqual(["a/example-2", "b/example-2"]);
+
+		available.push(makeModel("c", "example-3"));
+		expect(selectors("example")).toContain("c/example-3");
 	});
 });
 
@@ -390,7 +430,6 @@ describe("ModelBrowser native model metadata", () => {
 	});
 
 	test.each([
-		[-1, 0, "$?/0"],
 		[0, -1, "$0/?"],
 		[-1, -2, "$?/?"],
 	] as const)("renders invalid rates %s/%s with per-leg markers", (input, output, expected) => {

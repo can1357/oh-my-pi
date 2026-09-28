@@ -19,10 +19,19 @@ import {
 	readLines,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { getDefault } from "../config/settings-schema";
+import type { Setting } from "../config/registry";
+
 import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
+import {
+	cfgGcArchive,
+	cfgGcBlobs,
+	cfgGcColdArchiveAfterDays,
+	cfgGcRetainNewestGlobal,
+	cfgGcRetainNewestPerCwd,
+	cfgGcWal,
+} from "./gc-settings";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
@@ -169,30 +178,28 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 				? await Settings.loadIsolated({ agentDir })
 				: await Settings.loadReadOnly({ agentDir })
 			: undefined;
-	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings?.get(pathKey) ?? getDefault(pathKey);
-	const getNumber = (pathKey: "gc.coldArchiveAfterDays" | "gc.retainNewestGlobal" | "gc.retainNewestPerCwd") =>
-		settings?.get(pathKey) ?? getDefault(pathKey);
+	const read = <T>(setting: Setting<T>): T => (settings ? setting.get(settings) : setting.default);
 	return {
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
-		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
-		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
-		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
+		runBlobs: selected ? flags.blobs === true : read(cfgGcBlobs),
+		runArchive: selected ? flags.archive === true : read(cfgGcArchive),
+		runWal: selected ? flags.wal === true : read(cfgGcWal),
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
-			getNumber("gc.coldArchiveAfterDays"),
-			getDefault("gc.coldArchiveAfterDays"),
+			read(cfgGcColdArchiveAfterDays),
+			cfgGcColdArchiveAfterDays.default,
 		),
 		retainNewestGlobal: numberSetting(
 			flags.retainNewestGlobal,
-			getNumber("gc.retainNewestGlobal"),
-			getDefault("gc.retainNewestGlobal"),
+			read(cfgGcRetainNewestGlobal),
+			cfgGcRetainNewestGlobal.default,
 		),
 		retainNewestPerCwd: numberSetting(
 			flags.retainNewestPerCwd,
-			getNumber("gc.retainNewestPerCwd"),
-			getDefault("gc.retainNewestPerCwd"),
+			read(cfgGcRetainNewestPerCwd),
+			cfgGcRetainNewestPerCwd.default,
 		),
 	};
 }
@@ -705,13 +712,18 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 	const db = new Database(dbPath);
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		if (!tableExists(db, "history")) return { deleted: 0, ftsRebuilt: false };
-		if (!historyHasSessionId(db)) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = tableExists(db, "history_fts");
-		const deleteStmt = db.prepare("DELETE FROM history WHERE session_id = ?");
+		const hasHistory = tableExists(db, "history") && historyHasSessionId(db);
+		const hasRecaps = tableExists(db, "session_recaps");
+		if (!hasHistory && !hasRecaps) return { deleted: 0, ftsRebuilt: false };
+		const hasFts = hasHistory && tableExists(db, "history_fts");
+		const deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
+		// Recaps are session-scoped side output with no life beyond their session.
+		const deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
+				deleteRecapsStmt?.run(id);
+				if (!deleteStmt) continue;
 				const result = deleteStmt.run(id) as SqliteRunResult;
 				deleted += sqliteNumber(result.changes);
 			}

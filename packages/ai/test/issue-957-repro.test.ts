@@ -91,7 +91,7 @@ describe("issue #957 - Kimi OAuth refresh", () => {
 		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		const authStorage = new AuthStorage(store);
 		try {
-			await authStorage.set("kimi-code", [
+			await authStorage.credentials.set("kimi-code", [
 				{
 					type: "oauth",
 					access: "access-stored",
@@ -103,7 +103,7 @@ describe("issue #957 - Kimi OAuth refresh", () => {
 				},
 			]);
 
-			const apiKey = await authStorage.getApiKey("kimi-code");
+			const apiKey = await authStorage.keys.get("kimi-code");
 			expect(apiKey).toBe("access-refreshed");
 			expect(refreshCalls).toBe(1);
 

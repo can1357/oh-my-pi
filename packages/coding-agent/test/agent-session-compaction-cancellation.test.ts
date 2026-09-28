@@ -20,6 +20,11 @@ import {
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import {
+	cfgCompactionAutoContinue,
+	cfgCompactionExperimentalContextManagement,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
 type HookMode = "extension-veto" | "park";
 
 describe.each([false, true])("AgentSession compaction cancellation source (experimental=%s)", experimental => {
@@ -33,7 +38,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			new Error("Network access is forbidden in compaction cancellation tests"),
 		);
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
@@ -206,7 +211,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		// so the turn the abort cut must still resume; otherwise a manual /compact
 		// mid-turn leaves the agent idle exactly as before the fix.
 		session = await createSession("park");
-		session.settings.override("compaction.autoContinue", true);
+		cfgCompactionAutoContinue.override(session.settings, true);
 		session.agent.state.isStreaming = true;
 		vi.spyOn(session, "abort").mockImplementation(async () => {
 			session.agent.state.isStreaming = false;
@@ -240,7 +245,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 					if (!first) throw new Error("Expected seeded history");
 					session.sessionManager.branch(first.id);
 				} else {
-					session.settings.override("compaction.experimentalContextManagement", false);
+					cfgCompactionExperimentalContextManagement.override(session.settings, false);
 				}
 				gate.resolve();
 				await cancellation;
@@ -254,7 +259,7 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 				version: 1,
 				text: "Preserve the rollback decision.",
 			});
-			session.settings.override("compaction.experimentalContextManagement", false);
+			cfgCompactionExperimentalContextManagement.override(session.settings, false);
 			const result = await session.compact();
 			expect(result.summary).toBe("compacted");
 			expect(JSON.stringify(session.agent.state.messages)).toContain("Preserve the rollback decision.");

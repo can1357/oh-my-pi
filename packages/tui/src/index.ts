@@ -48,6 +48,8 @@ export * from "./fuzzy";
 export * from "./keybindings";
 // Kitty keyboard protocol helpers
 export * from "./keys";
+// Glyph Protocol: in-band icon registration (APC 25a1)
+export * from "./glyph-protocol";
 // Kitty graphics: Unicode placeholders
 export * from "./kitty-graphics";
 // LaTeX → Unicode/ANSI math rendering

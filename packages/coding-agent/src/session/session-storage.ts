@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
 import { withFileLockSync } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { openCloexecSync } from "@oh-my-pi/pi-utils/fs-open";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
@@ -11,6 +12,8 @@ import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { isAssistantMessageLine } from "./session-entries";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
+/** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
+const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 const utf8Decoder = new TextDecoder("utf-8");
 
 export interface SessionStorageStat {
@@ -213,7 +216,10 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			fs.mkdirSync(dir, { recursive: true });
 		}
 		// Open file once, keep fd for lifetime
-		this.#fd = fs.openSync(fpath, flags === "w" ? "w" : "a");
+		this.#fd = openCloexecSync(
+			fpath,
+			SESSION_WRITE_FLAGS | (flags === "w" ? fs.constants.O_TRUNC : fs.constants.O_APPEND),
+		);
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}
@@ -223,17 +229,21 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * writer's descriptor on the orphaned previous inode, where the append would
 	 * be silently lost. Under the publish lock no cooperating replacement can
 	 * interleave, so re-open the live path when its identity changed.
+	 *
+	 * Returns the size of the descriptor the next write appends to: the one
+	 * `fstat` serves both the identity check and the append rollback point.
 	 */
-	#reopenIfReplaced(): void {
+	#reopenIfReplaced(): number {
+		const current = fs.fstatSync(this.#fd);
 		let live: fs.Stats;
 		try {
 			live = fs.statSync(this.#fpath);
 		} catch (err) {
-			if (isEnoent(err)) return;
+			if (isEnoent(err)) return current.size;
 			throw err;
 		}
-		if (live.ino === fs.fstatSync(this.#fd).ino) return;
-		const nextFd = fs.openSync(this.#fpath, "a");
+		if (live.ino === current.ino) return current.size;
+		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
 		try {
 			fs.closeSync(this.#fd);
@@ -242,6 +252,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		}
 		this.#fd = nextFd;
 		writerRegistry.register(this, nextFd, this);
+		return fs.fstatSync(nextFd).size;
 	}
 
 	#recordError(err: unknown): Error {
@@ -251,8 +262,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		return error;
 	}
 
-	#writeNow(line: string): void {
-		const originalSize = fs.fstatSync(this.#fd).size;
+	/** Append `line` at the end of the held descriptor, rolling back to `originalSize` on failure. */
+	#writeNow(line: string, originalSize: number): void {
 		const buf = Buffer.from(line, "utf-8");
 		let offset = 0;
 		try {
@@ -267,10 +278,28 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			try {
 				fs.ftruncateSync(this.#fd, originalSize);
 			} catch (rollbackError) {
-				throw new AggregateError(
-					[toError(writeError), toError(rollbackError)],
-					"Session append failed and its partial bytes could not be rolled back",
-				);
+				// Windows refuses ftruncate on an O_APPEND handle. Reopen without
+				// O_APPEND and verify its identity before rolling back: the path may
+				// now name a different session file after an external replacement.
+				try {
+					const rollbackFd = fs.openSync(this.#fpath, "r+");
+					try {
+						const original = fs.fstatSync(this.#fd);
+						const current = fs.fstatSync(rollbackFd);
+						if (original.dev !== current.dev || original.ino !== current.ino) {
+							throw new Error("Session file was replaced before append rollback");
+						}
+						fs.ftruncateSync(rollbackFd, originalSize);
+					} finally {
+						fs.closeSync(rollbackFd);
+					}
+				} catch (pathRollbackError) {
+					// Keep the write failure visible in the message.
+					throw new AggregateError(
+						[toError(writeError), toError(rollbackError), toError(pathRollbackError)],
+						`Session append failed and its partial bytes could not be rolled back: ${toError(writeError).message}`,
+					);
+				}
 			}
 			throw writeError;
 		}
@@ -287,12 +316,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// check-then-rename, which would otherwise erase the appended turn.
 		try {
 			if (this.#publishLock) {
-				this.#publishLock(() => {
-					this.#reopenIfReplaced();
-					this.#writeNow(line);
-				});
+				this.#publishLock(() => this.#writeNow(line, this.#reopenIfReplaced()));
 			} else {
-				this.#writeNow(line);
+				this.#writeNow(line, fs.fstatSync(this.#fd).size);
 			}
 		} catch (err) {
 			throw this.#recordError(err);
@@ -518,22 +544,29 @@ export class FileSessionStorage implements SessionStorage {
 			}
 			throw toError(err);
 		}
-		try {
-			fs.closeSync(fd);
-		} catch {
-			// Ignore close errors; the lock content is already written.
-		}
 		// Verify the record survived: a concurrent stale-lock steal may have
 		// removed our file between create and write (a POSIX fd write succeeds
 		// on the unlinked inode), in which case we hold nothing. Retry instead
-		// of entering the region unexclusively (hV-oE).
+		// of entering the region unexclusively (hV-oE). The path still naming
+		// our inode proves the record is there (holders only ever create and
+		// unlink lock files), and comparing identities costs two stats instead
+		// of a full open/read/close. The descriptor stays open until after the
+		// comparison so the inode cannot be freed and its number reused by a
+		// successor's file; bigint keeps 64-bit Windows file IDs exact.
 		try {
-			if (fs.readFileSync(lockPath, "utf8") !== record) return false;
+			const held = fs.fstatSync(fd, { bigint: true });
+			const named = fs.statSync(lockPath, { bigint: true });
+			return held.ino === named.ino && held.dev === named.dev;
 		} catch {
 			// Removed under us: hold nothing, retry.
 			return false;
+		} finally {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// Ignore close errors; the lock content is already written.
+			}
 		}
-		return true;
 	}
 
 	/**
@@ -904,6 +937,23 @@ export class FileSessionStorage implements SessionStorage {
 					cause: error,
 				},
 			);
+		}
+
+		// Remove EPERM-rewrite leftovers (`<name>.jsonl.<snowflake>.bak`): the
+		// picker scan would otherwise resurrect the deleted session from the
+		// newest stale backup (#11499). Best-effort — a locked file warns
+		// instead of failing the delete the user asked for.
+		const base = path.basename(sessionPath);
+		for (const bak of this.listFilesSync(path.dirname(sessionPath), "*.bak")) {
+			if (!path.basename(bak).startsWith(`${base}.`)) continue;
+			try {
+				await fsp.unlink(bak);
+			} catch (err) {
+				logger.warn("Failed to remove stale session backup during delete", {
+					path: bak,
+					error: toError(err).message,
+				});
+			}
 		}
 	}
 }

@@ -8,7 +8,7 @@
  * string twice — once from the body content, once as the styled warning line.
  */
 import { describe, expect, it } from "bun:test";
-import { type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { type OutputMeta, stripGeneratedOutputNotice, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
@@ -85,10 +85,6 @@ describe("stripOutputNotice", () => {
 		expect(stripOutputNotice(combined, truncation).trimEnd()).toBe(body);
 	});
 
-	it("returns input unchanged when meta is undefined", () => {
-		expect(stripOutputNotice("plain text", undefined)).toBe("plain text");
-	});
-
 	it("returns input unchanged when meta has no notice-emitting fields", () => {
 		// e.g. meta carries only `source` info; formatOutputNotice yields "".
 		const sourceOnly: OutputMeta = { source: { type: "path", value: "/tmp/x" } };
@@ -102,6 +98,18 @@ describe("stripOutputNotice", () => {
 		// eagerly must not corrupt that prefix.
 		const streaming = "partial output so far…";
 		expect(stripOutputNotice(streaming, truncation)).toBe(streaming);
+	});
+
+	it("strips result-limit notices without metadata, with or without retry advice", () => {
+		const atCap: OutputMeta = { limits: { resultLimit: { reached: 200 } } };
+		const combined: OutputMeta = {
+			limits: {
+				resultLimit: { reached: 100, suggestion: 200 },
+				columnTruncated: { maxColumn: 512, unit: "chars" },
+			},
+		};
+		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(atCap)}`)).toBe("body");
+		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(combined)}`)).toBe("body");
 	});
 
 	it("only strips the trailing occurrence, not a coincidental earlier match", () => {

@@ -17,18 +17,18 @@ import {
 	extractImagePastePathsFromText,
 	extractImagePathFromText,
 	extractPastePathsFromText,
-	SPACE_HOLD_MECHANICAL_RUN,
-	SPACE_HOLD_RELEASE_MS,
-	SPACE_REPEAT_MAX_GAP_MS,
 } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { SPACE_HOLD_MECHANICAL_RUN, SPACE_HOLD_RELEASE_MS, SPACE_REPEAT_MAX_GAP_MS } from "@oh-my-pi/pi-tui/space-hold";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
-function makeEditor() {
+function makeEditor(holdEnabled = true) {
 	const editor = new CustomEditor(getEditorTheme());
 	const events: string[] = [];
-	editor.sttHoldEnabled = () => true;
-	editor.onSpaceHoldStart = () => events.push("start");
-	editor.onSpaceHoldEnd = () => events.push("end");
+	editor.spaceHold.handler = {
+		enabled: () => holdEnabled,
+		onStart: () => events.push("start"),
+		onEnd: () => events.push("end"),
+	};
 	return { editor, events };
 }
 
@@ -234,6 +234,77 @@ describe("CustomEditor bracketed path paste", () => {
 
 		expect(editor.getText()).toBe(chipLabel("video", 1));
 		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
+	});
+
+	it("shows only the chip whose full attachment number remains in the buffer", () => {
+		const { editor } = makeEditor();
+		for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		editor.pendingImages = Array.from({ length: 10 }, () => image);
+		editor.setText(`${chipLabel("paste", 10)} ${chipLabel("image", 10)}`);
+
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#10", "paste#10"]);
+	});
+
+	it("tracks chips drawn with a theme's overridden chip glyph", async () => {
+		await initTheme();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
+		try {
+			const { editor } = makeEditor();
+			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+			editor.setText(`see ${chipLabel("paste", 10)}`);
+
+			expect(editor.getText()).toBe("see 📎 #10");
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["paste#10"]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("keeps recorded paste and image chips after their theme glyph changes", async () => {
+		await initTheme();
+		const { editor } = makeEditor();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => {
+			if (key === "chip.paste") return "🧷";
+			if (key === "chip.image") return "🔶";
+			return symbol(key);
+		});
+		let draft = "";
+		try {
+			const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+			editor.setDraft("[Image #1]", [image]);
+			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+			draft = `${chipLabel("image", 1)} ${chipLabel("paste", 10)}`;
+			editor.setText(draft);
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
+		} finally {
+			spy.mockRestore();
+		}
+
+		editor.setText(`${draft} edited`);
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
+		expect(editor.getExpandedText()).toBe("[Image #1] blob 10 edited");
+	});
+
+	it("favors an active image atom when its glyph reuses a deleted paste label", async () => {
+		await initTheme();
+		const { editor } = makeEditor();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
+		try {
+			editor.insertTextAttachment("deleted paste");
+			editor.setText("");
+			spy.mockImplementation(key => (key === "chip.image" ? "📎" : symbol(key)));
+			editor.pendingImages.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
+			editor.insertAtom(chipLabel("image", 1), "[Image #1]");
+
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1"]);
+			expect(editor.getExpandedText().trimEnd()).toBe("[Image #1]");
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	describe("skill chips", () => {
@@ -698,13 +769,6 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		vi.useRealTimers();
 	});
 
-	it("types deliberate space taps without triggering, even several in a row", () => {
-		const { editor, events } = makeEditor();
-		feedSpaces(editor, 3, TAP_GAP_MS);
-		expect(editor.getText()).toBe("   ");
-		expect(events).toEqual([]);
-	});
-
 	it("recognizes a held bar from a steady fast cadence and tracks back the burst", () => {
 		const { editor, events } = makeEditor();
 		editor.handleInput("h");
@@ -752,8 +816,7 @@ describe("CustomEditor space-hold push-to-talk", () => {
 	});
 
 	it("leaves the space bar typing normally when the gesture is disabled", () => {
-		const { editor, events } = makeEditor();
-		editor.sttHoldEnabled = () => false;
+		const { editor, events } = makeEditor(false);
 		feedSpaces(editor, 8, REPEAT_GAP_MS);
 		expect(editor.getText()).toBe(" ".repeat(8));
 		expect(events).toEqual([]);

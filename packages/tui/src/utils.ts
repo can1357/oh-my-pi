@@ -241,6 +241,9 @@ const OSC66_PREFIX = "\x1b]66;";
 const APC_SPAN_REGEX = /\x1b_[\s\S]*?(?:\x07|\x1b\\)/g;
 const APC_PREFIX = "\x1b_";
 const PRINTABLE_ASCII_REGEX = /^[\u0020-\u007e]*$/;
+// Keep native escape parsing: a JS SGR parser costs more than Bun's scanner.
+// Test Jamo separately from the ASCII correction markers to keep scans cheap.
+const HANGUL_COMPAT_JAMO_REGEX = /[\u3131-\u318e]/;
 
 // Pin Bun.stringWidth semantics to the native width engine and guard against Bun
 // default drift: strip ANSI/OSC (don't count escape bytes) and treat
@@ -337,6 +340,18 @@ export function visibleWidth(str: string): number {
 		return str.length;
 	}
 
+	// The extra gate pays for itself on long uncached lines, not short cache
+	// misses. APC and OSC 66 still need their existing payload corrections.
+	if (
+		!cacheable &&
+		!str.includes("\t") &&
+		!HANGUL_COMPAT_JAMO_REGEX.test(str) &&
+		!str.includes(APC_PREFIX) &&
+		!str.includes(OSC66_PREFIX)
+	) {
+		return Bun.stringWidth(str, STRING_WIDTH_OPTS);
+	}
+
 	let tabCount = 0;
 	let compatibilityJamoCount = 0;
 	let fillerCount = 0;
@@ -382,6 +397,70 @@ export function visibleWidth(str: string): number {
 		visibleWidthCache.set(str, width);
 	}
 	return width;
+}
+
+/** Remove ANSI, OSC, and APC control sequences while preserving visible text. */
+export function stripTerminalSequences(str: string): string {
+	if (!str.includes("\x1b")) return str;
+	let result = "";
+	let i = 0;
+	while (i < str.length) {
+		const ansi = extractAnsiCode(str, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		result += str[i];
+		i++;
+	}
+	return result;
+}
+
+/**
+ * Extract ANSI escape sequences from a string at the given position.
+ * Copied verbatim from pi-mono `packages/tui/src/utils.ts` alongside
+ * `stripTerminalSequences` so both behave identically to upstream pi. Kept
+ * module-private: it was removed from the public API in 9.6.2 and this port
+ * does not reintroduce that export.
+ */
+function extractAnsiCode(str: string, pos: number): { code: string; length: number } | null {
+	if (pos >= str.length || str[pos] !== "\x1b") return null;
+
+	const next = str[pos + 1];
+
+	// CSI sequence: ESC [ ... m/G/K/H/J
+	if (next === "[") {
+		let j = pos + 2;
+		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
+		if (j < str.length) return { code: str.substring(pos, j + 1), length: j + 1 - pos };
+		return null;
+	}
+
+	// OSC sequence: ESC ] ... BEL or ESC ] ... ST (ESC \)
+	// Used for hyperlinks (OSC 8), window titles, etc.
+	if (next === "]") {
+		let j = pos + 2;
+		while (j < str.length) {
+			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
+			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
+			j++;
+		}
+		return null;
+	}
+
+	// APC sequence: ESC _ ... BEL or ESC _ ... ST (ESC \)
+	// Used for cursor marker and application-specific commands
+	if (next === "_") {
+		let j = pos + 2;
+		while (j < str.length) {
+			if (str[j] === "\x07") return { code: str.substring(pos, j + 1), length: j + 1 - pos };
+			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.substring(pos, j + 2), length: j + 2 - pos };
+			j++;
+		}
+		return null;
+	}
+
+	return null;
 }
 
 /**

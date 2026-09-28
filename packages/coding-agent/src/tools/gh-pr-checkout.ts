@@ -32,6 +32,8 @@ import { invalidateAllForNumber } from "./github-cache";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
+import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
 export const GH_PR_CHECKOUT_FIELDS = [
 	"baseRefName",
@@ -500,8 +502,8 @@ export async function checkoutPullRequest(
 					localBranch,
 					{
 						detach: false,
-						clone: session.settings.get("worktree.clone"),
-						backend: parseIsolationBackend(session.settings.get("isolation.backend")),
+						clone: cfgWorktreeClone.get(session.settings),
+						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
 					},
 					signal,
 				);

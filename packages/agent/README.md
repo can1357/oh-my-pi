@@ -154,8 +154,9 @@ const agent = new Agent({
   // Dynamic model-scoped API key resolution (for expiring OAuth tokens)
   getApiKey: async (model) => tokenForModel(model),
 
-  // Tool execution context (late-bound UI/session access)
-  getToolContext: () => ({ /* app-defined */ }),
+  // Tool execution context (late-bound UI/session access). Surface the loop's
+  // passive-context sink so tools can call ctx.addAdditionalContext(...).
+  getToolContext: toolCall => ({ addAdditionalContext: toolCall?.addAdditionalContext /* app-defined */ }),
 });
 ```
 
@@ -461,7 +462,7 @@ const runCoverage = aggregateAgentRunCoverage(coverages);
 
 ### Tool status reporting
 
-`execute_tool` spans carry `pi.gen_ai.tool.status` ∈
+`execute_tool` spans carry `omp.gen_ai.tool.status` ∈
 `"ok" | "error" | "skipped" | "blocked" | "timeout" | "aborted"`.
 `beforeToolCall` blocks throw a distinguishable `ToolCallBlockedError`
 internally; the catch path reports `status: "blocked"` instead of conflating

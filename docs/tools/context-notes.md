@@ -12,7 +12,7 @@
 ## Registration / Visibility
 
 - Requires `compaction.experimentalContextManagement = true`, an undisposed session, and a session journal whose ID matches the tool session's owner ID.
-- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction, then restart to update available tools.
+- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction; the running session gains the tool immediately.
 - Metadata: `strict = true`, `loadMode = "essential"`. Calls without a `text` property request read approval; calls with that property request write approval.
 - Notes-backed rollover requires all four tools to be active: `context_notes`, `new_context`, `read`, and `grep`.
 

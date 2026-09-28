@@ -24,12 +24,14 @@ function json(value: unknown, status = 200): Response {
 
 function authStorage(accessToken = jwt()): AuthStorage {
 	return {
-		getOAuthAccessByCredentialId: async (_provider: string, credentialId: number) => ({
-			ok: true as const,
-			accessToken,
-			credentialId,
-			accountId: "workspace-a",
-		}),
+		oauth: {
+			accessById: async (_provider: string, credentialId: number) => ({
+				ok: true as const,
+				accessToken,
+				credentialId,
+				accountId: "workspace-a",
+			}),
+		},
 	} as unknown as AuthStorage;
 }
 
@@ -56,18 +58,16 @@ describe("Codex Security cloud client", () => {
 		const resolutions: boolean[] = [];
 		const requests: Array<{ authorization: string | null; accountId: string | null }> = [];
 		const storage = {
-			getOAuthAccessByCredentialId: async (
-				_provider: string,
-				credentialId: number,
-				options: { forceRefresh: boolean },
-			) => {
-				resolutions.push(options.forceRefresh);
-				return {
-					ok: true as const,
-					accessToken: options.forceRefresh ? "refreshed-token" : "initial-token",
-					credentialId,
-					accountId: "workspace-a",
-				};
+			oauth: {
+				accessById: async (_provider: string, credentialId: number, options: { forceRefresh: boolean }) => {
+					resolutions.push(options.forceRefresh);
+					return {
+						ok: true as const,
+						accessToken: options.forceRefresh ? "refreshed-token" : "initial-token",
+						credentialId,
+						accountId: "workspace-a",
+					};
+				},
 			},
 		} as unknown as AuthStorage;
 		let attempt = 0;

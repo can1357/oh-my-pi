@@ -278,6 +278,7 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	instructions?: unknown;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -313,7 +314,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers);
+		const servers = expandEnvVarsDeep(parsed.mcpServers, {
+			CLAUDE_PLUGIN_ROOT: root.path,
+			OMP_PLUGIN_ROOT: root.path,
+		});
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -326,12 +330,27 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
+			// Report a dropped value, as the native and standalone loaders do: a
+			// typo would otherwise silently revert the id encoding or re-enable
+			// the server's instructions.
 			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
+			if (requestIdFormat === undefined && cfg.requestIdFormat != null) {
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid requestIdFormat ${JSON.stringify(cfg.requestIdFormat)}, ignoring`,
+				);
+			}
+			const instructions = typeof cfg.instructions === "boolean" ? cfg.instructions : undefined;
+			if (instructions === undefined && cfg.instructions != null) {
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid instructions ${JSON.stringify(cfg.instructions)}, ignoring`,
+				);
+			}
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
+				...(instructions !== undefined && { instructions }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: cfg.args }),
 				...(cfg.env !== undefined && { env: cfg.env }),

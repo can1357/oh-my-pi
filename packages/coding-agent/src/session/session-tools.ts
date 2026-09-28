@@ -7,10 +7,11 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
-import type { Settings, SkillsSettings } from "../config/settings";
+import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
+import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
@@ -20,6 +21,9 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import type { AgentDefinition } from "../task/types";
+import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -45,6 +49,17 @@ import { toolReadsSkillUris } from "../system-prompt";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
+import {
+	cfgExternalThinking,
+	cfgIncludeModelInPrompt,
+	cfgProvidersOpenaiCodexCodeMode,
+	cfgProvidersOpenaiCodexCodeModeDirectTools,
+	cfgSkillful,
+} from "./settings";
+import { cfgStartupQuiet } from "../modes/settings";
+import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -68,8 +83,22 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** Live enabled eval preludes; candidates for the next base rebuild's advertised snapshot. */
+	evalPreludes(): readonly EvalPreludeDefinition[];
+	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
+	sessionAgents(): readonly AgentDefinition[];
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
+}
+
+/** Registry delta applied by the SDK's settings-gated tool reconcile. */
+export interface SettingsGatedToolDelta {
+	/** Newly registered names: `builtIn` marks built-in factory provenance, `activate` joins the enabled set. */
+	readonly added: readonly { readonly name: string; readonly builtIn: boolean; readonly activate: boolean }[];
+	/** Names whose registry entries were removed. */
+	readonly removed: readonly string[];
+	/** `xd://` state after following `tools.xdev`; undefined while mounting is off. */
+	readonly xdev: XdevState | undefined;
 }
 
 interface SessionToolsOptions {
@@ -88,6 +117,11 @@ interface SessionToolsOptions {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Re-resolves settings-gated tools against live settings, mutating the shared
+	 * registry; `isBuiltIn` reports this session's built-in provenance.
+	 */
+	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -184,6 +218,8 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
+const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const SESSION_AGENT_NOTICE_MESSAGE_TYPE = "session-agent-notice";
 
 /**
  * Structured payload persisted on each {@link XDEV_MOUNT_NOTICE_MESSAGE_TYPE}
@@ -200,6 +236,33 @@ interface ToolRosterNoticeDetails {
 interface XdevMountNoticeDetails {
 	added: string[];
 	removed: string[];
+}
+
+/** Prelude names added/removed by one hidden {@link EVAL_PRELUDE_NOTICE_MESSAGE_TYPE} message. */
+interface EvalPreludeNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
+/** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_MESSAGE_TYPE} message. */
+interface SessionAgentNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
+/**
+ * Prompt-affecting state frozen at each base rebuild. Tools render their
+ * provider-visible text from this snapshot instead of live settings, so
+ * mid-session toggles leave the cached prefix byte-stable and ride hidden
+ * notices until the next rebuild absorbs them.
+ */
+interface PromptSurface {
+	/** Skill-URI hints in `bash`/`read` (mid-session `/skillful` toggles). */
+	skillHintVisible: boolean;
+	/** Eval preludes in the system prompt and eval description. */
+	evalPreludes: readonly EvalPreludeDefinition[];
+	/** User-tagged model agents listed in the task description. */
+	sessionAgents: readonly AgentDefinition[];
 }
 
 interface PendingNoticePreview<T> {
@@ -279,6 +342,14 @@ export class SessionTools {
 	 */
 	#basePromptXdevNames: ReadonlySet<string> = new Set();
 	#toolRegistryMutationScope = new AsyncLocalStorage<boolean>();
+	/**
+	 * Render-scoped candidate prompt surface. Rebuild frames run inside
+	 * `.run(candidate, …)` so tool getters read the candidate during render and
+	 * signature computation; everything outside the frame reads the committed
+	 * {@link #promptSurface}. Abandoned frames simply exit their scope — no
+	 * rollback write that could clobber a newer commit.
+	 */
+	#promptSurfaceScope = new AsyncLocalStorage<PromptSurface>();
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
@@ -311,10 +382,21 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/**
+	 * Prompt surface committed by the last system-prompt rebuild. The
+	 * provider-visible system prompt is deliberately byte-stable across
+	 * mid-session `/skillful` and eval-prelude toggles (a notice rides the next
+	 * turn instead), so the provider-side text in `BashTool.description`,
+	 * `ReadTool.parameters`, and `EvalTool.description` must freeze to the same
+	 * state — reading live settings per request would mutate the provider tool
+	 * prefix without the intended prompt refresh. The refresh lifecycle updates it.
+	 */
+	#promptSurface: PromptSurface;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -342,6 +424,7 @@ export class SessionTools {
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
+		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -355,6 +438,7 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#promptSurface = this.#derivePromptSurface();
 		// Seed from the construction slate (top-level tools plus xd:// mounts).
 		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
 		// so an early reconcile (think/Code Mode after the startup model
@@ -421,6 +505,43 @@ export class SessionTools {
 		return this.#skillsSettings;
 	}
 
+	/**
+	 * Skill-URI hint visibility (see {@link #promptSurface}). Tools read this
+	 * instead of the live `skillful` setting so the provider tool prefix stays
+	 * byte-stable between system-prompt rebuilds.
+	 *
+	 * Inside a rebuild frame ({@link #promptSurfaceScope}) this returns the
+	 * candidate so the rendered prompt and computed signature see the new
+	 * state; outside, the committed snapshot.
+	 */
+	get skillHintVisible(): boolean {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).skillHintVisible;
+	}
+
+	/**
+	 * Eval preludes the system prompt and eval description advertise (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame.
+	 */
+	get advertisedEvalPreludes(): readonly EvalPreludeDefinition[] {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).evalPreludes;
+	}
+
+	/**
+	 * User-tagged model agents the task description advertises (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame.
+	 */
+	get advertisedSessionAgents(): readonly AgentDefinition[] {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).sessionAgents;
+	}
+
+	/** Derives the candidate surface from live state without publishing it. */
+	#derivePromptSurface(): PromptSurface {
+		return {
+			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
+			evalPreludes: this.#host.evalPreludes(),
+			sessionAgents: this.#host.sessionAgents(),
+		};
+	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
 	clearAcpPermissionDecisions(): void {
 		this.#acpPermissionDecisions.clear();
@@ -696,7 +817,7 @@ export class SessionTools {
 	#currentPromptModelKey(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
-		if (this.#host.settings.get("includeModelInPrompt")) return formatModelString(activeModel);
+		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return formatModelString(activeModel);
 		return `delegation-bias:${resolveDelegationBias(activeModel)}`;
 	}
 
@@ -714,8 +835,8 @@ export class SessionTools {
 	/** Whether a model transition crosses a Code Mode presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
-		const setting = this.#host.settings.get("providers.openai-codex.codeMode");
-		const extraDirectTools = this.#host.settings.get("providers.openai-codex.codeModeDirectTools");
+		const setting = cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings);
+		const extraDirectTools = cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings);
 		const resolve = (model: Model | undefined) =>
 			resolveCodeMode({
 				provider: model?.provider ?? "",
@@ -786,7 +907,7 @@ export class SessionTools {
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
 		if (this.#isExplicitAutoApproveMode()) {
-			const userPolicies = (this.#host.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
+			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
 		}
@@ -883,8 +1004,8 @@ export class SessionTools {
 	#isExplicitAutoApproveMode(): boolean {
 		return (
 			this.#autoApprove ||
-			(this.#host.settings.isConfigured("tools.approvalMode") &&
-				this.#host.settings.get("tools.approvalMode") === "yolo")
+			(cfgToolsApprovalMode.isConfigured(this.#host.settings) &&
+				cfgToolsApprovalMode.get(this.#host.settings) === "yolo")
 		);
 	}
 
@@ -902,8 +1023,8 @@ export class SessionTools {
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
-			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			setting: cfgProvidersOpenaiCodexCodeMode.get(this.#host.settings),
+			extraDirectTools: cfgProvidersOpenaiCodexCodeModeDirectTools.get(this.#host.settings),
 			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
@@ -1050,10 +1171,13 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		let candidateSurface: PromptSurface | undefined;
 		try {
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
+				// Local alias: closures below cannot observe the field narrowing.
+				const rebuildSystemPrompt = this.#rebuildSystemPrompt;
 				// The provider receives only `appliedNames`, but prompt capability and
 				// safety gates must see every enabled tool that remains callable via
 				// the Code Mode eval bridge. The rendered tool inventory is restricted
@@ -1071,28 +1195,50 @@ export class SessionTools {
 					const tool = this.#toolRegistry.get(name);
 					return tool ? [tool] : [];
 				});
-				const signature = this.#computeAppliedToolSignature(
-					promptToolNames,
-					promptTools,
-					directToolNames,
-					mountedSignatureTools,
-				);
+				// Derive the candidate surface and run both the signature
+				// computation and the awaited render inside its scope: the tool
+				// getters read the candidate, so prompt, signature and provider
+				// schemas describe the same state. Nothing publishes outside this
+				// frame until the commit below.
+				const candidate = this.#derivePromptSurface();
+				const computeSignature = (surface: PromptSurface): string =>
+					this.#promptSurfaceScope.run(surface, () =>
+						this.#computeAppliedToolSignature(
+							promptToolNames,
+							promptTools,
+							directToolNames,
+							mountedSignatureTools,
+						),
+					);
+				// Eval-prelude and model-mention changes alone never trigger a
+				// rebuild: they ride their hidden notices. The trigger keeps the
+				// committed sets; a rebuild caused by anything else absorbs the live
+				// ones.
+				const triggerSignature = computeSignature({
+					...candidate,
+					evalPreludes: this.#promptSurface.evalPreludes,
+					sessionAgents: this.#promptSurface.sessionAgents,
+				});
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
-					signature !== this.#lastAppliedToolSignature &&
+					triggerSignature !== this.#lastAppliedToolSignature &&
 					this.#lastAppliedToolSignature !== undefined &&
 					this.#host.model()?.thinking?.prefixBinding === true &&
 					this.#host.agent.state.messages.some(message => message.role === "assistant");
 				if (freezeImplicitPromptRefresh) {
-					frozenSignature = signature;
-				} else if (forcePromptRefresh || signature !== this.#lastAppliedToolSignature) {
+					frozenSignature = triggerSignature;
+				} else if (forcePromptRefresh || triggerSignature !== this.#lastAppliedToolSignature) {
+					const signature = computeSignature(candidate);
 					const built = await untilAborted(
 						signal,
-						this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+						this.#promptSurfaceScope.run(candidate, () =>
+							rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					candidateSurface = candidate;
 				}
 			}
 			signal?.throwIfAborted();
@@ -1145,6 +1291,9 @@ export class SessionTools {
 				// tracking any later frozen changes that must follow a delivered base.
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
+				// Publish the exact surface the prompt rendered with — never
+				// re-derive from live settings, which could diverge mid-flight.
+				this.#promptSurface = candidateSurface ?? this.#promptSurface;
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
@@ -1233,7 +1382,7 @@ export class SessionTools {
 			if (!pending.added.delete(name)) pending.removed.add(name);
 		}
 		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		if (this.#host.settings.get("startup.quiet")) return;
+		if (cfgStartupQuiet.get(this.#host.settings)) return;
 		const parts: string[] = [];
 		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
 		if (removedNames.length > 0) parts.push(`unmounted ${removedNames.join(", ")}`);
@@ -1356,6 +1505,90 @@ export class SessionTools {
 		};
 	}
 
+	/**
+	 * Builds the hidden notice reconciling the eval preludes the model knows with
+	 * the live set. Delivered with the next user prompt instead of rebuilding the
+	 * system prompt, so a mid-session toggle (`/computer on`) keeps the provider
+	 * cache prefix intact.
+	 *
+	 * Known preludes are the committed base snapshot, then every prelude notice
+	 * still in context, applied in order. Deriving this from the transcript
+	 * rather than tracked state stays truthful across base rebuilds (which absorb
+	 * the live set), compaction (which drops old notices), and resume.
+	 */
+	takeEvalPreludeNotice(): CustomMessage<EvalPreludeNoticeDetails> | undefined {
+		const known = new Set(this.#promptSurface.evalPreludes.map(definition => definition.name));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = this.#host.evalPreludes();
+		const liveNames = new Set(live.map(definition => definition.name));
+		const added = live.filter(definition => !known.has(definition.name));
+		const removed = [...known].filter(name => !liveNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		// Topic docs are served through `read`; sessions without it get them inline,
+		// matching the eval description's `inlineTopics` fallback.
+		const canRead = (this.#toolPredicateNames ?? this.getActiveToolNames()).includes("read");
+		return {
+			role: "custom",
+			customType: EVAL_PRELUDE_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(evalPreludeNoticePrompt, {
+				added: added.map(definition => ({ name: definition.name, summary: evalPreludeSummary(definition) })),
+				removed,
+				canRead,
+				sections: added.flatMap(definition => [
+					...(canRead ? [] : [definition.documentation.trim()]),
+					...(definition.guidance ? [definition.guidance.trim()] : []),
+				]),
+			}),
+			details: { added: added.map(definition => definition.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/**
+	 * Builds the hidden notice reconciling the user-tagged model agents the task
+	 * description advertises with the live set. Delivered with the next user
+	 * prompt instead of rewriting the task description, so tagging a model
+	 * mid-session keeps the provider cache prefix intact.
+	 *
+	 * Known agents are the committed base snapshot, then every agent notice still
+	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 */
+	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
+		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = this.#host.sessionAgents();
+		const liveNames = new Set(live.map(agent => agent.name));
+		const added = live.filter(agent => !known.has(agent.name));
+		const removed = [...known].filter(name => !liveNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: SESSION_AGENT_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(sessionAgentNoticePrompt, {
+				added: added.map(agent => ({ name: agent.name, description: agent.description })),
+				removed,
+			}),
+			details: { added: added.map(agent => agent.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
 	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
 	peekPendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
@@ -1456,8 +1689,8 @@ export class SessionTools {
 			? xdevDocsFor(
 					this.#xdev,
 					new Set(addedNames),
-					this.#host.settings.get("tools.xdevDocs"),
-					this.#host.settings.get("tools.xdevInlineDevices"),
+					cfgToolsXdevDocs.get(this.#host.settings),
+					cfgToolsXdevInlineDevices.get(this.#host.settings),
 				)
 			: "";
 		return {
@@ -1478,11 +1711,11 @@ export class SessionTools {
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
 		if (this.#skillsReloadable) {
-			const skillsSettings = this.#host.settings.getGroup("skills");
+			const skillsSettings = cfgSkills.get(this.#host.settings);
 			const discovered = await loadSkills({
 				...skillsSettings,
 				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
 				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});
 			this.#skills = discovered.skills;
@@ -1618,21 +1851,15 @@ export class SessionTools {
 	}
 
 	/**
-	 * Session-scoped enable/disable for the private `think` scratchpad tool.
-	 *
-	 * Enabling constructs the tool once and refreshes the model's tool contract;
-	 * disabling removes it from the active set while preserving its registry entry.
+	 * Reconciles the private `think` scratchpad with the `externalThinking`
+	 * setting and the active model. Enabling constructs the tool once;
+	 * disabling removes it from the active set but keeps its registry entry.
 	 *
 	 * @returns false when enabling was requested but this session cannot build the tool.
 	 */
-	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
-		return this.#setThinkToolActive(enabled && supportsExternalThinking(this.#host.model()));
-	}
-
-	/** Reconciles the external scratchpad after the active model changes. */
 	reconcileThinkTool(): Promise<boolean> {
 		return this.#setThinkToolActive(
-			this.#host.settings.get("externalThinking") && supportsExternalThinking(this.#host.model()),
+			cfgExternalThinking.get(this.#host.settings) && supportsExternalThinking(this.#host.model()),
 		);
 	}
 
@@ -1660,6 +1887,40 @@ export class SessionTools {
 	}
 
 	/**
+	 * Re-resolves settings-gated tools (built-in factories, image/speech generation,
+	 * `xd://` mounting) against live settings: registers newly allowed tools,
+	 * unregisters disallowed ones, and reapplies the enabled set with one forced
+	 * prompt rebuild — unconditionally unless `refreshPrompt` is false, then only
+	 * when the tool set changed. Unrelated selections, MCP/extension tools, and the
+	 * Code Mode partition are preserved.
+	 */
+	reconcileBuiltinTools({ refreshPrompt = true }: { refreshPrompt?: boolean } = {}): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			const reconcile = this.#reconcileSettingsGatedTools;
+			if (!reconcile || this.#host.isDisposed()) return;
+			// Sampled before the delta: it still carries names mounted under the
+			// `xd://` state the reconcile may release.
+			const enabled = new Set(this.getEnabledToolNames());
+			const delta = await reconcile(name => this.#builtInToolNames.has(name));
+			for (const name of delta.removed) {
+				enabled.delete(name);
+				this.#builtInToolNames.delete(name);
+			}
+			for (const { name, builtIn, activate } of delta.added) {
+				this.setToolBuiltIn(name, builtIn);
+				if (activate) enabled.add(name);
+			}
+			const xdevChanged = delta.xdev !== this.#xdev;
+			if (xdevChanged) {
+				this.#xdev = delta.xdev;
+				if (delta.xdev) delta.xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+			}
+			if (!refreshPrompt && !xdevChanged && delta.added.length === 0 && delta.removed.length === 0) return;
+			await this.#applyActiveToolsByName([...enabled], true);
+		});
+	}
+
+	/**
 	 * Rebuilds the stable base prompt for the current tools and model.
 	 * `commitIf` lets asynchronous producers discard a stale rebuild atomically
 	 * after its inputs have been superseded.
@@ -1674,6 +1935,8 @@ export class SessionTools {
 
 	async #prepareBaseSystemPrompt(isCurrent?: () => boolean): Promise<SystemPromptPreparation | undefined> {
 		if (this.#host.isDisposed() || !this.#rebuildSystemPrompt || isCurrent?.() === false) return;
+		// Local alias: closures below cannot observe the field narrowing.
+		const rebuildSystemPrompt = this.#rebuildSystemPrompt;
 		const activeToolNames = this.getActiveToolNames();
 		const promptToolNames =
 			this.#codeModeDirectWireSignature === undefined ? activeToolNames : this.getEnabledToolNames();
@@ -1681,15 +1944,39 @@ export class SessionTools {
 		const directToolNames = this.#codeModeDirectWireSignature === undefined ? undefined : activeToolNames;
 		this.#setActiveToolNames?.(this.#toolPredicateNames ?? activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
-		const built = await this.#rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames });
-		if (this.#host.isDisposed() || isCurrent?.() === false) return;
+		// Derive the candidate and run the awaited render inside its scope: the
+		// tool getters read the candidate while the prompt renders, so the built
+		// prompt and the captured signature describe the same state. Nothing is
+		// published to {@link #promptSurface} here — an abandoned, stale or
+		// throwing preparation leaves the committed snapshot untouched, and the
+		// scope frame (not a rollback write) guarantees no clobbering of a newer
+		// winner.
+		const candidate = this.#derivePromptSurface();
+		const built = await this.#promptSurfaceScope.run(candidate, () =>
+			rebuildSystemPrompt(promptToolNames, this.#toolRegistry, { directToolNames }),
+		);
+		const promptTools = promptToolNames
+			.map(name => this.#toolRegistry.get(name))
+			.filter((tool): tool is AgentTool => tool != null);
+		const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		const signature = this.#promptSurfaceScope.run(candidate, () =>
+			this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames, mountedSignatureTools),
+		);
 		return {
 			systemPrompt: built.systemPrompt,
 			commit: () => {
+				// Publish only to a live, current session whose base this
+				// preparation still owns.
 				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
-				// A handler may have rebuilt policy while this preparation was awaiting its final commit.
+				// A handler may have rebuilt policy while this preparation was
+				// awaiting its final commit: its own lifecycle published its own
+				// snapshot, so only carry the prompt forward.
 				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
 				this.#baseSystemPrompt = built.systemPrompt;
+				this.#promptSurface = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
 				if (
@@ -1706,20 +1993,7 @@ export class SessionTools {
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
-				// Match the committed prompt so an unchanged tool set can skip rebuilding it.
-				const promptTools = promptToolNames
-					.map(name => this.#toolRegistry.get(name))
-					.filter((tool): tool is AgentTool => tool != null);
-				const mountedSignatureTools = [...(this.#xdev?.mountedNames ?? [])].flatMap(name => {
-					const tool = this.#toolRegistry.get(name);
-					return tool ? [tool] : [];
-				});
-				this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(
-					promptToolNames,
-					promptTools,
-					directToolNames,
-					mountedSignatureTools,
-				);
+				this.#lastAppliedToolSignature = signature;
 				return true;
 			},
 		};
@@ -1729,12 +2003,13 @@ export class SessionTools {
 	async buildSystemPromptForAgentStart(
 		promptText: string,
 		isCurrent: () => boolean,
+		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
 		try {
-			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
+			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText, signal);
 			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
 			const injected = memory.context;
 			if (!injected) {
@@ -1817,7 +2092,7 @@ export class SessionTools {
 	 *
 	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
 	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
+	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`). The
 	 * closure-captured ones cannot change at runtime regardless of skip behavior.
 	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -515,5 +515,210 @@ describe("resolveAwsCredentials", () => {
 				`[profile b]\nrole_arn = arn:aws:iam::1:role/b\nsource_profile = a\n`,
 		);
 		await expect(resolveAwsCredentials({ profile: "a", region: "us-east-1" })).rejects.toThrow(/cycle/);
+	});
+});
+
+// SSO token refresh. The cached access token is short-lived (commonly 1 h) but
+// ships with a refresh token whose client registration lasts weeks; these cover
+// the refresh_token grant, cache write-back, and the cases where refresh is not
+// possible and the user really does have to run `aws sso login`.
+
+describe("resolveAwsCredentials SSO token refresh", () => {
+	let tmp: string;
+	let cacheDir: string;
+	let homedirSpy: ReturnType<typeof spyOn<typeof os, "homedir">>;
+	const saved = new Map<string, string | undefined>();
+	const START_URL = "https://example.awsapps.com/start";
+	const SESSION = "my-session";
+
+	/** SSO cache filenames are sha1(sso_session) for the sso-session profile shape. */
+	function cacheFileName(key: string): string {
+		return `${new Bun.CryptoHasher("sha1").update(key).digest("hex")}.json`;
+	}
+
+	beforeEach(async () => {
+		for (const k of ENV_KEYS) {
+			saved.set(k, Bun.env[k]);
+			delete Bun.env[k];
+		}
+		Bun.env.AWS_EC2_METADATA_DISABLED = "true";
+		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-sso-"));
+		// The SSO cache path is built from os.homedir(), which Bun resolves from the
+		// passwd entry rather than $HOME, so redirect it the way stream.test.ts does.
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(tmp);
+		cacheDir = path.join(tmp, ".aws", "sso", "cache");
+		await fs.mkdir(cacheDir, { recursive: true });
+		clearAwsCredentialCache();
+	});
+
+	afterEach(async () => {
+		for (const [k, v] of saved) {
+			if (v === undefined) delete Bun.env[k];
+			else Bun.env[k] = v;
+		}
+		saved.clear();
+		homedirSpy.mockRestore();
+		await removeWithRetries(tmp);
+		clearAwsCredentialCache();
+	});
+
+	async function writeSsoConfig(): Promise<void> {
+		const cfg = path.join(tmp, "config");
+		await Bun.write(
+			cfg,
+			`[profile sso-test]\n` +
+				`sso_session = ${SESSION}\n` +
+				`sso_account_id = 111122223333\n` +
+				`sso_role_name = TestRole\n` +
+				`region = us-east-1\n\n` +
+				`[sso-session ${SESSION}]\n` +
+				`sso_start_url = ${START_URL}\n` +
+				`sso_region = us-east-1\n`,
+		);
+		Bun.env.AWS_CONFIG_FILE = cfg;
+		const sharedPath = path.join(tmp, "credentials");
+		await Bun.write(sharedPath, "");
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = sharedPath;
+	}
+
+	async function writeCachedToken(token: Record<string, unknown>): Promise<string> {
+		const file = path.join(cacheDir, cacheFileName(SESSION));
+		await Bun.write(file, JSON.stringify(token));
+		return file;
+	}
+
+	function expiredToken(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+		return {
+			startUrl: START_URL,
+			region: "us-east-1",
+			accessToken: "stale-access-token",
+			expiresAt: new Date(Date.now() - 60_000).toISOString(),
+			refreshToken: "refresh-token-1",
+			clientId: "client-id",
+			clientSecret: "client-secret",
+			registrationExpiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+			...overrides,
+		};
+	}
+
+	/** Mock the OIDC token endpoint plus the SSO portal GetRoleCredentials call. */
+	function ssoMock(
+		captured: { oidc: Array<Record<string, unknown>>; bearer: string[] },
+		opts: { oidcStatus?: number; rotateRefreshToken?: boolean } = {},
+	): FetchImpl {
+		return Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("oidc.")) {
+					captured.oidc.push(JSON.parse(String(init?.body)));
+					if (opts.oidcStatus && opts.oidcStatus !== 200) {
+						return new Response(JSON.stringify({ error: "invalid_grant" }), { status: opts.oidcStatus });
+					}
+					return Response.json({
+						accessToken: "fresh-access-token",
+						expiresIn: 3600,
+						tokenType: "Bearer",
+						...(opts.rotateRefreshToken ? { refreshToken: "refresh-token-2" } : {}),
+					});
+				}
+				const headers = (init?.headers ?? {}) as Record<string, string>;
+				captured.bearer.push(String(headers["x-amz-sso_bearer_token"]));
+				return Response.json({
+					roleCredentials: {
+						accessKeyId: "ASIASSO",
+						secretAccessKey: "sso-secret",
+						sessionToken: "sso-token",
+						expiration: Date.now() + 3_600_000,
+					},
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		);
+	}
+
+	test("refreshes an expired token and uses the fresh one for GetRoleCredentials", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(expiredToken());
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		const creds = await resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) });
+
+		expect(creds.accessKeyId).toBe("ASIASSO");
+		expect(captured.oidc).toHaveLength(1);
+		expect(captured.oidc[0]).toMatchObject({
+			grantType: "refresh_token",
+			refreshToken: "refresh-token-1",
+			clientId: "client-id",
+			clientSecret: "client-secret",
+		});
+		// The portal must see the refreshed token, not the stale one.
+		expect(captured.bearer).toEqual(["fresh-access-token"]);
+	});
+
+	test("persists the refreshed token, including a rotated refresh token", async () => {
+		await writeSsoConfig();
+		const file = await writeCachedToken(expiredToken());
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		await resolveAwsCredentials({
+			profile: "sso-test",
+			fetch: ssoMock(captured, { rotateRefreshToken: true }),
+		});
+
+		const persisted = JSON.parse(await Bun.file(file).text());
+		expect(persisted.accessToken).toBe("fresh-access-token");
+		expect(persisted.refreshToken).toBe("refresh-token-2");
+		expect(Date.parse(persisted.expiresAt)).toBeGreaterThan(Date.now());
+		// Fields the resolver does not consume must survive the rewrite.
+		expect(persisted.startUrl).toBe(START_URL);
+		expect(persisted.clientSecret).toBe("client-secret");
+		// No temp files left behind by the atomic rename.
+		expect((await fs.readdir(cacheDir)).filter(f => f.endsWith(".tmp"))).toEqual([]);
+	});
+
+	test("leaves a still-valid token alone", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(
+			expiredToken({ accessToken: "live-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString() }),
+		);
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		await resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) });
+
+		expect(captured.oidc).toHaveLength(0);
+		expect(captured.bearer).toEqual(["live-token"]);
+	});
+
+	test("still reports expiry when the token carries no refresh grant", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(expiredToken({ refreshToken: undefined, clientId: undefined, clientSecret: undefined }));
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
+			/has expired. Run 'aws sso login'/,
+		);
+		expect(captured.oidc).toHaveLength(0);
+	});
+
+	test("reports expiry when the refresh exchange is rejected", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(expiredToken());
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		await expect(
+			resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured, { oidcStatus: 400 }) }),
+		).rejects.toThrow(/has expired. Run 'aws sso login'/);
+		expect(captured.oidc).toHaveLength(1);
+	});
+
+	test("does not attempt refresh once the client registration has expired", async () => {
+		await writeSsoConfig();
+		await writeCachedToken(expiredToken({ registrationExpiresAt: new Date(Date.now() - 86_400_000).toISOString() }));
+		const captured = { oidc: [] as Array<Record<string, unknown>>, bearer: [] as string[] };
+
+		await expect(resolveAwsCredentials({ profile: "sso-test", fetch: ssoMock(captured) })).rejects.toThrow(
+			/has expired. Run 'aws sso login'/,
+		);
+		expect(captured.oidc).toHaveLength(0);
 	});
 });

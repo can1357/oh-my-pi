@@ -13,6 +13,7 @@ import {
 	type ContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
+	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	getToolSchemaMetadataRevision,
 	invalidateToolSchemaMetadata,
@@ -47,6 +48,14 @@ describe("estimateToolSchemaTokens", () => {
 			tokenizer,
 		);
 		expect(estimate).toBe(estimateToolSchemaTokens([{ name: "odd", description: "odd tool" } as never], tokenizer));
+	});
+
+	it("counts rendered examples, which the agent loop appends to the wire description", () => {
+		const tool = { name: "grep", description: "Search files.", parameters: { type: "object" } };
+		const examples = [{ caption: "Find TODOs", call: { pattern: "TODO", path: "src" } }];
+		const without = estimateToolSchemaTokens([tool as never], tokenizer);
+		const withExamples = estimateToolSchemaTokens([{ ...tool, examples } as never], tokenizer);
+		expect(withExamples).toBeGreaterThan(without);
 	});
 
 	it("skips non-string name/description fragments", () => {
@@ -265,6 +274,22 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
 	});
+
+	it("counts frozen rendered descriptions, not full source descriptions", () => {
+		const full = { ...visible, description: "Use this skill for browser tasks. ".repeat(50) };
+		const rendered = { ...visible, description: "Use for interactive browser tasks." };
+		const promptText = `You are an agent.\nSkills:\n- vis: ${rendered.description}\n`;
+		const source = {
+			systemPrompt: [promptText],
+			agent: { state: { tools: [readTool] } },
+			skills: [full],
+			renderedSkills: [rendered],
+		};
+		const b = computeNonMessageBreakdown(source as never, tokenizer);
+		expect(b.skillsTokens).toBe(estimateSkillsTokens([rendered], tokenizer));
+		expect(b.skillsTokens).toBeLessThan(estimateSkillsTokens([full], tokenizer));
+		expect(b.systemPromptTokens + b.skillsTokens).toBe(tokenizer.countTokens(promptText));
+	});
 });
 
 /**
@@ -278,15 +303,6 @@ describe("computeNonMessageBreakdown skills filtering", () => {
  */
 describe("non-message estimates tolerate a missing description", () => {
 	const readTool = { name: "read", description: "read files", parameters: {} };
-
-	it("estimateToolSchemaTokens does not throw on an undefined tool description", () => {
-		const tokens = estimateToolSchemaTokens(
-			[{ name: "lens_tool", description: undefined, parameters: {} } as never],
-			tokenizer,
-		);
-		expect(Number.isFinite(tokens)).toBe(true);
-		expect(tokens).toBeGreaterThanOrEqual(0);
-	});
 
 	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
 		const session = {

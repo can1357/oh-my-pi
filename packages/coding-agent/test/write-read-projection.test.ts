@@ -13,6 +13,8 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
 		cwd,
@@ -102,7 +104,7 @@ describe("write tool read projection guard", () => {
 		const original = `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir);
-		session.settings.set("read.defaultLimit", 20);
+		cfgReadDefaultLimit.set(session.settings, 20);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-1", { path: filePath }),
 		);
@@ -119,7 +121,7 @@ describe("write tool read projection guard", () => {
 		const original = "\n".repeat(60);
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir, undefined, "hashline");
-		session.settings.set("read.defaultLimit", 20);
+		cfgReadDefaultLimit.set(session.settings, 20);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-hashline", { path: filePath }),
 		);
@@ -175,12 +177,17 @@ describe("write tool read projection guard", () => {
 	});
 
 	it("rejects actual bounded mutable-resource output before internal URL dispatch", async () => {
-		const url = "vault://document";
+		const url = "fixture://document";
 		let resourceContent = `${Array.from({ length: 60 }, (_, index) => `resource ${index + 1}`).join("\n")}\n`;
 		let writeCalled = false;
 		const handler: ProtocolHandler = {
-			scheme: "vault",
-			immutable: false,
+			scheme: "fixture",
+			spec: {
+				backing: "virtual",
+				selectors: "lines",
+				immutable: false,
+				write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+			},
 			resolve: async resolvedUrl => ({
 				url: resolvedUrl.href,
 				content: resourceContent,
@@ -203,6 +210,46 @@ describe("write tool read projection guard", () => {
 		);
 		expect(writeCalled).toBe(false);
 		expect(resourceContent).toContain("resource 60");
+	});
+
+	it("rejects write-back of a summarized read of a large local:// code file", async () => {
+		const localRoot = path.join(tmpDir, "artifacts", "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		const filePath = path.join(localRoot, "big.ts");
+		const original = Array.from(
+			{ length: 1200 },
+			(_, index) =>
+				`export function handler${index}(input: number): number {\n\tconst doubled = input * 2;\n\treturn doubled + ${index};\n}\n`,
+		).join("\n");
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-local", { path: "local://big.ts" }),
+		);
+		expect(projection.length).toBeLessThan(original.length);
+
+		await expect(
+			new WriteTool(session).execute("write-local", { path: "local://big.ts", content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("round-trips a single-page read of a large local:// file without read metadata", async () => {
+		const localRoot = path.join(tmpDir, "artifacts", "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		const filePath = path.join(localRoot, "notes.txt");
+		const original = `${Array.from({ length: 250 }, (_, index) => `note ${index + 1} ${"x".repeat(250)}`).join("\n")}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-local", { path: "local://notes.txt" }),
+		);
+
+		// A writable scheme's read carries no backing-file hint that a write-back would persist.
+		await new WriteTool(session).execute("write-local", { path: "local://notes.txt", content: projection });
+		expect((await Bun.file(filePath).text()).trimEnd()).toBe(original.trimEnd());
 	});
 
 	it("compares against the ACP buffer before bridge writes", async () => {

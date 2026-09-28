@@ -51,6 +51,9 @@ path = "src/lib.rs"
 bench = false
 
 
+[dependencies.pi-vfs]
+workspace = true
+
 [dependencies.async-recursion]
 version = "1.1.1"
 
@@ -177,6 +180,9 @@ features = [
     "term",
     "user",
 ]
+
+[target."cfg(unix)".dependencies.rlimit]
+version = "0.11.0"
 
 [target."cfg(unix)".dependencies.terminfo]
 version = "0.9.0"

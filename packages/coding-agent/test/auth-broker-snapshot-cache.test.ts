@@ -88,7 +88,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 
 		const storage = await discoverAuthStorage(tempDir);
 		try {
-			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("cached-api-key");
 		} finally {
 			storage.close();
 		}
@@ -97,9 +97,9 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 	test("seeds the encrypted cache after an initial broker fetch", async () => {
 		const cachePath = path.join(tempDir, "snapshot.enc");
 		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
-		brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+		await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
 		const brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.reload();
+		await brokerStorage.credentials.reload();
 		let handle: AuthBrokerServerHandle | undefined;
 		let storage: AuthStorage | undefined;
 		try {
@@ -115,7 +115,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "3600000";
 
 			storage = await discoverAuthStorage(tempDir);
-			expect(await storage.getApiKey(PROVIDER)).toBe("broker-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
 			await waitUntil(async () => {
 				const cached = await readAuthBrokerSnapshotCache({
 					path: cachePath,
@@ -162,7 +162,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			});
 
 			storage = await discoverAuthStorage(tempDir);
-			expect(await storage.getApiKey(PROVIDER)).toBe("cached-api-key");
+			expect(await storage.keys.get(PROVIDER)).toBe("cached-api-key");
 		} finally {
 			storage?.close();
 			server.stop(true);

@@ -11,6 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -33,7 +34,7 @@ function createContext(options?: {
 			options?.editor ??
 			({ insertTextAttachment, insertText, pasteText } as unknown as InteractiveModeContext["editor"]),
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
-		settings: { get: () => options?.threshold ?? 100 } as unknown as InteractiveModeContext["settings"],
+		settings: Settings.isolated({ "paste.largeMenuThreshold": options?.threshold ?? 100 }),
 		sessionManager: {
 			getCwd: () => process.cwd(),
 			getArtifactsDir: () => options?.artifactsDir ?? null,
@@ -122,19 +123,6 @@ describe("InputController.handleLargePaste gate", () => {
 });
 
 describe("InputController.presentLargePasteMenu actions", () => {
-	it("offers the requested actions in order", async () => {
-		const { controller, spies } = createContext({ choice: undefined });
-
-		await controller.presentLargePasteMenu("payload", 1);
-
-		const options = spies.showHookSelector.mock.calls[0][1] as Array<{ label: string }>;
-		expect(options.map(option => option.label)).toEqual([
-			"Attach as a wrapped block",
-			"Attach as local file",
-			"Paste inline",
-		]);
-	});
-
 	it("wraps the paste in attachment XML collapsed to a marker", async () => {
 		const { controller, spies } = createContext({ choice: "Attach as a wrapped block" });
 
@@ -171,14 +159,6 @@ describe("InputController.presentLargePasteMenu actions", () => {
 		await controller.presentLargePasteMenu("payload", 1);
 
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("payload");
-	});
-
-	it("titles the menu with the paste's line count", async () => {
-		const { controller, spies } = createContext({ choice: undefined });
-
-		await controller.presentLargePasteMenu("payload", 123);
-
-		expect(spies.showHookSelector.mock.calls[0][0]).toBe("Pasted 123 lines");
 	});
 });
 

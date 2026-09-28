@@ -144,8 +144,9 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag | Description |
 | --- | --- |
-| `--system-prompt <text\|file>` | System prompt (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
-| `--append-system-prompt <text\|file>` | Append text or file contents to the system prompt. |
+| `--system-prompt <text\|file>` | Plain-text system prompt override (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
+| `--system-prompt-template <path>` | Strictly read `<path>` as a Handlebars system-prompt template; mutually exclusive with `--system-prompt`. See [system prompt customization](./system-prompt-customization.md). |
+| `--append-system-prompt <text\|file>` | Append plain text or file contents to the system prompt. |
 
 #### Output mode
 
@@ -200,6 +201,8 @@ print-mode disposal semantics when the advisor runtime is enabled.
 | `rpc-ui` | RPC transport with UI extension events enabled. |
 | `acp` | Agent Client Protocol server over stdio. Equivalent to the [`acp`](#subcommands) subcommand; see [approval mode → ACP sessions](./approval-mode.md#acp-sessions). |
 
+`--no-ui` (only with `--mode rpc`) runs extensions headless: no `extension_ui_request` dialogs are sent to the host, and `ctx.hasUI` is `false`. See [RPC startup](./rpc.md#startup).
+
 ## Subcommands
 
 Run `omp <command> --help` for each command's own flags and examples.
@@ -207,11 +210,11 @@ Run `omp <command> --help` for each command's own flags and examples.
 | Command | Purpose | See also |
 | --- | --- | --- |
 | `launch` | Start a coding session (the default command). | [Launch flags](#launch-flags) |
-| `acp` | Run Oh My Pi as an ACP (Agent Client Protocol) server over stdio. | [approval mode](./approval-mode.md#acp-sessions) |
+| `acp` | Run omp as an ACP (Agent Client Protocol) server over stdio. | [approval mode](./approval-mode.md#acp-sessions) |
 | `auth-broker` | Manage the omp auth-broker (credential vault). | [auth broker / gateway](./auth-broker-gateway.md) |
 | `auth-gateway` | Run an auth-gateway forward proxy backed by the configured broker. | [auth broker / gateway](./auth-broker-gateway.md) |
 | `agents` | Manage bundled task agents. | [task agent discovery](./task-agent-discovery.md) |
-| `bench` | Benchmark models: TTFT/prefill vs decode throughput with p50/p95 across chat, prefill, generation, and prompt-cache workloads, rendered in a live dashboard (`--prefill-bytes` sizes the synthetic prefill input). | |
+| `bench` | Benchmark models: TTFT/prefill vs decode throughput with p50/p95 across chat, prefill, generation, and prompt-cache workloads, rendered in a live dashboard (`--prefill-bytes` sizes the synthetic prefill input). `--detailed` runs single-user, `--par`-way parallel (aggregate tok/s and scaling), and prefill phases per model. | |
 | `browser-relay` | Run the local CDP relay used by Eval's browser API to drive your own Chrome tabs. | [computer use](./computer-use.md) |
 | `cleanse` | Detect and fix project diagnostics with weighted parallel subagents. | |
 | `commit` | Generate a commit message and update changelogs. | |
@@ -245,7 +248,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |
 | `worktree`, `wt` | List or clear agent-managed git worktrees (`~/.omp/wt`). | |
-| `search`, `q` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
+| `search`, `q`, `web-search` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
 
 > `install`, `join`, `browser-relay`, `auth-gateway`, and `tiny-models` are also
 > reachable through related mechanisms (the `plugin` command, the `/join` slash

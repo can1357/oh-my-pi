@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { disposeSessionQuietly } from "../../src/main";
+import { Settings } from "../../src/config/settings";
 import { runPrintMode } from "../../src/modes/print-mode";
 import { formatPersistenceFailure } from "../../src/modes/persistence-failure";
 import { registerRpcPersistenceSurface } from "../../src/modes/rpc/rpc-mode";
@@ -69,7 +70,7 @@ function assistantSession(manager: SessionManager, dispose: () => Promise<void>)
 	return {
 		extensionRunner: undefined,
 		subscribe: () => {},
-		settings: { get: () => false },
+		settings: Settings.isolated(),
 		sessionManager: manager,
 		getLastAssistantMessage: () => assistant(""),
 		prepareForHeadlessAdvisorDrain: () => {},
@@ -93,7 +94,7 @@ describe("headless persistence-failure surface", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
 			prepareForHeadlessAdvisorDrain: () => {},
@@ -140,7 +141,7 @@ describe("headless persistence-failure surface", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
 			prepareForHeadlessAdvisorDrain: () => {},
@@ -190,7 +191,7 @@ describe("headless persistence-failure surface", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: {
 				onPersistenceError: (callback: (error: Error) => void) => {
 					notifyPersistenceError = callback;
@@ -236,7 +237,7 @@ describe("headless persistence-failure surface", () => {
 		const session = {
 			extensionRunner: undefined,
 			subscribe: () => {},
-			settings: { get: () => false },
+			settings: Settings.isolated(),
 			sessionManager: manager,
 			getLastAssistantMessage: () => assistant(""),
 			prepareForHeadlessAdvisorDrain: () => {},

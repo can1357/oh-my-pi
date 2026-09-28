@@ -136,6 +136,40 @@ describe("kimi usage provider", () => {
 		expect(report!.limits[1]!.window?.resetsAt).toBe(Date.parse("2026-08-20T00:00:00.000Z"));
 	});
 
+	it("surfaces monthly aggregate usages without duplicating the 5h limit", async () => {
+		const monthlyReset = "2026-10-22T00:00:00Z";
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				limits: [
+					{
+						window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" },
+						detail: { limit: "100", used: "100", resetTime: "2026-09-22T12:22:15.593402Z" },
+					},
+				],
+				usages: {
+					limit_5h: { used_ratio: 0, reset_time: "2026-09-22T12:22:15Z" },
+					limit_month_total: { used_ratio: 0.0795, reset_time: monthlyReset },
+					limit_month_code: { used_ratio: 0, reset_time: monthlyReset },
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits.map(limit => limit.label)).toEqual(["5h limit", "Monthly total", "Monthly code"]);
+
+		const monthlyTotal = report!.limits[1]!;
+		expect(monthlyTotal.amount.unit).toBe("percent");
+		expect(monthlyTotal.amount.used).toBeCloseTo(7.95);
+		expect(monthlyTotal.amount.remaining).toBeCloseTo(92.05);
+		expect(monthlyTotal.amount.usedFraction).toBe(0.0795);
+		expect(monthlyTotal.window?.resetsAt).toBe(Date.parse(monthlyReset));
+
+		const monthlyCode = report!.limits[2]!;
+		expect(monthlyCode.amount.unit).toBe("percent");
+		expect(monthlyCode.amount.usedFraction).toBe(0);
+	});
+
 	it("cleanly ignores empty totalQuota objects", async () => {
 		const report = await kimiUsageProvider.fetchUsage!(
 			{ provider: "kimi-code", credential: makeCredential(), signal: undefined },

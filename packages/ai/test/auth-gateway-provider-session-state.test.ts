@@ -143,12 +143,12 @@ async function startGateway(
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-session-state-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	if (options?.apiKeys) {
-		await storage.set(
+		await storage.credentials.set(
 			provider,
 			options.apiKeys.map(key => ({ type: "api_key", key })),
 		);
 	} else {
-		storage.setRuntimeApiKey(provider, "sk-ant-api-test");
+		storage.keys.setRuntime(provider, "sk-ant-api-test");
 	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
@@ -350,7 +350,7 @@ describe("auth-gateway provider session state", () => {
 			// What markUsageLimitReached does to a session: same conversation, next
 			// credential. Fast mode is an entitlement of the account that was
 			// rejected, not of the endpoint, so the new one has to be asked.
-			gateway.storage.setRuntimeApiKey("anthropic", "sk-ant-api-sibling");
+			gateway.storage.keys.setRuntime("anthropic", "sk-ant-api-sibling");
 			expect(await priorityTurn(gateway.handle, "session-a", model.id)).toMatchObject({ status: 200 });
 			// Still the sibling: a switch re-probes once, it does not re-probe every
 			// turn afterwards.

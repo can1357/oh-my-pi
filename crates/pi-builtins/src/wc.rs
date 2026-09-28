@@ -72,6 +72,9 @@ mod count_fast {
 	///      size for regular files
 	///   3. Otherwise, we just read normally, but without the overhead of counting
 	///      other things such as lines and words.
+	///
+	/// The descriptor shortcuts apply only to handles backed by a native host
+	/// file; provider-backed files always take the `read` path.
 	#[inline]
 	pub(crate) fn count_bytes_fast<T: WordCountable>(handle: &mut T) -> (usize, Option<io::Error>) {
 		let mut byte_count = 0;
@@ -111,7 +114,7 @@ mod count_fast {
 	
 		#[cfg(windows)]
 		{
-			if let Some(file) = handle.inner_file() {
+			if let Some(file) = handle.native_file() {
 				if let Ok(metadata) = file.metadata() {
 					let attributes = metadata.file_attributes();
 	
@@ -208,22 +211,23 @@ mod countable {
 	//! This module provides a [`WordCountable`] trait and implementations
 	//! for some common file-like objects. Use the [`WordCountable::buffered`]
 	//! method to get an iterator over lines of a file-like object.
-	use std::{
-		fs::File,
-		io::{BufRead, BufReader, Read},
-	};
+	use std::io::{BufRead, BufReader, Read};
 	#[cfg(unix)]
 	use std::os::fd::{AsFd, BorrowedFd};
+
+	use pi_vfs::File;
 
 	use crate::host::Stdin;
 
 	pub trait WordCountable: Read {
 		type Buffered: BufRead;
 		fn buffered(self) -> Self::Buffered;
+		/// The host descriptor behind this input, when it has one.
 		#[cfg(unix)]
 		fn inner_fd(&self) -> Option<BorrowedFd<'_>>;
+		/// The native host file behind this input, when it has one.
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File>;
+		fn native_file(&self) -> Option<&std::fs::File>;
 	}
 
 	impl WordCountable for &mut Stdin {
@@ -239,7 +243,7 @@ mod countable {
 		}
 
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File> {
+		fn native_file(&self) -> Option<&std::fs::File> {
 			None
 		}
 	}
@@ -253,12 +257,12 @@ mod countable {
 
 		#[cfg(unix)]
 		fn inner_fd(&self) -> Option<BorrowedFd<'_>> {
-			Some(self.as_fd())
+			self.native().map(|file| file.as_fd())
 		}
 
 		#[cfg(windows)]
-		fn inner_file(&mut self) -> Option<&mut File> {
-			Some(self)
+		fn native_file(&self) -> Option<&std::fs::File> {
+			self.native()
 		}
 	}
 }
@@ -525,7 +529,6 @@ use std::{
 	borrow::Cow,
 	cmp::max,
 	ffi::{OsStr, OsString},
-	fs::{self, File},
 	io::{self, Write},
 	iter,
 	path::{Path, PathBuf},
@@ -669,7 +672,9 @@ impl Inputs {
 			(None, Some(path)) => {
 				let input = Input::from(PathBuf::from(path));
 				let small = match &input {
-					Input::Path(path) => fs::metadata(host.resolve(path))
+					Input::Path(path) => host
+						.fs()
+						.metadata(host.resolve(path))
 						.is_ok_and(|meta| meta.is_file() && meta.len() <= (10 << 20)),
 					Input::Stdin(_) => false,
 				};
@@ -1193,7 +1198,7 @@ enum CountResult {
 fn word_count_from_input(input: &Input, settings: &Settings, host: &mut Host) -> CountResult {
 	let (total, maybe_err) = match input {
 		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings),
-		Input::Path(path) => match File::open(host.resolve(path)) {
+		Input::Path(path) => match host.fs().open(host.resolve(path)) {
 			Ok(file) => word_count_from_reader(file, settings),
 			Err(error) => return CountResult::Failure(error),
 		},
@@ -1239,7 +1244,7 @@ fn compute_number_width(inputs: &Inputs, settings: &Settings, host: &Host) -> us
 				match input {
 					Input::Stdin(_) => minimum_width = MINIMUM_WIDTH,
 					Input::Path(path) => {
-						if let Ok(meta) = fs::metadata(host.resolve(path)) {
+						if let Ok(meta) = host.fs().metadata(host.resolve(path)) {
 							if meta.is_file() {
 								total += meta.len();
 							} else {
@@ -1276,7 +1281,7 @@ fn files0_iter_file(
 	path: &Path,
 	host: &Host,
 ) -> Result<impl Iterator<Item = InputIterItem>, WcError> {
-	let file = File::open(host.resolve(path)).map_err(|source| WcError::Io {
+	let file = host.fs().open(host.resolve(path)).map_err(|source| WcError::Io {
 		context: format!(
 			"cannot open {} for reading",
 			quoting_style::locale_aware_escape_name(
@@ -1461,6 +1466,10 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 	}
 
 	for maybe_input in inputs.iter() {
+		// An aborted invocation prints no partial total.
+		if host.is_cancelled() {
+			return;
+		}
 		num_inputs += 1;
 		let input = match maybe_input {
 			Ok(input) => input,
@@ -1559,14 +1568,11 @@ pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
-	use std::io::{BufRead, Seek, SeekFrom, Write};
+	use std::io::{Seek, SeekFrom};
 
-	use super::{
-		Wc,
-		count_fast::count_bytes_fast,
-		countable::WordCountable,
-		word_count::WordCount,
-	};
+	use pi_vfs::BlockingFs;
+
+	use super::{Wc, count_fast::count_bytes_fast, word_count::WordCount};
 	use crate::host::run_util;
 
 	#[test]
@@ -1612,21 +1618,14 @@ mod tests {
 
 	#[test]
 	fn count_fast_counts_from_the_current_file_position() {
-		let mut file = tempfile::tempfile().unwrap();
-		file.write_all(b"abcdef").unwrap();
+		let directory = tempfile::tempdir().unwrap();
+		let path = directory.path().join("input");
+		std::fs::write(&path, b"abcdef").unwrap();
+		let mut file = BlockingFs::default().open(&path).unwrap();
 		file.seek(SeekFrom::Start(2)).unwrap();
 		let (bytes, error) = count_bytes_fast(&mut file);
 		assert_eq!(bytes, 4);
 		assert!(error.is_none());
-	}
-
-	#[test]
-	fn countable_buffers_files() {
-		let mut file = tempfile::tempfile().unwrap();
-		file.write_all(b"first\nsecond\n").unwrap();
-		file.seek(SeekFrom::Start(0)).unwrap();
-		let lines: Vec<_> = file.buffered().lines().collect::<Result<_, _>>().unwrap();
-		assert_eq!(lines, ["first", "second"]);
 	}
 
 	#[test]

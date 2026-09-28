@@ -49,7 +49,9 @@ export function renderComposerShapePreview(
 	width: number,
 	status?: ComposerPreviewStatusSource,
 ): readonly string[] {
-	const previewWidth = Math.max(24, Math.min(width, 96));
+	// No upper cap: the hosting overlay already bounds width by the terminal,
+	// and capping clips the status band the preview exists to show (#12500).
+	const previewWidth = Math.max(24, width);
 	const style = getComposerStyle(shape);
 	const paddingX = style.defaultPaddingX(undefined);
 	const chromeWidth = style.sideChromeWidth(paddingX);

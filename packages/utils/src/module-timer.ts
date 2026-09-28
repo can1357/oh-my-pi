@@ -40,6 +40,7 @@
  * - **Dev runs only.** In the compiled `omp` binary every module is pre-bundled
  *   into bunfs, so `onLoad` never fires; profile with a `bun --preload` dev run.
  */
+import { readFileSync } from "node:fs";
 import { plugin } from "bun";
 import { moduleLoadBuffer } from "./timing-buffer";
 
@@ -48,8 +49,8 @@ import { moduleLoadBuffer } from "./timing-buffer";
 // `{ contents, loader: "js" }`, Bun forces ESM and CJS modules fail to load
 // (e.g. `Missing 'default' export`). Our own source tree (where the interesting
 // timing lives) is uniformly TypeScript, so a TS-only filter is both safe and
-// sufficient.
-const MODULE_LOADER_FILTER = /\.[mc]?tsx?$/;
+// sufficient. Declaration files are imported as text assets, never evaluated.
+const MODULE_LOADER_FILTER = /^(?!.*\.d\.[mc]?ts$).*\.[mc]?tsx?$/;
 const MODULE_COMPLETE_KEY: symbol = Symbol.for("omp.moduleLoadComplete");
 const MODULE_BODY_START_KEY: symbol = Symbol.for("omp.moduleBodyStart");
 const STATIC_IMPORT_PATTERN =
@@ -133,10 +134,12 @@ if (process.env.PI_TIMING) {
 	plugin({
 		name: "pi-module-load-timer",
 		setup(build) {
-			build.onLoad({ filter: MODULE_LOADER_FILTER }, async args => {
+			// Synchronous on purpose: a module served by an async onLoad cannot be
+			// `require()`d (cli.ts requires postmortem through Bun's CJS bridge).
+			build.onLoad({ filter: MODULE_LOADER_FILTER }, args => {
 				starts.set(args.path, performance.now());
 				childSetFor(importsByPath, args.path);
-				const contents = await Bun.file(args.path).text();
+				const contents = readFileSync(args.path, "utf8");
 				addImportEdges(importsByPath, args.path, contents);
 				return {
 					contents: instrumentContents(args.path, contents),

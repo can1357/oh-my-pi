@@ -1,10 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	type DaemonOperation,
-	parseDaemonRpcResult,
-	parseDaemonSnapshot,
-	parseDaemonWireRequest,
-} from "../../src/launch/protocol";
+import { type DaemonOperation, parseDaemonRpcResult, parseDaemonWireRequest } from "../../src/launch/protocol";
 
 const operation: Extract<DaemonOperation, { op: "logs" }> = {
 	op: "logs",
@@ -92,11 +87,31 @@ describe("launch logs compatibility", () => {
 	});
 });
 
-describe("regex-derived protocol fields", () => {
-	it("preserves an empty readiness match", () => {
-		expect(parseDaemonSnapshot({ ...baseSnapshot, readyMatch: "" }).readyMatch).toBe("");
+describe("daemon mode protocol", () => {
+	it("accepts persistence transitions and rejects unsupported modes", () => {
+		const request = parseDaemonWireRequest({
+			id: "mode-request",
+			token: "token",
+			operation: { op: "mode", name: "web", mode: "persist" },
+		});
+		expect(request.operation).toEqual({ op: "mode", name: "web", mode: "persist" });
+		expect(
+			parseDaemonRpcResult(
+				{ op: "mode", name: "web", mode: "persist" },
+				{ daemon: { ...baseSnapshot, persist: true } },
+			),
+		).toEqual({ op: "mode", daemon: { ...baseSnapshot, persist: true } });
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "bad-mode",
+				token: "token",
+				operation: { op: "mode", name: "web", mode: "restart" },
+			}),
+		).toThrow("operation.mode must be persist, session, or detached");
 	});
+});
 
+describe("regex-derived protocol fields", () => {
 	it("preserves an empty wait pattern match", () => {
 		const waitOperation: Extract<DaemonOperation, { op: "wait" }> = {
 			op: "wait",

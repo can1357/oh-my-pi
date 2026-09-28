@@ -58,7 +58,8 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 // Broker-shared server mode (one language server per project shared by every
 // omp instance through the LSP mux daemon). Off by default so embedders and
 // tests that drive getOrCreateClient directly never touch the daemon broker;
-// the SDK turns it on from the `lsp.shared` setting at session creation.
+// the SDK sets it from the `lsp.shared` setting at session creation and on every
+// later change. Only consulted at cold-start, so running clients keep their transport.
 let sharedLspEnabled = false;
 
 /** Enable or disable attaching to broker-shared language servers. */
@@ -383,7 +384,11 @@ function queueWriteMessage(
 		throw err;
 	});
 	client.writeQueue = result.catch(() => {});
-	return result;
+	// Keep the internal queue chained so writes stay serialized, but do not make
+	// this caller wait forever behind an earlier wedged write. `writeMessage`
+	// observes the same signal once this write reaches the sink; until then the
+	// abort race only releases the caller and deliberately leaves the client alive.
+	return untilAborted(signal, result);
 }
 
 // =============================================================================
@@ -1107,6 +1112,7 @@ export async function getOrCreateClient(
 			isReading: false,
 			status: "connecting",
 			lastActivity: Date.now(),
+			startedAt: Date.now(),
 			writeQueue: Promise.resolve(),
 			activeProgressTokens: new Set(),
 			projectLoaded,
@@ -1546,7 +1552,9 @@ const WATCHED_FILES_NOTIFY_TIMEOUT_MS = 2_000;
 /**
  * Announce harness-authored filesystem changes to active LSP clients for `cwd`.
  *
- * This covers sibling files that are not open text documents, such as generated
+ * Created or deleted files can change module resolution for otherwise untouched
+ * open documents, so those overlays are refreshed after the watcher notification.
+ * This also covers sibling files that are not open text documents, such as generated
  * CSS modules or type files that another edited document imports immediately.
  *
  * The underlying stdin write drain is self-bounded by
@@ -1580,6 +1588,8 @@ export async function notifyWorkspaceWatchedFiles(
 				});
 			if (clientChanges.length === 0) return;
 			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
+			await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), sendSignal)));
 		}),
 	);
 	throwIfAborted(signal);

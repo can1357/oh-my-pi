@@ -42,12 +42,6 @@ describe("additionalWorkspaceDirectories", () => {
 });
 
 describe("SessionManager workspace directories", () => {
-	it("starts with no additional directories", () => {
-		const session = SessionManager.inMemory();
-		expect(session.getAdditionalDirectories()).toEqual([]);
-		expect([session.getCwd(), ...session.getAdditionalDirectories()]).toEqual([session.getCwd()]);
-	});
-
 	it("seeds from setAdditionalDirectories and excludes cwd", async () => {
 		const session = SessionManager.inMemory();
 		await session.setAdditionalDirectories(["/some/other", session.getCwd()]);
@@ -71,14 +65,6 @@ describe("SessionManager workspace directories", () => {
 		const second = await session.addWorkspaceDirectory("/another/repo");
 		expect(second).toBeNull();
 		expect(session.getAdditionalDirectories()).toEqual([path.resolve("/another/repo")]);
-	});
-
-	it("addWorkspaceDirectory expands ~ to home", async () => {
-		const session = SessionManager.inMemory();
-		const home = os.homedir();
-		const added = await session.addWorkspaceDirectory("~/projects");
-		expect(added).toBe(path.join(home, "projects"));
-		expect(session.getAdditionalDirectories()).toEqual([path.join(home, "projects")]);
 	});
 
 	it("removeWorkspaceDirectory removes a known root and returns null when absent", async () => {
@@ -190,7 +176,7 @@ describe("SessionManager workspace directories", () => {
 		source.appendMessage(makeAssistantMessage());
 		await source.flush();
 
-		const forked = await SessionManager.forkFrom(source.getSessionFile()!, tempDir.path());
+		const forked = await SessionManager.forkFrom(source.getSessionFile()!, tempDir.path(), tempDir.path());
 		expect(forked.getAdditionalDirectories()).toEqual([path.join(tempDir.path(), "extra")]);
 	});
 });

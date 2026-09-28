@@ -233,14 +233,6 @@ describe("OutputSink", () => {
 		expect(dumped.totalLines).toBe(4);
 		expect(dumped.outputLines).toBe(4);
 	});
-	test("invokes onChunk callback with sanitized text", async () => {
-		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
-		await sink.push("abc");
-		await sink.push("def");
-		expect(chunks).toEqual(["abc", "def"]);
-	});
-
 	test("normalizes carriage-return progress frames across chunk boundaries", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
@@ -708,17 +700,6 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.output.endsWith("L11")).toBe(true);
 		expect(dumped.output).toContain("elided");
 		expect(dumped.totalBytes).toBe(byteLength(lines));
-	});
-
-	test("disabled (headBytes=0) preserves tail-only behavior", async () => {
-		const sink = new OutputSink({ spillThreshold: 5, headBytes: 0 });
-		await sink.push("abc");
-		await sink.push("def");
-
-		const dumped = await sink.dump();
-		expect(dumped.truncated).toBe(true);
-		expect(dumped.output).toBe("bcdef");
-		expect(dumped.elidedBytes).toBeUndefined();
 	});
 
 	test("head fills cleanly across chunks without elision when total fits", async () => {

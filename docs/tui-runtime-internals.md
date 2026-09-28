@@ -48,6 +48,8 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 
 Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width)` takes the whole eligible prefix during graceful shutdown. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
 
+The composer opens each frame with `beginFrame(frame)` before offering history. Until that frame's `renderViewport(width, rows, frame)` returns, every full-allocation measurement of a live block (retirement peek, `liveRowCount`, viewport layout) renders the block once and replays those rows; `renderViewport` closes the frame, so no measurement outlives the synchronous composition that took it. Allocation-constrained viewport renders are never shared.
+
 Display replay has an independent cursor over committed entries. It never changes
 `committed` states or the logical frontier, and an offered replay never removes
 the active tail from the projected viewport.

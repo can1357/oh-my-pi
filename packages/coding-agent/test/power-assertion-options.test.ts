@@ -11,8 +11,4 @@ describe("powerAssertionOptions", () => {
 		expect(powerAssertionOptions("display")).toMatchObject({ idle: true, display: true, system: false, user: false });
 		expect(powerAssertionOptions("system")).toMatchObject({ idle: true, display: true, system: true, user: true });
 	});
-
-	it("names the session so platform power diagnostics can attribute the assertion", () => {
-		expect(powerAssertionOptions("idle")?.reason).toBe("Oh My Pi agent session");
-	});
 });

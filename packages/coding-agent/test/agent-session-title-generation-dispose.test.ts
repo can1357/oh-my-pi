@@ -36,13 +36,13 @@ afterEach(async () => {
 describe("AgentSession title generation disposal", () => {
 	it("isolates the title provider session without changing credentials and aborts it during disposal", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		store.saveOAuth("anthropic", {
+		await store.saveOAuth("anthropic", {
 			access: "account-a-token",
 			refresh: "account-a-refresh",
 			expires: Date.now() + 60_000,
 			accountId: "account-a",
 		});
-		store.saveOAuth("anthropic", {
+		await store.saveOAuth("anthropic", {
 			access: "account-b-token",
 			refresh: "account-b-refresh",
 			expires: Date.now() + 60_000,
@@ -51,31 +51,30 @@ describe("AgentSession title generation disposal", () => {
 		const storage = new AuthStorage(store);
 		authStorage = storage;
 		const modelRegistry = new ModelRegistry(storage);
-		await storage.reload();
-		storage.clearConfigApiKeys();
+		await storage.credentials.reload();
+		storage.keys.clearConfig();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const providerSessionId = "provider-session";
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
 		});
-		const pinnedAccount = storage.listOAuthAccounts("anthropic").find(account => account.accountId === "account-b");
+		const pinnedAccount = storage.oauth.accounts("anthropic").find(account => account.accountId === "account-b");
 		if (!pinnedAccount) throw new Error("Expected account-b credential");
-		expect(storage.pinSessionOAuthAccount("anthropic", providerSessionId, pinnedAccount.credentialId)).toBe(true);
+		expect(storage.sessions.pin("anthropic", providerSessionId, pinnedAccount.credentialId)).toBe(true);
 		let titleProvider: string | undefined;
 		let titleCredentialId: number | undefined;
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (requestModel, sessionId) => {
 			titleProvider = requestModel.provider;
-			titleCredentialId = storage
-				.listOAuthAccounts(requestModel.provider, sessionId)
+			titleCredentialId = storage.oauth
+				.accounts(requestModel.provider, sessionId)
 				.find(account => account.active)?.credentialId;
 			return "test-key";
 		});
@@ -87,9 +86,9 @@ describe("AgentSession title generation disposal", () => {
 			modelRegistry,
 			providerSessionId,
 		});
-		expect(
-			storage.listOAuthAccounts("anthropic", providerSessionId).find(account => account.active)?.credentialId,
-		).toBe(pinnedAccount.credentialId);
+		expect(storage.oauth.accounts("anthropic", providerSessionId).find(account => account.active)?.credentialId).toBe(
+			pinnedAccount.credentialId,
+		);
 		const started = Promise.withResolvers<void>();
 		const response = Promise.withResolvers<ai.AssistantMessage>();
 		let requestSignal: AbortSignal | undefined;
@@ -116,15 +115,14 @@ describe("AgentSession title generation disposal", () => {
 
 	it("does not start a second auto-title request while the first is still in flight", async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -154,15 +152,14 @@ describe("AgentSession title generation disposal", () => {
 
 	it("lets a replacement session title itself and ignores the previous request", async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -211,5 +208,46 @@ describe("AgentSession title generation disposal", () => {
 		expect(await generateTitle.mock.results[1]?.value).toBe("replacement session");
 		await setSessionName.mock.results[0]?.value;
 		expect(session.sessionName).toBe("replacement session");
+	});
+
+	it("retitles from the assistant reply when the title model declines an ambiguous first message", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({
+				responses: [{ content: ["The screenshot shows a TypeError thrown by the tokenizer."] }],
+			}).stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const titleInputs: string[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+			const content = context.messages[0]?.content;
+			titleInputs.push(typeof content === "string" ? content : "");
+			return createAssistantMessage(titleInputs.length === 1 ? "<title/>" : "<title>Tokenizer TypeError</title>");
+		});
+		const named = Promise.withResolvers<void>();
+		session.sessionManager.onSessionNameChanged(() => named.resolve());
+
+		session.maybeStartTitleGeneration("help");
+		await session.prompt("help");
+		await named.promise;
+
+		expect(session.sessionName).toBe("Tokenizer TypeError");
+		expect(titleInputs).toHaveLength(2);
+		expect(titleInputs[1]).toContain("TypeError thrown by the tokenizer");
 	});
 });

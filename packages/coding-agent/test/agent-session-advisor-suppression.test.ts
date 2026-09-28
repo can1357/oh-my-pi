@@ -25,7 +25,7 @@ import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -116,7 +116,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		return { session, sessionManager, mock, streamStarted: started.promise };
@@ -189,8 +189,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 						},
 					],
 				},
-				{ content: [], stopReason: "stop" },
 			],
+			// Any further review stays silent; the advise-only turn above ends
+			// its own review without a follow-up request.
+			handler: () => ({ content: [], stopReason: "stop" }),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -202,7 +204,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({
 			agent,
@@ -273,8 +275,8 @@ describe("AgentSession advisor auto-resume suppression", () => {
 						},
 					],
 				},
-				{ content: [], stopReason: "stop" },
 			],
+			handler: () => ({ content: [], stopReason: "stop" }),
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -290,7 +292,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({
 			agent,
@@ -304,7 +306,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await session.prompt("yield the final result");
 		expect(await session.waitForAdvisorCatchup(1000)).toBe(true);
 
-		expect(advisorMock.calls).toHaveLength(2);
+		expect(advisorMock.calls).toHaveLength(1);
 		expect(mock.calls).toHaveLength(1);
 		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
 		expect(advisorCards).toHaveLength(1);
@@ -677,7 +679,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		const msg: IrcMessage = { id: "m-yield", from: "peer", to: "me", body: "status?", ts: Date.now() };

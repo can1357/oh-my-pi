@@ -30,7 +30,6 @@ const { getAgentDir, setAgentDir, TempDir } = piUtils;
 
 const originalAgentDir = getAgentDir();
 const originalWebSocket = global.WebSocket;
-const originalCodexWebSocketV2 = Bun.env.PI_CODEX_WEBSOCKET_V2;
 const originalProxyEnv: Record<string, string | undefined> = {
 	PI_PROXY: Bun.env.PI_PROXY,
 	PI_PROXY_CODEX_PROXY_TEST: Bun.env.PI_PROXY_CODEX_PROXY_TEST,
@@ -60,7 +59,6 @@ beforeEach(() => {
 afterEach(() => {
 	global.WebSocket = originalWebSocket;
 	setAgentDir(originalAgentDir);
-	restoreEnv("PI_CODEX_WEBSOCKET_V2", originalCodexWebSocketV2);
 	vi.useRealTimers();
 	for (const key in originalProxyEnv) restoreEnv(key, originalProxyEnv[key]);
 	__resetProxyCache();
@@ -206,6 +204,38 @@ function createNoProgressCodexSse(signal: AbortSignal | undefined): Response {
 		},
 	});
 	return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+/**
+ * Non-2xx response whose error body is delivered partially and then stalls
+ * forever unless the request signal aborts. Mirrors a server (or proxy) that
+ * flushes error headers plus an incomplete JSON body and holds the socket open —
+ * the shape that used to bypass the Codex pre-response deadline (issue #12664).
+ * Wiring the body stream to the fetch signal lets the armed pre-response
+ * watchdog abort the read exactly as a real socket would.
+ */
+function createStalledErrorResponse(status: number, signal: AbortSignal | undefined): Response {
+	const encoder = new TextEncoder();
+	let abortListener: (() => void) | undefined;
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(encoder.encode('{"error":{"message":"synthetic incomplete'));
+			abortListener = () => {
+				if (abortListener) signal?.removeEventListener("abort", abortListener);
+				const reason = signal?.reason;
+				controller.error(reason instanceof Error ? reason : new Error("request aborted"));
+			};
+			if (signal?.aborted) {
+				queueMicrotask(() => abortListener?.());
+			} else {
+				signal?.addEventListener("abort", abortListener, { once: true });
+			}
+		},
+		cancel() {
+			if (abortListener) signal?.removeEventListener("abort", abortListener);
+		},
+	});
+	return new Response(stream, { status, headers: { "content-type": "application/json" } });
 }
 
 function encodeWebSocketMessage(value: Record<string, unknown>): Uint8Array {
@@ -2514,6 +2544,51 @@ describe("openai-codex streaming", () => {
 		expect(signals[1]?.aborted).toBe(false);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Recovered after watchdog timeout");
+	});
+
+	it.each([
+		["non-retryable 403 parsed by CodexApiError.fromResponse", 403],
+		["retryable 503 inspected by fetchWithRetry", 503],
+	] as const)("bounds a stalled error body with the pre-response deadline (%s)", async (_label, status) => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const callerAbort = new AbortController();
+		const { promise: requestStarted, resolve: markRequestStarted } = Promise.withResolvers<void>();
+		let requestCount = 0;
+		const fetchMock: FetchImpl = async (input, init) => {
+			requestCount += 1;
+			const requestSignal = getRequestSignal(input, init);
+			markRequestStarted();
+			return createStalledErrorResponse(status, requestSignal);
+		};
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+		const resultPromise = streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+			signal: callerAbort.signal,
+			streamFirstEventTimeoutMs: 10,
+		}).result();
+		await requestStarted;
+		const backstop = Promise.withResolvers<never>();
+		// Bun fake timers incorrectly fire this production watchdog after clearTimeout,
+		// so use the platform clock to ensure the test fails if the body remains stuck.
+		const backstopTimer = setTimeout(() => {
+			callerAbort.abort();
+			backstop.reject(new Error("stalled error body exceeded the test backstop"));
+		}, 1_000);
+		let result;
+		try {
+			result = await Promise.race([resultPromise, backstop.promise]);
+		} finally {
+			clearTimeout(backstopTimer);
+		}
+
+		expect(requestCount).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("timed out");
 	});
 
 	it("bounds Codex SSE socket-close attempts and preserves the default when omitted", async () => {
@@ -5028,64 +5103,6 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: undefined,
 			lastPreviousResponseId: undefined,
 		});
-	});
-
-	it("uses websocket v2 beta header when v2 mode is enabled", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		Bun.env.PI_CODEX_WEBSOCKET_V2 = "1";
-
-		const payload = Buffer.from(
-			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
-			"utf8",
-		).toBase64();
-		const token = `aaa.${payload}.bbb`;
-
-		const fetchMock = vi.fn(async () => {
-			throw new Error("SSE fallback should not be called");
-		});
-
-		class WebSocketV2HeaderProbe extends MockWebSocket {
-			constructor(url: string, options?: { headers?: WsHeaders }) {
-				super(url, options);
-				expect(options?.headers?.["OpenAI-Beta"] ?? options?.headers?.["openai-beta"]).toBe(
-					"responses_websockets=2026-02-06",
-				);
-				this.scheduleOpen();
-			}
-
-			override send(): void {
-				this.emitCodexResponse({ messageId: "msg_v2", responseId: "resp_v2", text: "Hello v2" });
-			}
-		}
-
-		global.WebSocket = WebSocketV2HeaderProbe as unknown as typeof WebSocket;
-
-		const model: Model<"openai-codex-responses"> = buildModel({
-			id: "gpt-5.3-codex-spark",
-			name: "GPT-5.3 Codex Spark",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
-			reasoning: true,
-			preferWebsockets: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 128000,
-		});
-		const context: Context = {
-			systemPrompt: ["You are a helpful assistant."],
-			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
-		};
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		await streamOpenAICodexResponses(model, context, {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-v2-session",
-			providerSessionState,
-		}).result();
-		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("waits for caller abort when a prewarmed websocket is silent before its first event", async () => {

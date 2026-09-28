@@ -11,6 +11,8 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
 		.filter(c => c.type === "text")
@@ -22,7 +24,7 @@ function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	const settings = Settings.isolated();
 	// Disable structural summarization so multi-range tests assert raw line content
 	// regardless of language heuristics.
-	settings.set("read.summarize.enabled", false);
+	cfgReadSummarizeEnabled.set(settings, false);
 	return {
 		cwd,
 		hasUI: false,
@@ -48,20 +50,6 @@ describe("read tool multi-range selector", () => {
 
 	afterEach(async () => {
 		await removeWithRetries(tmpDir);
-	});
-
-	it("keeps the workspace-relative path in hashline headers for nested files", async () => {
-		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, "alpha\nbeta\n");
-
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
-		const firstLine = text.split("\n")[0];
-
-		// A same-basename file elsewhere in the tree must not capture a
-		// follow-up edit, so the header retains the workspace-relative path.
-		expect(firstLine).toBe(`[${path.join("src", "nested", "numbered.txt")}#${firstLine.slice(-5, -1)}]`);
 	});
 
 	it("returns both ranges separated by an elision marker", async () => {

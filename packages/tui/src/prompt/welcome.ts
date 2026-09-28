@@ -3,9 +3,13 @@ import type { Component } from "../tui";
 import { padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { theme } from "../theme/theme";
+import { formatDoubleTap, formatKeyHint, formatKeyHints, type KeyName } from "../app-keybindings";
+import { editorKey } from "../chrome/keybinding-hints";
+import { getKeybindings, type Keybinding } from "../keybindings";
 import tipsText from "./tips.txt" with { type: "text" };
 
-/** Tips embedded at build time, one per line; blanks dropped. */
+/** Tips embedded at build time, one per line; blanks dropped. Key placeholders
+ *  (see {@link expandTipKeys}) stay raw until render time. */
 const TIPS: readonly string[] = tipsText
 	.split("\n")
 	.map(line => line.trim())
@@ -76,6 +80,35 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	}
 	return out + reset;
 }
+
+/** Key placeholders in tips.txt: `{key:shift+tab}`, `{keys:up,down}`, `{tap:left}`, `{action:tui.editor.undo}`. */
+const TIP_KEY_PLACEHOLDER = /\{(key|keys|tap|action):([^}]+)\}/g;
+
+const MODIFIER_NAMES: Record<string, true | undefined> = { ctrl: true, shift: true, alt: true, super: true };
+
+/** A `+`-joined chord whose leading parts are modifiers (`ctrl+o`, `shift`, `left`). */
+function isKeyName(key: string): key is KeyName {
+	const parts = key.split("+");
+	return parts.every((part, i) => part.length > 0 && (i === parts.length - 1 || MODIFIER_NAMES[part] === true));
+}
+
+function isKeybinding(action: string): action is Keybinding {
+	return action in getKeybindings().getResolvedBindings();
+}
+
+/** Expand tip key placeholders through the key formatter; malformed ones stay verbatim. */
+function expandTipKeys(tip: string): string {
+	return tip.replace(TIP_KEY_PLACEHOLDER, (placeholder, kind: string, value: string) => {
+		if (kind === "action") return isKeybinding(value) ? editorKey(value) : placeholder;
+		const keys = value.split(",");
+		if (!keys.every(isKeyName)) return placeholder;
+		if (kind === "keys") return formatKeyHints(keys);
+		const [key] = keys;
+		if (key === undefined) return placeholder;
+		return kind === "tap" ? formatDoubleTap(key) : formatKeyHint(key);
+	});
+}
+
 export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
 	const label = "Tip: ";
 	const labelWidth = visibleWidth(label);
@@ -83,7 +116,7 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	if (bodyBudget < 8) return [];
 
 	const isNew = NEW_TIP_MARKER.test(tip);
-	const body = isNew ? tip.replace(NEW_TIP_MARKER, "") : tip;
+	const body = expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip);
 
 	const wrappedBody = wrapTextWithAnsi(replaceTabs(body), bodyBudget);
 	if (wrappedBody.length === 0) return [];
@@ -153,7 +186,8 @@ export class WelcomeComponent implements Component {
 		private modelName: string,
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
-		private lspServers: LspServerInfo[] = [],
+		/** Detected project servers; `null` means LSP is disabled and hides the section. */
+		private lspServers: LspServerInfo[] | null = [],
 	) {}
 	get tip(): string | undefined {
 		this.#nagRoll ??= Math.random();
@@ -185,10 +219,13 @@ export class WelcomeComponent implements Component {
 		this.#requestRender();
 		this.#animTimer = setInterval(() => {
 			const elapsed = performance.now() - (this.#animStart ?? 0);
+			const requestRender = this.#requestRender;
 			if (elapsed >= INTRO_MS) {
 				this.#stopAnimation();
 			}
-			this.#requestRender?.();
+			// Stopping clears the callback, but the settled frame must still paint
+			// so an oversized startup header can retire into native scrollback.
+			requestRender?.();
 		}, INTRO_TICK_MS);
 	}
 
@@ -236,7 +273,7 @@ export class WelcomeComponent implements Component {
 		this.invalidate();
 	}
 
-	setLspServers(servers: LspServerInfo[]): void {
+	setLspServers(servers: LspServerInfo[] | null): void {
 		this.lspServers = servers;
 		this.invalidate();
 	}
@@ -329,29 +366,6 @@ export class WelcomeComponent implements Component {
 			sessionLines.push("");
 		}
 
-		// LSP servers content
-		const lspLines: string[] = [];
-		if (this.lspServers.length === 0) {
-			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
-		} else {
-			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
-				const icon =
-					server.status === "ready"
-						? theme.styledSymbol("status.enabled", "success")
-						: server.status === "available"
-							? theme.styledSymbol("status.enabled", "dim")
-							: server.status === "connecting"
-								? theme.styledSymbol("status.pending", "muted")
-								: theme.styledSymbol("status.error", "error");
-				const exts = server.fileTypes.slice(0, 3).join(" ");
-				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
-			}
-		}
-		// Pad to the fixed slot count so the box height doesn't depend on server count.
-		while (lspLines.length < WELCOME_LSP_SLOTS) {
-			lspLines.push("");
-		}
-
 		// Right column
 		const rightLines = [
 			` ${theme.bold(theme.fg("accent", "Tips"))}`,
@@ -359,9 +373,7 @@ export class WelcomeComponent implements Component {
 			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
 			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
 			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
-			separator,
-			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
-			...lspLines,
+			...this.#renderLspSection(separator),
 			separator,
 			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
 			...sessionLines,
@@ -414,6 +426,33 @@ export class WelcomeComponent implements Component {
 		lines.push(...this.#renderTip(boxWidth));
 
 		return lines;
+	}
+
+	/** Right-column LSP rows padded to a fixed height; empty when LSP is disabled. */
+	#renderLspSection(separator: string): string[] {
+		if (this.lspServers === null) return [];
+		const lspLines: string[] = [];
+		if (this.lspServers.length === 0) {
+			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
+		} else {
+			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
+				const icon =
+					server.status === "ready"
+						? theme.styledSymbol("status.enabled", "success")
+						: server.status === "available"
+							? theme.styledSymbol("status.enabled", "dim")
+							: server.status === "connecting"
+								? theme.styledSymbol("status.pending", "muted")
+								: theme.styledSymbol("status.error", "error");
+				const exts = server.fileTypes.slice(0, 3).join(" ");
+				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
+			}
+		}
+		// Pad to the fixed slot count so the box height doesn't depend on server count.
+		while (lspLines.length < WELCOME_LSP_SLOTS) {
+			lspLines.push("");
+		}
+		return [separator, ` ${theme.bold(theme.fg("accent", "LSP Servers"))}`, ...lspLines];
 	}
 
 	/**

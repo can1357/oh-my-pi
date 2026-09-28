@@ -48,7 +48,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
-		authStorage.setRuntimeApiKey(model.provider, "token");
+		authStorage.keys.setRuntime(model.provider, "token");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),

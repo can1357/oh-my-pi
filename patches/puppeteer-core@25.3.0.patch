@@ -630,6 +630,21 @@ index 3d68f887920ded269eb641273a5a13dee235ae1d..dcdd86c8697c0dbd2dd2162c9a739dd9
      }
      mainRealm() {
          return this.#world;
+diff --git a/lib/puppeteer/common/util.js b/lib/puppeteer/common/util.js
+index 05d554b577baf66a432e3318a3165c4bae2cfe9f..65037bbc2a319170fdd67ff0dd8eda39fe0554c4 100644
+--- a/lib/puppeteer/common/util.js
++++ b/lib/puppeteer/common/util.js
+@@ -80,7 +80,9 @@ export const withSourcePuppeteerURLIfNone = (functionName, object) => {
+         // Second element is the caller of this function.
+         // Third element is the caller of the caller of this function
+         // which is precisely what we want.
+-        return stack[2];
++        // xxx-stealth: compiled binaries can expose fewer structured stack
++        // frames, so preserve the closest available source location.
++        return stack[2] ?? stack.at(-1);
+     };
+     const site = new Error().stack;
+     Error.prepareStackTrace = original;
 diff --git a/lib/puppeteer/common/QueryHandler.js b/lib/puppeteer/common/QueryHandler.js
 index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8c51f9e70 100644
 --- a/lib/puppeteer/common/QueryHandler.js

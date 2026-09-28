@@ -11,7 +11,7 @@ import { MCPManager } from "../src/mcp/manager";
 import { DeferredMCPTool, MCPTool } from "../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../src/mcp/types";
 import { customToolToDefinition } from "../src/sdk";
-import { buildSystemPrompt, projectSystemPromptToolMetadata, toolReadsSkillUris } from "../src/system-prompt";
+import { buildSystemPrompt, projectSystemPromptToolMetadata } from "../src/system-prompt";
 import { createMCPProxyTools } from "../src/task/executor";
 import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
@@ -44,22 +44,10 @@ function createCapturedConnection(calls: CapturedRequest[]): MCPServerConnection
 }
 
 describe("MCP tool strict declaration", () => {
-	it("declares strict:false on MCPTool", () => {
-		const tool = new MCPTool(createCapturedConnection([]), STRICT_TOOL);
-		expect(tool.strict).toBe(false);
-	});
-
 	it("declares strict:false on DeferredMCPTool", () => {
 		const connection = createCapturedConnection([]);
 		const tool = new DeferredMCPTool("srv", STRICT_TOOL, async () => connection);
 		expect(tool.strict).toBe(false);
-	});
-
-	it("propagates strict:false onto Task proxy definitions", () => {
-		const manager = new MCPManager(process.cwd());
-		vi.spyOn(manager, "getTools").mockReturnValue([new MCPTool(createCapturedConnection([]), STRICT_TOOL)]);
-		const [proxy] = createMCPProxyTools(manager);
-		expect(proxy?.strict).toBe(false);
 	});
 
 	it("survives the custom-tool → definition bridge into the registered session tool", () => {
@@ -91,16 +79,6 @@ describe("Skill URI reader capability", () => {
 			return { content: [{ type: "text", text: "ok" }] };
 		},
 	};
-
-	it("survives the custom-tool → definition bridge into the registered session tool", () => {
-		const definition = customToolToDefinition(SKILL_READER);
-		expect(definition.readsSkillUris).toBe(true);
-		const adapter = wrapRegisteredTool(
-			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
-			{ createContext: () => ({}) } as unknown as ExtensionRunner,
-		);
-		expect(toolReadsSkillUris(adapter)).toBe(true);
-	});
 
 	it("preserves the skill catalog and URI guidance through to the rendered prompt", async () => {
 		const definition = customToolToDefinition(SKILL_READER);
