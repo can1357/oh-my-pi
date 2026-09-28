@@ -335,6 +335,7 @@
 - Added live progress monitoring for supervised services through Bash's `progress` option and `proc://<name>/progress`: attach or retune `wake`/`ambient` delivery, detach with `off`, and inspect watchers through `proc://`. Running background jobs with existing progress channels can also switch between `wake` and `ambient` through `proc://<job-id>/progress`; jobs reject `off` and cannot gain a channel after launch.
 - Added Bash `async: "auto"`: potentially slow finite commands stay inline for `bash.asyncAuto.inlineGraceMs`, then promote the same process without restarting. Short deadlines stay inline; at the job cap auto completes inline with a notice while `async: true` errors. Finite async commands can request `wake` or `ambient` progress after backgrounding.
 - Backgrounded Bash and Eval results now name the command or cell in the notice (`Backgrounded as job bg_5 (uv run verify.py) (killed once …); …`), keeping parallel results attributable even when they return out of order.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines (bounded by rows and bytes) behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red that stay visible even while tool activity is hidden.
 
 ### Changed
 
@@ -397,6 +398,9 @@
 - Fixed supervised image tunnels rejecting a published URL when the child exits between the startup log read and exit check; each tunnel child now uses a private temporary log directory.
 - Fixed a failed progress preview delivery leaving its mirrored output artifact unfinalized.
 - Service monitors are released at every conversation boundary, including same-id `/clear`; retained service completion survives a session switch or exit, but not reset or a new session.
+- Failed asynchronous Bash results no longer repeat output already shown through progress updates.
+- Completed asynchronous jobs now show their terminal result text in the TUI, including failures.
+- Supervised service completions now include a neutral diagnostic when a process exits with a nonzero code without a reported termination reason.
 - Fixed a supervised process's progress arriving out of order after its monitor was retuned between `wake` and `ambient`: output sampled before the switch now stays ahead of later output instead of landing behind it — or on a later turn — when the process completes.
 - Clarified agent guidance for waits interrupted by background completions: account for the completion notice, then retry only if still blocked on results that will not be pushed ([#9373](https://github.com/can1357/oh-my-pi/pull/9373) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
