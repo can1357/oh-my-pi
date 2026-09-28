@@ -1611,6 +1611,28 @@ function isReplayableAnthropicCompaction(
 	return payload?.type === "anthropicCompaction" && payload.provider === model.provider && payload.content.length > 0;
 }
 
+/** Which persisted compaction summaries a request replays as native blocks. */
+interface AnthropicCompactionReplay {
+	model: Model<"anthropic-messages">;
+	/** Replay persisted legacy threshold blocks (encrypted content) too. */
+	legacy: boolean;
+}
+
+/**
+ * Whether `payload` goes on the wire as a `compaction` block under `replay`:
+ * replayable for the model, and carrying a signature or (when legacy replay is
+ * on) the legacy ciphertext. Anything else is sent as the summary's text.
+ */
+function replaysAnthropicCompactionBlock(
+	payload: ProviderPayload | undefined,
+	replay: AnthropicCompactionReplay,
+): payload is AnthropicCompactionPayload {
+	return (
+		isReplayableAnthropicCompaction(payload, replay.model) &&
+		(payload.signature !== undefined || (replay.legacy && payload.encryptedContent !== undefined))
+	);
+}
+
 /** The wire block for a replayed compaction payload, opaque state included. */
 function compactionBlockParam(payload: AnthropicCompactionPayload): CompactionBlockParam {
 	const { content, signature, encryptedContent } = payload;
@@ -4193,12 +4215,26 @@ function collectAnthropicControlRecords(messages: readonly Message[]): Anthropic
  * lands between a `tool_use` and its `tool_result`, where `transformMessages`
  * would flush synthetic aborted results; a mid-turn change therefore takes
  * effect from the next step.
+ *
+ * A summary replayed as a `compaction` block is never a slot: the block must
+ * open the request, so nothing may precede it. A response opened by the block
+ * (no real user turn between them) takes the change from its next step. A
+ * summary sent as text is an ordinary user turn.
  */
-function anthropicEffortInsertIndex(messages: readonly Message[], end: number): number {
+function anthropicEffortInsertIndex(
+	messages: readonly Message[],
+	end: number,
+	compactionReplay: AnthropicCompactionReplay | undefined,
+): number {
 	for (let i = end - 1; i >= 0; i--) {
-		const role = messages[i]?.role;
-		if (role === "user") return i;
-		if (role === "assistant") return end;
+		const message = messages[i];
+		if (message?.role === "assistant") return end;
+		if (message?.role !== "user") continue;
+		if (!compactionReplay || !replaysAnthropicCompactionBlock(message.providerPayload, compactionReplay)) return i;
+		let next = end;
+		if (messages[next]?.role === "assistant") next++;
+		while (messages[next]?.role === "toolResult") next++;
+		return next;
 	}
 	return end;
 }
@@ -4311,6 +4347,7 @@ function planAnthropicEffortControls(
 	messages: readonly Message[],
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
+	compactionReplay: AnthropicCompactionReplay | undefined,
 ): {
 	topLevel: AnthropicOutputEffort | undefined;
 	inserts: AnthropicControlInsert[];
@@ -4335,7 +4372,7 @@ function planAnthropicEffortControls(
 		const recorded = record.effort.tail;
 		if (recorded !== null && recorded !== tail) {
 			inserts.push({
-				index: anthropicEffortInsertIndex(messages, record.index),
+				index: anthropicEffortInsertIndex(messages, record.index, compactionReplay),
 				spec: { toolChanges: [], effort: recorded },
 			});
 		}
@@ -4343,7 +4380,7 @@ function planAnthropicEffortControls(
 	}
 	if (current !== undefined && current !== tail) {
 		inserts.push({
-			index: anthropicEffortInsertIndex(messages, messages.length),
+			index: anthropicEffortInsertIndex(messages, messages.length, compactionReplay),
 			spec: { toolChanges: [], effort: current },
 		});
 		tail = current;
@@ -4587,11 +4624,15 @@ function buildParams(
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
+	const compactionReplay: AnthropicCompactionReplay | undefined = compactionSupported
+		? { model: effectiveModel, legacy: !compactionRequest && !signedReplay }
+		: undefined;
 	const effortPlan = planAnthropicEffortControls(
 		outputConfigEffort,
 		context.messages,
 		records,
 		model.compat.supportsPerMessageEffort === true,
+		compactionReplay,
 	);
 	const wireMessages = convertAnthropicMessages(
 		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
@@ -4600,7 +4641,7 @@ function buildParams(
 		{
 			serverSideFallbackEnabled: !!fallbacks?.length,
 			replayCompaction: compactionSupported,
-			replayLegacyCompaction: !compactionRequest && !signedReplay,
+			replayLegacyCompaction: compactionReplay?.legacy,
 			dropAllThinking,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
@@ -4918,9 +4959,7 @@ export function convertAnthropicMessages(
 		if (
 			opts?.replayCompaction &&
 			(msg.role === "user" || msg.role === "developer") &&
-			isReplayableAnthropicCompaction(msg.providerPayload, model) &&
-			(msg.providerPayload.signature !== undefined ||
-				(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
+			replaysAnthropicCompactionBlock(msg.providerPayload, { model, legacy: opts.replayLegacyCompaction !== false })
 		) {
 			const compactionParam: AnthropicMessageParam = {
 				role: "assistant",
@@ -5004,9 +5043,10 @@ export function convertAnthropicMessages(
 			// replayed turn.
 			if (
 				opts?.replayCompaction &&
-				isReplayableAnthropicCompaction(msg.providerPayload, model) &&
-				(msg.providerPayload.signature !== undefined ||
-					(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
+				replaysAnthropicCompactionBlock(msg.providerPayload, {
+					model,
+					legacy: opts.replayLegacyCompaction !== false,
+				})
 			) {
 				blocks.push(compactionBlockParam(msg.providerPayload));
 			}

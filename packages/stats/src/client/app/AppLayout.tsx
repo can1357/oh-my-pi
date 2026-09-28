@@ -51,7 +51,7 @@ export function AppLayout({
 					>
 						<div className="stats-mobile-drawer-header">
 							<div className="stats-logo-container">
-								<span className="stats-logo-text">OH MY PI</span>
+								<span className="stats-logo-text">omp</span>
 								<span className="stats-logo-subtext">Observability</span>
 							</div>
 							<button

@@ -673,6 +673,7 @@ export interface ParsedSession {
 	sessionFile: string;
 	result: ParseSessionResult;
 	rebuild: boolean;
+	/** Recover missing rows from a full-history scan without rewriting unchanged records. */
 	replay: boolean;
 }
 
@@ -717,7 +718,8 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 						[string]
 					>("SELECT entry_id, timestamp, tool_call_id, result_chars FROM tool_calls WHERE session_file = ?")
 					.all(sessionFile);
-				if (result.reset || rebuild) {
+				const replace = result.reset || rebuild;
+				if (replace) {
 					// Only removed owners require another full replay, not an identity-only file replacement.
 					if (!reconcile && (messages.length > 0 || users.length > 0 || tools.length > 0)) {
 						const retainedMessages = new Set(
@@ -736,27 +738,69 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 								row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])),
 							);
 					}
-					if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
-					if (users.length > 0)
-						database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
-					if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
 				} else {
 					// A reconciliation replay only needs missing rows and unfinished links. Keep stable request
 					// IDs and avoid rewriting every table/index for transcripts whose contents did not change.
 					const messageById = new Map(messages.map(row => [row.entry_id, row.timestamp]));
 					const userById = new Map(users.map(row => [row.entry_id, row]));
 					const toolById = new Map(tools.map(row => [row.tool_call_id, row]));
+					const absentMessages = new Set(messageById.keys());
+					const absentUsers = new Set(userById.keys());
+					const absentTools = new Set(toolById.keys());
+					const stats = result.stats.filter(row => {
+						if (messageById.get(row.entryId) !== row.timestamp) return true;
+						absentMessages.delete(row.entryId);
+						return false;
+					});
+					const userStats = result.userStats.filter(row => {
+						if (userById.get(row.entryId)?.timestamp !== row.timestamp) return true;
+						absentUsers.delete(row.entryId);
+						return false;
+					});
+					const toolCalls = result.toolCalls.filter(row => {
+						const stored = toolById.get(row.toolCallId);
+						if (stored?.entry_id !== row.entryId || stored.timestamp !== row.timestamp) return true;
+						absentTools.delete(row.toolCallId);
+						return false;
+					});
 					rows = {
 						...result,
-						stats: result.stats.filter(row => messageById.get(row.entryId) !== row.timestamp),
-						userStats: result.userStats.filter(row => userById.get(row.entryId)?.timestamp !== row.timestamp),
-						userLinks: result.userLinks.filter(row => userById.get(row.entryId)?.model == null),
-						toolCalls: result.toolCalls.filter(row => {
-							const stored = toolById.get(row.toolCallId);
-							return stored?.entry_id !== row.entryId || stored.timestamp !== row.timestamp;
-						}),
-						toolResults: result.toolResults.filter(row => toolById.get(row.toolCallId)?.result_chars == null),
+						stats,
+						userStats,
+						toolCalls,
+						// A reused ID needs fresh linkage after its old identity is removed.
+						userLinks: result.userLinks.filter(
+							row => absentUsers.has(row.entryId) || userById.get(row.entryId)?.model == null,
+						),
+						toolResults: result.toolResults.filter(
+							row => absentTools.has(row.toolCallId) || toolById.get(row.toolCallId)?.result_chars == null,
+						),
 					};
+					// Repair stale owners without invalidating IDs of records still present in the transcript.
+					if (absentMessages.size > 0 || absentUsers.size > 0 || absentTools.size > 0) {
+						reconcile = true;
+						for (const id of absentMessages) {
+							database
+								.query("DELETE FROM messages WHERE session_file = ? AND entry_id = ?")
+								.run(sessionFile, id);
+						}
+						for (const id of absentUsers) {
+							database
+								.query("DELETE FROM user_messages WHERE session_file = ? AND entry_id = ?")
+								.run(sessionFile, id);
+						}
+						for (const id of absentTools) {
+							database
+								.query("DELETE FROM tool_calls WHERE session_file = ? AND tool_call_id = ?")
+								.run(sessionFile, id);
+						}
+					}
+				}
+				if (replace) {
+					if (messages.length > 0) database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
+					if (users.length > 0)
+						database.query("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
+					if (tools.length > 0) database.query("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
 				}
 			}
 			writes.push(rows);
@@ -1867,8 +1911,8 @@ export function insertUserMessageStats(stats: Iterable<UserMessageStats>): numbe
 /**
  * Backfill the responding `model`/`provider` on user-message rows that were
  * persisted before their assistant reply was parsed by an incremental tail
- * read. Each row is updated at most
- * once because the `model IS NULL` guard short-circuits subsequent passes.
+ * read. Each row is updated at most once because the `model IS NULL` guard
+ * short-circuits subsequent passes.
  *
  * Returns the number of rows actually updated.
  */

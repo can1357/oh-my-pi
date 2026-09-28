@@ -344,7 +344,17 @@ async function syncAllSessionsLocked(
 		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
 		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
 		if (unknownIdentity && result.parserState) result.reset = true;
-		return { sessionFile, result, rebuild: !stored?.parserState, replay };
+		return {
+			sessionFile,
+			result,
+			// During a full replay, a changed file can be a rewrite even if its old tail checkpoint matches.
+			rebuild:
+				!stored?.parserState ||
+				(replay &&
+					(result.parserState?.size !== stored.parserState.size ||
+						result.parserState?.mtimeMs !== stored.parserState.mtimeMs)),
+			replay,
+		};
 	};
 
 	const acceptFile = (sessionFile: string, parsed: ParsedSession | null) => {

@@ -11,7 +11,7 @@ export function NavRail({ activeSection, onSectionChange, className = "" }: NavR
 		<aside className={`stats-nav-rail ${className}`}>
 			<div className="stats-nav-rail-header">
 				<div className="stats-logo-container">
-					<span className="stats-logo-text">OH MY PI</span>
+					<span className="stats-logo-text">omp</span>
 					<span className="stats-logo-subtext">Observability</span>
 				</div>
 			</div>
@@ -37,7 +37,7 @@ export function NavRail({ activeSection, onSectionChange, className = "" }: NavR
 			</nav>
 
 			<div className="stats-nav-rail-footer">
-				<span className="stats-version-tag">OMP Stats v1.0.0</span>
+				<span className="stats-version-tag">omp Stats v1.0.0</span>
 			</div>
 		</aside>
 	);

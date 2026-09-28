@@ -27,6 +27,9 @@
 - Fixed Cursor shell tool calls showing their millisecond timeout as seconds (15000 instead of 15) in the transcript ([#13082](https://github.com/can1357/oh-my-pi/issues/13082))
 - Fixed unix-socket fetches failing when `PI_PROXY` is set ([#13505](https://github.com/can1357/oh-my-pi/issues/13505)).
 - Fixed Ollama chat turns recording zero cost; usage is now priced from the model's cost card ([#13056](https://github.com/can1357/oh-my-pi/issues/13056)).
+### Fixed
+
+- Fixed Anthropic requests failing with "`compaction` block must be sent first" when a per-message effort change was recorded on the turn right after a native compaction; the effort control now follows the compaction block ([#13569](https://github.com/can1357/oh-my-pi/pull/13569) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.5] - 2026-09-27
 

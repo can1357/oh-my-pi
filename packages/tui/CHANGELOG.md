@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Skipped `wait` calls no longer appear in the transcript when interrupted by a queued completion or message.
+
 ## [18.3.5] - 2026-09-27
 
 ### Added
