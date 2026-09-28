@@ -25,6 +25,6 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
-{{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
+{{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it. `<agent>@<provider/model>` runs a listed agent on a tagged model; use its full selector, not `m<N>`.
 {{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (READ-ONLY; investigation only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}: {{description}}
 {{/list}}{{/if}}

@@ -23,6 +23,7 @@ const AGENT: AgentDefinition = {
 
 const POLICY = {
 	discovery: { agents: [AGENT], projectAgentsDir: null },
+	agentSpec: "scout",
 	agentName: "scout",
 	agent: AGENT,
 	effectiveAgent: AGENT,

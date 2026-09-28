@@ -4,6 +4,7 @@ import { Settings } from "../../src/config/settings";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import * as discovery from "../../src/task/discovery";
+import * as taskExecutor from "../../src/task/executor";
 import type { AgentDefinition } from "../../src/task/types";
 import { WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
@@ -87,5 +88,36 @@ describe("runEvalWorkpool", () => {
 		await expect(runEvalWorkpool({ op: "wait", name: "scout-pool" }, { session })).rejects.toThrow(
 			'unknown workpool operation "wait"',
 		);
+	});
+
+	it("runs pool workers on the ^-tagged model named by agent@selector", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const dispatched = Promise.withResolvers<taskExecutor.ExecutorOptions>();
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			dispatched.resolve(options);
+			return {
+				index: options.index ?? 0,
+				id: options.id ?? "worker",
+				agent: options.agent.name,
+				agentSource: "bundled",
+				task: "inspect",
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 1,
+			};
+		});
+		const session: ToolSession = {
+			...makeSession(),
+			getSessionAgents: () => [{ ...SCOUT, name: "m1", model: ["a/x"] }],
+		};
+		await runEvalWorkpool({ op: "create", agent: "scout@a/x", name: "tagged" }, { session });
+		await runEvalWorkpool({ op: "push", name: "tagged", items: ["inspect"] }, { session });
+		const options = await dispatched.promise;
+		expect(options.agent.name).toBe("scout");
+		expect(options.modelOverride).toEqual(["a/x"]);
 	});
 });
