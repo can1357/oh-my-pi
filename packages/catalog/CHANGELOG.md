@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Cerebras models reporting cached input tokens as free; they now cost the model's input rate, matching Cerebras billing
+- Corrected Cerebras model pricing so cached input tokens are charged at the model’s input rate, consistent with Cerebras billing.
 
 ## [18.3.5] - 2026-09-27
 

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Skipped `wait` calls no longer appear in the transcript when interrupted by a queued completion or message.
+- Prevented interrupted wait operations from appearing in the transcript when a queued completion or message is received.
 
 ## [18.3.5] - 2026-09-27
 

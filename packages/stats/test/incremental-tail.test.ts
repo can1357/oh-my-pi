@@ -4,7 +4,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { closeDb, getFileOffset, getOverallStats, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getFileOffset, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 

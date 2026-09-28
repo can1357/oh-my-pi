@@ -387,6 +387,7 @@ describe("AgentSession role model thinking behavior", () => {
 			classifierStarted.resolve();
 			await releaseClassifier.promise;
 			options.onUsage?.({
+				purpose: "auto-thinking",
 				role: "smol",
 				api: model.api,
 				provider: model.provider,

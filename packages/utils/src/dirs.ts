@@ -797,6 +797,16 @@ export function getCommitCacheDbPath(): string {
 	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
 }
 
+/**
+ * Get the judgment answer cache database path (~/.omp/cache/judgment-cache.db).
+ * Honors `OMP_JUDGMENT_CACHE_DB` so tests and operators can isolate the cache.
+ */
+export function getJudgmentCacheDbPath(): string {
+	const override = process.env.OMP_JUDGMENT_CACHE_DB;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "judgment-cache.db"), "cache");
+}
+
 /** Get the legacy Pi extension parse cache database path. */
 export function getLegacyPiExtensionCacheDbPath(): string {
 	return dirs.rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");

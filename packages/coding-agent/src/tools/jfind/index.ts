@@ -12,7 +12,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
-import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../../judgment";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
 import { formatPathRelativeToCwd, normalizePathLikeInput, resolveSearchResultPath } from "../path-utils";
@@ -86,7 +86,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			settings: this.session.settings,
 			registry,
 			sessionId: this.session.getSessionId?.() ?? undefined,
-			onUsage: journalJudgmentUsage(this.session.sessionManager, "find"),
+			purpose: "find",
+			onUsage: journalJudgmentUsage(this.session.sessionManager),
+			telemetry: this.session.getTelemetry?.(),
+			cache: sharedJudgmentCache(),
 		});
 		const started = performance.now();
 		const result = await runCascade({

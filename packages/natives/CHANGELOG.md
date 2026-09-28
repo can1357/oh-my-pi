@@ -4,11 +4,12 @@
 
 ### Added
 
-- Added `expandWindowsLongPath` and `getWindowsShortPath`, which convert Windows paths between long and 8.3 spellings without resolving symlinks or junctions; import them from `@oh-my-pi/pi-natives/path` to load the addon only on first use on Windows ([#13394](https://github.com/can1357/oh-my-pi/pull/13394) by [@CoderTCY](https://github.com/CoderTCY))
+- Added Windows path utilities for converting between long and 8.3 short path spellings without resolving symlinks or junctions. Import them from `@oh-my-pi/pi-natives/path`.
 
 ### Fixed
 
-- Fixed the native `xargs` builtin ignoring `-P`/`--max-procs`; it now runs up to that many commands in parallel (`-P 0`: as many as possible), as GNU xargs does.
+- Fixed the native `xargs` builtin so `-P`/`--max-procs` correctly limits parallel command execution, including GNU-compatible `-P 0` behavior.
+- Improved snapcompact rendering performance for stretched shapes on Windows x64, Intel Macs, and Linux CPUs without AVX2, with no visual changes.
 
 ## [18.3.5] - 2026-09-27
 
@@ -19,7 +20,6 @@
 ### Fixed
 
 - Fixed SmolLM word completion (`spelling.autocomplete: smollm`) being about 25x slower on Windows x64 and Intel Macs; suggestions are unchanged ([#13488](https://github.com/can1357/oh-my-pi/pull/13488) by [@H4vC](https://github.com/H4vC))
-- Fixed snapcompact frames for stretched shapes rendering about 3-4x slower on Windows x64, Intel Macs, and Linux CPUs without AVX2; frames are visually unchanged ([#13496](https://github.com/can1357/oh-my-pi/pull/13496) by [@H4vC](https://github.com/H4vC))
 
 ## [18.3.4] - 2026-09-27
 

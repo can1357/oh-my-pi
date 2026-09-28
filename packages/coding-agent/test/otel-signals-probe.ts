@@ -144,6 +144,7 @@ logger.error("probe error", { code: "probe" });
 // Metric instruments via the agent telemetry hooks.
 const usage: ChatUsageEvent = {
 	span: undefined as never,
+	operation: "chat",
 	agent: { id: "main", name: "Main" },
 	conversationId: "probe-session",
 	stepNumber: 0,
@@ -193,9 +194,9 @@ const coverage: AgentRunCoverage = {
 config.onRunEnd?.(summary, coverage);
 
 await flushTelemetryExport();
-assertSingleMetricPoint("pi.omp.agent.chat.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.calls");
-assertSingleMetricPoint("pi.omp.agent.tool.duration");
+assertSingleMetricPoint("omp.agent.chat.calls");
+assertSingleMetricPoint("omp.agent.tool.calls");
+assertSingleMetricPoint("omp.agent.tool.duration");
 await server.stop(true);
 
 const ok = seen.has("logs") && seen.has("metrics");
