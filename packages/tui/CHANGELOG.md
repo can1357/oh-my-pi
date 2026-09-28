@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added account quota usage to the `full` and `nerd` status-line presets ([#9929](https://github.com/can1357/oh-my-pi/issues/9929), [#9983](https://github.com/can1357/oh-my-pi/pull/9983) by [@Hunter-124](https://github.com/Hunter-124))
+
 ## [18.4.0] - 2026-09-28
 
 ### Fixed
