@@ -89,7 +89,7 @@ import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
-import { isForcedToolChoice } from "../utils/tool-choice";
+import { isForcedToolChoice, isForcedToolChoiceRejection } from "../utils/tool-choice";
 import {
 	AnthropicConnectionTimeoutError,
 	type AnthropicFetchOptions,
@@ -2050,6 +2050,8 @@ const streamAnthropicOnce = (
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
 			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
 			let dropAllThinking = droppedAllThinkingForSignature;
+			let retriedForcedToolChoice = false;
+			let downgradeForcedToolChoice = false;
 			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
@@ -2240,6 +2242,7 @@ const streamAnthropicOnce = (
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
 					disableStrictTools,
+					downgradeForcedToolChoice,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
 					supportsEagerToolInputStreaming,
@@ -3127,6 +3130,20 @@ const streamAnthropicOnce = (
 							providerSessionState.strictToolsDisabled = true;
 						}
 						disableStrictTools = true;
+						params = await rebuildParams(streamFailure);
+						resetStreamOutputState();
+						continue;
+					}
+					const carriedForcedToolChoice =
+						params.tool_choice?.type === "any" || params.tool_choice?.type === "tool";
+					if (
+						!retriedForcedToolChoice &&
+						firstTokenTime === undefined &&
+						carriedForcedToolChoice &&
+						isForcedToolChoiceRejection(streamFailure)
+					) {
+						retriedForcedToolChoice = true;
+						downgradeForcedToolChoice = true;
 						params = await rebuildParams(streamFailure);
 						resetStreamOutputState();
 						continue;
@@ -4444,6 +4461,7 @@ function anthropicToolChangeBlocks(
 
 type AnthropicParamBuildOptions = {
 	disableStrictTools: boolean;
+	downgradeForcedToolChoice?: boolean;
 	useUmansGatewayWebSearch: boolean;
 	forceDemoteUnsignedThinking: boolean;
 	supportsEagerToolInputStreaming: boolean;
@@ -4475,6 +4493,7 @@ function buildParams(
 ): { params: MessageCreateParamsStreaming; requestControls: AnthropicRequestControls | undefined } {
 	const {
 		disableStrictTools,
+		downgradeForcedToolChoice = false,
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
 		supportsEagerToolInputStreaming,
@@ -4780,7 +4799,7 @@ function buildParams(
 		const choiceType = params.tool_choice?.type;
 		if (
 			(choiceType === "any" || choiceType === "tool") &&
-			(compactionRequest || !model.compat.supportsForcedToolChoice)
+			(compactionRequest || !model.compat.supportsForcedToolChoice || downgradeForcedToolChoice)
 		) {
 			params.tool_choice = { type: "auto" };
 		}

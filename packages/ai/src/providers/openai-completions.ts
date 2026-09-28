@@ -56,7 +56,12 @@ import {
 	StreamMarkupHealing,
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
-import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
+import {
+	isForcedToolChoice,
+	isForcedToolChoiceRejection,
+	mapToOpenAICompletionsToolChoice,
+	type OpenAICompletionsToolChoice,
+} from "../utils/tool-choice";
 import type {
 	ChatCompletionAssistantMessageParam,
 	ChatCompletionChunk,
@@ -866,13 +871,21 @@ const streamOpenAICompletionsOnce = (
 			);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			let disableStrictTools = isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
+			let retriedForcedToolChoice = false;
+			let downgradeForcedToolChoice = false;
 			const trimmedBaseUrl = baseUrl.replace(/\/+$/, "");
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				const builtParams = buildParams(
+					model,
+					context,
+					options,
+					effectiveToolStrictModeOverride,
+					downgradeForcedToolChoice,
+				);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
@@ -975,6 +988,15 @@ const streamOpenAICompletionsOnce = (
 							reasoningEffortFallback,
 						);
 					}
+				} else if (
+					!retriedForcedToolChoice &&
+					firstTokenTime === undefined &&
+					isForcedToolChoice(activeRequestParams?.tool_choice) &&
+					isForcedToolChoiceRejection(error, capturedErrorResponse)
+				) {
+					retriedForcedToolChoice = true;
+					downgradeForcedToolChoice = true;
+					openaiStream = await createCompletionsStream();
 				} else if (
 					model.compat.retryWithoutStrictOnGrammarError &&
 					!disableStrictTools &&
@@ -1783,12 +1805,13 @@ function resolveOpenAICompatForRequest(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
 	hasTools: boolean,
+	toolChoiceOverride?: OpenAICompletionsToolChoice,
 ): OpenAICompatPolicy {
 	return resolveOpenAICompatPolicy(model, {
 		endpoint: "chat-completions",
 		reasoning: options?.reasoning,
 		disableReasoning: options?.disableReasoning,
-		toolChoice: mapToOpenAICompletionsToolChoice(options?.toolChoice),
+		toolChoice: toolChoiceOverride ?? mapToOpenAICompletionsToolChoice(options?.toolChoice),
 		hasTools,
 	});
 }
@@ -1888,13 +1911,20 @@ function buildParams(
 	context: Context,
 	options: OpenAICompletionsOptions | undefined,
 	toolStrictModeOverride?: ToolStrictModeOverride,
+	downgradeForcedToolChoice = false,
 ): {
 	params: OpenAICompletionsParams;
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
 	reasoningEffortFallbackAllowed: boolean;
 } {
-	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
+	const toolChoiceOverride: OpenAICompletionsToolChoice = downgradeForcedToolChoice ? "auto" : undefined;
+	const initialPolicy = resolveOpenAICompatForRequest(
+		model,
+		options,
+		Boolean(context.tools?.length),
+		toolChoiceOverride,
+	);
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 
@@ -1965,7 +1995,7 @@ function buildParams(
 	}
 
 	if (options?.toolChoice && initialCompat.supportsToolChoice) {
-		params.tool_choice = mapToOpenAICompletionsToolChoice(options.toolChoice);
+		params.tool_choice = downgradeForcedToolChoice ? "auto" : mapToOpenAICompletionsToolChoice(options.toolChoice);
 	}
 	const forcedToolName =
 		typeof params.tool_choice === "object" && params.tool_choice !== null && "function" in params.tool_choice
@@ -2003,7 +2033,10 @@ function buildParams(
 		// Preserve the hard tool-use contract while letting K3 choose among tools.
 		params.tool_choice = "required";
 	}
-	if (isForcedToolChoice(params.tool_choice) && !initialCompat.supportsForcedToolChoice) {
+	if (
+		isForcedToolChoice(params.tool_choice) &&
+		(!initialCompat.supportsForcedToolChoice || downgradeForcedToolChoice)
+	) {
 		// Some thinking-required OpenAI-compatible models reject forced
 		// `tool_choice` while still accepting tools with the default auto
 		// selector. Keep the tool available and let the model choose it.
