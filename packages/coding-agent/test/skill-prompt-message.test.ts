@@ -21,6 +21,22 @@ async function createSkill(body: string): Promise<{ dir: string; skill: Skill }>
 	};
 }
 
+async function createSkillFromRaw(raw: string): Promise<{ dir: string; skill: Skill }> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skill-prompt-${Snowflake.next()}-`));
+	const filePath = path.join(dir, "SKILL.md");
+	await Bun.write(filePath, raw);
+	return {
+		dir,
+		skill: {
+			name: "reviewer",
+			description: "Review code",
+			filePath,
+			baseDir: dir,
+			source: "test",
+		},
+	};
+}
+
 describe("buildSkillPromptMessage", () => {
 	test("defaults public skill prompt rendering to user-invoked bug-fix directory guidance", async () => {
 		const { dir, skill } = await createSkill("Review the supplied code carefully.");
@@ -61,4 +77,75 @@ describe("buildSkillPromptMessage", () => {
 			await removeWithRetries(dir);
 		}
 	});
+	test("strips CRLF frontmatter without leaking raw YAML", async () => {
+		const { dir, skill } = await createSkillFromRaw(
+			"---\r\nname: reviewer\r\ndescription: Review code\r\n---\r\n\r\nReview with CRLF line endings.\r\n",
+		);
+		try {
+			const built = await buildSkillPromptMessage(skill, { args: "" });
+
+			expect(built.message).toContain("Review with CRLF line endings.");
+			expect(built.message).not.toContain("name: reviewer");
+			expect(built.message).not.toContain("description: Review code");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	test("strips BOM + CRLF frontmatter without leaking raw YAML", async () => {
+		const { dir, skill } = await createSkillFromRaw(
+			"\uFEFF---\r\nname: reviewer\r\ndescription: Review code\r\n---\r\n\r\nReview with BOM and CRLF.\r\n",
+		);
+		try {
+			const built = await buildSkillPromptMessage(skill, { args: "" });
+
+			expect(built.message).toContain("Review with BOM and CRLF.");
+			expect(built.message).not.toContain("name: reviewer");
+			expect(built.message).not.toContain("description: Review code");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	test("strips BOM + LF frontmatter without leaking raw YAML", async () => {
+		const { dir, skill } = await createSkillFromRaw(
+			"\uFEFF---\nname: reviewer\ndescription: Review code\n---\n\nReview with BOM and LF.\n",
+		);
+		try {
+			const built = await buildSkillPromptMessage(skill, { args: "" });
+
+			expect(built.message).toContain("Review with BOM and LF.");
+			expect(built.message).not.toContain("name: reviewer");
+			expect(built.message).not.toContain("description: Review code");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	test("strips frontmatter whose closing delimiter has no trailing newline", async () => {
+		const { dir, skill } = await createSkillFromRaw(
+			"---\nname: reviewer\ndescription: Review code\n---\nBody right after the delimiter.",
+		);
+		try {
+			const built = await buildSkillPromptMessage(skill, { args: "" });
+
+			expect(built.message).toContain("Body right after the delimiter.");
+			expect(built.message).not.toContain("name: reviewer");
+			expect(built.message).not.toContain("description: Review code");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	test("leaves content without frontmatter unchanged", async () => {
+		const { dir, skill } = await createSkillFromRaw("Just a plain body, no frontmatter.\n");
+		try {
+			const built = await buildSkillPromptMessage(skill, { args: "" });
+
+			expect(built.message).toContain("Just a plain body, no frontmatter.");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 });
