@@ -28,6 +28,8 @@ import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
+import { cfgReadRenderMarkdown } from "./settings";
+
 export function toReadTruncationStats(result: TruncationResult): ReadTruncationStats {
 	const { content: _content, ...stats } = result;
 	return stats;
@@ -567,7 +569,7 @@ export function markMarkdownContentType(
 	details: ReadToolDetails,
 	filePath: string,
 ): ReadToolDetails {
-	if (!details.contentType && session.settings.get("read.renderMarkdown") && isMarkdownPath(filePath)) {
+	if (!details.contentType && cfgReadRenderMarkdown.get(session.settings) && isMarkdownPath(filePath)) {
 		details.contentType = "text/markdown";
 	}
 	return details;

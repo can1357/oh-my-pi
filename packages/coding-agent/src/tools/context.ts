@@ -38,6 +38,9 @@ export class ToolContextStore {
 			hasUI: this.#hasUI,
 			toolNames: this.#toolNames,
 			toolCall,
+			// Loop-dispatched calls carry the loop's passive-context sink; direct
+			// (non-loop) executors such as the Cursor bridge install their own.
+			addAdditionalContext: toolCall?.addAdditionalContext,
 		};
 	}
 

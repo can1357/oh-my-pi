@@ -6,7 +6,7 @@
  * Endpoint: POST https://ollama.com/api/web_search
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../types";
 import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
@@ -89,7 +89,7 @@ function toSearchSources(response: OllamaSearchResponse, numResults: number): Se
 
 /** Execute Ollama web search. */
 export async function searchOllama(params: SearchParamsWithFetch): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("ollama-cloud", {
+	const keyOrResolver: ApiKey = params.authStorage.keys.resolver("ollama-cloud", {
 		sessionId: params.sessionId,
 	});
 
@@ -126,7 +126,7 @@ export class OllamaProvider extends SearchProvider {
 	readonly label = "Ollama";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("ollama-cloud");
+		return authStorage.keys.source("ollama-cloud") !== undefined;
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

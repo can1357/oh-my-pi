@@ -56,7 +56,7 @@ it.each(["concern", "nit", "blocker"] as const)(
 	async severity => {
 		const temp = TempDir.createSync("@pi-advisor-terminal-unwind-");
 		const auth = await AuthStorage.create(":memory:");
-		auth.setRuntimeApiKey("anthropic", "test-key");
+		auth.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
 		const nextUserMarker = "NEXT_USER_CONTEXT_MARKER";

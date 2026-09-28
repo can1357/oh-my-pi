@@ -98,13 +98,25 @@ fn mismatch(
 ) -> EditError {
 	let actual = file_hash(normalized);
 	store.record(canonical, normalized, None);
+	// When the tag isn't from this exact path, list the other paths in this
+	// session that *did* issue the same tag — so the rejection can name the
+	// file the tag was actually for and the model doesn't follow a wrong-tree
+	// suggestion.
+	let tag_origin_paths: Vec<String> = store
+		.find_by_hash(expected)
+		.into_iter()
+		.map(|snapshot| snapshot.path)
+		.filter(|path| path != canonical)
+		.map(|path| path.to_string_lossy().into_owned())
+		.collect();
 	mismatch_error(&MismatchDetails {
-		path:               Some(section.path.clone()),
+		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
-		actual_file_hash:   actual,
-		file_lines:         normalized.split('\n').map(str::to_owned).collect(),
-		anchor_lines:       section.collect_anchor_lines().unwrap_or_default(),
-		hash_recognized:    store.by_hash(canonical, expected).is_some(),
+		actual_file_hash: actual,
+		file_lines: normalized.split('\n').map(str::to_owned).collect(),
+		anchor_lines: section.collect_anchor_lines().unwrap_or_default(),
+		hash_recognized: store.by_hash(canonical, expected).is_some(),
+		tag_origin_paths,
 	})
 }
 

@@ -106,6 +106,9 @@ function modifiedSpecial(sequence: string, modifier: number): string {
 	if (ss3Final) return `\x1b[1;${modifier}${ss3Final[1]}`;
 	const tilde = sequence.match(/^\x1b\[(\d+)~$/);
 	if (tilde) return `\x1b[${tilde[1]};${modifier}~`;
+	// Enter/Space/Backspace/Escape have no legacy modified form: a plain byte
+	// would drop the modifier (Shift+Enter would submit), so use Kitty CSI u.
+	if (sequence.length === 1) return `\x1b[${sequence.charCodeAt(0)};${modifier}u`;
 	return sequence;
 }
 
@@ -144,7 +147,7 @@ function encodeChord(token: string): string {
 		if (alt && encoded === special) encoded = `\x1b${encoded}`;
 		return encoded;
 	}
-	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest}`);
+	if (Array.from(rest).length !== 1) throw new Error(`unknown key ${rest} (quote literal text instead, e.g. ',')`);
 	let character = rest;
 	if (shift && /^[a-z]$/i.test(character)) character = character.toUpperCase();
 	if (ctrl) character = ctrlCharacter(character);

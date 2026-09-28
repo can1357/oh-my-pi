@@ -25,7 +25,7 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 /** LLM-facing footer appended when a tool call becomes a background job. */
 export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
+	return `Backgrounded as job ${jobId}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
 }
 
 /** Shell execution metadata used by transcript rendering. */
@@ -41,6 +41,13 @@ export interface BashToolDetails {
 	timedOut?: boolean;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
+	service?: {
+		name: string;
+		state: string;
+		ready: boolean;
+		timedOut: boolean;
+		pid?: number;
+	};
 	async?: {
 		state: "running" | "completed" | "failed";
 		jobId: string;
@@ -362,6 +369,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					if (details?.async?.state === "running") {
 						statsParts.push(`Backgrounded: ${details.async.jobId}`);
 					}
+					if (details?.service) {
+						const service = details.service;
+						statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
+						statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
+						if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+					}
 					if (wallTimeMs !== undefined) {
 						statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
 					}
@@ -460,7 +473,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 
 /** Renders bash command previews and output. */
 export const bashToolRenderer = createShellRenderer<BashRenderArgs>({
-	resolveTitle: () => "Bash",
+	resolveTitle: args => (args?.name ? `Bash · ${String(args.name)}` : "Bash"),
 	resolveCommand: args => args?.command,
 	resolveCwd: args => args?.cwd,
 	resolveEnv: args => args?.env,

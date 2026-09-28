@@ -15,6 +15,18 @@ export type AgentSessionEvent =
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;
+			/**
+			 * True when the agent finished its turn: the end is terminal, or the session resumes
+			 * only for queued input or background-job results. False while the agent continues its
+			 * own work (retry, compaction continuation, stop-time reminders).
+			 */
+			yielded?: boolean;
+			/**
+			 * True on a non-terminal end whose only possible resume is a background-job result
+			 * (no queued input, no continuation the agent scheduled itself). The wake is not
+			 * guaranteed: a cancelled or suppressed job never delivers one.
+			 */
+			awaitingAsyncWork?: boolean;
 	  })
 	| {
 			type: "auto_compaction_start";
@@ -46,7 +58,7 @@ export type AgentSessionEvent =
 			finalError?: string;
 			retryErrors?: RetryErrorUpdate[];
 	  }
-	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
+	| { type: "retry_fallback_applied"; from: string; to: string; role: string; reason?: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }
 	| { type: "config_warnings_changed" }

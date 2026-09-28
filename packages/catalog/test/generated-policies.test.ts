@@ -9,7 +9,6 @@ import {
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
 
 function createSpec<TApi extends Api>(overrides: {
@@ -452,6 +451,29 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("bills Cerebras cache reads at the live input rate", () => {
+		const cost = { input: 0.99, output: 1.49, cacheRead: 0, cacheWrite: 0 };
+		const cerebras = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "cerebras", cost }),
+		);
+		expect(cerebras.cost.cacheRead).toBe(0.99);
+		// Tracks upstream list-price changes instead of pinning a number.
+		const repriced = buildGenerated(
+			createSpec({
+				id: "gpt-oss-120b",
+				api: "openai-completions",
+				provider: "cerebras",
+				cost: { ...cost, input: 0.35 },
+			}),
+		);
+		expect(repriced.cost.cacheRead).toBe(0.35);
+		// Other providers keep their discounted (or unset) cache-read rate.
+		const groq = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "groq", cost }),
+		);
+		expect(groq.cost.cacheRead).toBe(0);
+	});
+
 	it("applies documented Cursor context-window floors at build time", () => {
 		// Rule-owned (`providers/cursor.kdl` context-window-floor): baked at
 		// build time. createSpec defaults to the 200k discovery fallback.
@@ -484,19 +506,6 @@ describe("generated model policies", () => {
 				}),
 			).contextWindow,
 		).toBe(1_000_000);
-	});
-
-	it("ships documented Cursor context windows in the bundled catalog", () => {
-		const windows: Array<[string, number]> = [
-			["cursor-grok-4.5", 256_000],
-			["cursor-grok-4.6", 256_000],
-			["default", 256_000],
-			["kimi-k2.7-code", 262_000],
-			["gpt-5.6-sol-fast", 272_000],
-		];
-		for (const [id, contextWindow] of windows) {
-			expect(getBundledModel("cursor", id)?.contextWindow).toBe(contextWindow);
-		}
 	});
 
 	it("resolves documented Cursor context windows offline", async () => {

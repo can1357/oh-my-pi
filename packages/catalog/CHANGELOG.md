@@ -2,6 +2,104 @@
 
 ## [Unreleased]
 
+## [18.4.1] - 2026-09-28
+
+### Added
+
+- Added `resolveCatalogAxes` to `compat/resolve`, which resolves a model's catalog-axis policy without computing its full compat and thinking policy; context-window and catalog-policy lookups now use it, reducing model-catalog load time.
+
+### Fixed
+
+- Fixed `--thinking xhigh` on Amazon Bedrock Grok 4.6 (`us.xai.grok-4.6`, `global.xai.grok-4.6`, `xai.grok-4.6`), which was silently lowered to `high` ([#13515](https://github.com/can1357/oh-my-pi/pull/13515) by [@pgkt04](https://github.com/pgkt04)).
+- Fixed `--thinking xhigh` and `--thinking max` on Amazon Bedrock Claude Opus 5.5, which were silently lowered to `high` ([#13515](https://github.com/can1357/oh-my-pi/pull/13515) by [@pgkt04](https://github.com/pgkt04)).
+- Fixed GitHub Copilot GPT-5.6 and GPT-6 Astra starting on the 1.05M premium context window instead of the default tier ([#13017](https://github.com/can1357/oh-my-pi/pull/13017)).
+- Added Cursor model pricing so usage stats no longer record zero cost for Cursor turns ([#13302](https://github.com/can1357/oh-my-pi/pull/13302) by [@eggpeat](https://github.com/eggpeat)).
+- Devin requests now identify as Devin CLI 3000.11.3 instead of 3000.6.2, the CLI release that routes Fusion pairings ([#13527](https://github.com/can1357/oh-my-pi/pull/13527) by [@will-bogusz](https://github.com/will-bogusz)).
+
+## [18.4.0] - 2026-09-28
+
+### Fixed
+
+- Corrected Cerebras model pricing so cached input tokens are charged at the model’s input rate, consistent with Cerebras billing.
+
+## [18.3.5] - 2026-09-27
+
+### Added
+
+- Added the `openai` web-search grounding for OpenAI API models that support Responses web search (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`) ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `Model.promptCache`, per-retention-tier prompt-cache entry lifetimes in seconds (`short` / `long`), declared per provider through the `prompt-cache` KDL rule (bundled: direct Anthropic, 5 min / 1 h). Custom models and `modelOverrides` opt in with the models.yml `promptCache` key ([#12699](https://github.com/can1357/oh-my-pi/pull/12699) by [@KamijoToma](https://github.com/KamijoToma)).
+
+## [18.3.1] - 2026-09-25
+
+### Added
+
+- Added compatibility flags for models that stop output at the context-window limit and models that support steering, including defaults for Claude 4.5+ and GPT-6+ models.
+
+### Fixed
+
+- Fixed forced-tool requests for Claude Opus 5.5 so tool selection falls back gracefully when necessary.
+- Added the provider-advertised `xhigh` reasoning level for Yolo-Auto Qwen3.8 models.
+- Fixed Devin Fusion pairing requests failing with `no API providers are available` by routing them through the lead model with the lead's limits and pricing; pairings without an available lead are no longer listed ([#13000](https://github.com/can1357/oh-my-pi/pull/13000) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added compaction support for the `claude-mythos-preview` model.
+- Added provider and authentication rule definitions for on-device Apple Foundation Models.
+- Added per-account discovery of Codex cyber access entitlements.
+- Added `org-scoped-identity` and `oauth-token-env` authentication rules for providers.
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added built-in StepFun provider support for the step-5-preview model, including live model discovery.
+
+### Fixed
+
+- Fixed cost estimation for OpenAI Codex GPT-6 Sol and Luna models across standard and worker routes.
+- Fixed GitHub Copilot Grok 4.x models failing to make requests.
+
+## [18.2.10] - 2026-09-22
+
+### Changed
+
+- Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5
+- Updated default model for commandcode to claude-sonnet-5
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Local OpenAI-compatible backends—including llama.cpp, LM Studio, vLLM, Ollama, and custom loopback or LAN hosts—now support maxTokens values above 64k without incorrectly applying the hosted OpenAI limit.
+- Fixed Union Alpha requests on OpenCode Go and Zen by using the correct Messages API.
+- Updated SuperGrok’s Grok 4.7 metadata to expose its documented 500K context window and low, medium, high, and xhigh thinking levels.
+- Fixed GPT-OSS tool interactions on Google Antigravity and Gemini CLI so function-call history is preserved correctly.
+- Fixed Devin model discovery for Enterprise credentials by falling back to the legacy Windsurf catalog when native discovery does not return the full model list.
+- Curated Xiaomi Token Plan (China) MiMo V2.6 metadata: context/output limits, reasoning, and image input ([#12841](https://github.com/can1357/oh-my-pi/pull/12841) by [@roboomp](https://github.com/roboomp)).
+
+## [18.2.8] - 2026-09-21
+
+### Added
+
+- Expanded OpenRouter provider support with embedding, reranking, video generation, text-to-speech, and speech-to-text capabilities, including five new speech-to-text models.
+- Added speech-to-text support to the OpenAI provider.
+
+## [18.2.7] - 2026-09-21
+
+### Added
+
+- Added model-kind and grounded-search capability metadata, along with catalogs for local inference and search-engine models.
+- Added OpenRouter image-model discovery and live TypeSafe judge-model discovery.
+- Added the `buildDiscoveredModel` helper for defining custom providers.
+- Added glob-based patterns for identity overrides.
+
+### Changed
+
+- Updated input cost for TypeSafe models to 0.042
+- Improved model routing and thinking-policy handling for llama.cpp Qwen models, Bonsai lineage aliases, and custom provider names.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
@@ -167,9 +265,9 @@
 ### Fixed
 
 - Fixed OpenCode Go/Zen live model discovery (`GET /v1/models`) missing `x-opencode-session` and omp's `User-Agent`: discovery requests now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
-	- Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
-	- Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
-	- Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
+   - Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
+   - Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
+   - Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.1.9] - 2026-09-04
 

@@ -281,14 +281,25 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	},
 	{
 		value: "codex",
-		label: "OpenAI",
+		label: "OpenAI Codex",
 		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
+	},
+	{
+		value: "openai",
+		label: "OpenAI API",
+		description:
+			"OpenAI hosted web_search via OPENAI_API_KEY or OpenAI API-key registry credentials; billed by API usage",
 	},
 	{
 		value: "xai",
 		label: "xAI",
 		description:
 			"Grok web search via xAI Responses API (uses SuperGrok/X Premium+ OAuth via /login xai-oauth, or XAI_API_KEY)",
+	},
+	{
+		value: "openrouter",
+		label: "OpenRouter",
+		description: "OpenRouter plugins-based web search with model-selected grounding",
 	},
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 	{ value: "exa", label: "Exa", description: "API via /login exa or EXA_API_KEY; explicit keyless fallback via MCP" },

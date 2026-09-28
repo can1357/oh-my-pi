@@ -5,7 +5,15 @@ import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import { isTimeBasedCost } from "./pricing";
-import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
+import {
+	type Api,
+	type Model,
+	type ModelCost,
+	modelKind,
+	type ModelSpec,
+	type Provider,
+	type TokenCost,
+} from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -292,7 +300,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
 		: [null, null];
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
-	const normalizedModelsDevModels = fetchedModelsDevModels ?? [];
+	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
 	const modelsDevModels = additiveStaticModelIds
 		? normalizedModelsDevModels.filter(model => !additiveStaticModelIds.has(model.id))
 		: normalizedModelsDevModels;
@@ -319,7 +327,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cacheModels = additiveStaticModelIds
 		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 		: preparedCacheModels;
-	const dynamicModels = fetchedDynamicModels ?? [];
+	const dynamicModels = fetchedDynamicModels?.models ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
 	// intentional catalog emptying still prunes removed models downstream), but
 	// is NOT pinned into the cache as authoritative — that would suppress the
@@ -331,12 +339,20 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
-	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
+	const mergedWithModelsDev = mergeDynamicModels(
+		mergedWithCache,
+		modelsDevModels,
+		fetchedModelsDevModels?.explicitKindModels,
+	);
 	const catalogMetricsSource = modelsDevFetchSucceeded ? normalizedModelsDevModels : preparedCacheModels;
 	const mergedWithCatalogMetrics = additiveStaticModelIds
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
-	const mergedModels = mergeDynamicModels(mergedWithCatalogMetrics, dynamicModels);
+	const mergedModels = mergeDynamicModels(
+		mergedWithCatalogMetrics,
+		dynamicModels,
+		fetchedDynamicModels?.explicitKindModels,
+	);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
@@ -423,9 +439,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	};
 }
 
+/** Materialized discovery rows plus kind provenance captured before policy can supply a KDL kind. */
+interface DiscoveredModelSet<TApi extends Api> {
+	models: Model<TApi>[];
+	explicitKindModels: ReadonlySet<Model<TApi>>;
+}
+
 async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
-): Promise<Model<TApi>[] | null> {
+): Promise<DiscoveredModelSet<TApi> | null> {
 	if (!options.modelsDev) {
 		return null;
 	}
@@ -440,7 +462,7 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<Model<TApi>[] | null> {
+): Promise<DiscoveredModelSet<TApi> | null> {
 	try {
 		const models = await fetcher();
 		if (models === null) {
@@ -512,6 +534,7 @@ function mergeCatalogMetrics<TApi extends Api>(
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
+	explicitKindModels?: ReadonlySet<Model<TApi>>,
 ): Model<TApi>[] {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
@@ -528,6 +551,9 @@ function mergeDynamicModels<TApi extends Api>(
 			merged.set(dynamicModel.id, dynamicModel);
 			continue;
 		}
+		// A policy-derived kind on a chat row is not permission to replace an
+		// authored runner. Only a kind present before materialization can do so.
+		if (modelKind(existingModel) !== "chat" && !explicitKindModels?.has(dynamicModel)) continue;
 		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
 	}
 	return Array.from(merged.values());
@@ -537,12 +563,12 @@ function retainModelIds<TApi extends Api>(
 	models: readonly Model<TApi>[],
 	retainedModels: readonly Model<TApi>[],
 ): Model<TApi>[] {
-	if (retainedModels.length === 0 || models.length === 0) return [];
+	if (models.length === 0) return [];
 	const retainedIds = new Set(retainedModels.map(model => model.id));
-	return models.filter(model => retainedIds.has(model.id));
+	return models.filter(model => modelKind(model) !== "chat" || retainedIds.has(model.id));
 }
 
-const MODEL_CACHE_FINGERPRINT_VERSION = `merge-v4:${VERSION}`;
+const MODEL_CACHE_FINGERPRINT_VERSION = `merge-v5:${VERSION}`;
 
 /**
  * Return the versioned content identity for a static provider slice. Callers
@@ -605,7 +631,13 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		};
 	}
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
-	// verbatim override vocabulary), never the resolved `compat` record.
+	// verbatim override vocabulary), never the resolved `compat` record. The
+	// override is transport-scoped, so a bundled row authored for one API must
+	// not follow an id whose discovered route moved: Copilot's chat-completions
+	// rows carry `supportsReasoningEffort: false`, which would silently strip
+	// the effort dial once the id is pinned to Responses (#12901).
+	const compat =
+		dynamicModel.compatConfig ?? (dynamicModel.api === existingModel.api ? existingModel.compatConfig : undefined);
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -628,7 +660,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 				? { ...existingModel.headers, ...dynamicModel.headers }
 				: existingModel.headers,
 		resolveHeaders,
-		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
+		compat,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	} as ModelSpec<TApi>);
 }
@@ -663,17 +695,20 @@ function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: numb
 	return discoveryLimit;
 }
 
-function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): Model<TApi>[] {
-	if (!Array.isArray(value)) {
-		return [];
-	}
+function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): DiscoveredModelSet<TApi> {
 	const models: Model<TApi>[] = [];
+	const explicitKindModels = new Set<Model<TApi>>();
+	if (!Array.isArray(value)) {
+		return { models, explicitKindModels };
+	}
 	for (const item of value) {
 		if (isModelLike(item)) {
-			models.push(buildModel(item as ModelSpec<TApi>));
+			const model = buildModel(item as ModelSpec<TApi>);
+			models.push(model);
+			if (item.kind !== undefined) explicitKindModels.add(model);
 		}
 	}
-	return models;
+	return { models, explicitKindModels };
 }
 
 function isModelLike(value: unknown): value is ModelSpec<Api> {

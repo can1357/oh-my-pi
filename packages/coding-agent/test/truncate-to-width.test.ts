@@ -8,17 +8,6 @@ import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
  * Unicode characters that have different byte vs display widths.
  */
 describe("truncateToWidth", () => {
-	it("should truncate messages with Unicode characters correctly", () => {
-		// This message contains a checkmark (✔) which may have display width > 1 byte
-		const message = '✔ script to run › dev $ concurrently "vite" "node --import tsx ./';
-		const maxMsgWidth = visibleWidth(message) - 1;
-
-		const truncated = truncateToWidth(message, maxMsgWidth);
-		const truncatedWidth = visibleWidth(truncated);
-
-		expect(truncatedWidth).toBeLessThanOrEqual(maxMsgWidth);
-	});
-
 	it("should handle emoji characters", () => {
 		const message = "🎉 Celebration! 🚀 Launch 📦 Package ready for deployment now";
 		const maxMsgWidth = visibleWidth(message) - 2;

@@ -51,7 +51,7 @@ export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConf
  * - `envKeys` present ⇒ env-var fallback in `getEnvApiKey`, overriding the
  *   catalog table's `envVars` for that provider.
  * - `login` present ⇒ member of `OAuthProvider`, shown in the `/login` list
- *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.login`.
+ *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.oauth.login`.
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *

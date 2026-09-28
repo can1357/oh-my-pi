@@ -5,6 +5,170 @@
 ### Fixed
 
 - Disabled macOS spelling assistance for command execution with `!` and Python execution with `$` ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102)).
+## [18.4.1] - 2026-09-28
+
+### Breaking Changes
+
+- Replaced `AgentsHubDeps.setDisabledAgents`/`setOverrides` with `setAgentDisabled(name, { disabled })` and `setAgentOverride(property, name, value)`, so each hub edit persists only the agent it changes; `PropertyKind` is exported ([#13308](https://github.com/can1357/oh-my-pi/pull/13308) by [@Vortex727](https://github.com/Vortex727))
+
+### Changed
+
+- LSP servers section is omitted from the welcome screen when LSP is disabled
+- Usage dashboards and provider cards can show connected accounts with unavailable usage separately from reported quotas, without treating missing reports as unused or unlimited ([#13476](https://github.com/can1357/oh-my-pi/pull/13476) by [@aktanazat](https://github.com/aktanazat)).
+
+### Fixed
+
+- Fixed sessions exiting as if the terminal hung up when it only stopped reading for a few seconds during a very large repaint (a long transcript's replay behind a busy tmux or container attach) ([#13576](https://github.com/can1357/oh-my-pi/pull/13576) by [@sjawhar](https://github.com/sjawhar))
+- Fixed fullscreen overlays rewriting the whole terminal on every change; each frame now repaints only the rows that changed ([#13568](https://github.com/can1357/oh-my-pi/pull/13568) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the armed `/loop` status reading `Loop waiting`, which hid that the next prompt becomes the repeated loop body; it now reads `Loop: next prompt repeats` ([#13435](https://github.com/can1357/oh-my-pi/pull/13435) by [@Dante-dan](https://github.com/Dante-dan)).
+- Reduced memory held by long sessions: committed transcript blocks no longer keep their rendered-row caches ([#13242](https://github.com/can1357/oh-my-pi/pull/13242) by [@iliaal](https://github.com/iliaal)).
+- Fixed the results-limit notice advising `Use limit=` values the tool would clamp straight back; at the hard cap it now reports the reached count alone ([#13263](https://github.com/can1357/oh-my-pi/issues/13263))
+- Fixed the rewind filter finding nothing for query words in scripts without spaces (e.g. Chinese): non-Latin words now match as substrings while Latin words keep whole-word matching ([#13361](https://github.com/can1357/oh-my-pi/pull/13361) by [@jchanghong023](https://github.com/jchanghong023))
+- The Esc-Esc rewind selector opens on the recent tail of long sessions instead of replaying the whole branch; press `a` to load earlier turns ([#12819](https://github.com/can1357/oh-my-pi/pull/12819) by [@lemonleks](https://github.com/lemonleks)).
+- Fixed OSC 8 hyperlinks (file paths, URLs, GitHub refs) rendering as plain text in Herdr panes. Herdr reports `TERM=xterm-256color` without `TERM_PROGRAM`, so its panes were treated as an unknown terminal, although Herdr renders OSC 8 itself and opens links on Ctrl+click. Screen or tmux nested inside a pane still follow their own rules, and `PI_NO_HYPERLINKS=1` still opts out ([#13289](https://github.com/can1357/oh-my-pi/pull/13289) by [@andrebrait](https://github.com/andrebrait)).
+- Fixed native stderr output painting over the TUI on Linux ([#13176](https://github.com/can1357/oh-my-pi/issues/13176)).
+- Fixed heavy lag while output streams with inline images on SIXEL terminals such as Orca: each visible image was re-encoded on every render pass ([#12998](https://github.com/can1357/oh-my-pi/pull/12998) by [@wimjan123](https://github.com/wimjan123))
+- Fixed Kitty-protocol terminals re-encoding every non-PNG image on redelivery and transcript rebuilds ([#13118](https://github.com/can1357/oh-my-pi/issues/13118)).
+- Fixed the Windows Terminal taskbar progress animation restarting every second while the agent works ([#12940](https://github.com/can1357/oh-my-pi/pull/12940)).
+- Fixed resuming a long session freezing the TUI for several seconds; first paint is now spread across frames ([#12933](https://github.com/can1357/oh-my-pi/issues/12933)).
+- The model hub no longer opens a thinking strip or shows the `t` hint for models that cannot reason ([#13112](https://github.com/can1357/oh-my-pi/pull/13112)).
+
+## [18.4.0] - 2026-09-28
+
+### Fixed
+
+- Prevented interrupted wait operations from appearing in the transcript when a queued completion or message is received.
+
+## [18.3.5] - 2026-09-27
+
+### Added
+
+- Added an "OpenAI API" option to the setup wizard's web-search step; the existing ChatGPT-OAuth option is now labeled "OpenAI Codex" ([#13467](https://github.com/can1357/oh-my-pi/pull/13467) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added responsive ghost-text word completion with pluggable backend providers, context-aware prose filtering, and feedback support.
+- Improved autocomplete responsiveness for high-latency file discovery by showing interim suggestions and a searching state while results are refreshed.
+
+### Changed
+
+- Improved word-completion acceptance and persistence when typing through existing ghost text, including more natural handling of trailing spaces and punctuation.
+- Made keyboard labels across the TUI platform-aware so shortcuts are displayed using the appropriate key names for the user's operating system.
+- Updated the process monitor to distinguish target scope from current and global scope in its labels.
+
+### Fixed
+
+- Fixed autocomplete submission so Enter commits the current input correctly while suggestions are still loading.
+- Fixed the background tint for truncated skip lines.
+
+### Removed
+
+- Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+
+## [18.3.1] - 2026-09-25
+
+### Breaking Changes
+
+- Replaced the `CustomEditor` space-hold callbacks and `sttHoldEnabled` option with the `spaceHold.handler` API.
+- Removed `Editor.cursorOverrideWidth`; widths for `cursorOverride` glyphs are now measured automatically.
+
+### Added
+
+- Added push-to-talk dictation to `Input`, with live transcription and `cursorOverride` support.
+- Added visual indicators for live-steered user messages and paginated content in read-tool results.
+- Added transcript support for `cfg://` configuration read and write tool calls.
+- Added an Anthropic slow-mode badge to the status-line model segment, showing the priority state, end time, and remaining request percentage when available.
+
+### Changed
+
+- Updated the settings selector so clearing an input field fully unsets the corresponding setting.
+
+### Fixed
+
+- Fixed dimmed blockquote styling after inline code spans.
+- Fixed rendering of tool calls and results for top-level extension and MCP tools invoked through `xd://` links.
+- Fixed file links in pending Read and Write cards so they open the correct local targets, including paths in the home directory, archives, and databases.
+
+## [18.3.0] - 2026-09-24
+
+### Added
+
+- Added proc:// and agent:// URI support for interacting with processes and agents.
+- Added support for xd:// documentation topic URLs.
+- Added rendering for background job state and peer-to-peer messages from the wait tool.
+- Added supervised bash service rendering with status, readiness, and output information.
+- Added a fullscreen annotation overlay for diffs and text, including multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added Daybreak-enabled account listings to the usage dashboard.
+
+### Changed
+
+- Mermaid flowcharts and state diagrams now automatically choose a layout that best fits the available terminal width and reflow when the terminal is resized.
+- Plan Review annotations now support multi-line editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+
+### Fixed
+
+- Fixed AltGr characters, including `[`, `]`, `{`, and `}`, being dropped in Windows Terminal when using the kitty keyboard protocol on Hungarian and other international keyboard layouts ([#12984](https://github.com/can1357/oh-my-pi/pull/12984) by [@H4vC](https://github.com/H4vC)).
+
+## [18.2.11] - 2026-09-23
+
+### Added
+
+- Added a Skills section to the settings.
+- Enabled OSC 8 hyperlinks in rio.
+
+### Fixed
+
+- Fixed scrolling startup release notes without requiring an initial Escape keypress.
+- Improved usage quota display so names remain distinguishable and readable in narrow and multi-column dashboards.
+
+## [18.2.10] - 2026-09-22
+
+### Changed
+
+- Added support for multiple concurrent TUI paint listeners to enable simultaneous session recording and streaming
+- Coalesced status event updates for progress-based operations to reduce TUI render overhead
+
+## [18.2.9] - 2026-09-22
+
+### Added
+
+- Added Claude and Codex saved-reset counts, availability, and expiry to usage views, with provider-specific confirmation and uniquely identified account options.
+- Added terminal detection and capability support for otty and rio, including Kitty graphics and true-color support where available, plus otty hyperlinks and notifications.
+- Added the public `stripTerminalSequences` export for extensions that need to remove terminal control sequences.
+
+### Fixed
+
+- Composer shape previews now use the full available overlay width instead of being clipped at 96 columns.
+- Fixed cursor placement when recalling prompts from history, keeping single-line entries at the end and preserving the appropriate position for multi-line entries.
+- Restored modified-key handling and terminal notifications over SSH sessions running inside tmux.
+- Fixed typed Enter occasionally being interpreted as a literal newline when terminal input events are batched.
+
+## [18.2.8] - 2026-09-21
+
+### Changed
+
+- Improved Bash tool background-task notices by providing completed output as a follow-up and discouraging unnecessary polling.
+
+## [18.2.7] - 2026-09-21
+
+### Breaking Changes
+
+- Removed specialized keyword modules in favor of a centralized registration system
+
+### Added
+
+- Added `find` tool renderer to display search results with hit ranking and score visualization
+- Supported collapsing/expanding search hit details and range snippets
+- Enabled file hyperlinking for navigation to absolute paths in search results
+- Added streaming progress display for incomplete find tool operations
+- Added Glyph Protocol support for rendering icons without requiring patched fonts
+- Added `setMagicKeywords` for dynamic configuration of highlightable magic keywords
+
+### Fixed
+
+- Prevented magic keywords from triggering spelling autocorrect and underlining
 
 ## [18.2.5] - 2026-09-17
 

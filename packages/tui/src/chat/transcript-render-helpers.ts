@@ -7,10 +7,10 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component } from "../tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
-import type { JobSnapshot } from "../tools/hub";
-import type { DaemonSnapshot } from "../tools/hub";
+import type { JobSnapshot } from "../tools/wait";
+import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
-import { createIrcMessageCard } from "../tools/hub";
+import { createIrcMessageCard } from "../tools/wait";
 import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";

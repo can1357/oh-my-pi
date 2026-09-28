@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-	AgentEvent,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentEvent,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	joinAdditionalContext,
+	TOOL_RESULT_ADDITIONAL_CONTEXT,
+	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	CursorMcpCall,
@@ -26,7 +29,8 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-} from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+	shellTimeoutSeconds,
+} from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -220,6 +224,35 @@ function createToolResultMessage(
 	};
 }
 
+/**
+ * Per-call passive-context collector for tools the bridge executes directly.
+ * The agent loop never sees these calls, so the bridge installs its own
+ * `addAdditionalContext` sink and attaches what the call reported to the
+ * result message; `Agent` injects it after the buffered Cursor results.
+ */
+function createBridgeToolContext(options: CursorExecBridgeOptions): {
+	context: AgentToolContext | undefined;
+	attach(message: ToolResultMessage): ToolResultMessage;
+} {
+	const reported: string[] = [];
+	const base = options.getToolContext?.();
+	return {
+		context: base && {
+			...base,
+			addAdditionalContext: (value: string) => {
+				reported.push(value);
+			},
+		},
+		attach: message => {
+			const additionalContext = joinAdditionalContext(reported);
+			if (additionalContext !== undefined) {
+				(message as ToolResultWithAdditionalContext)[TOOL_RESULT_ADDITIONAL_CONTEXT] = additionalContext;
+			}
+			return message;
+		},
+	};
+}
+
 function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
@@ -265,13 +298,14 @@ async function executeTool(
 			}
 		: undefined;
 
+	const bridgeContext = createBridgeToolContext(options);
 	try {
 		result = await tool.execute(
 			toolCallId,
 			toolArgs as Record<string, unknown>,
 			undefined,
 			onUpdate,
-			options.getToolContext?.(),
+			bridgeContext.context,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -286,7 +320,7 @@ async function executeTool(
 	};
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedFinalResult, isError });
 
-	return createToolResultMessage(toolCallId, toolName, result, isError);
+	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 }
 
 function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
@@ -494,7 +528,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async shell(args: Parameters<NonNullable<ICursorExecHandlers["shell"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
 		const toolResultMessage = await executeTool(this.options, "bash", toolCallId, {
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -515,7 +549,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+		const timeoutSeconds = shellTimeoutSeconds(args.timeout);
 		const toolArgs = omitUndefinedArgs({
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
@@ -566,8 +600,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			canStreamSanitizedDelta = false;
 		};
 
+		const bridgeContext = createBridgeToolContext(this.options);
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, bridgeContext.context);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
@@ -601,7 +636,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			result: sanitizedFinalResult,
 			isError,
 		});
-		return createToolResultMessage(toolCallId, toolName, result, isError);
+		return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 	}
 
 	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0]) {

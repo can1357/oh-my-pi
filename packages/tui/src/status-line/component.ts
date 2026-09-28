@@ -25,6 +25,7 @@ import type {
 	StatusLineHost,
 	StatusLineSession,
 } from "./host";
+import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
@@ -35,6 +36,7 @@ import {
 	detectCodexResetFireworks,
 } from "../overlays/codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
@@ -53,6 +55,18 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
+
+/**
+ * Providers whose subscription quota is a single monthly bucket, so their
+ * `monthly`/`30d` window is the one the usage segment must show. Providers that
+ * merely report a monthly side-counter (GitHub Copilot's premium requests) stay
+ * out: their monthly row is not the session quota.
+ */
+const MONTHLY_SUBSCRIPTION_PROVIDERS: Record<string, true> = {
+	"alibaba-token-plan": true,
+	cursor: true,
+	"opencode-go": true,
+};
 
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
@@ -79,7 +93,7 @@ function normalizeUsageScopeValue(value: unknown): string | undefined {
  * be present and equal or a workspace sibling can mutate this account's
  * baseline.
  */
-function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
+function reportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
 	const accountId = normalizeUsageScopeValue(identity.accountId);
 	const email = normalizeUsageScopeValue(identity.email);
@@ -234,6 +248,8 @@ interface ContextUsageMemo {
 	tokenizerRef: unknown;
 	usedTokens: number;
 	contextWindow: number;
+	/** The session reported `percent: null`: usage is unknown, so no percent is shown. */
+	percentUnknown: boolean;
 	systemPromptRef: readonly string[] | undefined;
 	toolsRef: readonly any[] | undefined;
 	skillsRef: readonly any[] | undefined;
@@ -288,6 +304,7 @@ interface StatusLineExternalInputs {
 	isStreaming: boolean | undefined;
 	isAutoThinking: boolean | undefined;
 	isFastModeActive: boolean;
+	anthropicSlowModeLabel: string | undefined;
 	compactionSpeculation: unknown;
 }
 
@@ -298,7 +315,6 @@ interface CachedStatusLine {
 	availableWidth: number;
 	renderRevision: number;
 	inputRevision: number;
-	placeholders: boolean;
 	previewTitle: string | undefined;
 	externalInputs: StatusLineExternalInputs;
 }
@@ -406,8 +422,10 @@ function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
 
-function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): number {
-	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
+/** Gap width the embedded gauge needs for its labels; an unknown percent (`null`) shows the window label alone. */
+function embeddedContextGaugeMinWidth(percent: number | null, contextWindow: number): number {
+	const percentWidth = percent === null ? 0 : formatEmbeddedContextPercent(percent).length + 2;
+	return percentWidth + formatNumber(contextWindow).length + 2;
 }
 
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
@@ -528,6 +546,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
+	#recording = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -567,6 +586,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -919,6 +945,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Toggle the `● REC` badge shown while `/record` captures the screen. */
+	setRecording(recording: boolean): void {
+		if (this.#recording === recording) return;
+		this.#recording = recording;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -1454,6 +1487,24 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
+	/**
+	 * Seed working-tree status from the status line this one replaces (the
+	 * startup bar), so the dirty counts stay on screen instead of blanking until
+	 * this instance's first fetch lands. Normal TTL refreshes follow.
+	 */
+	adoptGitStatus(source: StatusLineComponent): void {
+		if (this.#cachedGitStatusCwd === undefined && source.#cachedGitStatusCwd !== undefined) {
+			this.#cachedGitStatus = source.#cachedGitStatus;
+			this.#cachedGitStatusCwd = source.#cachedGitStatusCwd;
+			this.#gitStatusLastFetch = source.#gitStatusLastFetch;
+		}
+		if (this.#jjStatusLastFetch === 0 && source.#jjStatusLastFetch !== 0) {
+			this.#cachedJjStatus = source.#cachedJjStatus;
+			this.#jjStatusLastFetch = source.#jjStatusLastFetch;
+		}
+		this.#invalidateStatusLineRenderCache();
+	}
+
 	#lookupPr(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
 		number: number;
 		url: string;
@@ -1756,7 +1807,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// The report boundary above validates the fields this extractor iterates;
 			// optional metadata and credit fields are narrowed again before use.
 			const usageReport = report as UsageReport;
-			if (!codexReportMatchesExactIdentity(usageReport, activeIdentity)) continue;
+			if (!reportMatchesExactIdentity(usageReport, activeIdentity)) continue;
 			matchingReport = usageReport;
 			break;
 		}
@@ -1812,12 +1863,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		const now = Date.now();
+		const resetReports: UsageReport[] = [];
 		const activeModelId = normalizeUsageScopeValue(context.modelId);
 		const activeAntigravityCounter =
 			context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
+		const monthlySubscriptionProvider =
+			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
@@ -1828,6 +1889,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// fetchUsageReports supplies normalized rows; the guards above protect
 			// the unknown session boundary before the account matcher reads metadata.
 			const usageReport = report as UsageReport;
+			if (
+				usageReport.resetCredits &&
+				(!context.identity || reportMatchesExactIdentity(usageReport, context.identity))
+			) {
+				resetReports.push(usageReport);
+			}
 			const limits =
 				provider === "google-antigravity" && activeAntigravityCounter
 					? scopeAntigravityLimitsForModel(usageReport, context)
@@ -1874,10 +1941,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 										: undefined;
 				const windowClass =
 					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-						? "monthly"
-						: undefined);
+					(monthlySubscriptionProvider && (windowId === "monthly" || windowId === "30d") ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
@@ -1915,7 +1979,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		for (const group of scopeGroups.values()) {
 			if (!selectedGroup || group.priority < selectedGroup.priority) selectedGroup = group;
 		}
-		if (!selectedGroup) return null;
+		const resetReport =
+			resetReports.length === 1
+				? resetReports[0]
+				: context.identity
+					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
+					: undefined;
+		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
+		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const resetCredits =
+			resetSummary && resetSummary.bankedCount > 0
+				? {
+						bankedCount: resetSummary.bankedCount,
+						redeemableCount: resetSummary.redeemableCount,
+						expiryHours:
+							resetExpiryMs !== undefined && resetExpiryMs > 0
+								? Math.max(1, Math.ceil(resetExpiryMs / 3_600_000))
+								: undefined,
+						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
+						unavailableReason: resetSummary.unavailableReason,
+					}
+				: undefined;
+		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
 
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let daily: { percent: number; resetMinutes?: number } | undefined;
@@ -1972,8 +2057,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				}
 			}
 		}
-		if (!fiveHour && !daily && !sevenDay && !monthly) return null;
-		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly };
+		if (!fiveHour && !daily && !sevenDay && !monthly && !resetCredits) return null;
+		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly, resetCredits };
 	}
 
 	/**
@@ -2025,6 +2110,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const usedTokens = usage?.tokens ?? 0;
 		const contextWindow = usage?.contextWindow ?? modelContextWindow;
 		this.#contextUsageCache = {
+			percentUnknown: usage?.percent === null,
 			messagesRef: messages,
 			length,
 			lastFingerprint,
@@ -2078,7 +2164,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const breakdown = this.getCachedContextBreakdown();
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
-		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
+		let contextPercent: number | null =
+			contextWindow > 0 && !this.#contextUsageCache?.percentUnknown
+				? (breakdown.usedTokens / contextWindow) * 100
+				: null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
@@ -2131,6 +2220,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
 			stream: this.#streamStatus,
+			recording: this.#recording,
 			usageStats,
 			contextPercent,
 			contextTokens,
@@ -2306,6 +2396,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			isAutoThinking: this.session.isAutoThinking,
 			isFastModeActive:
 				typeof this.session.isFastModeActive === "function" ? this.session.isFastModeActive() : false,
+			anthropicSlowModeLabel:
+				typeof this.session.getAnthropicSlowModeLabel === "function"
+					? this.session.getAnthropicSlowModeLabel()
+					: undefined,
 			compactionSpeculation: this.session.compactionSpeculation,
 		};
 	}
@@ -2360,6 +2454,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
+			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
 			left.compactionSpeculation === right.compactionSpeculation
 		);
 	}
@@ -2370,8 +2465,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * clocks, countdowns, and VCS fallback polling advance only at their own
 	 * display/probe cadence.
 	 */
-	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings, placeholders: boolean): number {
-		if (placeholders) return 0;
+	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
 		const meter = this.#meter();
@@ -2400,17 +2494,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return 0;
 	}
 
-	#buildStatusLine(
-		width: number,
-		layout: StatusLineLayout = "box",
-		previewTitle?: string,
-		options?: { readonly placeholders?: boolean },
-	): CachedStatusLine {
+	#buildStatusLine(width: number, layout: StatusLineLayout = "box", previewTitle?: string): CachedStatusLine {
 		const effectiveSettings = this.#resolveSettings();
-		const placeholders = options?.placeholders === true;
 		const externalInputs = this.#readStatusLineExternalInputs();
 		const nowMs = Date.now();
-		const clockTick = this.#statusLineClock(nowMs, effectiveSettings, placeholders);
+		const clockTick = this.#statusLineClock(nowMs, effectiveSettings);
 		if (clockTick !== this.#statusLineClockTick) {
 			this.#statusLineClockTick = clockTick;
 			this.#invalidateStatusLineRenderCache();
@@ -2422,14 +2510,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cached.availableWidth === width &&
 			cached.renderRevision === this.#renderRevision &&
 			cached.inputRevision === this.#statusLineInputRevision &&
-			cached.placeholders === placeholders &&
 			cached.previewTitle === previewTitle &&
 			this.#sameStatusLineExternalInputs(cached.externalInputs, externalInputs)
 		) {
 			return cached;
 		}
 
-		const content = this.#renderStatusLine(width, layout, previewTitle, options, nowMs);
+		const content = this.#renderStatusLine(width, layout, previewTitle, nowMs);
 		const result = {
 			content,
 			dimmedContent: this.#dimWhileFocusProxied(content),
@@ -2437,7 +2524,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			availableWidth: width,
 			renderRevision: this.#renderRevision,
 			inputRevision: this.#statusLineInputRevision,
-			placeholders,
 			previewTitle,
 			externalInputs,
 		};
@@ -2460,16 +2546,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * `previewTitle` is a stand-in session title for composer previews; the
 	 * `session_name` segment renders it when the session is unnamed.
 	 */
-	#renderStatusLine(
-		width: number,
-		layout: StatusLineLayout,
-		previewTitle: string | undefined,
-		options: { readonly placeholders?: boolean } | undefined,
-		nowMs: number,
-	): string {
+	#renderStatusLine(width: number, layout: StatusLineLayout, previewTitle: string | undefined, nowMs: number): string {
 		const effectiveSettings = this.#resolveSettings();
 		this.#syncPricingTimer();
-		const placeholders = options?.placeholders === true;
 		const plain = layout !== "box" && layout !== "band";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
@@ -2479,7 +2558,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		const liveCtx = this.#buildSegmentContext(
+		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
@@ -2488,7 +2567,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			nowMs,
 			previewTitle,
 		);
-		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
 		const separatorDef = plain
 			? { left: "·", right: "·" }
 			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
@@ -2540,8 +2618,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const embedContext =
 			!plain &&
 			effectiveSettings.contextLine === "embedded" &&
-			ctx.contextPercent !== null &&
-			ctx.contextPercent !== undefined &&
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
 			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
@@ -2561,13 +2637,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
-				const count = placeholders ? "…" : `${runningBackgroundJobs}`;
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${count}`));
+				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
-			if (subagentBadge) {
-				const content = placeholders ? [theme.icon.agents, "…"].filter(Boolean).join(" ") : subagentBadge;
-				rightParts.unshift(placeholders ? theme.fg("statusLineSubagents", content) : content);
-			}
+			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];
@@ -2599,9 +2671,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
 		const embeddedContextWidth = embedContext
-			? ctx.startupPlaceholder
-				? "…%".length + "…".length + 4
-				: embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow)
 			: 0;
 		const minimumGapWidth = (): number => {
 			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
@@ -2755,11 +2825,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const horizontal = theme.boxRound.horizontal;
 		const mode = effectiveSettings.contextLine ?? "embedded";
 		const pct = ctx.contextPercent;
-		if (mode === "off" || pct === null || pct === undefined) {
+		if (mode === "off" || (pct === null && ctx.contextWindow <= 0)) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
 		}
 
-		const clampedPct = Math.min(100, Math.max(0, pct));
+		// Unknown usage against a known window (startup prepaint) draws the fresh-session
+		// gauge: one lit cell and the window label, no percent.
+		const clampedPct = pct === null ? 0 : Math.min(100, Math.max(0, pct));
 		let percentLabel = "";
 		let windowLabel = "";
 		let percentStart = -1;
@@ -2768,14 +2840,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
 		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct > 100;
+		const percentOverflow = pct !== null && pct > 100;
 		if (embedContext) {
-			const candidatePercent = ctx.startupPlaceholder
-				? "…%"
-				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = ctx.startupPlaceholder ? "…" : formatNumber(ctx.contextWindow);
-			const minimumLabelWidth = candidatePercent.length + candidateWindow.length + 4;
-			if (gapWidth >= minimumLabelWidth) {
+			const candidatePercent = pct === null ? "" : formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const candidateWindow = formatNumber(ctx.contextWindow);
+			if (gapWidth >= embeddedContextGaugeMinWidth(pct, ctx.contextWindow)) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
@@ -2877,9 +2946,32 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 	}
 
-	/** Render startup ellipses inside each segment's normal icon, color, and static chrome. */
-	renderStartupPlaceholder(width: number, layout: StatusLineLayout): string {
-		return this.#buildStatusLine(width, layout, undefined, { placeholders: true }).content;
+	/**
+	 * Wire this bar into `editor` for a composer layout: the matching top-border
+	 * provider, the autocomplete probe, and the standalone bottom-bar placement.
+	 * Callers re-run it whenever the composer shape changes.
+	 */
+	attachToEditor(
+		editor: Pick<Editor, "isAutocompleteActive" | "setTopBorderProvider" | "setTopBorder">,
+		style: Pick<ComposerStyle, "statusAttachment" | "bottomBar" | "bottomBarGap">,
+	): void {
+		this.setAutocompleteActiveProbe(() => editor.isAutocompleteActive());
+		switch (style.statusAttachment) {
+			case "top-border":
+				editor.setTopBorderProvider(availableWidth => this.getTopBorder(availableWidth));
+				break;
+			case "top-band":
+				editor.setTopBorderProvider(availableWidth => this.getBandTopBorder(availableWidth));
+				break;
+			case "top-rule-chip":
+				editor.setTopBorderProvider(availableWidth => this.getStandaloneTopBorder(availableWidth));
+				break;
+			case "none":
+				editor.setTopBorderProvider(undefined);
+				editor.setTopBorder(undefined);
+				break;
+		}
+		this.setComposerStyle(style);
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {

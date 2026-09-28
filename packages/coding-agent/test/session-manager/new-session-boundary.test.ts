@@ -63,7 +63,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		}
 	});
 
-	it("keeps an explicit /new boundary when the relaunched process has a different terminal id", async () => {
+	it("skips an explicit /new boundary on a different terminal and continues the latest non-empty session", async () => {
 		const old = SessionManager.create(cwd);
 		old.appendMessage({ role: "user", content: "pre-new work", timestamp: 1 });
 		old.appendMessage(makeAssistantMessage());
@@ -79,19 +79,20 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		await resumed.close();
 
 		// Filesystems may assign both rapid writes the same mtime. Session-header
-		// creation time must still make the explicit boundary win deterministically.
+		// creation time must still order the explicit boundary newest deterministically.
 		const tiedMtime = new Date("2026-01-01T00:00:00.000Z");
 		fs.utimesSync(oldFile, tiedMtime, tiedMtime);
 		fs.utimesSync(freshFile, tiedMtime, tiedMtime);
 
 		// Closing a terminal tab/window changes its TTY identity, so the next
-		// process cannot rely on the old terminal-scoped breadcrumb.
+		// process has no breadcrumb pointing at the empty boundary: -c skips
+		// the 0-turn stub and continues the latest non-empty transcript.
 		process.env.TMUX_PANE = "%new-boundary-relaunched-terminal";
 		const relaunched = await SessionManager.continueRecent(cwd);
 		try {
-			expect(relaunched.getEntries()).toHaveLength(0);
-			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(freshFile));
-			expect(path.resolve(relaunched.getSessionFile() ?? "")).not.toBe(path.resolve(oldFile));
+			expect(JSON.stringify(relaunched.getEntries())).toContain("pre-new work");
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(oldFile));
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).not.toBe(path.resolve(freshFile));
 		} finally {
 			await relaunched.close();
 		}
@@ -121,6 +122,39 @@ describe("SessionManager.continueRecent /new boundary", () => {
 			// Materialized-then-deleted target (non-fresh) → fall back to the
 			// most-recent surviving session, not a fresh empty one.
 			expect(JSON.stringify(relaunched.getEntries())).toContain("first session");
+		} finally {
+			await relaunched.close();
+		}
+	});
+
+	it("-c skips an empty newest stub when the breadcrumb belongs to another project", async () => {
+		const old = SessionManager.create(cwd);
+		old.appendMessage({ role: "user", content: "real work", timestamp: 1 });
+		old.appendMessage(makeAssistantMessage());
+		await old.flush();
+		const oldFile = old.getSessionFile();
+		if (!oldFile) throw new Error("Expected persisted old session file");
+		await old.close();
+
+		// All writes below share one terminal, so the breadcrumb points at the
+		// foreign project while -c runs in cwd: the different-cwd branch.
+		process.env.TMUX_PANE = "%new-boundary-skip-empty-terminal";
+		const stubFile = SessionManager.createEmptySessionFile(cwd);
+		expect(fs.existsSync(stubFile)).toBe(true);
+
+		const cwdOther = path.join(testAgentDir, "other-project");
+		fs.mkdirSync(cwdOther, { recursive: true });
+		const other = SessionManager.create(cwdOther);
+		other.appendMessage({ role: "user", content: "other work", timestamp: 1 });
+		other.appendMessage(makeAssistantMessage());
+		await other.flush();
+		await other.close();
+
+		// Newest file in cwd is the untitled stub; -c must fall back past it.
+		const relaunched = await SessionManager.continueRecent(cwd);
+		try {
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(oldFile));
+			expect(JSON.stringify(relaunched.getEntries())).toContain("real work");
 		} finally {
 			await relaunched.close();
 		}

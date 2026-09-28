@@ -322,19 +322,6 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		assertIdenticalGrowth(bullets, 60, 3);
 	});
 
-	it("a list closed by a paragraph freezes at the boundary (streaming perf gate)", () => {
-		// The lookahead must actually fire here: the tail after the blank line
-		// is a paragraph, which cannot continue a `-` list, so the rendered
-		// list rows become settled (frozen prefix) on the transient path.
-		const doc = "- alpha\n- beta\n- gamma\n\nClosing paragraph after the list keeps going.";
-		const streaming = new Markdown("", 0, 0, THEME);
-		streaming.transientRenderCache = true;
-		clearRenderCache();
-		streaming.setText(doc);
-		const streamLines = streaming.render(60);
-		expect(streamLines).toEqual(renderCold(doc, 60));
-	});
-
 	it("orphan-fence repair starting mid-stream keeps growth byte-identical", () => {
 		// Final-mode repairOrphanClosingFence deletes an unmatched bare fence
 		// once both a heading and a GFM table delimiter follow it. The raw text

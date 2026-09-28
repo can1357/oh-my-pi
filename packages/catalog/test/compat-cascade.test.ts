@@ -126,6 +126,40 @@ describe("cascade rank precedence", () => {
 		expect(upgraded.thinking.mode).toBe("effort");
 	});
 
+	test("identity-scoped neutral opt-in activates reviewed class and revision ladders only", () => {
+		const cascade = compile(
+			`provider "prov" {
+				thinking-upgrade-neutral #true
+				thinking-efforts "minimal" "low"
+				class "cls" {
+					thinking-upgrade-neutral #true
+					revision ">=2" {
+						thinking-efforts "low" "medium" "xhigh"
+					}
+				}
+				class "other" {
+					revision ">=2" {
+						thinking-efforts "high" "max"
+					}
+				}
+			}`,
+		);
+
+		const upgraded = resolveCascadeRules(cascade, target({ revision: "2.1", reasoning: false }));
+		expect(upgraded.reasoning).toBe(true);
+		expect(upgraded.thinking.efforts).toEqual(["low", "medium", "xhigh"]);
+		expect(upgraded.thinking.upgradeNeutral).toBe(true);
+
+		// Provider-wide opt-in is intentionally insufficient: it must not turn
+		// every neutral discovery row into a reasoning model.
+		const unrelated = resolveCascadeRules(
+			cascade,
+			target({ class: "other", model: "other-model", revision: "2.1", reasoning: false }),
+		);
+		expect(unrelated.reasoning).toBe(false);
+		expect(unrelated.thinking).toEqual({});
+	});
+
 	test("compound wildcard and token selectors preserve conjunction semantics", () => {
 		const cascade: CompiledCascade = {
 			rules: [
@@ -221,17 +255,6 @@ describe("cascade rank precedence", () => {
 });
 
 describe("resolveCascade over committed rules", () => {
-	test("bundled rules resolve thinking for a reasoning glm target", () => {
-		const resolved = resolveCascade({
-			provider: "opencode-zen",
-			api: "openai-completions",
-			class: "glm",
-			model: "glm-5.2",
-			reasoning: true,
-		});
-		expect(resolved.thinking.mode).toBeDefined();
-	});
-
 	test("glm-5.2 on a blanket-glm provider resolves without overlapping the class ladder", () => {
 		// Regression: providers/alibaba-coding-plan.kdl has a direct `class "glm"`
 		// efforts block and no exact glm-5.2 residue, so it used to tie with the

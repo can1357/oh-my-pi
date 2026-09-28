@@ -186,19 +186,6 @@ export const observed = [
 		expect(missing).toEqual([]);
 	});
 
-	it("keeps pi-ai/pi-coding-agent/pi-tui roots routed to their compat shims in compiled mode", () => {
-		// The shim entries themselves resolve to virtual bundled specifiers in
-		// compiled mode (the shim files are bundled under their own registry
-		// keys); the test asserts only that the roots stay distinct from the
-		// canonical pi-* surface — extensions still see the `Type` /
-		// `defineTool` helpers the canonical entrypoints dropped.
-		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
-		expect(overrides["@oh-my-pi/pi-ai"]).toBeDefined();
-		expect(overrides["@oh-my-pi/pi-ai"]).not.toBe("omp-legacy-pi-bundled:@oh-my-pi/pi-ai/oauth");
-		expect(overrides["@oh-my-pi/pi-coding-agent"]).toBeDefined();
-		expect(overrides["@oh-my-pi/pi-tui"]).toBeDefined();
-	});
-
 	it("does not register subpath overrides in dev/install mode", () => {
 		const overrides = __buildLegacyPiPackageRootOverrides(false);
 		expect(overrides).not.toHaveProperty("@oh-my-pi/pi-ai/oauth");

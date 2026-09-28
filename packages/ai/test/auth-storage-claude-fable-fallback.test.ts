@@ -5,6 +5,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 
@@ -21,17 +22,19 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 			return rows;
 		},
 		updateAuthCredential() {},
-		deleteAuthCredential() {},
+		async deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},
-		replaceAuthCredentialsForProvider() {
+		async replaceAuthCredentials() {
 			return rows;
 		},
-		upsertAuthCredentialForProvider() {
+		async upsertAuthCredential() {
 			return rows;
 		},
-		deleteAuthCredentialsForProvider() {},
+		async deleteAuthCredentials() {},
 		getCache(key) {
 			const entry = cache.get(key);
 			if (!entry) return null;
@@ -132,7 +135,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		storage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 	});
 
 	afterEach(() => {
@@ -158,7 +161,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		});
 
 		// Unknown Fable headroom is not a proactive hard block.
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-1");
 	});
@@ -177,7 +180,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-2");
 	});
@@ -196,7 +199,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-1");
 	});
@@ -215,7 +218,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-1");
 	});
@@ -234,7 +237,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-1");
 	});
@@ -253,7 +256,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-2");
 	});
@@ -271,7 +274,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-3");
 	});
@@ -289,15 +292,39 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const firstKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const firstKey = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(firstKey).toBe("oat-1");
 
-		const result = await storage.markUsageLimitReached("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const result = await storage.limits.markReached("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(result.switched).toBe(true);
 
-		const retryKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const retryKey = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(retryKey).not.toBe(firstKey);
 		expect(["oat-2", "oat-3"]).toContain(retryKey as string);
+	});
+
+	it("keeps an organization denial blocked across model tiers and healthy usage reports", async () => {
+		const now = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			const email = access === "oat-1" ? "a@example.com" : access === "oat-2" ? "b@example.com" : "c@example.com";
+			return withFable(baseReport(email), 0.2);
+		});
+		const deniedKey = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
+		expect(deniedKey).toBe("oat-1");
+		await storage.limits.rotate("anthropic", "session-3", {
+			apiKey: deniedKey,
+			modelId: "claude-fable-5",
+			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
+				code: "oauth_not_allowed_for_organization",
+			}),
+		});
+
+		expect(await storage.keys.get("anthropic", "session-3", { modelId: "claude-sonnet-4-5" })).toBe("oat-2");
+		vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60_000);
+		store.cache.clear();
+		expect(await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" })).toBe("oat-2");
 	});
 
 	it("aborts a local usage lookup before marking the credential blocked", async () => {
@@ -310,11 +337,11 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return releaseUsage.promise;
 		});
 
-		const firstKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const firstKey = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 		store.cache.clear();
 		blockUsage = true;
 		const controller = new AbortController();
-		const marking = storage.markUsageLimitReached("anthropic", "session-3", {
+		const marking = storage.limits.markReached("anthropic", "session-3", {
 			modelId: "claude-fable-5",
 			signal: controller.signal,
 		});
@@ -336,7 +363,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 
 		expect(rejectedQuickly).toBe(true);
 		expect(String(rejection)).toContain("usage fetch aborted");
-		expect(await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" })).toBe(firstKey);
+		expect(await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" })).toBe(firstKey);
 	});
 
 	it("does not mark a credential when aborted during target resolution", async () => {
@@ -344,17 +371,17 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		const provider = "no-usage-provider";
 		store = makeStore([oauthRow(1, "a@example.com", provider)]);
 		storage = new AuthStorage(store);
-		await storage.reload();
-		const firstKey = await storage.getApiKey(provider, "session-3");
+		await storage.credentials.reload();
+		const firstKey = await storage.keys.get(provider, "session-3");
 		const controller = new AbortController();
 
-		const marking = storage.markUsageLimitReached(provider, "session-3", {
+		const marking = storage.limits.markReached(provider, "session-3", {
 			signal: controller.signal,
 		});
 		controller.abort();
 
 		await expect(marking).rejects.toThrow();
-		expect(await storage.getApiKey(provider, "session-3")).toBe(firstKey);
+		expect(await storage.keys.get(provider, "session-3")).toBe(firstKey);
 	});
 
 	it("extends a live Fable rate-limit block to the confirmed Fable reset", async () => {
@@ -374,10 +401,10 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const firstKey = await storage.getApiKey("anthropic", "session-3");
+		const firstKey = await storage.keys.get("anthropic", "session-3");
 		expect(firstKey).toBe("oat-1");
 
-		const result = await storage.markUsageLimitReached("anthropic", "session-3", {
+		const result = await storage.limits.markReached("anthropic", "session-3", {
 			modelId: "claude-fable-5",
 			retryAfterMs: 1_000,
 		});
@@ -387,7 +414,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		store.cache.clear();
 		now = startNow + 60_001;
 
-		const retryKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const retryKey = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(retryKey).toBe("oat-2");
 	});
 
@@ -404,7 +431,7 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			return reportsByAccess[access] ?? null;
 		});
 
-		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		const key = await storage.keys.get("anthropic", "session-3", { modelId: "claude-fable-5" });
 
 		expect(key).toBe("oat-3");
 	});

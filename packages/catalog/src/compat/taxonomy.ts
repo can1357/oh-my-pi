@@ -14,13 +14,13 @@ import { formatRevision, parseRevisionPrefix } from "./revision";
 import rules from "./rules.json";
 import type { CompiledClass, CompiledIdentityOverride, CompiledMatcher, ModelIdentity } from "./types";
 
-/** Two classes (or two families) tie for one model id. */
+/** Two classes, families, or reviewed override patterns tie for one model id. */
 export class AmbiguousIdentityError extends Error {
 	constructor(
 		readonly model: string,
 		readonly first: string,
 		readonly second: string,
-		kind: "class" | "family",
+		kind: "class" | "family" | "override",
 	) {
 		super(`ambiguous ${kind} for \`${model}\`: \`${first}\` and \`${second}\` tie`);
 		this.name = "AmbiguousIdentityError";
@@ -201,27 +201,50 @@ function ranksInClass(classId: string, model: string, lenient: boolean): Omit<Cl
 	return out;
 }
 
-// Lowercase override index built once per process: avoids re-lowercasing every
-// override model/provider string on every classifyModel call. First override
-// in tree order wins per (model, provider) slot, matching the linear scan it
-// replaced.
+// Exact overrides retain a direct lowercase index. Pattern overrides are few
+// and remain in one static list, ranked only after exact lookup misses.
 interface OverrideBucket {
 	byProvider: Map<string, CompiledIdentityOverride>;
 	agnostic: CompiledIdentityOverride | undefined;
 }
 
-let overrideIndex: Map<string, OverrideBucket> | undefined;
+interface IndexedPatternOverride {
+	override: CompiledIdentityOverride;
+	glob: string;
+	provider?: string;
+	specificity: number;
+}
 
-function getOverrideIndex(): Map<string, OverrideBucket> {
-	if (overrideIndex !== undefined) return overrideIndex;
-	const index = new Map<string, OverrideBucket>();
-	for (const cls of rules.taxonomy.classes) {
+interface OverrideIndexes {
+	exact: Map<string, OverrideBucket>;
+	patterns: IndexedPatternOverride[];
+}
+
+let overrideIndexes: OverrideIndexes | undefined;
+
+function getOverrideIndexes(): OverrideIndexes {
+	if (overrideIndexes !== undefined) return overrideIndexes;
+	const exact = new Map<string, OverrideBucket>();
+	const patterns: IndexedPatternOverride[] = [];
+	const classes: readonly CompiledClass[] = rules.taxonomy.classes;
+	for (const cls of classes) {
 		for (const override of cls.overrides) {
+			if (override.model === undefined) {
+				if (override.glob !== undefined) {
+					patterns.push({
+						override,
+						glob: override.glob,
+						provider: override.provider?.toLowerCase(),
+						specificity: nonWildcardBytes(override.glob),
+					});
+				}
+				continue;
+			}
 			const key = override.model.toLowerCase();
-			let bucket = index.get(key);
+			let bucket = exact.get(key);
 			if (bucket === undefined) {
 				bucket = { byProvider: new Map(), agnostic: undefined };
-				index.set(key, bucket);
+				exact.set(key, bucket);
 			}
 			if (override.provider !== undefined) {
 				const providerKey = override.provider.toLowerCase();
@@ -231,30 +254,68 @@ function getOverrideIndex(): Map<string, OverrideBucket> {
 			}
 		}
 	}
-	overrideIndex = index;
-	return index;
+	overrideIndexes = { exact, patterns };
+	return overrideIndexes;
+}
+
+function overrideIsActive(override: CompiledIdentityOverride, observedAtMs: number | undefined): boolean {
+	return override.expiresAtMs === undefined || observedAtMs === undefined || observedAtMs < override.expiresAtMs;
+}
+
+interface PatternOverrideRanking {
+	winner?: { specificity: number; override: CompiledIdentityOverride };
+	tied?: readonly [CompiledIdentityOverride, CompiledIdentityOverride];
+}
+
+function rankPatternOverrides(
+	patterns: readonly IndexedPatternOverride[],
+	provider: string | undefined,
+	bareModel: string,
+	observedAtMs: number | undefined,
+): PatternOverrideRanking {
+	let winner: { specificity: number; override: CompiledIdentityOverride } | undefined;
+	let tied: readonly [CompiledIdentityOverride, CompiledIdentityOverride] | undefined;
+	for (const pattern of patterns) {
+		const { override, specificity } = pattern;
+		if (pattern.provider !== provider || !overrideIsActive(override, observedAtMs)) continue;
+		if (!globMatch(pattern.glob, bareModel)) continue;
+		if (winner?.specificity === specificity) {
+			tied = [winner.override, override];
+		} else if (winner === undefined || winner.specificity < specificity) {
+			winner = { specificity, override };
+			tied = undefined;
+		}
+	}
+	return { winner, tied };
 }
 
 function findIdentityOverride(
 	provider: string,
 	bareModel: string,
 	observedAtMs: number | undefined,
+	lenient: boolean,
 ): CompiledIdentityOverride | undefined {
-	const bucket = getOverrideIndex().get(bareModel.toLowerCase());
-	if (bucket === undefined) return undefined;
-	const scoped = bucket.byProvider.get(provider.toLowerCase());
-	if (scoped !== undefined) {
-		if (scoped.expiresAtMs === undefined || observedAtMs === undefined || observedAtMs < scoped.expiresAtMs) {
-			return scoped;
-		}
+	const lowerProvider = provider.toLowerCase();
+	const lowerBareModel = bareModel.toLowerCase();
+	const indexes = getOverrideIndexes();
+	const bucket = indexes.exact.get(lowerBareModel);
+	if (bucket !== undefined) {
+		const scoped = bucket.byProvider.get(lowerProvider);
+		if (scoped !== undefined && overrideIsActive(scoped, observedAtMs)) return scoped;
+		const agnostic = bucket.agnostic;
+		if (agnostic !== undefined && overrideIsActive(agnostic, observedAtMs)) return agnostic;
 	}
-	const agnostic = bucket.agnostic;
-	if (agnostic !== undefined) {
-		if (agnostic.expiresAtMs === undefined || observedAtMs === undefined || observedAtMs < agnostic.expiresAtMs) {
-			return agnostic;
-		}
+
+	const scoped = rankPatternOverrides(indexes.patterns, lowerProvider, lowerBareModel, observedAtMs);
+	const ranked =
+		scoped.winner === undefined && scoped.tied === undefined
+			? rankPatternOverrides(indexes.patterns, undefined, lowerBareModel, observedAtMs)
+			: scoped;
+	if (ranked.tied !== undefined) {
+		if (lenient) return undefined;
+		throw new AmbiguousIdentityError(lowerBareModel, ranked.tied[0].id, ranked.tied[1].id, "override");
 	}
-	return undefined;
+	return ranked.winner?.override;
 }
 
 /** Result of collapsing a wire id through the suffix vocabulary. */
@@ -369,8 +430,8 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * other model classified under the same key. Calls with an explicit
  * observedAtMs skip the memo so override expiry stays exact.
  *
- * @throws AmbiguousIdentityError on equal-rank cross-class or cross-family
- * matches unless `opts.lenient`.
+ * @throws AmbiguousIdentityError on equal-rank cross-class, cross-family, or
+ * reviewed-pattern matches unless `opts.lenient`.
  */
 const classifyMemo = new Map<string, ModelIdentity>();
 const CLASSIFY_MEMO_MAX = 4096;
@@ -396,7 +457,7 @@ function classifyModelUncached(provider: string, modelId: string, opts?: Classif
 	const lenient = opts?.lenient === true;
 	const trimmed = modelId.trim();
 	const bare = bareOf(trimmed);
-	const override = findIdentityOverride(provider, bare, opts?.observedAtMs);
+	const override = findIdentityOverride(provider, bare, opts?.observedAtMs, lenient);
 	if (override) {
 		const logical = override.logical ?? trimmed;
 		const cls = override.class ?? classifyRanks(logical, lenient).class;

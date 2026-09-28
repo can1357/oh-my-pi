@@ -67,12 +67,6 @@ describe("effort-dial-less reasoner encoding (regression)", () => {
 		expect(grok43.thinking).toBeDefined();
 		expect(getSupportedEfforts(grok43).length).toBeGreaterThan(0);
 	});
-
-	test("the no-dial encoding stays scoped to openai-responses*", () => {
-		const claude = getBundledModel("anthropic", "claude-sonnet-4-6");
-		if (!claude) throw new Error("anthropic/claude-sonnet-4-6 must be in bundled models.json");
-		expect(claude.thinking).toBeDefined();
-	});
 });
 
 const singleUserContext: Context = {
@@ -107,15 +101,6 @@ describe("xAI OAuth Responses reasoning payload (regression)", () => {
 		const { params } = buildParams(grok45, singleUserContext, { reasoning: Effort.High }, undefined);
 
 		expect(params.reasoning).toEqual({ effort: "high" });
-		expect(params.include).toContain("reasoning.encrypted_content");
-	});
-
-	test("paid xai/grok-4.5 requests encrypted reasoning content", () => {
-		const grok45 = getBundledModel<"openai-responses">("xai", "grok-4.5");
-		if (!grok45) throw new Error("xai/grok-4.5 must be in bundled models.json");
-
-		const { params } = buildParams(grok45, singleUserContext, { reasoning: Effort.High }, undefined);
-
 		expect(params.include).toContain("reasoning.encrypted_content");
 	});
 

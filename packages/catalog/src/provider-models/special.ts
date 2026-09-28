@@ -4,6 +4,7 @@ import { apiRouteFor } from "../compat/behavior";
 import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -49,6 +50,7 @@ export function openaiCodexModelManagerOptions(
 	const { resolveAccounts, clientVersion, fetch } = config;
 	return {
 		providerId: "openai-codex",
+		cacheProviderId: resolveModelCacheProviderId("openai-codex"),
 		dynamicModelsAuthoritative: true,
 		...(resolveAccounts
 			? {
@@ -75,7 +77,8 @@ export function openaiCodexModelManagerOptions(
 
 /**
  * Merge complete per-account Codex catalogs into one authoritative list,
- * deduped by model id (first account to expose an id wins).
+ * deduped by model id. The first account to expose an id supplies its spec;
+ * account access is merged from every account whose catalog lists that id.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
  * cannot replace the previous or bundled authoritative catalog. An account
@@ -100,7 +103,15 @@ function unionCodexModels(
 		}
 		catalogs++;
 		for (const model of result.models) {
-			if (!byId.has(model.id)) byId.set(model.id, model);
+			const existing = byId.get(model.id);
+			if (!existing) {
+				byId.set(model.id, model);
+			} else if (model.accountAccess) {
+				byId.set(model.id, {
+					...existing,
+					accountAccess: { ...existing.accountAccess, ...model.accountAccess },
+				});
+			}
 		}
 	}
 	return catalogs > 0 ? [...byId.values()] : null;
@@ -334,6 +345,7 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 	const staticModels = seedModels<"devin-agent">("devin");
 	return {
 		providerId: "devin",
+		cacheProviderId: resolveModelCacheProviderId("devin"),
 		// A configured host serves its own Cascade deployment; keep the seed on it.
 		staticModels:
 			baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL
@@ -352,6 +364,58 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Synthetic role providers
+// ---------------------------------------------------------------------------
+
+export function localModelManagerOptions(): ModelManagerOptions<"local-inference"> {
+	return {
+		providerId: "local",
+		cacheProviderId: resolveModelCacheProviderId("local"),
+		staticModels: seedModels<"local-inference">("local"),
+	};
+}
+
+export function webModelManagerOptions(): ModelManagerOptions<"web-search"> {
+	return {
+		providerId: "web",
+		cacheProviderId: resolveModelCacheProviderId("web"),
+		staticModels: seedModels<"web-search">("web"),
+	};
+}
+
+/** Credentials and endpoint overrides for the TypeSafe catalog manager. */
+export interface TypeSafeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** Discover account-visible judge models while keeping the bundled offline seed. */
+export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
+	const { apiKey } = config;
+	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
+	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
+	const staticModels = seedModels<"typesafe">("typesafe");
+	return {
+		providerId: "typesafe",
+		cacheProviderId: resolveModelCacheProviderId("typesafe"),
+		staticModels: staticModels.map(model => ({ ...model, baseUrl })),
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: () =>
+						fetchTypeSafeModels({
+							apiKey,
+							baseUrl,
+							fetch: config.fetch,
+						}),
+				}
+			: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

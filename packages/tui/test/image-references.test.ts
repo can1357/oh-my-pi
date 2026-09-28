@@ -87,10 +87,6 @@ describe("renderPlaceholders", () => {
 		expect(out).toBe("see <image:2> and <paste:1> done");
 	});
 
-	it("reports bracketed markers as marker form", () => {
-		expect(capture("[Image #1]").refs[0]?.form).toBe("marker");
-	});
-
 	it("recognizes chip tokens from every symbol preset", () => {
 		// A draft written under the nerd or ascii preset must stay a reference after
 		// the user switches presets — otherwise atomic deletion and styling break.

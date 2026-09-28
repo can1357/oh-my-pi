@@ -1,5 +1,11 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { CODEX_CLIENT_VERSION } from "../wire/codex";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import {
+	SINGULARITYAPI_DEV_API_BASE_URL,
+	SINGULARITYAPI_TECH_API_BASE_URL,
+	normalizeSingularityApiBaseUrl,
+} from "../wire/singularityapi";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -11,6 +17,11 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
+	// Both SingularityAPI rosters are issued per key, so the namespace must be
+	// resolved with the credential (`hydrateCredentialScopedModelCaches`) rather
+	// than from the synchronous, credential-less startup read.
+	"singularityapi-dev": true,
+	"singularityapi-tech": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -58,6 +69,9 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
+		case "openai-codex":
+			// The backend filters the roster by client version.
+			return `${providerId}:${CODEX_CLIENT_VERSION}`;
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor":
@@ -86,6 +100,27 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "singularityapi-dev":
+		case "singularityapi-tech": {
+			// Both products issue their roster per key, and a configured proxy
+			// publishes its own. Discovery is authoritative, so a shared namespace
+			// would serve the previous key's roster for the full 24h TTL — including
+			// ids the current key cannot call. Hashing the pair means switching
+			// either re-runs discovery instead, and the provider-id prefix keeps the
+			// two products from ever reading each other's rows behind one proxy.
+			//
+			// Both call paths must land on one namespace: `ModelRegistry` resolves
+			// this provider through the credential-scoped hydration pass (it is in
+			// CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS), while discovery hashes the
+			// `/v1`-suffixed endpoint the matching `singularityApi*ModelManagerOptions`
+			// passes — which is why both normalize through
+			// `normalizeSingularityApiBaseUrl` against their own canonical host.
+			const canonical =
+				providerId === "singularityapi-tech" ? SINGULARITYAPI_TECH_API_BASE_URL : SINGULARITYAPI_DEV_API_BASE_URL;
+			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
@@ -140,6 +175,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
 		}
+		case "devin":
+			// v2: rows cached before Fusion pairings carried their lead uid as
+			// `requestModelId` send the composite uid and fail with
+			// `permission_denied: no API providers are available`.
+			return "devin:models-v2";
 		default:
 			return providerId;
 	}

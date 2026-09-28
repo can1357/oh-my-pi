@@ -7,11 +7,11 @@
  * compat per request.
  */
 
-import { resolveModelPolicy } from "./compat/resolve";
+import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import type { Api, Model, ModelSpec } from "./types";
+import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -74,6 +74,19 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	const kind = MODEL_KINDS.find(value => value === catalog.kind);
+	if (kind !== undefined) model.kind = kind;
+	const webSearch = catalog.webSearch;
+	if (
+		webSearch === "gemini" ||
+		webSearch === "anthropic" ||
+		webSearch === "codex" ||
+		webSearch === "xai" ||
+		webSearch === "openrouter" ||
+		webSearch === "openai"
+	) {
+		model.webSearch = webSearch;
+	}
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
@@ -85,6 +98,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	}
 	const priority = catalog.priority;
 	if (typeof priority === "number") model.priority = priority;
+	const promptCache = objectPayload(catalog.promptCache);
+	if (promptCache !== undefined) {
+		const short = numberField(promptCache, "short");
+		const long = numberField(promptCache, "long");
+		model.promptCache = {
+			...(short !== undefined && { short }),
+			...(long !== undefined && { long }),
+		};
+	}
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
@@ -118,8 +140,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
- * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `cache-read-at-input-rate`, `limits-patch`, `long-context-cost`,
+ * `context-window-floor`, `input-modalities`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
@@ -198,6 +220,14 @@ export function applyCatalogCorrections(
 			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
 		}
 	}
+	if (catalog.cacheReadAtInputRate === true) {
+		const { longContext } = model.cost;
+		model.cost = {
+			...model.cost,
+			cacheRead: model.cost.input,
+			...(longContext && { longContext: { ...longContext, cacheRead: longContext.input } }),
+		};
+	}
 	if (catalog.timeBased !== undefined) {
 		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}
@@ -274,6 +304,16 @@ function supportsOpenAIGAComputerUse(
 }
 
 /**
+ * Build a discovered model using the backend's catalog-selected request API.
+ * The credential-bearing provider id remains unchanged while `providerType`
+ * persists the backend policy identity across cache and config round trips.
+ */
+export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string): Model<Api> {
+	const api = resolveDiscoveryApi(spec, providerType);
+	return buildModel({ ...spec, api, providerType });
+}
+
+/**
  * Build one model from an authored spec. Bundled models.json rows are fully
  * materialized by the generator and consumed directly (see `models.ts`), so
  * this only runs for discovered/custom/override specs.
@@ -283,9 +323,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
-		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
-		// discovery default (see `resolveThinkingPolicy`); materialize the
-		// correction so transports and the picker see a reasoning-capable model.
+		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
+		// `reasoning: false` discovery default (see `resolveThinkingPolicy`);
+		// materialize the correction for transports and the picker.
 		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,

@@ -1,9 +1,9 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
-import { reportMatchesActiveAccount } from "./active-oauth-account";
+import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
@@ -26,31 +26,29 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
+function formatUsageReportAccount(
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	limit: UsageLimit,
+	index: number,
+): string {
+	const codex = report.provider === "openai-codex";
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
-	const org =
-		typeof metaOrgName === "string" && metaOrgName
-			? metaOrgName
-			: typeof metaOrgId === "string" && metaOrgId
-				? metaOrgId
-				: undefined;
-	// Two subscriptions (orgs) can share one email — suffix the org so the rows
-	// are tellable apart.
+	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+	const label = (identity: string, includeOrg: boolean): string => {
+		if (codex) return formatCodexUsageReportLabel(report, peers, identity);
+		return includeOrg && typeof org === "string" && org && org !== identity ? `${identity} (${org})` : identity;
+	};
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return org ? `${email} (${org})` : email;
-	// Guard metadata values for truthiness before using, then fall back to scope.
-	// ?? won't help here: empty string is not null/undefined, so it would suppress
-	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
+	if (typeof email === "string" && email) return label(email, true);
+	// Empty metadata must not hide a valid scoped identity.
 	const metaAccountId = report.metadata?.accountId;
 	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
-	if (typeof accountId === "string" && accountId) {
-		return org && org !== accountId ? `${accountId} (${org})` : accountId;
-	}
+	if (typeof accountId === "string" && accountId) return label(accountId, true);
 	const metaProjectId = report.metadata?.projectId;
 	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
 }
 
 function renderUsageReports(
@@ -85,39 +83,51 @@ function renderUsageReports(
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
 		for (const report of providerReports) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
-			const savedResets = report.resetCredits?.availableCount ?? 0;
-			if (savedResets > 0) {
-				const resetLabel =
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			if (resets && resets.bankedCount > 0) {
+				const resetIdentity =
 					typeof report.metadata?.email === "string"
 						? report.metadata.email
 						: typeof report.metadata?.accountId === "string"
 							? report.metadata.accountId
 							: "account";
+				let resetLabel: string;
+				if (report.provider === "openai-codex") {
+					resetLabel = formatCodexUsageReportLabel(report, providerReports, resetIdentity);
+				} else {
+					const orgName = report.metadata?.orgName;
+					const orgId = report.metadata?.orgId;
+					const org =
+						typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
+					const raw = org && org !== resetIdentity ? `${resetIdentity} (${org})` : resetIdentity;
+					resetLabel = sanitizeText(raw.replace(/[\r\n\t]+/g, " "));
+				}
+				const availability =
+					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
-					`- ${resetLabel}: ${savedResets} saved rate-limit reset${savedResets === 1 ? "" : "s"} available — /usage reset to spend`,
+					`- ${resetLabel}: ${resets.bankedCount} saved rate-limit reset${resets.bankedCount === 1 ? "" : "s"} — ${availability} — /usage reset to spend`,
 				);
-				const credits = report.resetCredits?.credits;
-				if (credits) {
-					for (const credit of credits) {
-						if (credit.expiresAt) {
-							const expiryMs = Date.parse(credit.expiresAt);
-							if (!Number.isNaN(expiryMs)) {
-								const remaining = expiryMs - nowMs;
-								if (remaining > 0) {
-									lines.push(
-										`  expires in ${formatCoarseDuration(remaining)} (${credit.expiresAt.slice(0, 10)})`,
-									);
-								} else {
-									lines.push(`  expired (${credit.expiresAt.slice(0, 10)})`);
-								}
-							}
-						}
+				if (resets.soonestExpiry) {
+					const expiryMs = Date.parse(resets.soonestExpiry);
+					const remaining = expiryMs - nowMs;
+					if (remaining > 0) {
+						lines.push(
+							`  soonest expires in ${formatCoarseDuration(remaining)} (${resets.soonestExpiry.slice(0, 10)})`,
+						);
+					} else {
+						lines.push(`  expired (${resets.soonestExpiry.slice(0, 10)})`);
 					}
+				}
+				if (resets.redeemableCount === 0 && resets.unavailableReason) {
+					const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
+					lines.push(`  unavailable: ${reason}`);
 				}
 			}
 			if (report.limits.length === 0) {
 				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				lines.push(`- ${email}: no limits reported`);
+				const label =
+					report.provider === "openai-codex" ? formatCodexUsageReportLabel(report, providerReports, email) : email;
+				lines.push(`- ${label}: no limits reported`);
 				continue;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
@@ -131,7 +141,7 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, providerReports, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
@@ -164,10 +174,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		if (reports && reports.length > 0) {
 			const currentProvider = runtime.session.model?.provider;
 			const activeAccount = currentProvider
-				? runtime.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-						currentProvider,
-						runtime.session.sessionId,
-					)
+				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
 			return renderUsageReports(

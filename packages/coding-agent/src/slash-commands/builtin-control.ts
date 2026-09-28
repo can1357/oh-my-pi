@@ -64,6 +64,15 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "record",
+		icon: "export",
+		description: "Start or stop recording this screen to a replayable file (omp play)",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.toggleRecording();
+		},
+	},
+	{
 		name: "pause",
 		icon: "pause",
 		description: "Freeze all agents (main, subagents, advisor) until resumed",

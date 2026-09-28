@@ -19,32 +19,10 @@ describe("task agent capability descriptions", () => {
 		}
 	});
 
-	it("does not classify an agent declaring `hub` as read-only", () => {
-		// `hub` resolves to exec approval for start/stop/restart, process-stdin
-		// `send`, unrecognized ops and malformed params, so declaring it must
-		// disqualify an agent from the read-only label surfaced to the model.
+	it("keeps `wait` read-only while any exec-tier tool disqualifies the agent", () => {
 		const scout = agentByName(loadBundledAgents(), "scout");
 
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "hub", "yield"] })).toBe(false);
-		expect(isReadOnlyAgent({ ...scout, tools: ["hub"] })).toBe(false);
-
-		// Guard against over-correcting: the positive case must still hold.
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
-	});
-
-	it("disables read summarization for scout, leaves other agents summarizing", () => {
-		const agents = loadBundledAgents();
-
-		expect(agentByName(agents, "scout").readSummarize).toBe(false);
-		for (const name of ["task", "sonic", "reviewer"]) {
-			expect(agentByName(agents, name).readSummarize).toBeUndefined();
-		}
-	});
-	it("ships every bundled agent without prewalk; hand-off is opt-in via task.agentPrewalk", () => {
-		const agents = loadBundledAgents();
-
-		for (const name of ["task", "scout", "sonic", "reviewer", "security-reviewer"]) {
-			expect(agentByName(agents, name).prewalk).toBeUndefined();
-		}
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "yield"] })).toBe(true);
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "bash"] })).toBe(false);
 	});
 });

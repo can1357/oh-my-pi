@@ -576,188 +576,43 @@ describe("AskTool custom input", () => {
 		expect(editor).toHaveBeenCalledTimes(1);
 		expect(abort).not.toHaveBeenCalled();
 	});
-	it("keeps question context visible while entering Other custom input", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const questions = [
-			{
-				id: "details",
-				question: "Share details",
-				options: [{ label: "yes" }, { label: "no", description: "Skip the optional detail." }],
-			},
-		];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-context", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title).toContain("Share details");
-		expect(title).toContain("yes");
-		expect(title).toContain("no");
-		expect(title).toContain("Skip the optional detail.");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("caps Other editor context for long option lists with long descriptions", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const longDescription = "x".repeat(400);
-		const optionCount = 20;
-		const options = Array.from({ length: optionCount }, (_, i) => ({
-			label: `option-${i}`,
-			description: longDescription,
-		}));
-		const questions = [{ id: "pick", question: "Pick one", options }];
-		const context = createContext({
-			select: async () => "Other (type your own)",
-			editor,
-		});
-
-		await tool.execute("call-editor-cap", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const lineCount = title.split("\n").length;
-		// Cap is 8 option rows + their (single-line) descriptions + chrome; far below
-		// 20 options × (label + multi-line description) the unbounded path would emit.
-		expect(lineCount).toBeLessThanOrEqual(22);
-		expect(title).toContain("Pick one");
-		expect(title).toContain("option-0");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-		// Descriptions are flattened to a single line and truncated.
-		expect(title).not.toContain("x".repeat(400));
-		// Every option-row description must fit on one line.
-		for (const line of title.split("\n")) {
-			expect(line.length).toBeLessThanOrEqual(160);
-		}
-	});
-
-	it("keeps user-checked options visible in capped multi-select context", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				call += 1;
-				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-12"));
-				if (call === 2) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-17"));
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-multi", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		// Checked options must survive the window so the user sees what they had
-		// already toggled before switching to Other.
-		expect(title).toContain("opt-12");
-		expect(title).toContain("opt-17");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-	});
-
-	it("summarizes excess checked options instead of exceeding the context cap", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `checked-${i}` }));
-		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				if (call < 12) {
-					const label = `checked-${call}`;
-					call += 1;
-					return selectItemLabel(opts.find(o => selectItemLabel(o) === label));
-				}
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-many-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		const optionRows = title
-			.split("\n")
-			.filter(line => line.includes("checked-") || line.includes("Other (type your own)"));
-		expect(optionRows.length).toBeLessThanOrEqual(8);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("checked");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("keeps sparse checked gap markers within the Other title budget", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_title: string) => "custom");
-		const checkedLabels = [10, 20, 30, 40, 50, 60].map(i => `opt-${i}`);
-		const options = Array.from({ length: 61 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Pick sparse", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				const next = checkedLabels[call++];
-				return next ? selectItemLabel(opts.find(o => selectItemLabel(o) === next)) : "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-cap-sparse-checked", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title.split("\n").length).toBeLessThanOrEqual(16);
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-		expect(title).toContain("Enter your response:");
-	});
-
-	it("enforces total title row budget under narrow terminals", async () => {
+	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
 		const originalColumns = process.stdout.columns;
-		// Force an 80-wide terminal so long descriptions would wrap to multiple
-		// rendered rows without per-line width truncation + total row budget.
-		Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+		// A narrow terminal must not clip the title: UI surfaces own its layout.
+		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
 		try {
+			const question = "A question long enough to exceed any clipped terminal width, ending here?";
 			const tool = new AskTool(createSession());
 			const editor = vi.fn(async (_title: string) => "custom");
-			const longDescription = "x".repeat(400);
-			const options = Array.from({ length: 8 }, (_, i) => ({
-				label: `option-${i}`,
-				description: longDescription,
-			}));
-			const questions = [{ id: "pick", question: "Pick one", options }];
 			const context = createContext({
 				select: async () => "Other (type your own)",
 				editor,
 			});
+			await tool.execute(
+				"call-editor-title-single",
+				{ questions: [{ id: "one", question, options: [{ label: "yes", description: "Detail." }] }] },
+				undefined,
+				undefined,
+				context,
+			);
+			expect(editor.mock.calls[0]?.[0]).toBe(question);
 
-			await tool.execute("call-editor-row-budget", { questions }, undefined, undefined, context);
-
-			const title = editor.mock.calls[0]?.[0] ?? "";
-			const lines = title.split("\n");
-			// 16-row hard budget keeps the input row + hint reachable on 80x24.
-			expect(lines.length).toBeLessThanOrEqual(16);
-			// Every emitted line must fit on a single 80-cell row after truncation.
-			for (const line of lines) {
-				expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
-			}
-			expect(title).toContain("Pick one");
-			expect(title).toContain("Other (type your own)");
-			expect(title).toContain("Enter your response:");
-			expect(title).not.toContain("x".repeat(400));
+			const multiEditor = vi.fn(async (_title: string) => "custom");
+			let call = 0;
+			const multiContext = createContext({
+				select: async () => (call++ === 0 ? "yes" : "Other (type your own)"),
+				editor: multiEditor,
+			});
+			await tool.execute(
+				"call-editor-title-multi",
+				{ questions: [{ id: "many", question, options: [{ label: "yes" }, { label: "no" }], multi: true }] },
+				undefined,
+				undefined,
+				multiContext,
+			);
+			expect(multiEditor.mock.calls[0]?.[0]).toBe(`(1 selected) ${question}`);
 		} finally {
-			if (originalColumns === undefined) {
-				Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
-			} else {
-				Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
-			}
+			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
 		}
 	});
 

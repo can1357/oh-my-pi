@@ -4,6 +4,11 @@ provider "xai-oauth" {
 	default-model "grok-4.6"
 	env "XAI_OAUTH_TOKEN" "XAI_API_KEY"
 	discovery label="xAI Grok OAuth (SuperGrok)" oauth-provider="xai-oauth"
+	kind-apis {
+		image "openai-images"
+		tts "xai-tts"
+	}
+	web-search "xai"
 
 	// Source of truth for the xai-oauth chat picker. Declaration order is headline order.
 	// Context windows from hermes-agent/agent/model_metadata.py:205-220
@@ -53,6 +58,13 @@ provider "xai-oauth" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=500000 max-tokens=500000
 		}
+		// 500K context per docs.x.ai/developers/models/grok-4.7.
+		model "grok-4.7" name="Grok 4.7" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=500000 max-tokens=500000
+		}
 		// Text-only per the bundled catalog.
 		model "grok-4.20-multi-agent-0309" name="Grok 4.20 (Multi-Agent)" {
 			reasoning #true
@@ -82,6 +94,27 @@ provider "xai-oauth" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=200000 max-tokens=200000
 		}
+		model "grok-tts" name="Grok TTS" api="xai-tts" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "grok-imagine-image" name="Grok Imagine Image" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "grok-imagine-image" {
+		kind "image"
+	}
+	models "grok-tts" {
+		kind "tts"
 	}
 
 	// Replaces the provider-keyed prompt-cache session-header baseline.
@@ -118,7 +151,7 @@ provider "xai-oauth" {
 		supports-reasoning-effort #false
 	}
 	// xhigh-capable SKUs keep xhigh unmapped.
-	models "grok-4.6*" "grok-4.20-multi-agent*" priority=1 {
+	models "grok-4.6*" "grok-4.7*" "grok-4.20-multi-agent*" priority=1 {
 		reasoning-effort-map {
 			minimal "low"
 		}

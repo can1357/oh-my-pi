@@ -25,6 +25,8 @@ import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-c
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
+import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 const usage = {
 	input: 1,
 	output: 1,
@@ -107,8 +109,8 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
 			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
 			const { ctx, helpers, controller, chatContainer } = createFixture({ isStreaming: true });
-			const showImages = ctx.settings.get("terminal.showImages");
-			ctx.settings.set("terminal.showImages", true);
+			const showImages = cfgTerminalShowImages.get(ctx.settings);
+			cfgTerminalShowImages.set(ctx.settings, true);
 			try {
 				const assistant: AssistantMessage = {
 					role: "assistant",
@@ -178,7 +180,7 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 				expect(Bun.stripANSI(chatContainer.render(120).join("\n")).match(/\[Image: image\/png\]/g)).toHaveLength(1);
 				expect(ctx.pendingTools.size).toBe(0);
 			} finally {
-				ctx.settings.set("terminal.showImages", showImages);
+				cfgTerminalShowImages.set(ctx.settings, showImages);
 				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
 			}
 		});

@@ -157,7 +157,7 @@ describe("Perplexity browser SSO login", () => {
 		let prompts = 0;
 		try {
 			await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
-				const identity = await storage.login("perplexity", {
+				const identity = await storage.oauth.login("perplexity", {
 					onAuth: () => {
 						throw new Error("The host already owns the login browser");
 					},
@@ -180,7 +180,7 @@ describe("Perplexity browser SSO login", () => {
 					},
 				});
 				expect(identity).toMatchObject({ type: "oauth", email: "sso@example.com" });
-				expect((await storage.getOAuthAccess("perplexity"))?.accessToken).toBe(token);
+				expect((await storage.oauth.access("perplexity"))?.accessToken).toBe(token);
 			});
 		} finally {
 			storage.close();
@@ -272,7 +272,7 @@ describe("Perplexity browser SSO login", () => {
 		const response = Promise.withResolvers<Response>();
 		try {
 			await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
-				const result = storage.login("perplexity", {
+				const result = storage.oauth.login("perplexity", {
 					signal: controller.signal,
 					onAuth: () => {},
 					onPrompt: async () => "",
@@ -286,7 +286,7 @@ describe("Perplexity browser SSO login", () => {
 				controller.abort();
 				response.resolve(Response.json({ user: { email: "sso@example.com" } }));
 				await expect(result).rejects.toBeInstanceOf(LoginCancelledError);
-				expect(storage.getAll().perplexity).toBeUndefined();
+				expect(storage.credentials.all().perplexity).toBeUndefined();
 			});
 		} finally {
 			storage.close();

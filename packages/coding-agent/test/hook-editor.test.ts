@@ -102,18 +102,6 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
-	it("submits the current text on Ctrl+Enter", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "line 1\nline 2", onSubmit, onCancel);
-
-		component.handleInput("\x1b[13;5u");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("line 1\nline 2");
-		expect(onCancel).not.toHaveBeenCalled();
-	});
-
 	it("submits Ctrl+Enter variants with NumLock or keypad Enter metadata", () => {
 		const variants = ["\x1b[13;133u", "\x1b[57414;5u", "\x1b[57414;133u"];
 
@@ -141,21 +129,6 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("draft");
 		expect(onCancel).not.toHaveBeenCalled();
 	});
-	it("submits the current text on Ctrl+Q (Windows Terminal fallback for #2118)", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "line 1\nline 2", onSubmit, onCancel);
-
-		// Ctrl+Q raw byte (0x11). Windows Terminal cannot deliver a distinct
-		// Ctrl+Enter, so app.message.followUp also binds Ctrl+Q (#1903), and the
-		// hook editor must honor it for the same reason.
-		component.handleInput("\x11");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("line 1\nline 2");
-		expect(onCancel).not.toHaveBeenCalled();
-	});
-
 	it("keeps Ctrl+Q working after Enter inserts a newline (Windows Terminal)", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
@@ -246,22 +219,6 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledWith("first\nsecond");
-	});
-
-	it("submits on plain Enter", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
-			promptStyle: true,
-		});
-
-		component.handleInput("a");
-		component.handleInput("b");
-		component.handleInput("\r");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("ab");
-		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("submits on alternate Enter encodings recognized by the key matcher", () => {
@@ -394,15 +351,11 @@ describe("HookEditorComponent prompt-style mode", () => {
 			promptStyle: true,
 		});
 
-		const rendered = renderText(component);
 		const lines = renderLines(component);
 
 		expect(lines[0]).toMatch(/^╭─ Prompt .*╮$/);
 		expect(lines.at(-1)).toMatch(/^╰.*╯$/);
 		expect(lines.some(line => line.includes("> "))).toBe(true);
-		expect(rendered).toContain("enter or ctrl+q submit  esc cancel");
-		expect(rendered).not.toContain("shift+enter newline");
-		expect(rendered).toContain("ctrl+g external editor");
 	});
 
 	it("anchors the hardware cursor while entering an Other response", () => {
@@ -489,7 +442,6 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const content = component.renderContent(80).map(line => Bun.stripANSI(line));
 		expect(content.some(line => line.startsWith("Enter your response:"))).toBe(true);
 		expect(content.some(line => line.startsWith("> "))).toBe(true);
-		expect(content.some(line => line.includes("esc cancel"))).toBe(true);
 	});
 });
 

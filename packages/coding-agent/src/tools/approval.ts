@@ -7,21 +7,19 @@
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { Settings } from "../config/settings";
+
+import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
-/** Settings-shaped reader the execute-time tool context may carry. */
-export type ApprovalSettingsReader = {
-	get(key: string): unknown;
-};
-
 /** The slice of `AgentToolContext` that approval resolution actually reads. */
 export type ApprovalContextSource = {
 	autoApprove?: boolean;
-	settings?: ApprovalSettingsReader;
+	settings?: Settings;
 };
 
 export interface ResolvedExecuteTimeApproval {
@@ -70,17 +68,17 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 	if (context?.autoApprove === true) {
 		return {
 			approvalMode: "yolo",
-			userPolicies: asPolicyMap(context.settings?.get("tools.approval")),
+			userPolicies: context.settings ? asPolicyMap(cfgToolsApproval.get(context.settings)) : {},
 		};
 	}
 	const settings = context?.settings;
 	if (!settings) {
 		return { approvalMode: "always-ask", userPolicies: {} };
 	}
-	const configured = settings.get("tools.approvalMode");
+	const configured: unknown = cfgToolsApprovalMode.get(settings);
 	return {
 		approvalMode: isApprovalMode(configured) ? configured : "yolo",
-		userPolicies: asPolicyMap(settings.get("tools.approval")),
+		userPolicies: asPolicyMap(cfgToolsApproval.get(settings)),
 	};
 }
 
@@ -97,11 +95,27 @@ export interface ResolvedApproval {
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
 const TIER_VALUES: ReadonlySet<ToolTier> = new Set(["read", "write", "exec"]);
 
-const TIER_RANK: Record<ToolTier, number> = {
+/** Ordering of capability tiers, least to most privileged. */
+export const TIER_RANK: Readonly<Record<ToolTier, number>> = {
 	read: 0,
 	write: 1,
 	exec: 2,
 };
+
+/**
+ * Fold the per-target decisions of a multi-target write tool (`edit`, `ast_edit`): the first
+ * `policy: "deny"` decision wins with its reason (a read-only URL target); otherwise the highest
+ * tier, starting from "read".
+ */
+export function strictestApproval(decisions: Iterable<ToolApprovalDecision>): ToolApprovalDecision {
+	let tier: ToolTier = "read";
+	for (const decision of decisions) {
+		if (typeof decision !== "string" && decision.policy === "deny") return decision;
+		const decisionTier = typeof decision === "string" ? decision : decision.tier;
+		if (TIER_RANK[decisionTier] > TIER_RANK[tier]) tier = decisionTier;
+	}
+	return tier;
+}
 
 const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 	"always-ask": "read",

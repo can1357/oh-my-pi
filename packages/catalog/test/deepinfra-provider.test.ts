@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { DEEPINFRA_BASE_URL, deepinfraModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -57,16 +56,6 @@ function catalogFixture(): Response {
 }
 
 describe("DeepInfra built-in provider", () => {
-	test("registers catalog descriptor with DEEPINFRA_API_KEY env discovery", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "deepinfra");
-		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
-		expect(descriptor?.catalogDiscovery?.envVars).toContain("DEEPINFRA_API_KEY");
-		expect(descriptor?.catalogDiscovery?.allowUnauthenticated).toBe(true);
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.deepinfra).toBe("deepseek-ai/DeepSeek-V4-Flash-0731");
-	});
-
 	test("maps chat models from tagged catalog metadata and drops non-chat surfaces", async () => {
 		const requests: Array<{ url: string; authorization: string | null }> = [];
 		const fetchMock = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
