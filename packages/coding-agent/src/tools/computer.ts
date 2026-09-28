@@ -32,6 +32,9 @@ import {
 // their established model-family fallback.
 const COORDINATE_SAFE_MAX_CAPTURE_WIDTH = 1280;
 const COORDINATE_SAFE_MAX_CAPTURE_HEIGHT = 896;
+/** How the eval description tells the model the guide reaches it without a `read`. */
+const GUIDE_DELIVERY =
+	"arrives unasked, once, after the output of the Eval cell that makes this conversation's first direct `computer.window(…)`/`computer.focusedWindow()` call, hit or miss; read it only if that output has left your context";
 
 function usesCoordinateSafeImageSizing(model: Model | undefined): boolean {
 	if (!model) return false;
@@ -129,8 +132,37 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
+	// Conversations (by session id) that already received the guide. The
+	// prelude outlives `/new` and session switches, so this is per id.
+	const taught = new Set<string | null>();
+	const teachGuide = (): string | undefined => {
+		// A session that cannot `read` has the guide inline in the eval description.
+		if (session.isToolActive?.("read") === false) return undefined;
+		const conversation = session.getSessionId?.() ?? null;
+		if (taught.has(conversation)) return undefined;
+		taught.add(conversation);
+		return `Computer guide (sent once per conversation; also at xd://eval/computer):\n${computerPreludeAssets.documentation}`;
+	};
+	/** The post-input report of a cell that reached the desktop. */
+	const settleReport = async (cell: EvalPreludeCell, output: string): Promise<string | undefined> => {
+		if (closed || !controller.settle) return undefined;
+		try {
+			return await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
+		} catch (error) {
+			// Cancellation of the turn needs no report; anything else leaves the
+			// model without its post-input observation, so it is told to look.
+			if (cell.signal.aborted) return undefined;
+			const message = error instanceof Error ? error.message : String(error);
+			logger.debug("Computer cell settle failed", { error: message });
+			return `No post-input report for this cell (${message}); read the windows it touched before continuing.`;
+		}
+	};
 	// Cells whose code reached the desktop; only these are settled.
 	const cells = new WeakSet<EvalPreludeCell>();
+	// Cells that looked a window up directly: the conversation's first to settle
+	// carries the guide after its output, whether the lookup hit, missed or was
+	// caught, so the next call is not a guess.
+	const lookups = new WeakSet<EvalPreludeCell>();
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -144,6 +176,7 @@ export function createComputerPrelude(
 	return {
 		name: "computer",
 		documentation: computerPreludeAssets.documentation,
+		documentationDelivery: GUIDE_DELIVERY,
 		javascript: computerPreludeAssets.javascript,
 		python: computerPreludeAssets.python,
 		exports: ["computer"],
@@ -156,26 +189,24 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
-			if (context.cell && (parsed.action === "run" || parsed.action === "call")) cells.add(context.cell);
+			if (context.cell && (parsed.action === "run" || parsed.action === "call")) {
+				cells.add(context.cell);
+				const [first, ...rest] = parsed.action === "call" ? parsed.chain : [];
+				if (rest.length === 0 && (first?.method === "window" || first?.method === "focusedWindow")) {
+					lookups.add(context.cell);
+				}
+			}
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
 		status: describeComputerCall,
 		settleCell: async (cell, { output }) => {
-			if (!cells.has(cell) || closed || !controller.settle) return undefined;
+			if (!cells.has(cell)) return undefined;
 			cells.delete(cell);
-			try {
-				const text = await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
-				return text === undefined ? undefined : { text };
-			} catch (error) {
-				// Cancellation of the turn needs no report; anything else leaves the
-				// model without its post-input observation, so it is told to look.
-				if (cell.signal.aborted) return undefined;
-				const message = error instanceof Error ? error.message : String(error);
-				logger.debug("Computer cell settle failed", { error: message });
-				return {
-					text: `No post-input report for this cell (${message}); read the windows it touched before continuing.`,
-				};
-			}
+			const report = await settleReport(cell, output);
+			// Taught only once the turn will carry it.
+			const guide = lookups.has(cell) && !cell.signal.aborted ? teachGuide() : undefined;
+			if (guide === undefined) return report === undefined ? undefined : { text: report };
+			return { text: report ? `${guide}\n\n${report}` : guide };
 		},
 	};
 }

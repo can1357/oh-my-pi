@@ -58,6 +58,12 @@ export interface EvalPreludeDefinition {
 	name: string;
 	/** Static Markdown documentation shown only while this prelude is enabled. */
 	documentation: string;
+	/**
+	 * Where the documentation also arrives without a `read` (for example with
+	 * the first reply of a conversation). The eval description names it on
+	 * this prelude's line so the model does not spend a call fetching it.
+	 */
+	documentationDelivery?: string;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
 	javascript: string;
 	/** Python source installed into a Python eval kernel. */

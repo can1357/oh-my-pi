@@ -170,6 +170,30 @@ describe("eval tool description", () => {
 		expect(tool.description).not.toContain("xd://eval/fixture");
 		expect(tool.docTopics().fixture).toBeUndefined();
 	});
+
+	it("tells the model not to read a prelude doc that arrives unasked", () => {
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "Fixture summary line.\n\nBODY",
+			documentationDelivery: "arrives with the first reply",
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const delivered = new EvalTool(makeSession({ preludes: () => [prelude] })).description;
+		expect(delivered).toContain(
+			"`read` the linked docs before first use, except where a line says its doc arrives unasked:",
+		);
+		expect(delivered).toContain(
+			"`fixture`: Fixture summary line. → `xd://eval/fixture`; arrives with the first reply",
+		);
+		const plain = new EvalTool(makeSession({ preludes: () => [{ ...prelude, documentationDelivery: undefined }] }))
+			.description;
+		expect(plain).toContain("`read` the linked docs before first use:");
+	});
 });
 
 describe("eval tool dynamic schema", () => {

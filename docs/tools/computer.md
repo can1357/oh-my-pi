@@ -22,6 +22,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 
 - `computer.enabled` gates the Eval prelude and defaults to `false`. `/computer` toggles it for the current session without persisting settings.
 - The prelude is available only through enabled Eval runtimes; it is not an AgentTool.
+- The model-facing guide (`xd://eval/computer`) also arrives unasked, once per conversation (keyed by session id), appended through `settleCell` after the output of the Eval cell that makes the first direct `computer.window(…)` or `computer.focusedWindow()` call, whether that call found a window, returned `null`, or threw (caught or not), and ahead of that cell's post-input report. A cancelled cell, or one whose turn is aborted while it settles, delivers nothing and does not use the copy up. The Eval description's `computer` line says so (`documentationDelivery`), so a desktop task does not open with a `read` of the guide. Sessions without the `read` tool already get the guide inline in the Eval description and receive no copy.
 - The worker permits one active run; concurrent direct helpers/runs fail with `Computer worker is busy`. Capability inspection remains available during a run. The active Eval documentation and globals update with the current enabled state.
 - Unlike `browser`, this prelude can operate IDEs, terminals, native applications, browser windows, and system dialogs. It has no browser DOM or web ARIA surface; its accessibility methods use the host OS.
 
