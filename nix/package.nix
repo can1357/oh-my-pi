@@ -12,6 +12,8 @@
   lib,
   libpulseaudio,
   makeBinaryWrapper,
+  # PR packaging checks supply a prebuilt addon. Normal builds compile Rust.
+  nativeAddon ? null,
   pipewire,
   removeReferencesTo,
   source,
@@ -36,6 +38,8 @@ let
     inherit source craneLib withWaylandScreencast;
   };
   inherit (nativeBuild) platform;
+  nativeAddonPath =
+    if nativeAddon == null then "${nativeBuild}/lib/${platform.nativeLibrary}" else nativeAddon;
   bunRuntimeTemplate = callPackage ./bun-runtime.nix { inherit bun; };
   patchedDependencies = lib.mapAttrs (
     _: patch: source + "/${patch}"
@@ -73,6 +77,9 @@ let
     )
     ++ cudaRuntimeLibraries;
 in
+assert lib.assertMsg (
+  nativeAddon == null || (stdenv.hostPlatform.system == "x86_64-linux" && !withWaylandScreencast)
+) "The CI native addon requires x86_64-linux without Wayland screencast support.";
 stdenv.mkDerivation {
   pname = "omp";
   inherit (packageJson) version;
@@ -123,12 +130,11 @@ stdenv.mkDerivation {
     runHook preBuild
 
     echo "Preparing pi-natives"
-    install -Dm755 "${nativeBuild}/lib/${platform.nativeLibrary}" \
+    install -Dm755 "${nativeAddonPath}" \
       "packages/natives/native/${platform.addon}"
-    # The loader and embed-native.ts require the release version, which is
-    # written into the addon after linking (build-bindings.ts does this for
-    # local builds; this raw cargo build must do it itself). Darwin re-signs
-    # through signIfRequired below; the sandbox has no system codesign.
+    # Stamp both source-built and cached addons with the checkout version.
+    # The loader and embed-native.ts require that version. Darwin re-signs
+    # through signIfRequired below because the sandbox has no system codesign.
     bun scripts/stamp-native-version.ts --no-sign \
       "packages/natives/native/${platform.addon}"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
