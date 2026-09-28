@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Preserved provider-reported routed models as `upstreamModel` when they differ from the requested model.
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
