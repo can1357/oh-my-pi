@@ -121,31 +121,32 @@ describe("RewindSelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("loads the earlier rewind history on `a` without splitting the cutoff tool exchange", () => {
+	it("steps past the startup tail into earlier history without splitting the cutoff tool exchange", () => {
 		const selected: string[] = [];
 		const entries = longEntriesWithBoundaryTool();
 		const selector = makeSelector(id => selected.push(id), undefined, entries);
 		try {
 			selector.render(120);
 
-			// The oldest retained turn must include its folded tool result.
-			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
-			selector.handleInput(DOWN);
-			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("file.txt");
-			selector.handleInput(ENTER);
-			selector.handleInput(UP);
+			// The tail starts at u39 (601 targets): 600 steps reach its oldest turn.
+			for (let index = 0; index < 600; index++) selector.handleInput(UP);
 			selector.handleInput(ENTER);
 
-			// Loading twice must preserve the selected turn.
-			selector.handleInput("a");
-			selector.handleInput("a");
+			// Left past the oldest replayed turn loads the earlier history.
+			selector.handleInput(LEFT);
 			selector.render(120);
 			selector.handleInput(ENTER);
 
+			// The cutoff turn keeps its folded tool result after the reload.
+			selector.handleInput(DOWN);
+			selector.handleInput(DOWN);
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("file.txt");
+			selector.handleInput(ENTER);
+
 			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
 			selector.handleInput(ENTER);
 
-			expect(selected).toEqual(["t39", "u39", "u39", "u0"]);
+			expect(selected).toEqual(["u39", "u38", "t39", "u0"]);
 		} finally {
 			selector.dispose();
 		}

@@ -229,16 +229,20 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * writer's descriptor on the orphaned previous inode, where the append would
 	 * be silently lost. Under the publish lock no cooperating replacement can
 	 * interleave, so re-open the live path when its identity changed.
+	 *
+	 * Returns the size of the descriptor the next write appends to: the one
+	 * `fstat` serves both the identity check and the append rollback point.
 	 */
-	#reopenIfReplaced(): void {
+	#reopenIfReplaced(): number {
+		const current = fs.fstatSync(this.#fd);
 		let live: fs.Stats;
 		try {
 			live = fs.statSync(this.#fpath);
 		} catch (err) {
-			if (isEnoent(err)) return;
+			if (isEnoent(err)) return current.size;
 			throw err;
 		}
-		if (live.ino === fs.fstatSync(this.#fd).ino) return;
+		if (live.ino === current.ino) return current.size;
 		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
 		try {
@@ -248,6 +252,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		}
 		this.#fd = nextFd;
 		writerRegistry.register(this, nextFd, this);
+		return fs.fstatSync(nextFd).size;
 	}
 
 	#recordError(err: unknown): Error {
@@ -257,8 +262,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		return error;
 	}
 
-	#writeNow(line: string): void {
-		const originalSize = fs.fstatSync(this.#fd).size;
+	/** Append `line` at the end of the held descriptor, rolling back to `originalSize` on failure. */
+	#writeNow(line: string, originalSize: number): void {
 		const buf = Buffer.from(line, "utf-8");
 		let offset = 0;
 		try {
@@ -311,12 +316,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// check-then-rename, which would otherwise erase the appended turn.
 		try {
 			if (this.#publishLock) {
-				this.#publishLock(() => {
-					this.#reopenIfReplaced();
-					this.#writeNow(line);
-				});
+				this.#publishLock(() => this.#writeNow(line, this.#reopenIfReplaced()));
 			} else {
-				this.#writeNow(line);
+				this.#writeNow(line, fs.fstatSync(this.#fd).size);
 			}
 		} catch (err) {
 			throw this.#recordError(err);
@@ -542,22 +544,29 @@ export class FileSessionStorage implements SessionStorage {
 			}
 			throw toError(err);
 		}
-		try {
-			fs.closeSync(fd);
-		} catch {
-			// Ignore close errors; the lock content is already written.
-		}
 		// Verify the record survived: a concurrent stale-lock steal may have
 		// removed our file between create and write (a POSIX fd write succeeds
 		// on the unlinked inode), in which case we hold nothing. Retry instead
-		// of entering the region unexclusively (hV-oE).
+		// of entering the region unexclusively (hV-oE). The path still naming
+		// our inode proves the record is there (holders only ever create and
+		// unlink lock files), and comparing identities costs two stats instead
+		// of a full open/read/close. The descriptor stays open until after the
+		// comparison so the inode cannot be freed and its number reused by a
+		// successor's file; bigint keeps 64-bit Windows file IDs exact.
 		try {
-			if (fs.readFileSync(lockPath, "utf8") !== record) return false;
+			const held = fs.fstatSync(fd, { bigint: true });
+			const named = fs.statSync(lockPath, { bigint: true });
+			return held.ino === named.ino && held.dev === named.dev;
 		} catch {
 			// Removed under us: hold nothing, retry.
 			return false;
+		} finally {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// Ignore close errors; the lock content is already written.
+			}
 		}
-		return true;
 	}
 
 	/**

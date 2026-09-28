@@ -174,6 +174,21 @@ export class TranscriptContainer extends Container {
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
+	/**
+	 * The composed frame {@link beginFrame} opened; `undefined` outside one.
+	 * {@link renderViewport} closes it, so it never outlives the synchronous
+	 * composition that opened it.
+	 */
+	#openFrame: AnimationFrame | undefined;
+	/**
+	 * Full-allocation blank-trimmed renders of the blocks measured during the
+	 * open frame, keyed by entry at {@link #frameRowsWidth}. A retirement peek
+	 * and the viewport measure the same live blocks back to back inside one
+	 * composition, with no block mutation possible in between; replaying the
+	 * first measurement spares every block its second render per frame.
+	 */
+	#frameRows = new Map<TranscriptEntry, readonly string[]>();
+	#frameRowsWidth = 0;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -301,6 +316,21 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
+	 * Open one composed frame: every live-block measurement until this frame's
+	 * {@link renderViewport} returns renders against `frame` and is taken once,
+	 * so the retirement peek and the viewport share each block's render.
+	 *
+	 * Callers MUST call {@link renderViewport} with the same `frame` in the same
+	 * synchronous composition, without mutating any transcript block in
+	 * between: the shared rows are only as fresh as that first measurement.
+	 */
+	beginFrame(frame: AnimationFrame): void {
+		this.#lastFrame = frame;
+		this.#frameRows.clear();
+		this.#openFrame = frame;
+	}
+
+	/**
 	 * Total rows the live, un-emitted tail occupies at `width`.
 	 *
 	 * `limit` stops the walk once the total passes it: measuring a resumed
@@ -322,8 +352,33 @@ export class TranscriptContainer extends Container {
 
 	/** One live block's un-emitted rows at `width`, rendered against its full-height allocation. */
 	#liveBlockRows(entry: TranscriptEntry, index: number, width: number): readonly string[] {
+		const rows = this.#measuredRows(entry, width);
+		const emitted = this.#projectedEmittedRowCount(entry, index, width);
+		return emitted === 0 ? rows : rows.slice(emitted);
+	}
+
+	/**
+	 * One block's blank-trimmed render at its full-height allocation. Inside an
+	 * open frame the first measurement of each block is replayed to later ones.
+	 */
+	#measuredRows(entry: TranscriptEntry, width: number): readonly string[] {
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-		return this.#renderEntry(entry, width).slice(this.#projectedEmittedRowCount(entry, index, width));
+		if (this.#openFrame === undefined) return this.#renderEntry(entry, width);
+		if (this.#frameRowsWidth !== width) {
+			this.#frameRows.clear();
+			this.#frameRowsWidth = width;
+		}
+		let rows = this.#frameRows.get(entry);
+		if (rows === undefined) {
+			rows = this.#renderEntry(entry, width);
+			this.#frameRows.set(entry, rows);
+		}
+		return rows;
+	}
+
+	#closeFrame(): void {
+		this.#openFrame = undefined;
+		this.#frameRows.clear();
 	}
 
 	/** Block spans of the last `renderViewport` output, in output coordinates. Empty when the tail is empty. */
@@ -349,9 +404,22 @@ export class TranscriptContainer extends Container {
 		this.#lastViewportSpans = spans;
 	}
 
-	/** Render the live tail, constrained to the supplied transcript height. */
+	/**
+	 * Render the live tail, constrained to the supplied transcript height.
+	 * Closes the frame {@link beginFrame} opened; a different `frame` discards
+	 * its measurements first.
+	 */
 	renderViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
+		if (frame !== this.#openFrame) this.#closeFrame();
 		this.#lastFrame = frame;
+		try {
+			return this.#composeViewport(width, rows, frame);
+		} finally {
+			this.#closeFrame();
+		}
+	}
+
+	#composeViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
 		this.#syncEntries();
 		this.#settleFinalized();
 		const live = this.#liveEntries();
@@ -522,7 +590,7 @@ export class TranscriptContainer extends Container {
 		// Only a render publishes a block's stable rows, so the head renders
 		// before its progressive-append eligibility is read.
 		const head = this.#entries[this.#frontier];
-		if (head !== undefined) this.#liveBlockRows(head, this.#frontier, width);
+		if (head !== undefined) this.#measuredRows(head, width);
 		const appendHead =
 			policy === "pressure" &&
 			head?.mode === "appendOnly" &&
@@ -723,15 +791,10 @@ export class TranscriptContainer extends Container {
 			return this.#freezeStableRows(entry, rendered, "stable rows changed within a width epoch");
 		}
 		entry.stableRows = published;
-		// Slice only when the rendered rows actually changed: same length
-		// plus prefix-equality in both directions means byte-identical, so
-		// the stored array can be reused (callers only slice/read it).
-		const priorRows = entry.renderedStableByWidth.get(width);
-		if (
-			priorRows === undefined ||
-			priorRows.length !== stableRendered.length ||
-			!isRowPrefix(priorRows, stableRendered)
-		) {
+		// The prefix check above proves equal-length rows are byte-identical.
+		// Reuse our snapshot then; copy new rows so mutable renderer buffers
+		// cannot change the bytes checked on the next frame.
+		if (priorRender === undefined || priorRender.length !== stableRendered.length) {
 			entry.renderedStableByWidth.set(width, stableRendered.slice());
 		}
 		let perCount = entry.stableRowCountByWidth.get(width);
@@ -858,8 +921,7 @@ export class TranscriptContainer extends Container {
 		while (this.#frontier < this.#entries.length) {
 			const entry = this.#entries[this.#frontier]!;
 			if (entry.mode !== "appendOnly" || entry.state !== "settled") return;
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const rendered = this.#renderEntry(entry, width);
+			const rendered = this.#measuredRows(entry, width);
 			if (entry.emitted !== entry.stableRows.length) return;
 			if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			this.#retireEntry(entry);

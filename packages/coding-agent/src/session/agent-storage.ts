@@ -26,10 +26,9 @@ type SettingsRow = {
 	value: string;
 };
 
-/** Row shape for model_usage table queries */
+/** Row shape for the model_usage MRU query (ordering column stays in SQL) */
 type ModelUsageRow = {
 	model_key: string;
-	last_used_at: number;
 };
 
 /** Row shape for model_perf table queries */
@@ -180,9 +179,7 @@ export class AgentStorage {
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#listModelUsageStmt = this.#db.prepare(
-			"SELECT model_key, last_used_at FROM model_usage ORDER BY last_used_at DESC",
-		);
+		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
 		// sample first halves the aggregates so old measurements fade out.
 		this.#upsertModelPerfStmt = this.#db.prepare(

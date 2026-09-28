@@ -67,6 +67,7 @@ async function createHub(settings: TestSettings): Promise<{
 		tuiStub,
 		{
 			browserSource: {
+				revision: 0,
 				defaultThinkingLevel: "high",
 				modelProviderOrder: [],
 				knownRoleIds: [],

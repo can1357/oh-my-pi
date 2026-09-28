@@ -16,8 +16,8 @@ use std::{
 	sync::{
 		Arc, LazyLock,
 		atomic::{AtomicBool, AtomicU64, Ordering},
-		mpsc,
 	},
+	time::Duration,
 };
 
 use grep_matcher::Matcher;
@@ -32,7 +32,7 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use pi_vfs::{BlockingFs, File};
 use smallvec::SmallVec;
 
@@ -50,21 +50,17 @@ static PCRE2_JIT_ENABLED: LazyLock<bool> = LazyLock::new(|| match std::env::var(
 /// Upper bound on entries per streamed `onMatches` batch; a file with more
 /// content matches streams several batches while it is still being searched.
 const GREP_STREAM_BATCH: usize = 1024;
-/// Streamed batches queued for the JS thread at once. A full queue blocks the
-/// search workers until JS drains it, so streaming memory is bounded by the
-/// batches in flight, not by the total match count.
+/// Maximum batches awaiting JS acknowledgement; native waits enforce this
+/// bound without entering N-API's blocking queue path.
 const GREP_STREAM_QUEUE: usize = 8;
+/// Cancellation checks while producers await JS consumption.
+const GREP_STREAM_CANCEL_POLL: Duration = Duration::from_millis(10);
 
-/// `onMatches` callback: bounded queue, called without the error-first slot.
-type GrepStreamCallback = ThreadsafeFunction<
-	Vec<GrepMatch>,
-	UnknownReturnValue,
-	Vec<GrepMatch>,
-	Status,
-	false,
-	false,
-	GREP_STREAM_QUEUE,
->;
+/// `onMatches` callback, called without the error-first slot. The N-API queue
+/// stays unbounded; [`JsMatchStream`] reserves bounded capacity before
+/// enqueueing.
+type GrepStreamCallback =
+	ThreadsafeFunction<Vec<GrepMatch>, UnknownReturnValue, Vec<GrepMatch>, Status, false, false>;
 
 /// Output mode for [`search`] and [`grep`] (string values match JS callers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,8 +159,9 @@ pub struct GrepOptions<'env> {
 	/// Stream results instead of returning them: called on the JS thread with
 	/// batches (at most 1024 entries, files in no particular order) of what
 	/// `matches` would hold, while the search runs. A slow callback pauses the
-	/// search instead of buffering, every call returns before the promise
-	/// settles, and the result then carries counts with empty `matches`.
+	/// search instead of buffering. Successful completion waits for every
+	/// callback and carries counts with empty `matches`; cancellation also
+	/// interrupts delivery waits, though already queued callbacks may still run.
 	/// A throw rejects the search with it. Incompatible with `maxCount` and
 	/// `offset`.
 	#[napi(ts_type = "(matches: GrepMatch[]) => void")]
@@ -2401,46 +2398,74 @@ fn hand_off(sink: Option<&dyn MatchSink>, mut result: GrepResult) -> Result<Grep
 	Ok(result)
 }
 
-/// [`MatchSink`] over the `onMatches` callback.
+#[derive(Default)]
+struct GrepStreamDelivery {
+	pending:   Vec<GrepMatch>,
+	in_flight: usize,
+	/// First callback error; preserved until the search rejects with it.
+	failure:   Option<Error>,
+}
+
+#[derive(Default)]
+struct GrepStreamShared {
+	delivery: Mutex<GrepStreamDelivery>,
+	ready:    Condvar,
+}
+
+/// [`MatchSink`] over `onMatches`, with cancellation-aware native backpressure.
 ///
-/// Coalesces small per-file deliveries into batches of at most
-/// [`GREP_STREAM_BATCH`] entries, blocks workers while the bounded callback
-/// queue is full, and always holds the newest batch back: [`Self::settle`]
-/// sends it last and waits for it, so the promise settles only after JS has
-/// run every call.
+/// Capacity is reserved before nonblocking N-API delivery and released when
+/// the JS callback returns. Successful completion drains every accepted batch;
+/// cancellation can stop both capacity waits and the final acknowledgement
+/// wait.
 struct JsMatchStream {
 	callback: GrepStreamCallback,
-	pending:  Mutex<Vec<GrepMatch>>,
-	/// First error thrown by the callback; stops the search and rejects it.
-	failure:  Arc<Mutex<Option<Error>>>,
-	failed:   Arc<AtomicBool>,
+	shared:   Arc<GrepStreamShared>,
+	cancel:   task::CancelToken,
 }
 
 impl JsMatchStream {
-	fn new(callback: GrepStreamCallback) -> Self {
-		Self { callback, pending: Mutex::default(), failure: Arc::default(), failed: Arc::default() }
+	fn new(callback: GrepStreamCallback, cancel: task::CancelToken) -> Self {
+		Self { callback, shared: Arc::default(), cancel }
 	}
 
-	/// Queue `batch`, blocking while the queue is full; `done` fires once the
-	/// callback has run on it.
-	fn send(&self, batch: Vec<GrepMatch>, done: Option<mpsc::SyncSender<()>>) -> Result<()> {
-		let failure = Arc::clone(&self.failure);
-		let failed = Arc::clone(&self.failed);
+	fn send(&self, batch: Vec<GrepMatch>) -> Result<()> {
+		{
+			let mut delivery = self.shared.delivery.lock();
+			loop {
+				self.cancel.heartbeat()?;
+				if delivery.failure.is_some() {
+					return Err(Error::from_reason("grep onMatches callback threw"));
+				}
+				if delivery.in_flight < GREP_STREAM_QUEUE {
+					delivery.in_flight += 1;
+					break;
+				}
+				self
+					.shared
+					.ready
+					.wait_for(&mut delivery, GREP_STREAM_CANCEL_POLL);
+			}
+		}
+
+		let shared = Arc::clone(&self.shared);
 		let status = self.callback.call_with_return_value(
 			batch,
-			ThreadsafeFunctionCallMode::Blocking,
+			ThreadsafeFunctionCallMode::NonBlocking,
 			move |returned: Result<UnknownReturnValue>, _: Env| {
+				let mut delivery = shared.delivery.lock();
 				if let Err(err) = returned {
-					failure.lock().get_or_insert(err);
-					failed.store(true, Ordering::Release);
+					delivery.failure.get_or_insert(err);
 				}
-				if let Some(done) = done {
-					let _ = done.send(());
-				}
+				delivery.in_flight -= 1;
+				shared.ready.notify_all();
 				Ok(())
 			},
 		);
 		if status != Status::Ok {
+			let mut delivery = self.shared.delivery.lock();
+			delivery.in_flight -= 1;
+			self.shared.ready.notify_all();
 			return Err(Error::new(
 				status,
 				"grep onMatches callback is no longer callable".to_owned(),
@@ -2449,38 +2474,46 @@ impl JsMatchStream {
 		Ok(())
 	}
 
-	/// Deliver the held-back batch and wait until JS ran it (and, the queue
-	/// being FIFO, every call before it), then surface a callback throw over
-	/// `result`.
+	fn drain(&self) -> Result<()> {
+		let mut delivery = self.shared.delivery.lock();
+		while delivery.in_flight > 0 {
+			self.cancel.heartbeat()?;
+			self
+				.shared
+				.ready
+				.wait_for(&mut delivery, GREP_STREAM_CANCEL_POLL);
+		}
+		Ok(())
+	}
+
+	/// Flush the coalesced tail and preserve the original callback error over
+	/// the generic failure used to stop the parallel scanner.
 	fn settle(&self, result: Result<GrepResult>) -> Result<GrepResult> {
-		let last = std::mem::take(&mut *self.pending.lock());
-		let result = match result {
-			Ok(output) if !last.is_empty() => {
-				let (done, finished) = mpsc::sync_channel(1);
-				// Disconnection means the environment is shutting down; nothing
-				// is left to wait for.
-				self.send(last, Some(done)).map(|()| {
-					let _ = finished.recv();
-					output
-				})
-			},
-			other => other,
-		};
-		let failure = self.failure.lock().take();
+		let last = std::mem::take(&mut self.shared.delivery.lock().pending);
+		let result = result.and_then(|output| {
+			if !last.is_empty() {
+				self.send(last)?;
+			}
+			Ok(output)
+		});
+		let drained = self.drain();
+		let failure = self.shared.delivery.lock().failure.take();
 		match failure {
 			Some(err) => Err(err),
-			None => result,
+			None => result.and_then(|output| drained.map(|()| output)),
 		}
 	}
 }
 
 impl MatchSink for JsMatchStream {
 	fn deliver(&self, mut matches: Vec<GrepMatch>) -> Result<()> {
-		if self.failed.load(Ordering::Acquire) {
-			return Err(Error::from_reason("grep onMatches callback threw"));
-		}
+		self.cancel.heartbeat()?;
 		let ready = {
-			let mut pending = self.pending.lock();
+			let mut delivery = self.shared.delivery.lock();
+			if delivery.failure.is_some() {
+				return Err(Error::from_reason("grep onMatches callback threw"));
+			}
+			let pending = &mut delivery.pending;
 			if pending.is_empty() {
 				*pending = matches;
 				return Ok(());
@@ -2489,9 +2522,9 @@ impl MatchSink for JsMatchStream {
 				pending.append(&mut matches);
 				return Ok(());
 			}
-			std::mem::replace(&mut *pending, matches)
+			std::mem::replace(pending, matches)
 		};
-		self.send(ready, None)
+		self.send(ready)
 	}
 }
 
@@ -2608,7 +2641,8 @@ pub fn grep(
 		on_matches,
 	} = options;
 
-	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback)));
+	let ct = task::CancelToken::new(timeout_ms, signal);
+	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback, ct.clone())));
 	let config = GrepConfig {
 		filesystem: ShellFilesystem::blocking(filesystem),
 		stream: stream
@@ -2632,7 +2666,6 @@ pub fn grep(
 		max_columns,
 		mode,
 	};
-	let ct = task::CancelToken::new(timeout_ms, signal);
 	task::blocking("grep", ct, move |ct| {
 		let result = grep_sync(config, on_match.as_ref(), ct);
 		match stream {

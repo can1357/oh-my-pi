@@ -135,15 +135,40 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /**
- * How long a resolved candidate list is reused. Resolution filters the full
+ * How long a resolved role chain is reused. Resolution filters the full
  * catalog (thousands of models) synchronously — milliseconds per call, which a
- * concurrent fan-out turns into sustained event-loop stalls.
+ * concurrent fan-out turns into sustained event-loop stalls. The chain is
+ * shared by every judge built over the same settings and registry, since
+ * per-call consumers (auto-thinking, subagent starts) resolve a fresh judge.
  */
 const CANDIDATE_TTL_MS = 1_000;
 /** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
+/** Last resolved judge role chain, carried by the registry it was drawn from. */
+const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, number>;
+	[kRoleChain]?: { settings: Settings; list: RoleChainCandidate[]; expiresAt: number };
+}
+
+/** {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry. */
+function cachedJudgeRoleChain(settings: Settings, registry: RegistryWithRejections): RoleChainCandidate[] {
+	const now = Date.now();
+	const cached = registry[kRoleChain];
+	if (cached && cached.settings === settings && now < cached.expiresAt) return cached.list;
+	const list = judgeRoleChain(settings, registry);
+	registry[kRoleChain] = { settings, list, expiresAt: now + CANDIDATE_TTL_MS };
+	return list;
+}
+
+/** Append the session model when no candidate is native and the chain does not already route to it. */
+function withSessionFallback(candidates: RoleChainCandidate[], sessionModel: Model | undefined): RoleChainCandidate[] {
+	if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
+	const sessionIdentity = formatModelStringWithRouting(sessionModel);
+	if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
+		return candidates;
+	}
+	return [...candidates, { model: sessionModel, explicit: false }];
 }
 
 /** Which backend a judge-role candidate routes to: native System One decisions, on-device keywords, or a chat model. */
@@ -197,7 +222,7 @@ export class ChainJudge implements Judge {
 	readonly label = "judge role chain";
 	readonly #deps: JudgeDeps;
 	readonly #telemetry: AgentTelemetry | undefined;
-	#candidates: { list: RoleChainCandidate[]; expiresAt: number } | undefined;
+	#candidates: { chain: RoleChainCandidate[]; list: RoleChainCandidate[] } | undefined;
 
 	constructor(deps: JudgeDeps) {
 		this.#deps = deps;
@@ -291,22 +316,12 @@ export class ChainJudge implements Judge {
 	}
 
 	#resolveCandidates(): RoleChainCandidate[] {
-		const now = Date.now();
-		if (this.#candidates && now < this.#candidates.expiresAt) return this.#candidates.list;
-		const list = this.#buildCandidates();
-		this.#candidates = { list, expiresAt: now + CANDIDATE_TTL_MS };
-		return list;
-	}
-
-	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = judgeRoleChain(settings, registry);
-		if (!sessionModel || candidates.some(candidate => kindOf(candidate) === "native")) return candidates;
-		const sessionIdentity = formatModelStringWithRouting(sessionModel);
-		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {
-			return candidates;
-		}
-		return [...candidates, { model: sessionModel, explicit: false }];
+		const candidates = cachedJudgeRoleChain(settings, registry);
+		if (candidates === this.#candidates?.chain) return this.#candidates.list;
+		const list = withSessionFallback(candidates, sessionModel);
+		this.#candidates = { chain: candidates, list };
+		return list;
 	}
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
