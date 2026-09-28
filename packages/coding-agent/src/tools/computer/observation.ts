@@ -13,6 +13,7 @@
  * `- role "label" [ref=eN] …`.
  */
 import type { DesktopDisplay, DesktopWindow, DiffRun } from "@oh-my-pi/pi-natives";
+import { elideAxTree } from "./tree-elide";
 
 /**
  * `"42" Code "main.ts"`: the id JSON-quoted, as `window()` takes it (ids are
@@ -67,10 +68,17 @@ export interface PendingSettle {
 
 interface WindowRecord {
 	pid?: number;
-	/** Tree text the model last received. */
+	/** Unelided tree text the model last received. */
 	shown?: string;
 	options: AxReadOptions;
 }
+
+/**
+ * Bytes one window's tree may take in a cell's report. Larger trees are
+ * elided structurally, dropping unmarked subtrees without controls first, so
+ * the rows the input changed survive.
+ */
+export const REPORT_TREE_BUDGET_BYTES = 16 * 1024;
 
 /** Most refs remembered for mapping an element back to its window. */
 const MAX_REFS = 20_000;
@@ -514,7 +522,14 @@ export function renderReadBack(readBack: ReadBack): string {
 		summary = `no accessibility change visible ${(readBack.sinceInputMs / 1000).toFixed(1)} s after the input (the app may still be working); refs renewed`;
 	else
 		summary = `${change.changed} changed, ${change.added} added, ${change.removed.length} removed (rows marked ~ changed, + added)`;
-	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, change?.text ?? readBack.text];
+	const tree = change?.text ?? readBack.text;
+	const elided = elideAxTree(tree, REPORT_TREE_BUDGET_BYTES);
+	if (elided) {
+		const marked = (text: string): number => text.split("\n").filter(line => /^(?: {2})*[+~] /.test(line)).length;
+		const lostMarks = marked(tree) - marked(elided.text);
+		summary += `; ${elided.elidedRows} rows elided to fit (${lostMarks === 0 ? "every changed row kept" : `${lostMarks} changed rows among them`}) — \`win.ax()\`/\`win.find()\` reach them`;
+	}
+	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, elided?.text ?? tree];
 	if (change && change.removed.length > 0) {
 		const shown = change.removed.slice(0, 8).join("; ");
 		const more = change.removed.length > 8 ? `; +${change.removed.length - 8} more` : "";
