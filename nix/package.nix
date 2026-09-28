@@ -4,6 +4,7 @@
   alsa-lib,
   bun,
   bun2nix,
+  callPackage,
   cmake,
   config,
   cudaPackages_13 ? null,
@@ -19,8 +20,6 @@
   rustToolchain,
   source,
   stdenv,
-  stdenvNoCC,
-  unzip,
   # onnxruntime-node (downloaded into the agent cache on first use) ships CUDA
   # execution providers that dlopen vendor libraries absent from the NixOS
   # loader path. Enabling this appends them to the inference workers'
@@ -59,6 +58,7 @@ let
       };
     }
     .${stdenv.hostPlatform.system} or (throw "Unsupported OMP platform: ${stdenv.hostPlatform.system}");
+  bunRuntimeTemplate = callPackage ./bun-runtime.nix { inherit bun; };
   patchedDependencies = lib.mapAttrs (
     _: patch: source + "/${patch}"
   ) rootPackageJson.patchedDependencies;
@@ -94,22 +94,6 @@ let
       [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
     )
     ++ cudaRuntimeLibraries;
-  bunRuntimeTemplate = stdenvNoCC.mkDerivation {
-    pname = "omp-bun-runtime-template";
-    inherit (bun) version;
-    src = bun.src;
-
-    nativeBuildInputs = [ unzip ];
-    dontUnpack = true;
-    dontFixup = true;
-
-    installPhase = ''
-      runHook preInstall
-      unzip -q "$src"
-      install -Dm755 bun-*/bun "$out/libexec/bun"
-      runHook postInstall
-    '';
-  };
 in
 stdenv.mkDerivation {
   pname = "omp";
