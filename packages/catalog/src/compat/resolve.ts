@@ -83,6 +83,7 @@ class IdentityFacts {
 		return this.is("kimi") && this.family("k2.7-code", "k3");
 	}
 
+	/** OpenAI o-series and GPT-5+ 400 on temperature/top_p on every host (#5606). */
 	get openaiRejectsSampling(): boolean {
 		return this.is("openai") && (this.family("o-series") || this.revGte("5"));
 	}
