@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
 import * as transcriptions from "../../providers/transcriptions-server";
-import { transcribeAudio } from "../../transcription";
+import { isCloudTranscriptionApi, transcribeAudio } from "../../transcription";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayBootOptions,
@@ -39,7 +39,7 @@ export async function handleTranscriptions(
 	if (!model) {
 		return transcriptions.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	if (model.api !== "openai-transcriptions") {
+	if (!isCloudTranscriptionApi(model.api)) {
 		const detail =
 			model.api === "local-inference"
 				? `Model ${parsed.modelId} runs on-device only and cannot be served by the auth gateway`

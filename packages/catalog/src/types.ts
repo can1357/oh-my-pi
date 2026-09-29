@@ -57,6 +57,7 @@ export const RUNNER_APIS = [
 	"openai-embeddings",
 	"openrouter-rerank",
 	"openrouter-video",
+	"openai-codex-transcriptions",
 	"openai-transcriptions",
 ] as const;
 
