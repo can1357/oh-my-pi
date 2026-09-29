@@ -664,7 +664,7 @@ export const writeToolRenderer = {
 					header,
 					// The label ends with the args: once the content is complete the write is just running.
 					footerMeta: body && !options?.argsComplete ? uiTheme.fg("dim", "streaming") : undefined,
-					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true }] : [],
+					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true, expanded: options?.expanded }] : [],
 					phase: "pending",
 					borderColor: "borderMuted",
 				};
@@ -772,7 +772,7 @@ export const writeToolRenderer = {
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 				return {
 					header,
-					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true }] : [],
+					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true, expanded }] : [],
 					phase: isPartial ? "partial" : "success",
 					borderColor: "borderMuted",
 				};
