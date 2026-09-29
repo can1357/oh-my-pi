@@ -2133,13 +2133,8 @@ mod testing {
 		#[cfg(windows)]
 		#[test]
 		fn pipe_wrapped_as_file_gets_line_buffering() {
-			use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-
-			let (reader, writer) = os_pipe::pipe().unwrap();
-			// SAFETY: `into_raw_handle` hands over sole ownership of the
-			// write end, making the `File` its only owner.
-			let file = unsafe { std::fs::File::from_raw_handle(writer.into_raw_handle()) };
-			assert!(matches!(StreamWriter::new(OpenFile::File(file)), StreamWriter::Line(_)));
+			let (reader, writer) = std::io::pipe().unwrap();
+			assert!(matches!(StreamWriter::new(OpenFile::File(writer)), StreamWriter::Line(_)));
 			drop(reader);
 		}
 

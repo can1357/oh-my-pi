@@ -178,7 +178,6 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 anyhow = "1.0.102"
-os_pipe.workspace = true
 pretty_assertions = { version = "1.4.1", features = ["unstable"] }
 tempfile = "3"
 
