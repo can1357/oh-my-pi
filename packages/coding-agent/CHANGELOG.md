@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed valid multi-line bash commands that end at EOF without a trailing newline (e.g. ending in a `\` line continuation) being rejected with `pi-natives:command: syntax error …`; they now run as bash runs them
+- Fixed `&&` / `;` bash chains sometimes failing with `pi-natives:command: syntax error …` or running a subtly different command than the one you typed; every chain segment now re-runs exactly as written
 
 ## [18.4.3] - 2026-09-28
 
