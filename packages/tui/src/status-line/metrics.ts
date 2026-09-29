@@ -1,5 +1,7 @@
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme";
+
+export { normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 
 /** Inputs whose differences are intentionally preserved between current status segments and the legacy footer. */
 export interface BillingSummaryOptions {
@@ -7,17 +9,11 @@ export interface BillingSummaryOptions {
 	readonly usingSubscription: boolean;
 	readonly premiumRequests: number;
 	readonly fractionDigits: number;
-	readonly startupPlaceholder?: boolean;
 	readonly pricingPeriod?: "peak" | "off-peak";
 	readonly advisor?: {
 		readonly cost: number;
 		readonly usingSubscription: boolean;
 	};
-}
-
-/** Round premium-request counters without losing legitimate fractional requests. */
-export function normalizePremiumRequests(value: number): number {
-	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 function formatSpend(amount: number, usingSubscription: boolean, fractionDigits: number, uiTheme: Theme): string {
@@ -30,24 +26,13 @@ function formatSpend(amount: number, usingSubscription: boolean, fractionDigits:
 	return `S${formatted}`;
 }
 
-function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
-	if (!usingSubscription) return "$…";
-	if (uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription) {
-		return `${uiTheme.icon.subscription} …`;
-	}
-	return "S…";
-}
-
 function formatAdvisorSpend(
 	amount: number,
 	usingSubscription: boolean,
 	fractionDigits: number,
-	placeholder: boolean,
 	uiTheme: Theme,
 ): string {
-	const spend = placeholder
-		? formatSpendPlaceholder(usingSubscription, uiTheme)
-		: formatSpend(amount, usingSubscription, fractionDigits, uiTheme);
+	const spend = formatSpend(amount, usingSubscription, fractionDigits, uiTheme);
 	const icon = uiTheme.icon.advisor;
 	return icon && icon !== "(adv)" ? `${icon} ${spend}` : `${spend} (adv)`;
 }
@@ -63,21 +48,16 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 		return undefined;
 	}
 
-	const placeholder = options.startupPlaceholder === true;
 	const parts: string[] = [];
 	if (options.cost || options.pricingPeriod) {
-		parts.push(
-			placeholder
-				? formatSpendPlaceholder(options.usingSubscription, uiTheme)
-				: formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme),
-		);
+		parts.push(formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme));
 	} else if (options.usingSubscription) {
 		parts.push(
 			uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
 		);
 	}
 	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
-	if (premiumRequests) parts.push(`★ ${placeholder ? "…" : formatNumber(premiumRequests)}`);
+	if (premiumRequests) parts.push(`★ ${formatNumber(premiumRequests)}`);
 	if (advisorCost && options.advisor) {
 		const prefix = parts.length > 0 ? "+ " : "";
 		parts.push(
@@ -85,7 +65,6 @@ export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Th
 				advisorCost,
 				options.advisor.usingSubscription,
 				options.fractionDigits,
-				placeholder,
 				uiTheme,
 			)}`,
 		);

@@ -131,6 +131,34 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		]);
 	});
 
+	it("uses quota evidence from live reset discovery when broker reports are unavailable or stale", () => {
+		const live = status();
+		live.report = report();
+		const stale = report({ weeklyUsed: 0.1 });
+		stale.fetchedAt = NOW - HOUR;
+
+		for (const reports of [null, [stale]]) {
+			const plan = planClaudeResetRedemptions(input({ reports, statuses: [live] }));
+			expect(plan.actions).toMatchObject([
+				{ reason: "blocked-account", target: { credentialId: 11 }, blockedWindows: ["anthropic:7d"] },
+			]);
+		}
+	});
+
+	it("does not redeem using another organization's reset-discovery quota", () => {
+		const live = status();
+		live.report = report({ orgId: "org-other" });
+
+		const plan = planClaudeResetRedemptions(input({ reports: null, statuses: [live] }));
+
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "account",
+			reason: "no-report",
+		});
+	});
+
 	it("uses live grant exhaustion when the usage report predates the blocking response", () => {
 		const plan = planClaudeResetRedemptions(
 			input({

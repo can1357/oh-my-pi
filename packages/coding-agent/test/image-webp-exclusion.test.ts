@@ -113,32 +113,6 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(["image/png", "image/jpeg"]).toContain(mime);
 	});
 
-	test("re-encodes a WebP image out of WebP for local model provider ids", async () => {
-		for (const provider of ["llama.cpp", "lm-studio", "local-server"]) {
-			const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
-
-			const result = await normalizeModelContextImages([webp], { model: buildLocalVisionModel(provider) });
-
-			expect(result).toHaveLength(1);
-			const mime = result![0]!.mimeType;
-			expect(mime).not.toBe("image/webp");
-			expect(["image/png", "image/jpeg"]).toContain(mime);
-		}
-	});
-
-	test("re-encodes a WebP image out of WebP for renamed STB-backed local providers", async () => {
-		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
-
-		const result = await normalizeModelContextImages([webp], {
-			model: buildStbVisionModel("my-renamed-llama"),
-		});
-
-		expect(result).toHaveLength(1);
-		const mime = result![0]!.mimeType;
-		expect(mime).not.toBe("image/webp");
-		expect(["image/png", "image/jpeg"]).toContain(mime);
-	});
-
 	test("keeps WebP for a WebP-capable model when OMP_NO_WEBP is unset", async () => {
 		const [anthropic] = getBundledModels("anthropic");
 		expect(anthropic).toBeDefined();

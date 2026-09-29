@@ -206,6 +206,19 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskSpeculativeLaunch = register({
+	id: "task.speculativeLaunch",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Speculative Task Launch",
+		description:
+			"Start each batch subagent as soon as its tasks[] item finishes streaming instead of waiting for the whole task call. Launched agents are aborted if the finished call fails validation, is blocked, or its arguments change. Requires auto-allowed task approval and no extension tool lifecycle handlers.",
+	},
+});
+
 export const cfgTaskEnableEffort = register({
 	id: "task.enableEffort",
 	type: "boolean",

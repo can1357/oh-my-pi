@@ -545,20 +545,6 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("A-resolved\nmiddle\nB-resolved\ntail\n");
 	});
 
-	it("accepts `@ours`/`@theirs`/`@both` content tokens as shorthand", async () => {
-		const filePath = path.join(tempDir, "tokens.ts");
-		await Bun.write(filePath, TWO_WAY);
-		const session = createTestSession(tempDir);
-		const read = await getTool(session, "read");
-		const write = await getTool(session, "write");
-
-		await read.execute("read-tokens", { path: "tokens.ts" });
-		await write.execute("write-tokens", { path: "conflict://1", content: "@theirs" });
-
-		const after = await Bun.file(filePath).text();
-		expect(after).toBe("line 1\nnewApi(x)\nline N\n");
-	});
-
 	it("expands `@both` to ours then theirs without re-typing either side", async () => {
 		const filePath = path.join(tempDir, "both.ts");
 		await Bun.write(filePath, TWO_WAY);

@@ -106,8 +106,8 @@ function expectContentToContainPath(content: string, expected: string): void {
 // a CI scratch workspace, or a clone under `/tmp` — makes the fake home look
 // like scratch and renders the scratch icon instead of the folder icon. The
 // constant is frozen at import time and `os.tmpdir()` is already mocked
-// elsewhere in this file, so there is no seam to redirect it; the two tests
-// that need a non-scratch home skip instead of asserting the wrong icon.
+// elsewhere in this file, so there is no seam to redirect it; tests that need
+// a non-scratch home skip instead of asserting the wrong icon.
 const CHECKOUT_IS_SCRATCH = SCRATCH_ROOT_PREFIXES.some(root => pathIsWithin(root, originalProjectDir));
 
 function createFakeHome(): { home: string; projectsRoot: string } {
@@ -234,21 +234,58 @@ describe("status line path segment", () => {
 		}
 	});
 
-	it("normalizes and classifies a project directory only once", () => {
-		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-classify-"));
+	it.skipIf(CHECKOUT_IS_SCRATCH)("refreshes a repository alias after switching away and back", () => {
+		const { home, projectsRoot } = createFakeHome();
+		const projectDir = path.join(projectsRoot, "project");
+		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-retarget-"));
+		const alias = path.join(home, "alias");
 		try {
-			setProjectDir(scratchDir);
-			const realpath = vi.spyOn(fs, "realpathSync");
-			renderSegment("path", createPathContext());
-			renderSegment("path", createPathContext());
+			fs.mkdirSync(projectDir);
+			fs.symlinkSync(projectDir, alias, process.platform === "win32" ? "junction" : "dir");
+			const ctx = createPathContext();
+			ctx.activeRepo = {
+				cwd: alias,
+				repoRoot: alias,
+				relativeRepoRoot: "repo",
+				source: "single-direct-child-repo",
+			};
+			expect(Bun.stripANSI(renderSegment("path", ctx).content)).toBe(`${theme.icon.folder} project ↳ repo`);
 
-			const projectRealpaths = realpath.mock.calls.filter(
-				([input]) => path.resolve(String(input)) === path.resolve(scratchDir),
-			);
-			expect(projectRealpaths).toHaveLength(1);
+			ctx.activeRepo.cwd = scratchDir;
+			renderSegment("path", ctx);
+			fs.unlinkSync(alias);
+			fs.symlinkSync(scratchDir, alias, process.platform === "win32" ? "junction" : "dir");
+			ctx.activeRepo.cwd = alias;
+
+			const rendered = Bun.stripANSI(renderSegment("path", ctx).content);
+			expectContentToContainPath(rendered, `${theme.icon.scratchFolder} ${path.basename(scratchDir)} ↳ repo`);
+			expect(rendered).not.toContain(theme.icon.folder);
+		} finally {
+			removeSyncWithRetries(home);
+			removeSyncWithRetries(scratchDir);
+		}
+	});
+
+	it.skipIf(CHECKOUT_IS_SCRATCH)("uses the current home when switching project directories", () => {
+		const first = createFakeHome();
+		let secondHome: string | undefined;
+		try {
+			const firstProject = path.join(first.projectsRoot, "first-project");
+			fs.mkdirSync(firstProject);
+			setProjectDir(firstProject);
+			const ctx = createPathContext();
+			expect(Bun.stripANSI(renderSegment("path", ctx).content)).toBe(`${theme.icon.folder} first-project`);
+
+			const second = createFakeHome();
+			secondHome = second.home;
+			const secondProject = path.join(second.projectsRoot, "second-project");
+			fs.mkdirSync(secondProject);
+			setProjectDir(secondProject);
+			expect(Bun.stripANSI(renderSegment("path", ctx).content)).toBe(`${theme.icon.folder} second-project`);
 		} finally {
 			setProjectDir(originalProjectDir);
-			removeSyncWithRetries(scratchDir);
+			removeSyncWithRetries(first.home);
+			if (secondHome) removeSyncWithRetries(secondHome);
 		}
 	});
 

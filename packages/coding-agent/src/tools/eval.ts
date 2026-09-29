@@ -59,7 +59,7 @@ import {
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
-import { cfgToolsMaxTimeout } from "./settings";
+import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -466,6 +466,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
+				// The coordinator also exists for `task.speculativeLaunch`; eval shadows
+				// belong to the read/eval speculation slice only.
+				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
 				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
@@ -1039,39 +1042,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					appendTail(cellOutput);
 				}
 
-				if (result.cancelled) {
-					cellResult.status = "error";
-					pushUpdate();
-					const errorMsg = result.output || "Command aborted";
-					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput || errorMsg;
-
-					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
-					commitDisplaySpills(summaryForMeta);
-					const details: EvalToolDetails = {
-						language: languages[0],
-						languages,
-						cells: cellResults,
-						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
-						isError: true,
-					};
-					if (notice) details.notice = notice;
-
-					return toolResult(details)
-						.content([{ type: "text", text: outputText }, ...images])
-						.truncationFromSummary(summaryForMeta, { direction: "tail" })
-						.error()
-						.done();
-				}
-
-				if (result.exitCode !== 0 && result.exitCode !== undefined) {
+				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput
-						? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
-						: `Command exited with code ${result.exitCode}`;
+					const exitLine = `Command exited with code ${result.exitCode}`;
+					const outputText = result.cancelled
+						? combinedOutput || result.output || "Command aborted"
+						: combinedOutput
+							? `${combinedOutput}\n\n${exitLine}`
+							: exitLine;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					commitDisplaySpills(summaryForMeta);

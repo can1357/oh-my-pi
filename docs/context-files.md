@@ -124,7 +124,7 @@ Starting in `repo/packages/api`:
 
 ## Injection behavior
 
-With the default prompt template, discovered context files are injected into the opening project prompt as one `<repo-rules>` block, with one `<file>` element per surviving file in the sort order above:
+Discovered context files are injected as one `<repo-rules>` block, with one `<file>` element per surviving file in the sort order above. The block lives in the trailing `<project-context>` system block, after the static system prompt, together with every other working-directory-derived section (`<dir-context>`, `<workspace-tree>`, `<workspace-roots>`), so sessions in different directories share the static prompt as a cached prefix:
 
 ```xml
 <repo-rules>
@@ -138,7 +138,7 @@ You MUST follow the context files below for all tasks:
 </repo-rules>
 ```
 
-When `SYSTEM.md` selects the bundled custom-prompt template, the same files are emitted in that template's `<project>` / `<instructions>` section instead. In either mode, the agent sees each file's absolute path and fully expanded Markdown content (with `@` imports already resolved).
+The same trailing block is emitted when `SYSTEM.md` selects the bundled custom-prompt template or a custom template. In every mode, the agent sees each file's absolute path and fully expanded Markdown content (with `@` imports already resolved).
 
 Loading is automatic — there is no need to instruct the agent to search for `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, or similar files during a session.
 

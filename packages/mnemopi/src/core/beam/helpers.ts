@@ -749,13 +749,7 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 		// and invalidating there would only discard a still-valid cache. Only the query cache is
 		// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
 		// batch never touches.
-		if (committed > 0) {
-			const caches = beam.caches as
-				| { queryCache?: { invalidate?: () => void }; _queryCache?: { invalidate?: () => void } }
-				| undefined;
-			caches?.queryCache?.invalidate?.();
-			caches?._queryCache?.invalidate?.();
-		}
+		if (committed > 0) beam.caches.queryCache?.invalidate();
 	} catch (error) {
 		// Background embedding generation is best-effort: a failing provider, a closed DB
 		// during shutdown, or a transient API error must never disrupt the synchronous

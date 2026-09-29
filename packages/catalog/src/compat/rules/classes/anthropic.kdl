@@ -7,11 +7,11 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
-	// On-demand compaction (compact-2026-09-04) is available on the Claude
-	// API and Vertex, not Amazon Bedrock or unverified gateway deployments.
+	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
+	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
 	// effective URLs are checked at request time.
-	on "anthropic" "google-vertex" {
+	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
 		family "fable" {
 			revision ">=5" {
 				supports-server-compaction #true
@@ -61,6 +61,21 @@ class "anthropic" {
 			supports-forced-tool-choice #false
 		}
 	}
+	// Sonnet 5.5 rejects forced tool selection like Opus 5.5 (400 `tool_choice:
+	// type "tool" and "any" are not supported for this model`); upper-bounded
+	// for the same reason as the Opus rule above.
+	// https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
+	family "sonnet" {
+		revision ">=5.5 <6" {
+			supports-forced-tool-choice #false
+			// `thinking: {type: "disabled"}` is a 400; `between_tools` is the
+			// lowest thinking setting.
+			// https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#turn-off-up-front-thinking
+			supports-between-tools-thinking #true
+			// Signed thinking is bound to the exact preceding conversation.
+			thinking-prefix-binding #true
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {
@@ -84,6 +99,15 @@ class "anthropic" {
 		}
 		family "fable" {
 			revision ">=5.1" {
+				supports-thinking-binding-controls #true
+			}
+		}
+		family "sonnet" {
+			revision ">=5.5" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+				supports-per-message-effort #true
 				supports-thinking-binding-controls #true
 			}
 		}
@@ -367,5 +391,15 @@ class "anthropic" {
 		claude-thinking-beta-header #true
 		antigravity-claude-tool-mode #true
 		antigravity-usage-label "true"
+	}
+}
+
+// Claude 4+ ships the server-side `web_search` tool on any Messages-compatible host.
+class "anthropic" {
+	on-api "anthropic-messages" {
+		revision ">=4" {
+			web-search "anthropic"
+			web-search-model "claude-haiku-4-5"
+		}
 	}
 }

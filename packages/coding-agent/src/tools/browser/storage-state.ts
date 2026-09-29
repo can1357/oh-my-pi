@@ -212,7 +212,8 @@ function parseCookieString(source: string): BrowserCookieInput[] {
 	return parseCookieHeader(trimmed.replace(/^cookie\s*:\s*/i, ""));
 }
 
-function normalizeCookieArguments(args: unknown[]): CookieParam[] {
+/** Parse `tab.setCookies()` arguments (objects, Cookie headers, cURL dumps, JSON arrays, trailing scope). */
+export function normalizeCookieArguments(args: unknown[]): CookieParam[] {
 	if (args.length === 0) throw new ToolError(COOKIE_PARSE_ERROR);
 	const items = [...args];
 	const trailing = items.at(-1);
@@ -224,7 +225,8 @@ function normalizeCookieArguments(args: unknown[]): CookieParam[] {
 	return parsed.map(cookie => ({ ...scope, ...cookie }));
 }
 
-function storageValue(value: unknown): string {
+/** A Web Storage value as stored: strings verbatim, anything else JSON. */
+export function storageValue(value: unknown): string {
 	if (typeof value === "string") return value;
 	let serialized: string | undefined;
 	try {
@@ -236,7 +238,8 @@ function storageValue(value: unknown): string {
 	return serialized;
 }
 
-function storageEntries(value: unknown): Array<[string, string]> {
+/** The key/value pairs of a `tab.setStorage()` entries object. */
+export function storageEntries(value: unknown): Array<[string, string]> {
 	if (!isRecord(value)) throw new ToolError("tab.setStorage() expects a key/value object");
 	const entries: Array<[string, string]> = [];
 	for (const key in value) {
@@ -245,51 +248,89 @@ function storageEntries(value: unknown): Array<[string, string]> {
 	return entries;
 }
 
-function assertStorageKind(kind: string): asserts kind is StorageKind {
+/** Reject storage kinds other than `local`/`session`. */
+export function assertStorageKind(kind: string): asserts kind is StorageKind {
 	if (kind !== "local" && kind !== "session") {
 		throw new ToolError('Storage kind must be "local" or "session"');
 	}
 }
 
+/** Page function: the current origin's Web Storage, or null for an opaque origin. */
+export function readOriginStorageInPage(): StorageStateOrigin | null {
+	const scope = globalThis as unknown as {
+		location: { origin: string };
+		localStorage: BrowserStorageArea;
+		sessionStorage: BrowserStorageArea;
+	};
+	if (scope.location.origin === "null") return null;
+	const entries = (store: BrowserStorageArea): Array<{ name: string; value: string }> => {
+		const result: Array<{ name: string; value: string }> = [];
+		for (let index = 0; index < store.length; index++) {
+			const name = store.key(index);
+			if (name !== null) result.push({ name, value: store.getItem(name) ?? "" });
+		}
+		return result;
+	};
+	return {
+		origin: scope.location.origin,
+		localStorage: entries(scope.localStorage),
+		sessionStorage: entries(scope.sessionStorage),
+	};
+}
+
+/** Page function: replace the current origin's Web Storage with `state`. */
+export function restoreOriginStorageInPage(state: StorageStateOrigin): void {
+	const scope = globalThis as unknown as {
+		localStorage: BrowserStorageArea;
+		sessionStorage: BrowserStorageArea;
+	};
+	scope.localStorage.clear();
+	for (const entry of state.localStorage) scope.localStorage.setItem(entry.name, entry.value);
+	scope.sessionStorage.clear();
+	for (const entry of state.sessionStorage ?? []) scope.sessionStorage.setItem(entry.name, entry.value);
+}
+
+/** Page function: every pair of one storage area, or one key's value. */
+export function readStorageInPage(area: StorageKind, key: string | undefined): Record<string, string> | string | null {
+	const scope = globalThis as unknown as {
+		localStorage: BrowserStorageArea;
+		sessionStorage: BrowserStorageArea;
+	};
+	const store = area === "local" ? scope.localStorage : scope.sessionStorage;
+	if (key !== undefined) return store.getItem(key);
+	const result: Record<string, string> = {};
+	for (let index = 0; index < store.length; index++) {
+		const name = store.key(index);
+		if (name !== null) result[name] = store.getItem(name) ?? "";
+	}
+	return result;
+}
+
+/** Page function: store `pairs` in one storage area. */
+export function writeStorageInPage(area: StorageKind, pairs: Array<[string, string]>): void {
+	const scope = globalThis as unknown as {
+		localStorage: BrowserStorageArea;
+		sessionStorage: BrowserStorageArea;
+	};
+	const store = area === "local" ? scope.localStorage : scope.sessionStorage;
+	for (const [key, entry] of pairs) store.setItem(key, entry);
+}
+
+/** Page function: clear one storage area. */
+export function clearStorageInPage(area: StorageKind): void {
+	const scope = globalThis as unknown as {
+		localStorage: BrowserStorageArea;
+		sessionStorage: BrowserStorageArea;
+	};
+	(area === "local" ? scope.localStorage : scope.sessionStorage).clear();
+}
+
 async function readOriginStorage(page: Page, signal?: AbortSignal): Promise<StorageStateOrigin | null> {
-	return await untilAborted(signal, () =>
-		page.evaluate(() => {
-			const scope = globalThis as unknown as {
-				location: { origin: string };
-				localStorage: BrowserStorageArea;
-				sessionStorage: BrowserStorageArea;
-			};
-			if (scope.location.origin === "null") return null;
-			const entries = (store: BrowserStorageArea): Array<{ name: string; value: string }> => {
-				const result: Array<{ name: string; value: string }> = [];
-				for (let index = 0; index < store.length; index++) {
-					const name = store.key(index);
-					if (name !== null) result.push({ name, value: store.getItem(name) ?? "" });
-				}
-				return result;
-			};
-			return {
-				origin: scope.location.origin,
-				localStorage: entries(scope.localStorage),
-				sessionStorage: entries(scope.sessionStorage),
-			};
-		}),
-	);
+	return await untilAborted(signal, () => page.evaluate(readOriginStorageInPage));
 }
 
 async function restoreOriginStorage(page: Page, origin: StorageStateOrigin, signal?: AbortSignal): Promise<void> {
-	await untilAborted(signal, () =>
-		page.evaluate(state => {
-			const scope = globalThis as unknown as {
-				localStorage: BrowserStorageArea;
-				sessionStorage: BrowserStorageArea;
-			};
-			scope.localStorage.clear();
-			for (const entry of state.localStorage) scope.localStorage.setItem(entry.name, entry.value);
-			scope.sessionStorage.clear();
-			for (const entry of state.sessionStorage ?? []) scope.sessionStorage.setItem(entry.name, entry.value);
-		}, origin),
-	);
+	await untilAborted(signal, () => page.evaluate(restoreOriginStorageInPage, origin));
 }
 
 function parseStorageEntries(value: unknown): Array<{ name: string; value: string }> {
@@ -395,26 +436,7 @@ export async function readStorage(
 	if (options.key !== undefined && typeof options.key !== "string") {
 		throw new ToolError("tab.storage() expects key to be a string");
 	}
-	return await untilAborted(signal, () =>
-		page.evaluate(
-			(area, key) => {
-				const scope = globalThis as unknown as {
-					localStorage: BrowserStorageArea;
-					sessionStorage: BrowserStorageArea;
-				};
-				const store = area === "local" ? scope.localStorage : scope.sessionStorage;
-				if (key !== undefined) return store.getItem(key);
-				const result: Record<string, string> = {};
-				for (let index = 0; index < store.length; index++) {
-					const name = store.key(index);
-					if (name !== null) result[name] = store.getItem(name) ?? "";
-				}
-				return result;
-			},
-			kind,
-			options.key,
-		),
-	);
+	return await untilAborted(signal, () => page.evaluate(readStorageInPage, kind, options.key));
 }
 
 /** Set one Web Storage pair or a map of pairs on the current origin. */
@@ -430,34 +452,22 @@ export async function setPageStorage(
 		typeof keyOrEntries === "string"
 			? ([[keyOrEntries, storageValue(value)]] as Array<[string, string]>)
 			: storageEntries(keyOrEntries);
-	await untilAborted(signal, () =>
-		page.evaluate(
-			(area, pairs) => {
-				const scope = globalThis as unknown as {
-					localStorage: BrowserStorageArea;
-					sessionStorage: BrowserStorageArea;
-				};
-				const store = area === "local" ? scope.localStorage : scope.sessionStorage;
-				for (const [key, entry] of pairs) store.setItem(key, entry);
-			},
-			kind,
-			entries,
-		),
-	);
+	await untilAborted(signal, () => page.evaluate(writeStorageInPage, kind, entries));
 }
 
 /** Clear one Web Storage area on the current origin. */
 export async function clearPageStorage(page: Page, kind: string, signal?: AbortSignal): Promise<void> {
 	assertStorageKind(kind);
-	await untilAborted(signal, () =>
-		page.evaluate(area => {
-			const scope = globalThis as unknown as {
-				localStorage: BrowserStorageArea;
-				sessionStorage: BrowserStorageArea;
-			};
-			(area === "local" ? scope.localStorage : scope.sessionStorage).clear();
-		}, kind),
-	);
+	await untilAborted(signal, () => page.evaluate(clearStorageInPage, kind));
+}
+
+/** Where `tab.saveState()` writes: the requested path, else `~/.omp/browser-state/<tab>.json`. */
+export function storageStatePath(tabName: string, requestedPath: string | undefined, cwd: string): string {
+	const safeName = tabName.replace(/[^A-Za-z0-9._-]/g, "_");
+	const fileName = safeName === "." || safeName === ".." ? "_" : safeName || "main";
+	return requestedPath
+		? resolveToCwd(requestedPath, cwd)
+		: path.join(os.homedir(), ".omp", "browser-state", `${fileName}.json`);
 }
 
 /** Save cookies and current-origin Web Storage to a Playwright-compatible state file. */
@@ -468,11 +478,7 @@ export async function saveStorageState(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const safeName = name.replace(/[^A-Za-z0-9._-]/g, "_");
-	const fileName = safeName === "." || safeName === ".." ? "_" : safeName || "main";
-	const destination = requestedPath
-		? resolveToCwd(requestedPath, cwd)
-		: path.join(os.homedir(), ".omp", "browser-state", `${fileName}.json`);
+	const destination = storageStatePath(name, requestedPath, cwd);
 	const [browserCookies, origin] = await Promise.all([
 		untilAborted(signal, () => page.browserContext().cookies()),
 		readOriginStorage(page, signal),
@@ -482,6 +488,24 @@ export async function saveStorageState(
 	return destination;
 }
 
+/** Read and validate a saved browser state file. */
+export async function readStorageStateFile(
+	requestedPath: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<BrowserStorageState> {
+	if (typeof requestedPath !== "string" || requestedPath.length === 0) throw new ToolError(STORAGE_STATE_ERROR);
+	const source = resolveToCwd(requestedPath, cwd);
+	try {
+		const text = await untilAborted(signal, () => Bun.file(source).text());
+		return parseStorageState(JSON.parse(text) as unknown);
+	} catch (error) {
+		throwIfAborted(signal);
+		if (error instanceof ToolError) throw error;
+		throw new ToolError(STORAGE_STATE_ERROR);
+	}
+}
+
 /** Restore cookies and Web Storage from a saved browser state file. */
 export async function loadStorageState(
 	page: Page,
@@ -489,17 +513,7 @@ export async function loadStorageState(
 	cwd: string,
 	options: LoadStateOptions,
 ): Promise<LoadStateResult> {
-	if (typeof requestedPath !== "string" || requestedPath.length === 0) throw new ToolError(STORAGE_STATE_ERROR);
-	const source = resolveToCwd(requestedPath, cwd);
-	let state: BrowserStorageState;
-	try {
-		const text = await untilAborted(options.signal, () => Bun.file(source).text());
-		state = parseStorageState(JSON.parse(text) as unknown);
-	} catch (error) {
-		throwIfAborted(options.signal);
-		if (error instanceof ToolError) throw error;
-		throw new ToolError(STORAGE_STATE_ERROR);
-	}
+	const state = await readStorageStateFile(requestedPath, cwd, options.signal);
 	if (state.cookies.length > 0) {
 		try {
 			await untilAborted(options.signal, () => page.browserContext().setCookie(...state.cookies));

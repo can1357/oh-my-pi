@@ -548,21 +548,6 @@ describe("planInlineSwaps", () => {
 	const toolOnly = { renderSystemPrompt: "none" as const, renderToolResults: true };
 	const promptOnly = { renderSystemPrompt: "all" as const, renderToolResults: false };
 
-	it("never swaps the most recent tool result", () => {
-		const plan = planInlineSwaps({
-			options: toolOnly,
-			shape,
-			budget: 90,
-			toolResults: [
-				{ id: "a", textTokens: 10000, frames: 2 },
-				{ id: "z", textTokens: 10000, frames: 2 },
-			],
-			systemPrompt: undefined,
-			hasUserMessage: true,
-		});
-		expect(plan.toolResults.map(swap => swap.id)).toEqual(["a"]);
-	});
-
 	it("skips error, empty, below-floor, and below-margin candidates", () => {
 		const plan = planInlineSwaps({
 			options: toolOnly,

@@ -15,6 +15,7 @@ import {
 	parseStreamingJsonThrottled,
 	readSseEvents,
 } from "@oh-my-pi/pi-utils";
+import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
@@ -154,6 +155,7 @@ import {
 	resolveAnthropicMetadataUserId,
 	stripClaudeToolPrefix,
 } from "./anthropic-identity";
+import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import {
 	anthropicProviderSessionStateKey,
 	clearAnthropicFastModeFallback,
@@ -404,10 +406,17 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 		return allowAnthropicHeaderOverrides ? mergeHeaders(headers, anthropicHeaderOverrides) : headers;
 	} else if (!isOfficialAnthropicApiUrl(options.baseUrl)) {
+		// A keyless provider (`auth: none`) resolves to the `N/A` sentinel
+		// rather than a real key; custom endpoints that authenticate via their
+		// own headers may reject a bogus bearer, so send no Authorization —
+		// same sentinel guard as the openai transports. A caller-supplied
+		// Authorization in `model.headers` still wins.
+		const bearer =
+			incomingAuthorization ?? (options.apiKey !== NO_AUTH_SENTINEL ? `Bearer ${options.apiKey}` : undefined);
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
-			Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}`,
+			...(bearer ? { Authorization: bearer } : {}),
 			...sharedHeaders,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
@@ -1611,6 +1620,28 @@ function isReplayableAnthropicCompaction(
 	return payload?.type === "anthropicCompaction" && payload.provider === model.provider && payload.content.length > 0;
 }
 
+/** Which persisted compaction summaries a request replays as native blocks. */
+interface AnthropicCompactionReplay {
+	model: Model<"anthropic-messages">;
+	/** Replay persisted legacy threshold blocks (encrypted content) too. */
+	legacy: boolean;
+}
+
+/**
+ * Whether `payload` goes on the wire as a `compaction` block under `replay`:
+ * replayable for the model, and carrying a signature or (when legacy replay is
+ * on) the legacy ciphertext. Anything else is sent as the summary's text.
+ */
+function replaysAnthropicCompactionBlock(
+	payload: ProviderPayload | undefined,
+	replay: AnthropicCompactionReplay,
+): payload is AnthropicCompactionPayload {
+	return (
+		isReplayableAnthropicCompaction(payload, replay.model) &&
+		(payload.signature !== undefined || (replay.legacy && payload.encryptedContent !== undefined))
+	);
+}
+
 /** The wire block for a replayed compaction payload, opaque state included. */
 function compactionBlockParam(payload: AnthropicCompactionPayload): CompactionBlockParam {
 	const { content, signature, encryptedContent } = payload;
@@ -2234,6 +2265,8 @@ const streamAnthropicOnce = (
 					nextParams = replacementPayload as typeof nextParams;
 				}
 				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
+				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
+				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
@@ -3701,8 +3734,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// the proxy to deal with two competing credentials when the user explicitly
 	// asked for one.
 	const authorizationHeader = getHeaderCaseInsensitive(defaultHeaders, "Authorization");
+	// A keyless provider resolves to the `N/A` sentinel, for which no
+	// Authorization was built above; the client would otherwise inject a
+	// bogus `X-Api-Key: N/A` of its own.
 	const shouldSuppressClientApiKey =
-		!oauthToken && !model.compat.officialEndpoint && typeof authorizationHeader === "string";
+		!oauthToken &&
+		!model.compat.officialEndpoint &&
+		(typeof authorizationHeader === "string" || apiKey === NO_AUTH_SENTINEL);
 
 	return {
 		isOAuthToken: oauthToken,
@@ -3792,22 +3830,17 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	const budgetTokens = thinking.budget_tokens ?? 0;
 	if (budgetTokens <= 0) return;
 
-	const currentMaxTokens = Math.min(params.max_tokens ?? maxAllowedTokens, maxAllowedTokens);
-	const raisedMaxTokens = Math.min(
-		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
-		maxAllowedTokens,
-	);
-	params.max_tokens = raisedMaxTokens;
+	const output = budgetThinkingOutput(params.max_tokens, budgetTokens, maxAllowedTokens);
+	params.max_tokens = output.maxTokens;
 
-	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= raisedMaxTokens) return;
+	if (output.budgetTokens === budgetTokens) return;
 
-	const clampedBudget = raisedMaxTokens - OUTPUT_FALLBACK_BUFFER;
-	if (clampedBudget <= 0) {
+	if (output.budgetTokens <= 0) {
 		throw new AIError.ConfigurationError(
-			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${raisedMaxTokens}`,
+			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${output.maxTokens}`,
 		);
 	}
-	thinking.budget_tokens = clampedBudget;
+	thinking.budget_tokens = output.budgetTokens;
 }
 
 function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl: AnthropicCacheControl): boolean {
@@ -3982,34 +4015,33 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 }
 
 /**
- * Trailing system-prompt segments carrying per-turn volatile content (memory
- * recall blocks). They are rendered by the coding agent as their own
- * `systemPrompt` array elements and appended last, so on the wire they
- * normally form a volatile suffix after the stable prefix. The system cache
- * breakpoint anchors on the last stable segment instead of the array tail, so
- * a recall refresh re-bills only the suffix and the message tail for one turn
- * while the tools+stable-system prefix stays a cache hit.
+ * System-prompt segments whose bytes differ between sessions or turns of the
+ * same agent: per-turn memory recall (`<memories>`) and the coding agent's
+ * working-directory context (`<project-context>`: context files with their
+ * paths, workspace tree, workspace roots, session append text; advisors use
+ * the same tag for their context-file block). The coding agent renders them
+ * as their own `systemPrompt` array elements after the large static prompt.
+ * The system cache breakpoint anchors on the block right before the first
+ * such segment, so the static head is shared byte-for-byte across sessions in
+ * different directories (e.g. one git worktree per task) and a recall refresh
+ * re-bills only the suffix and the message tail.
  *
- * Only a genuinely trailing volatile run counts: a `before_agent_start`
- * extension override may append a stable policy block after the staged recall
- * block, and that block stays in the cached head. A volatile block stranded
- * mid-array still poisons the prefix at its position — prefix caching is
- * positional, so no classification can save the bytes after it.
+ * Everything from the first volatile segment on sits after the head
+ * breakpoint, including stable blocks appended behind it (per-spawn subagent
+ * role text, `before_agent_start` extension policy): prefix caching is
+ * positional, so bytes after a changing segment can never extend the cached
+ * head anyway; the rolling message breakpoints still cover them.
  *
- * Detection is by our own markup, not model identity: recall blocks always
- * open with `<memories>`. Stable segments containing recalled text elsewhere
- * (e.g. quoted in conversation) are unaffected — only a leading tag counts.
+ * Detection is by our own markup, not model identity: only a leading tag
+ * counts, so stable segments quoting these tags elsewhere are unaffected.
  */
-const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>"];
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>", "<project-context>"];
 
-function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
-	let start = systemBlocks.length;
-	while (start > 0) {
-		const text = systemBlocks[start - 1]?.text ?? "";
-		if (!VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => text.startsWith(marker))) break;
-		start--;
-	}
-	return start;
+function volatileSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	const start = systemBlocks.findIndex(block =>
+		VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => block.text.startsWith(marker)),
+	);
+	return start === -1 ? systemBlocks.length : start;
 }
 
 /**
@@ -4023,10 +4055,10 @@ function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]):
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
  *
- * Volatile trailing segments (memory recall) sit after the breakpoint, so a
- * recall refresh re-bills only the suffix and the tail for one turn instead of
- * the whole head. When every system block is volatile there is no stable
- * boundary and the breakpoint stays on the array tail (previous behavior).
+ * Volatile segments (memory recall, working-directory context) sit after the
+ * breakpoint, so a recall refresh or a different cwd re-bills only the suffix
+ * and the tail instead of the whole head. When every system block is volatile
+ * there is no stable boundary and the breakpoint stays on the array tail.
  *
  * Anthropic allows at most 4 cache breakpoints per request. At most one is
  * spent on tools and one on system here, leaving the remaining budget for
@@ -4036,9 +4068,12 @@ function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]):
  * sit first in wire order and survive message rewrites, and sibling subagents of
  * the same definition share this prefix byte for byte.
  *
- * When the OAuth Claude Code path already anchors its identity system block at
- * buildAnthropicSystemBlocks, the system check skips adding a second system
- * breakpoint, while the tool check still anchors the last tool definition.
+ * The OAuth Claude Code path pre-decorates its identity system block in
+ * buildAnthropicSystemBlocks. That breakpoint moves to the anchor block instead
+ * of a second one being added: the identity block is a prefix of the anchored
+ * head, so the move keeps the budget at last tool + last stable system block +
+ * 2 message breakpoints while the agent's static system prompt, not just the
+ * identity line, becomes a cached prefix of its own.
  *
  * Runs on the fresh system blocks and wire tools built for this request, after
  * the declared tool list was derived from the transcript's request controls.
@@ -4062,26 +4097,20 @@ function applyHeadCaching(
 	}
 
 	if (systemBlocks && systemBlocks.length > 0) {
-		// Anchor on the last stable block so a volatile recall suffix refresh
-		// re-bills only the suffix, not the whole head. The skip-if-decorated
-		// check applies only when there is no volatile suffix (previous
-		// behavior): with a suffix present the boundary anchor is added
-		// whenever the anchor block itself lacks a breakpoint, even if the
-		// OAuth path pre-decorated its identity block — otherwise the only
-		// system breakpoint sits before the stable prompt and a recall
-		// refresh re-bills it. The message budget in `applyPromptCaching`
-		// shrinks accordingly (4 minus head breakpoints). All-volatile falls
-		// back to tail anchoring (previous behavior).
-		const suffixStart = stableSystemSuffixStart(systemBlocks);
-		if (suffixStart === systemBlocks.length) {
-			if (!systemBlocks.some(block => block.cache_control != null)) {
-				const lastBlock = systemBlocks[systemBlocks.length - 1];
-				if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
-			}
-		} else {
-			const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
-			const anchor = systemBlocks[anchorIndex];
-			if (anchor && anchor.cache_control == null) anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		// Anchor on the last block before the volatile suffix so a recall
+		// refresh or a different working directory re-bills only the suffix,
+		// not the whole head. An earlier system breakpoint (the OAuth identity
+		// block) moves to the anchor rather than staying as a second one: a
+		// breakpoint left on the identity block caches only tools + identity,
+		// and keeping both would take a rolling message breakpoint from
+		// `applyPromptCaching` (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring.
+		const suffixStart = volatileSystemSuffixStart(systemBlocks);
+		const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+		const anchor = systemBlocks[anchorIndex];
+		if (anchor && anchor.cache_control == null) {
+			for (const block of systemBlocks) delete block.cache_control;
+			anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
 		}
 	}
 }
@@ -4095,6 +4124,41 @@ function usesAdaptiveThinkingTagOnly(model: Model<"anthropic-messages">): boolea
 		if (effortMap[effort] !== "adaptive") return false;
 	}
 	return thinking.efforts.length > 0;
+}
+
+/**
+ * True when enabled thinking on `model` is budget thinking
+ * (`thinking.type: "enabled"` with `budget_tokens`) rather than adaptive.
+ */
+export function usesBudgetThinking(model: Model<"anthropic-messages">): boolean {
+	return model.thinking?.mode !== "anthropic-adaptive" || model.compat.disableAdaptiveThinking === true;
+}
+
+/** The most output tokens a request to `model` may ask for (`max_tokens` ceiling). */
+export function anthropicOutputLimit(model: Model<"anthropic-messages">): number {
+	return model.maxTokens ?? UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
+}
+
+/**
+ * The `max_tokens` and thinking budget of budget thinking: `max_tokens`
+ * rises to leave {@link OUTPUT_FALLBACK_BUFFER} visible output tokens after
+ * the budget, within `maxAllowedTokens`, and the budget shrinks when that
+ * ceiling leaves less (a non-positive budget means the ceiling is too low).
+ */
+export function budgetThinkingOutput(
+	maxTokens: number | undefined,
+	budgetTokens: number,
+	maxAllowedTokens: number,
+): { maxTokens: number; budgetTokens: number } {
+	const currentMaxTokens = Math.min(maxTokens ?? maxAllowedTokens, maxAllowedTokens);
+	const raisedMaxTokens = Math.min(
+		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
+		maxAllowedTokens,
+	);
+	return {
+		maxTokens: raisedMaxTokens,
+		budgetTokens: Math.min(budgetTokens, raisedMaxTokens - OUTPUT_FALLBACK_BUFFER),
+	};
 }
 
 /**
@@ -4193,12 +4257,26 @@ function collectAnthropicControlRecords(messages: readonly Message[]): Anthropic
  * lands between a `tool_use` and its `tool_result`, where `transformMessages`
  * would flush synthetic aborted results; a mid-turn change therefore takes
  * effect from the next step.
+ *
+ * A summary replayed as a `compaction` block is never a slot: the block must
+ * open the request, so nothing may precede it. A response opened by the block
+ * (no real user turn between them) takes the change from its next step. A
+ * summary sent as text is an ordinary user turn.
  */
-function anthropicEffortInsertIndex(messages: readonly Message[], end: number): number {
+function anthropicEffortInsertIndex(
+	messages: readonly Message[],
+	end: number,
+	compactionReplay: AnthropicCompactionReplay | undefined,
+): number {
 	for (let i = end - 1; i >= 0; i--) {
-		const role = messages[i]?.role;
-		if (role === "user") return i;
-		if (role === "assistant") return end;
+		const message = messages[i];
+		if (message?.role === "assistant") return end;
+		if (message?.role !== "user") continue;
+		if (!compactionReplay || !replaysAnthropicCompactionBlock(message.providerPayload, compactionReplay)) return i;
+		let next = end;
+		if (messages[next]?.role === "assistant") next++;
+		while (messages[next]?.role === "toolResult") next++;
+		return next;
 	}
 	return end;
 }
@@ -4311,6 +4389,7 @@ function planAnthropicEffortControls(
 	messages: readonly Message[],
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
+	compactionReplay: AnthropicCompactionReplay | undefined,
 ): {
 	topLevel: AnthropicOutputEffort | undefined;
 	inserts: AnthropicControlInsert[];
@@ -4335,7 +4414,7 @@ function planAnthropicEffortControls(
 		const recorded = record.effort.tail;
 		if (recorded !== null && recorded !== tail) {
 			inserts.push({
-				index: anthropicEffortInsertIndex(messages, record.index),
+				index: anthropicEffortInsertIndex(messages, record.index, compactionReplay),
 				spec: { toolChanges: [], effort: recorded },
 			});
 		}
@@ -4343,7 +4422,7 @@ function planAnthropicEffortControls(
 	}
 	if (current !== undefined && current !== tail) {
 		inserts.push({
-			index: anthropicEffortInsertIndex(messages, messages.length),
+			index: anthropicEffortInsertIndex(messages, messages.length, compactionReplay),
 			spec: { toolChanges: [], effort: current },
 		});
 		tail = current;
@@ -4504,8 +4583,7 @@ function buildParams(
 			const thinkingOptions = options ?? {};
 			const mode = model.thinking?.mode;
 			const effort = resolveAnthropicAdaptiveEffort(model, thinkingOptions);
-			const compat = model.compat;
-			if (mode === "anthropic-adaptive" && !compat.disableAdaptiveThinking) {
+			if (!usesBudgetThinking(model)) {
 				const adaptive: { type: "adaptive"; display?: AnthropicThinkingDisplay } = { type: "adaptive" };
 				// Starting with Claude Opus 4.7 and Claude Fable/Mythos 5, adaptive thinking
 				// content is omitted from the response by default. Opt into summarized
@@ -4527,7 +4605,12 @@ function buildParams(
 				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
-			if (isAdaptiveOnlyThinking(model)) {
+			if (model.compat.supportsBetweenToolsThinking) {
+				// Sonnet 5.5 rejects `disabled` with a 400; `between_tools` is its lowest
+				// thinking setting. It takes no other field and leaves effort untouched:
+				// pinning `low` here would cap the whole turn's quality, not only thinking.
+				thinking = { type: "between_tools" };
+			} else if (isAdaptiveOnlyThinking(model)) {
 				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
 				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
 				// Omit the thinking field (the API defaults to adaptive) and pin the
@@ -4587,12 +4670,22 @@ function buildParams(
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
+	const compactionReplay: AnthropicCompactionReplay | undefined = compactionSupported
+		? { model: effectiveModel, legacy: !compactionRequest && !signedReplay }
+		: undefined;
 	const effortPlan = planAnthropicEffortControls(
 		outputConfigEffort,
 		context.messages,
 		records,
 		model.compat.supportsPerMessageEffort === true,
+		compactionReplay,
 	);
+	// `between_tools` returns a 400 at `xhigh`/`max` effort, and the effort in
+	// force from earlier turns outlives a thinking toggle. Fall back to the
+	// default adaptive request, which accepts every effort level.
+	if (thinking?.type === "between_tools" && (effortPlan.topLevel === "xhigh" || effortPlan.topLevel === "max")) {
+		thinking = undefined;
+	}
 	const wireMessages = convertAnthropicMessages(
 		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
 		effectiveModel,
@@ -4600,7 +4693,7 @@ function buildParams(
 		{
 			serverSideFallbackEnabled: !!fallbacks?.length,
 			replayCompaction: compactionSupported,
-			replayLegacyCompaction: !compactionRequest && !signedReplay,
+			replayLegacyCompaction: compactionReplay?.legacy,
 			dropAllThinking,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
@@ -4633,7 +4726,7 @@ function buildParams(
 
 	// OAuth and API-key requests alike get the full model ceiling; Claude Code
 	// itself requests 128k on Opus 5.5.
-	const maxOutputTokens = model.maxTokens ?? UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
+	const maxOutputTokens = anthropicOutputLimit(model);
 
 	// A caller-owned client targets its own endpoint: route body betas by the
 	// client's URL when it exposes one, not the model's routing. Otherwise the
@@ -4918,9 +5011,7 @@ export function convertAnthropicMessages(
 		if (
 			opts?.replayCompaction &&
 			(msg.role === "user" || msg.role === "developer") &&
-			isReplayableAnthropicCompaction(msg.providerPayload, model) &&
-			(msg.providerPayload.signature !== undefined ||
-				(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
+			replaysAnthropicCompactionBlock(msg.providerPayload, { model, legacy: opts.replayLegacyCompaction !== false })
 		) {
 			const compactionParam: AnthropicMessageParam = {
 				role: "assistant",
@@ -5004,9 +5095,10 @@ export function convertAnthropicMessages(
 			// replayed turn.
 			if (
 				opts?.replayCompaction &&
-				isReplayableAnthropicCompaction(msg.providerPayload, model) &&
-				(msg.providerPayload.signature !== undefined ||
-					(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
+				replaysAnthropicCompactionBlock(msg.providerPayload, {
+					model,
+					legacy: opts.replayLegacyCompaction !== false,
+				})
 			) {
 				blocks.push(compactionBlockParam(msg.providerPayload));
 			}

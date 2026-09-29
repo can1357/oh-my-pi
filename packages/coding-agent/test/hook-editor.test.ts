@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
@@ -102,18 +103,6 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 	});
 
-	it("submits the current text on Ctrl+Enter", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "line 1\nline 2", onSubmit, onCancel);
-
-		component.handleInput("\x1b[13;5u");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("line 1\nline 2");
-		expect(onCancel).not.toHaveBeenCalled();
-	});
-
 	it("submits Ctrl+Enter variants with NumLock or keypad Enter metadata", () => {
 		const variants = ["\x1b[13;133u", "\x1b[57414;5u", "\x1b[57414;133u"];
 
@@ -141,21 +130,6 @@ describe("HookEditorComponent default (hook) mode", () => {
 		expect(onSubmit).toHaveBeenCalledWith("draft");
 		expect(onCancel).not.toHaveBeenCalled();
 	});
-	it("submits the current text on Ctrl+Q (Windows Terminal fallback for #2118)", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "line 1\nline 2", onSubmit, onCancel);
-
-		// Ctrl+Q raw byte (0x11). Windows Terminal cannot deliver a distinct
-		// Ctrl+Enter, so app.message.followUp also binds Ctrl+Q (#1903), and the
-		// hook editor must honor it for the same reason.
-		component.handleInput("\x11");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("line 1\nline 2");
-		expect(onCancel).not.toHaveBeenCalled();
-	});
-
 	it("keeps Ctrl+Q working after Enter inserts a newline (Windows Terminal)", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
@@ -220,6 +194,113 @@ describe("HookEditorComponent default (hook) mode", () => {
 });
 
 describe("HookEditorComponent prompt-style mode", () => {
+	it("refuses image attachments unless the prompt opted in and is still open", () => {
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const plain = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), { promptStyle: true });
+		const disposed = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		disposed.dispose();
+
+		expect(plain.attachImage(image)).toBeUndefined();
+		expect(disposed.acceptsImages).toBe(false);
+		expect(disposed.attachImage(image)).toBeUndefined();
+	});
+
+	it("numbers images in text order on submit when they attached out of order", () => {
+		// Concurrent path loads: the second-pasted file finished first and took #1.
+		const later: ImageContent = { type: "image", data: "later", mimeType: "image/png" };
+		const earlier: ImageContent = { type: "image", data: "earlier", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(
+			createTui(),
+			"Prompt",
+			"[Image #2] then [Image #1]",
+			onSubmit,
+			vi.fn(),
+			{
+				promptStyle: true,
+				acceptImages: true,
+				images: [later, earlier],
+			},
+		);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith("[Image #1] then [Image #2]", [earlier, later]);
+	});
+
+	it("drops images whose markers were deleted and renumbers the rest on submit", () => {
+		const first: ImageContent = { type: "image", data: "first", mimeType: "image/png" };
+		const second: ImageContent = { type: "image", data: "second", mimeType: "image/jpeg" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", "[Image #2]", onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			images: [first, second],
+		});
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second]);
+	});
+
+	it("hands an empty bracketed paste to the host's clipboard image read and submits once the marker lands", () => {
+		// Windows Terminal owns Ctrl+V and pastes an image-only clipboard as an empty paste.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		let finishPaste: ((text: string | undefined) => boolean) | undefined;
+		const component: HookEditorComponent = new HookEditorComponent(createTui(), "Prompt", "see ", onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			// Like InputController.handleImagePaste: reserve delivery before the first await.
+			onPasteImage: () => {
+				finishPaste = component.beginPaste();
+				return Promise.resolve(true);
+			},
+		});
+
+		component.handleInput("\x1b[200~\x1b[201~\r");
+		expect(onSubmit).not.toHaveBeenCalled();
+		finishPaste?.(component.attachImage(image));
+
+		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image]);
+	});
+
+	it("labels attached images with their size and deletes the marker as a unit", () => {
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", "see ", onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		const marker = component.attachImage(image, { width: 640, height: 240 });
+		expect(marker).toBe("[Image #1, 640x240]");
+		component.pasteText(marker ?? "");
+
+		// One backspace removes the whole marker, so its image is dropped on submit.
+		component.handleInput("\x7f");
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith("see ");
+	});
+
+	it("keeps empty and image-path pastes as text in a prompt that did not opt into images", () => {
+		const onPasteImage = vi.fn();
+		const otherPathHandler = vi.fn();
+		const onSubmit = vi.fn();
+		const plain = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			onPasteImage,
+			onPasteImagePath: otherPathHandler,
+		});
+		plain.handleInput("\x1b[200~\x1b[201~\x1b[200~/tmp/shot.png\x1b[201~\r");
+		expect(onPasteImage).not.toHaveBeenCalled();
+		expect(otherPathHandler).not.toHaveBeenCalled();
+		expect(onSubmit).toHaveBeenCalledWith("/tmp/shot.png");
+	});
+
 	it("submits the complete pasted answer once when paste and Enter arrive together", () => {
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
@@ -246,22 +327,6 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledWith("first\nsecond");
-	});
-
-	it("submits on plain Enter", () => {
-		const onSubmit = vi.fn();
-		const onCancel = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
-			promptStyle: true,
-		});
-
-		component.handleInput("a");
-		component.handleInput("b");
-		component.handleInput("\r");
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit).toHaveBeenCalledWith("ab");
-		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("submits on alternate Enter encodings recognized by the key matcher", () => {

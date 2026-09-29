@@ -177,6 +177,13 @@ Must define at least one of:
 It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 `v2Endpoint`, and `streamingEndpoint`.
 
+`openai-responses` models on Amazon Bedrock's OpenAI routes (`/openai/…` on
+`bedrock-runtime.<region>.amazonaws.com` or `bedrock-mantle.<region>.api.aws`,
+Mantle's `/v1` base, the runtime FIPS host, and PrivateLink hosts of both endpoints)
+use native OpenAI compaction without an opt-in, for any provider id. Set
+`enabled: false` to turn it off, or `v2StreamingEnabled: false` to keep only
+the V1 `/responses/compact` request. See [compaction](./compaction.md).
+
 ### Model value checks
 
 - `id` required
@@ -310,6 +317,8 @@ If `llama.cpp` is not explicitly configured, registry adds an implicit discovera
 - auth mode: keyless (`auth: none` behavior)
 
 Runtime discovery calls llama.cpp model endpoints and synthesizes model entries with local defaults.
+
+The provider `api` is the default for discovered models; catalog rules can override it per model class. Qwen-class models on any `discovery.type: llama.cpp` provider (implicit or explicit) are discovered as `openai-completions`, because the Responses API cannot carry the chat template's thinking controls (`enable_thinking` / `chat_template_kwargs`). The override lives in `packages/catalog/src/compat/rules/providers/llama.cpp.kdl` (`discovery-api`); `omp models find <id> --json` shows the resolved `api`.
 
 ### Implicit LM Studio discovery
 
@@ -684,7 +693,7 @@ For `anthropic-messages` models the runtime uses a separate `AnthropicCompat` sh
 top-level provider field; inside `compat` it honors every shared key that also names an
 `AnthropicCompat` field: `supportsContextManagement`, `supportsEagerToolInputStreaming`,
 `supportsForcedToolChoice`, `allowAnthropicHeaderOverrides`, `requiresToolResultId`,
-`replayUnsignedThinking`, `stripImageInput`, and `streamIdleTimeoutMs`. Other Anthropic-side knobs
+`replayUnsignedThinking`, `bedrockMessagesApi`, `stripImageInput`, and `streamIdleTimeoutMs`. Other Anthropic-side knobs
 are supplied by built-in catalog metadata and are not configurable here — `applyCompatOverrides`
 drops override keys the resolved shape does not declare.
 
@@ -720,6 +729,80 @@ Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs w
 region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
 one. A gateway that accepts a bearer token instead of SigV4 needs no region at all: set the
 provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped.
+
+### Claude on Bedrock's Anthropic Messages API (`/anthropic`)
+
+Amazon Bedrock also serves Claude through the Anthropic Messages API, under `/anthropic` on both of
+its endpoints. AWS recommends `bedrock-runtime` for new applications
+([Inference using Anthropic Messages API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.html)).
+Claude Opus 4.7 and later are served here; Opus 4.6 and earlier stay on Converse
+([Claude in Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock)).
+
+| Route | Base URL | Provider | Model id |
+| --- | --- | --- | --- |
+| bedrock-runtime | `https://bedrock-runtime.<region>.amazonaws.com/anthropic` | `amazon-bedrock` | inference profile, e.g. `us.anthropic.claude-opus-5-5` |
+| bedrock-mantle | `https://bedrock-mantle.<region>.api.aws/anthropic` | `bedrock-mantle` | `anthropic.claude-opus-5-5` |
+
+The FIPS host (`bedrock-runtime-fips.<region>.amazonaws.com`) and AWS PrivateLink endpoint-specific
+hosts (`<vpce-id>[-<az>].bedrock-runtime.<region>.vpce.amazonaws.com`, likewise for
+`bedrock-runtime-fips` and `bedrock-mantle`) are recognized as the same routes. A VPC endpoint with
+private DNS enabled needs no change: it answers on the public hostnames
+([Bedrock VPC endpoints](https://docs.aws.amazon.com/bedrock/latest/userguide/vpc-interface-endpoints.html)).
+
+Define the model under the provider shown in the table, with `api: anthropic-messages`. Those two
+provider ids carry the catalog rule that enables Claude's on-demand compaction
+([Compaction](./compaction.md)). Set `auth: apiKey` so OMP sends plain API-key requests; without
+it, custom `anthropic-messages` models get Claude Code request shaping. The examples authenticate
+with an [Amazon Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html);
+OMP does not sign runtime-route requests with SigV4. Write the region into the runtime URL. Mantle
+URLs may keep `{region}`, which OMP fills in from your AWS region settings.
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: us.anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
+        reasoning: true
+        input: [text, image]
+  bedrock-mantle:
+    baseUrl: https://bedrock-mantle.{region}.api.aws/openai/v1
+    apiKey: AWS_BEARER_TOKEN_BEDROCK
+    auth: apiKey
+    models:
+      - id: anthropic.claude-opus-5-5
+        api: anthropic-messages
+        baseUrl: https://bedrock-mantle.{region}.api.aws/anthropic
+        reasoning: true
+        input: [text, image]
+```
+
+Requests on these routes are shaped by `compat.bedrockMessagesApi`, which OMP detects from a Bedrock
+`/anthropic` `baseUrl` under any provider id. Both routes reject the tool `strict` field, so OMP drops
+it. OMP also fits `metadata.user_id` to
+Bedrock's [request-metadata pattern](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html),
+which the runtime route enforces: a value that fits is kept, otherwise its session id is sent,
+otherwise it is left out. Both run after any `onPayload` hook. Both routes verify thinking
+signatures, so by default OMP does not replay unsigned thinking to them.
+
+The URL check cannot see a Bedrock route behind a proxy or an `ANTHROPIC_BASE_URL` reroute of the
+first-party `anthropic` provider; those keep plain Anthropic requests unless you opt in. Set the flag
+in `compat` (provider-wide or under `modelOverrides`) to opt in, or to `false` to opt a Bedrock URL
+out:
+
+```yaml
+providers:
+  anthropic:
+    compat:
+      bedrockMessagesApi: true # ANTHROPIC_BASE_URL points at bedrock-runtime /anthropic
+```
+
+On-demand compaction still needs a model line the catalog grants it to (`amazon-bedrock`,
+`bedrock-mantle`, or `anthropic` provider ids).
 
 ### Strict tool schemas (`disableStrictTools`)
 

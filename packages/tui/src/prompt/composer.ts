@@ -1,5 +1,8 @@
-import type { EditorTopBorder } from "../components/composer/types";
+import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
+import type { StatusLineComponent } from "../status-line/component";
+import type { StatusLineSession } from "../status-line/host";
+import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
@@ -12,7 +15,9 @@ import {
 	type TUIOptions,
 	type ViewportSize,
 } from "../tui";
-import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
+import { sliceWithWidth, visibleWidth } from "../utils";
+import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
+import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
 import type { WordCompletionMethod } from "./word-completion";
@@ -56,28 +61,22 @@ export interface ComposerWelcomeUpdate {
 	readonly modelName?: string;
 	readonly providerName?: string;
 	readonly recentSessions?: readonly RecentSession[];
-	readonly lspServers?: readonly LspServerInfo[];
+	/** Detected project servers; `null` means LSP is disabled and hides the welcome section. */
+	readonly lspServers?: readonly LspServerInfo[] | null;
 }
 
 /**
- * Placeholder-only status chrome replayed on the next first frame so the
- * status band/border exists before the session-aware status line attaches.
- * Bound to the composer shape it was rendered for; a different shape drops it.
+ * Status-bar inputs persisted by the last session. The first frame renders
+ * them through a startup {@link StatusLineComponent} at the live width until
+ * the session-aware status line attaches.
  */
-export interface ComposerStatusSnapshot {
-	readonly shape: string;
-	/** ANSI wrapper of the editor border at snapshot time (session accent or thinking color). */
+export interface ComposerStatusCache {
+	/** ANSI wrapper of the editor border when persisted (session accent or thinking color). */
 	readonly borderColor?: {
 		readonly prefix: string;
 		readonly suffix: string;
 	};
-	/** Status content embedded in the editor's top chrome (`top-border`, `top-band`, `top-rule-chip`). */
-	readonly topBorder?: {
-		readonly content: string;
-		readonly width: number;
-	};
-	/** Standalone bottom-bar rows (`pi`/`claude` shapes), gap row included. */
-	readonly bottomLines: readonly string[];
+	readonly statusLine: StatusLineStartupData;
 }
 
 /** Optional dependencies and initial state for a standalone composer. */
@@ -87,7 +86,7 @@ export interface ComposerOptions {
 	readonly tuiOptions?: TUIOptions;
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly welcome?: ComposerWelcomeUpdate;
-	readonly status?: ComposerStatusSnapshot;
+	readonly status?: ComposerStatusCache;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
 }
@@ -102,6 +101,13 @@ export interface RuntimeChildrenOptions {
 	 * settled rows it displaces retire to native scrollback.
 	 */
 	readonly transient?: readonly Component[];
+	/**
+	 * Dock order on a TSP terminal (no status strip; the composer carries its
+	 * facts): the native dock stacks HUD pills, the working row and queued messages over
+	 * the composer in its own order, and may add describe-only roots. Defaults
+	 * to the roots below the transcript in render order.
+	 */
+	readonly nativeDock?: readonly Component[];
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -118,29 +124,19 @@ export interface ComposerStartOptions {
 }
 
 /**
- * Mount slot for the session-aware status component below the editor. Shows
- * placeholder rows during startup until the real component mounts.
+ * Mount slot below the editor: the startup status line, then the session-aware
+ * one. ANSI only: a TSP terminal has no status strip, the composer carries the
+ * status line's facts ({@link StatusLineComponent.describeComposerFacts}).
  */
 class StatusHost implements Component {
-	#lines: readonly string[] = [];
 	#component: Component | undefined;
-
-	get mounted(): boolean {
-		return this.#component !== undefined;
-	}
-
-	setLines(lines: readonly string[]): void {
-		this.#lines = lines;
-	}
 
 	setComponent(component: Component): void {
 		this.#component = component;
-		this.#lines = [];
 	}
 
 	render(width: number): readonly string[] {
-		if (this.#component) return this.#component.render(width);
-		return this.#lines.map(line => truncateToWidth(line, width));
+		return this.#component?.render(width) ?? [];
 	}
 }
 
@@ -206,7 +202,7 @@ function rowTargetCandidates(target: Component): ((local: number) => string[]) |
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
  */
-export class Composer implements TerminalFrameProvider {
+export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	readonly ui: TUI;
 	#editor: CustomEditor;
 	readonly #header = new Container();
@@ -220,11 +216,13 @@ export class Composer implements TerminalFrameProvider {
 	#modelName = "";
 	#providerName = "";
 	#recentSessions: RecentSession[] = [];
-	#lspServers: LspServerInfo[] = [];
+	#lspServers: LspServerInfo[] | null = [];
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
-	#statusSnapshot: ComposerStatusSnapshot | undefined;
+	#nativeDock: readonly Component[] | undefined;
+	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
+	#startupStatus: StatusLineComponent | undefined;
 	#runtimeMounted = false;
 	// Composer-owned history id space. Transcript batch ids restart across
 	// container clears/swaps; the composer translates them into one monotonic
@@ -279,6 +277,8 @@ export class Composer implements TerminalFrameProvider {
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#transientChromeFloor: number | undefined;
 	#lastInterruptAt = 0;
+	/** Last described surface; its arrays are reused while their children are unchanged. */
+	#nativeSurface: NativeSurface = { main: [], dock: [] };
 	#started = false;
 	#stopped = false;
 	#transferred = false;
@@ -291,7 +291,6 @@ export class Composer implements TerminalFrameProvider {
 		this.#exit = options.exit ?? (code => postmortem.exitProcess(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
-		this.#statusSnapshot = options.status;
 		this.#applyWelcomeUpdate(options.welcome ?? {});
 
 		this.ui = new TUI(
@@ -318,7 +317,13 @@ export class Composer implements TerminalFrameProvider {
 		} catch {
 			// Extension-defined styles arrive with the session; InteractiveMode reapplies them.
 		}
-		this.#applyStatusSnapshot();
+		if (options.status) {
+			const { borderColor, statusLine } = options.status;
+			if (borderColor) this.editor.borderColor = text => `${borderColor.prefix}${text}${borderColor.suffix}`;
+			this.#startupStatus = createStartupStatusLine(statusLine);
+			this.#statusHost.setComponent(this.#startupStatus);
+			this.#startupStatus.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
+		}
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		// They deliberately mirror the interactive editor's contract so a stalled startup
 		// never behaves differently from a healthy one: Ctrl+C clears the draft and a second
@@ -380,12 +385,15 @@ export class Composer implements TerminalFrameProvider {
 		// editor drifts up above a band of blank rows (#11007).
 		this.#transientChromeFloor = Math.min(this.#transientChromeFloor ?? transientRows, transientRows);
 		const belowFloor = after.length - transientRows + this.#transientChromeFloor;
+		const now = performance.now();
+		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
+		// Retirement measures the same live blocks the viewport lays out below;
+		// one open frame renders each of them once for both.
+		transcript.beginFrame(frame);
 		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
-		const now = performance.now();
-		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
 		// The live tail is laid out against the same baseline retirement is
 		// billed against, so its compaction allocator (one row per block, no
 		// inter-block blanks) engages only when a block genuinely cannot retire.
@@ -421,6 +429,41 @@ export class Composer implements TerminalFrameProvider {
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
 		return { history, viewport: this.#paintHoverBand(mutable, spans) };
+	}
+
+	/**
+	 * Describe the whole surface for a TSP terminal. `main` is the flowing
+	 * document: the header (welcome, extras) and every transcript block as its
+	 * own component child. `dock` is the live chrome below the transcript in
+	 * render order: pending messages, HUDs, the working row, the editor and the
+	 * status line. There is no history/viewport split: retirement, resize
+	 * replay and hover bands are ANSI concerns.
+	 */
+	describeSurface(): NativeSurface {
+		if (!this.#started || this.#stopped) return this.#nativeSurface;
+		const main: NativeChild[] = [...this.#header.children];
+		const dock: NativeChild[] = [];
+		if (!this.#runtimeMounted) {
+			// The bootstrap gap is row spacing; the terminal owns the dock layout.
+			dock.push(this.editor);
+		} else {
+			const roots = this.#runtimeChildren;
+			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+			if (transcriptIndex < 0) {
+				dock.push(...roots);
+			} else {
+				const transcript = roots[transcriptIndex] as TranscriptContainer;
+				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks());
+				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1)));
+			}
+		}
+		const previous = this.#nativeSurface;
+		const nextMain = sameItems(previous.main, main) ? previous.main : main;
+		const nextDock = sameItems(previous.dock, dock) ? previous.dock : dock;
+		if (nextMain !== previous.main || nextDock !== previous.dock) {
+			this.#nativeSurface = { main: nextMain, dock: nextDock };
+		}
+		return this.#nativeSurface;
 	}
 
 	/**
@@ -635,7 +678,9 @@ export class Composer implements TerminalFrameProvider {
 			// retires first so transcript prefixes can follow in order.
 			const renderedHeader = this.#header.render(width);
 			if (renderedHeader.length > 0) {
-				const liveRows = transcript.liveRowCount(width);
+				// Only the comparison below reads the height, so the walk stops at
+				// the budget instead of rendering every replayed block (#12933).
+				const liveRows = transcript.liveRowCount(width, Math.max(0, rows - renderedHeader.length - chromeRows));
 				if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
 				this.#offeredHistory = {
 					id: this.#nextHistoryId++,
@@ -789,7 +834,7 @@ export class Composer implements TerminalFrameProvider {
 			autocomplete: this.#preferences.spellingAutocomplete,
 			autocorrect: this.#preferences.spellingAutocorrect,
 		});
-		this.#applyStatusSnapshot();
+		this.#startupStatus?.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
 		if (this.#preferences.quiet) {
 			this.#welcome?.stopIntro();
 			this.#welcome = undefined;
@@ -834,42 +879,21 @@ export class Composer implements TerminalFrameProvider {
 	}
 
 	/**
-	 * Mount the session-aware status component into the slot below the editor.
-	 * Drops the speculative snapshot; the caller installs the real top-border
+	 * Mount the session-aware status component into the slot below the editor,
+	 * retiring the startup status line; the caller installs the real top-border
 	 * provider through its composer-shape sync.
 	 */
-	setStatusComponent(component: Component): void {
+	setStatusComponent<TSession extends StatusLineSession>(component: StatusLineComponent<TSession>): void {
+		if (this.#startupStatus) component.adoptGitStatus(this.#startupStatus);
+		this.#disposeStartupStatus();
 		this.#statusHost.setComponent(component);
-		this.#statusSnapshot = undefined;
 		this.editor.setTopBorderProvider(undefined);
+		this.editor.composerFacts = component;
 	}
 
-	/** Cached placeholder top-border content fitted to the current editor width. */
-	#speculativeTopBorder(availableWidth: number): EditorTopBorder | undefined {
-		const border = this.#statusSnapshot?.topBorder;
-		if (!border) return undefined;
-		if (border.width <= availableWidth) return { content: border.content, width: border.width };
-		const content = truncateToWidth(border.content, availableWidth);
-		return { content, width: visibleWidth(content) };
-	}
-
-	/** Install the cached chrome for the current shape; a shape mismatch clears it. */
-	#applyStatusSnapshot(): void {
-		if (this.#statusHost.mounted) return;
-		const snapshot = this.#statusSnapshot;
-		if (!snapshot || snapshot.shape !== this.#preferences.composerShape) {
-			this.editor.setTopBorderProvider(undefined);
-			this.#statusHost.setLines([]);
-			return;
-		}
-		if (snapshot.borderColor) {
-			const { prefix, suffix } = snapshot.borderColor;
-			this.editor.borderColor = text => `${prefix}${text}${suffix}`;
-		}
-		this.editor.setTopBorderProvider(
-			snapshot.topBorder ? availableWidth => this.#speculativeTopBorder(availableWidth) : undefined,
-		);
-		this.#statusHost.setLines(snapshot.bottomLines);
+	#disposeStartupStatus(): void {
+		this.#startupStatus?.dispose();
+		this.#startupStatus = undefined;
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */
@@ -877,6 +901,7 @@ export class Composer implements TerminalFrameProvider {
 		if (this.#stopped) return;
 		this.#transientChrome = new Set(options.transient);
 		this.#transientChromeFloor = undefined;
+		this.#nativeDock = options.nativeDock;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
@@ -908,6 +933,7 @@ export class Composer implements TerminalFrameProvider {
 	stop(): void {
 		if (!this.#started || this.#stopped || this.#transferred) return;
 		this.#welcome?.stopIntro();
+		this.#disposeStartupStatus();
 		this.ui.stop();
 		this.#stopped = true;
 	}
@@ -917,7 +943,7 @@ export class Composer implements TerminalFrameProvider {
 		if (update.modelName !== undefined) this.#modelName = update.modelName;
 		if (update.providerName !== undefined) this.#providerName = update.providerName;
 		if (update.recentSessions !== undefined) this.#recentSessions = [...update.recentSessions];
-		if (update.lspServers !== undefined) this.#lspServers = [...update.lspServers];
+		if (update.lspServers !== undefined) this.#lspServers = update.lspServers && [...update.lspServers];
 	}
 
 	#ensureWelcome(): void {

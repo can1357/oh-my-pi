@@ -17,5 +17,9 @@ export async function selectSetupModel(
 	items: SelectItem[],
 	currentValue: string,
 ): Promise<string | null> {
-	return selectStandaloneItem(title, items, { currentValue, maxVisible: 10 });
+	return selectStandaloneItem(title, items, {
+		currentValue,
+		maxVisible: 10,
+		picker: { icon: "model", noun: "models" },
+	});
 }

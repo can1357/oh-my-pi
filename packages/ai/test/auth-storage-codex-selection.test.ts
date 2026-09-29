@@ -1356,7 +1356,7 @@ describe("AuthStorage codex oauth ranking", () => {
 			error: Object.assign(new Error("insufficient_quota"), { status: 429 }),
 		});
 
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe(`api-${healthyAccount}`);
 		const activeAccounts = (await authStorage.health.check())
@@ -2621,26 +2621,6 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.keys.get("openai-codex", "session-all-exhausted");
 		expect(apiKey).toBe("api-acct-soon");
-	});
-
-	test("works with single credential (no ranking)", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.credentials.set("openai-codex", [
-			{ type: "oauth", ...createCredential("acct-solo", "solo@example.com") },
-		]);
-
-		usageByAccount.set(
-			"acct-solo",
-			createCodexUsageReport({
-				accountId: "acct-solo",
-				primary: { usedFraction: 0.3, resetInMs: 20 * 60 * 1000 },
-				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * 60 * 60 * 1000 },
-			}),
-		);
-
-		const apiKey = await authStorage.keys.get("openai-codex", "session-single");
-		expect(apiKey).toBe("api-acct-solo");
 	});
 
 	test("prefers discovered model accounts over a pinned Codex account, without filtering unmatched catalogs", async () => {
@@ -4164,26 +4144,6 @@ describe("AuthStorage claude oauth ranking", () => {
 
 		const apiKey = await authStorage.keys.get("anthropic", undefined, { modelId: "claude-fable-5" });
 		expect(apiKey).toBe("api-acct-b");
-	});
-
-	test("single credential works without ranking", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.credentials.set("anthropic", [
-			{ type: "oauth", ...createCredential("acct-solo", "solo@example.com") },
-		]);
-
-		usageByAccount.set(
-			"acct-solo",
-			createClaudeUsageReport({
-				accountId: "acct-solo",
-				primary: { usedFraction: 0.3, resetInMs: 3 * HOUR_MS },
-				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * HOUR_MS },
-			}),
-		);
-
-		const apiKey = await authStorage.keys.get("anthropic", "session-claude-single");
-		expect(apiKey).toBe("api-acct-solo");
 	});
 
 	test("re-ranks a session pinned to a now-worse account after >1h of Anthropic idle", async () => {

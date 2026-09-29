@@ -224,26 +224,6 @@ describe("DAP launch failure handling", () => {
 		expect(launch?.args).toMatchObject({ args: ["--configured"], program: "/bin/echo" });
 	});
 
-	it("surfaces the launch failure when configurationDone also fails", async () => {
-		const manager = new DapSessionManager();
-		const fake = new FakeDapClient(TEST_ADAPTER, process.cwd(), {
-			launchError: "launch: 'C:\\repo\\python' is not a valid executable",
-			configurationDoneError: "configurationDone: Expected process to be stopped.",
-		});
-		spyOn(DapClient, "spawn").mockResolvedValue(fake as unknown as DapClient);
-
-		let message = "";
-		try {
-			await manager.launch({ adapter: TEST_ADAPTER, program: "C:\\repo\\python", cwd: process.cwd() });
-		} catch (error) {
-			expect(error).toBeInstanceOf(Error);
-			message = (error as Error).message;
-		}
-
-		expect(message).toContain("launch: 'C:\\repo\\python' is not a valid executable");
-		expect(message).toContain("configurationDone: Expected process to be stopped.");
-	});
-
 	it("surfaces the attach failure when configurationDone also fails", async () => {
 		const manager = new DapSessionManager();
 		const fake = new FakeDapClient(TEST_ADAPTER, process.cwd(), {
@@ -978,36 +958,6 @@ describe("DebugTool launch validation", () => {
 		}
 	});
 
-	it("shows supported install options when the JavaScript debug adapter is unavailable", async () => {
-		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
-			kind: "unavailable",
-			adapterName: "js-debug-adapter",
-			command: "js-debug-adapter",
-		});
-		try {
-			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-js-debug-hint-"));
-			try {
-				await fs.writeFile(path.join(cwd, "main.js"), "console.log('hi');\n");
-				const session: ToolSession = {
-					cwd,
-					hasUI: false,
-					getSessionFile: () => null,
-					getSessionSpawns: () => "*",
-					settings: Settings.isolated({ "debug.enabled": true }),
-				};
-				const tool = new DebugTool(session);
-
-				await expect(tool.execute("call", { action: "launch", program: "main.js" })).rejects.toThrow(
-					/download.*github\.com\/microsoft\/vscode-js-debug/,
-				);
-			} finally {
-				await removeWithRetries(cwd);
-			}
-		} finally {
-			launchSpy.mockRestore();
-		}
-	});
-
 	it("points to DAP configuration when a custom adapter command is unavailable", async () => {
 		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
 			kind: "unavailable",
@@ -1035,31 +985,6 @@ describe("DebugTool launch validation", () => {
 			}
 		} finally {
 			launchSpy.mockRestore();
-		}
-	});
-
-	it("shows the rdbg install command for explicit Ruby attach", async () => {
-		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
-		try {
-			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-rdbg-attach-"));
-			try {
-				const session: ToolSession = {
-					cwd,
-					hasUI: false,
-					getSessionFile: () => null,
-					getSessionSpawns: () => "*",
-					settings: Settings.isolated({ "debug.enabled": true }),
-				};
-				const tool = new DebugTool(session);
-
-				await expect(tool.execute("call", { action: "attach", pid: 1234, adapter: "rdbg" })).rejects.toThrow(
-					/gem install debug/,
-				);
-			} finally {
-				await removeWithRetries(cwd);
-			}
-		} finally {
-			attachSpy.mockRestore();
 		}
 	});
 

@@ -3,7 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import {
@@ -538,8 +538,11 @@ class DaemonBroker {
 		let id = "unknown";
 		try {
 			const decoded: unknown = JSON.parse(line);
+			// Correlate before validating: an operation this broker cannot parse (a newer omp
+			// reaching a broker that predates it) must fail the caller's request, not strand it
+			// until the client-side timeout.
+			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
-			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
@@ -1257,6 +1260,11 @@ class DaemonBroker {
 		await record.log?.close();
 		record.log = await DaemonLog.open(record.dir);
 		record.stopRequested = false;
+		// Settled history does not need subscription writes, but a new generation
+		// must persist the owner's current capability for crash recovery.
+		const owner = record.snapshot.owner;
+		record.completionCapable = owner !== undefined && this.#completionSubscriptions.has(owner);
+		record.completionSubscriptionId = owner === undefined ? undefined : this.#completionSubscriptions.get(owner);
 		await this.#launch(record);
 		await record.persistQueue;
 		return { op: "restart", daemon: record.snapshot };
@@ -1304,10 +1312,8 @@ class DaemonBroker {
 		throw new Error(`Unknown daemon ${name}${names.length ? `. Available: ${names.join(", ")}` : ""}`);
 	}
 
-	#persist(record: ManagedDaemon): void {
-		const metaPath = path.join(record.dir, META_FILE);
-		const tempPath = `${metaPath}.${process.pid}.tmp`;
-		const metadata = {
+	#serializeMetadata(record: ManagedDaemon): string {
+		return JSON.stringify({
 			daemon: { ...record.snapshot },
 			spec: record.spec,
 			completionEvents: record.completionCapable,
@@ -1318,10 +1324,16 @@ class DaemonBroker {
 				...completion,
 				daemon: { ...completion.daemon },
 			})),
-		};
+		});
+	}
+
+	#persist(record: ManagedDaemon): void {
+		const metaPath = path.join(record.dir, META_FILE);
+		const tempPath = `${metaPath}.${process.pid}.tmp`;
+		const metadata = this.#serializeMetadata(record);
 		record.persistQueue = record.persistQueue
 			.then(async () => {
-				await Bun.write(tempPath, JSON.stringify(metadata));
+				await Bun.write(tempPath, metadata);
 				await fs.rename(tempPath, metaPath);
 			})
 			.catch(error => {
@@ -1336,6 +1348,9 @@ class DaemonBroker {
 		const subscriptionId = capable ? this.#completionSubscriptions.get(owner) : undefined;
 		const persistence: Promise<void>[] = [];
 		for (const record of this.#records.values()) {
+			// A settled record has no future completion to deliver once its pending
+			// events are acknowledged. Rebinding the owner must not rewrite its history.
+			if (terminalState(record.snapshot.state) && record.pendingCompletions.length === 0) continue;
 			const clearPendingCompletions = !capable && record.pendingCompletions.length > 0;
 			if (
 				record.snapshot.owner !== owner ||
@@ -1458,7 +1473,9 @@ class DaemonBroker {
 						});
 					});
 				}
-				this.#persist(record);
+				// Recovery may only change a subset of records. In particular, a
+				// terminal record already stored in the current format needs no write.
+				if (JSON.stringify(decoded) !== this.#serializeMetadata(record)) this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {
 					name: entry.name,

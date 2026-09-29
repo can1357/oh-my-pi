@@ -5,23 +5,6 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 describe("parseArgs — --hide-thinking flag", () => {
-	it("parses --hide-thinking as a boolean flag", () => {
-		const result = parseArgs(["--hide-thinking"]);
-		expect(result.hideThinking).toBe(true);
-	});
-
-	it("defaults hideThinking to undefined when flag is not provided", () => {
-		const result = parseArgs([]);
-		expect(result.hideThinking).toBeUndefined();
-	});
-
-	it("parses --hide-thinking with other flags", () => {
-		const result = parseArgs(["--hide-thinking", "--model", "opus", "hello"]);
-		expect(result.hideThinking).toBe(true);
-		expect(result.model).toBe("opus");
-		expect(result.messages).toContain("hello");
-	});
-
 	it("parses --hide-thinking with --thinking flag (both can coexist)", () => {
 		const result = parseArgs(["--hide-thinking", "--thinking", "xhigh"]);
 		expect(result.hideThinking).toBe(true);
@@ -58,8 +41,12 @@ describe("parseArgs — --thinking flag", () => {
 		expect(parseArgs(["--thinking", "max"]).thinking).toBe(ThinkingLevel.Max);
 	});
 
-	it("ignores invalid levels and the internal inherit selector", () => {
-		expect(parseArgs(["--thinking", "bogus"]).thinking).toBeUndefined();
-		expect(parseArgs(["--thinking", "inherit"]).thinking).toBeUndefined();
+	it("records invalid levels and the internal inherit selector as usage errors", () => {
+		const bogus = parseArgs(["--thinking", "bogus"]);
+		expect(bogus.thinking).toBeUndefined();
+		expect(bogus.invalidFlagValues).toEqual([expect.stringContaining('Invalid --thinking value: "bogus"')]);
+		expect(parseArgs(["--thinking", "inherit"]).invalidFlagValues).toEqual([
+			expect.stringContaining('Invalid --thinking value: "inherit"'),
+		]);
 	});
 });

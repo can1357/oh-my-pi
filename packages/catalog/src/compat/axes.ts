@@ -190,6 +190,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
@@ -209,6 +210,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
+	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
@@ -321,6 +323,16 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
+	/**
+	 * The host bills cache-hit input tokens at the full input rate (no cache
+	 * discount), so the built row's `cacheRead` tracks its live `input` price.
+	 */
+	"cache-read-at-input-rate": {
+		key: "cacheReadAtInputRate",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -333,6 +345,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
+	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
+	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },

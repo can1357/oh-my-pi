@@ -70,6 +70,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let compactHookEnabled = true;
+	let compactEvents: { fromExtension?: boolean; compactionEntry?: CompactionEntry }[] = [];
 	const tempDirs: TempDir[] = [];
 
 	const NOTICE_SOURCE = "compaction";
@@ -88,7 +89,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// temporary extension for every test.
 		const extensionRunner = {
 			hasHandlers: (type: string) => compactHookEnabled && type === "session_before_compact",
-			emit: async (event: { type: string; preparation?: CompactionPreparation }) => {
+			emit: async (event: {
+				type: string;
+				preparation?: CompactionPreparation;
+				fromExtension?: boolean;
+				compactionEntry?: CompactionEntry;
+			}) => {
+				if (event.type === "session_compact") compactEvents.push(event);
 				if (event.type !== "session_before_compact" || !event.preparation) return undefined;
 				return {
 					compaction: {
@@ -135,6 +142,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	beforeEach(() => {
 		compactHookEnabled = true;
+		compactEvents = [];
 		sessionManager = SessionManager.inMemory();
 
 		// Seed a minimal branch so prepareCompaction() returns a preparation.
@@ -437,6 +445,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(0);
+		// The hook-provided summary is reported to `session_compact` as extension-owned.
+		expect(compactEvents).toHaveLength(1);
+		expect(compactEvents[0]?.fromExtension).toBe(true);
+		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "compacted", fromExtension: true });
 	});
 
 	it("auto-continues after compaction while an active goal still needs work", async () => {
@@ -960,6 +972,11 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+		// Native (handoff) compaction is not extension-owned.
+		expect(compactEvents).toHaveLength(1);
+		expect(compactEvents[0]?.fromExtension).toBe(false);
+		expect(compactEvents[0]?.compactionEntry).toMatchObject({ summary: "handoff document" });
+		expect(compactEvents[0]?.compactionEntry?.fromExtension).toBeFalsy();
 	});
 
 	describe("length stop below the compaction threshold", () => {

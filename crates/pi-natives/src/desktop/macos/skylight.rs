@@ -41,7 +41,6 @@ const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 
 unsafe extern "C" {
-	fn CGEventPostToPid(pid: pid_t, event: core_graphics::sys::CGEventRef);
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
 }
 
@@ -91,6 +90,10 @@ impl PsnLookup {
 #[derive(Clone, Copy)]
 struct RequiredSpi {
 	post_to_pid:         SLEventPostToPidFn,
+	/// `CGEventPostToPid` when it is a separate implementation; `None` where
+	/// it re-exports `SLEventPostToPid` (as on macOS 26), since posting
+	/// through both would then deliver every event twice.
+	public_post_to_pid:  Option<SLEventPostToPidFn>,
 	set_integer:         SLEventSetIntegerValueFieldFn,
 	post_record:         SLPSPostEventRecordToFn,
 	get_front:           SLPSGetFrontProcessFn,
@@ -157,8 +160,11 @@ fn resolve_required() -> Option<RequiredSpi> {
 	if !psn.can_resolve() {
 		return None;
 	}
+	let post_to_pid: SLEventPostToPidFn = symbol(c"SLEventPostToPid")?;
 	Some(RequiredSpi {
-		post_to_pid: symbol(c"SLEventPostToPid")?,
+		post_to_pid,
+		public_post_to_pid: symbol::<SLEventPostToPidFn>(c"CGEventPostToPid")
+			.filter(|public| *public as usize != post_to_pid as usize),
 		set_integer: symbol(c"SLEventSetIntegerValueField")?,
 		post_record: symbol(c"SLPSPostEventRecordTo")?,
 		get_front: symbol(c"_SLPSGetFrontProcess")?,
@@ -245,12 +251,18 @@ pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	Ok(())
 }
 
+/// Posts a background pointer event through `SkyLight`, then through the
+/// public per-pid queue only where `CGEventPostToPid` is a separate function.
+/// Where it is not, a second post would deliver the event twice. The separate
+/// public post is kept as it was; its benefit there is unmeasured.
 pub(super) fn post_dual(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	let spi = required()?;
 	post_routed(pid, event)?;
-	// The public post supplements a successful SkyLight post for plain AppKit;
-	// it is never a fallback. SAFETY: `event` remains retained for the
-	// synchronous public CoreGraphics post.
-	unsafe { CGEventPostToPid(pid, event.as_ptr()) };
+	if let Some(public_post_to_pid) = spi.public_post_to_pid {
+		// SAFETY: `event` remains retained for the synchronous post and the
+		// symbol was resolved with the `SLEventPostToPid` ABI it shares.
+		unsafe { public_post_to_pid(pid, event_ptr(event)) };
+	}
 	Ok(())
 }
 

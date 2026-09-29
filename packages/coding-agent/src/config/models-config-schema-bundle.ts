@@ -83,6 +83,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
 		"replayUnsignedThinking?": "boolean",
+		"bedrockMessagesApi?": "boolean",
 	} as const;
 
 	const OpenAICompatFieldsSchema = type(OpenAICompatFields);

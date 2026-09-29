@@ -40,7 +40,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 | Event | Fires | Can return |
 |---|---|---|
 | `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }` |
-| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
+| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean; additionalContext?: string }` |
 
 ### Session lifecycle
 
@@ -97,13 +97,13 @@ Contract:
 - If **any** handler returns `{ block: true }`, execution stops immediately.
 - `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
-- A non-blocking handler can return `additionalContext` carrying trusted handler-authored instructions for the next provider request. Non-empty values from all handlers are preserved in registration order and emitted after the batch's tool results in assistant call order with developer/system priority where supported. They are delivered only when the call runs and returns a non-error result: a later block, approval denial, interrupt skip, or failed execution discards them. Raw tool output and other untrusted data must stay in the tool result.
+- A non-blocking handler can return `additionalContext` carrying trusted handler-authored instructions for the next provider request. Distinct non-empty values from all handlers are preserved in registration order and emitted after the batch's tool results in assistant call order with developer/system priority where supported; a call whose joined context is identical to an earlier call's in the same batch is emitted once. They are delivered only when the call runs and returns a non-error result: a later block, approval denial, interrupt skip, or failed execution discards them. Raw tool output and other untrusted data must stay in the tool result.
 - A non-blocking handler can return `input` to replace the raw arguments passed to the tool. The last replacement wins, and handlers do not see earlier input revisions.
 - Eval prelude calls such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are not tool calls and do not emit these hooks.
 
 ## Post-tool override contract
 
-Return `{ content, details, isError }` from a `tool_result` handler to patch what the LLM sees:
+Return `{ content, details, isError, additionalContext }` from a `tool_result` handler to patch what the LLM sees and/or attach trusted guidance outside the tool output:
 
 ```ts
 omp.on("tool_result", async (event, ctx) => {
@@ -115,18 +115,22 @@ omp.on("tool_result", async (event, ctx) => {
         text: chunk.text.replace(/(?:sk|pk)-[a-zA-Z0-9]{20,}/g, "[REDACTED_API_KEY]"),
       };
     });
-    return { content: redacted };
+    return {
+      content: redacted,
+      additionalContext: "Use the redacted result for subsequent reasoning.",
+    };
   }
 });
 ```
 
 Contract:
 
-- Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event, and the last returned override wins.
+- Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event; returned `content`/`details`/`isError` merge per field, so a later handler's defined field wins while fields it leaves unset keep earlier overrides (a handler returning only `details`, `isError`, or `additionalContext` never erases an earlier `content` redaction).
 - `content` replaces the full content array for the LLM.
 - `details` replaces the structured details object.
+- `additionalContext` is not part of the tool result. Distinct non-blank values are retained in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context; a call whose joined context is identical to an earlier call's in the same batch is delivered once.
 - `isError` exists on the shared result type, but `HookToolWrapper` does not propagate it into a successful tool result; on a tool failure, the original error is rethrown after handlers complete.
-- On a tool failure, `tool_result` is still emitted with `isError: true`.
+- On a tool failure, `tool_result` is still emitted with `isError: true`, and returned `additionalContext` is delivered. Filter on `event.isError` so success-only and failure-only handlers cannot fire on the opposite outcome.
 
 ## Context modification contract
 

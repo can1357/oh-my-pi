@@ -1466,6 +1466,8 @@ mod tests {
 
 	use super::*;
 
+	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
+	// difftastic) would otherwise replace git's patch with its own output.
 	fn git(dir: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.args(args)
@@ -1512,16 +1514,16 @@ mod tests {
 			.expect("discover")
 			.expect("repository");
 		let actual = repo.diff_text(&DiffOptions::default()).expect("diff");
-		let expected = git(dir.path(), &["diff"]);
+		let expected = git(dir.path(), &["diff", "--no-ext-diff"]);
 		assert_eq!(actual, expected);
 		assert_eq!(
 			repo.changed_files(&DiffOptions::default()).expect("names"),
-			git(dir.path(), &["diff", "--name-only"])
+			git(dir.path(), &["diff", "--no-ext-diff", "--name-only"])
 				.lines()
 				.map(str::to_owned)
 				.collect::<Vec<_>>()
 		);
-		let expected_numstat = git(dir.path(), &["diff", "--numstat"])
+		let expected_numstat = git(dir.path(), &["diff", "--no-ext-diff", "--numstat"])
 			.lines()
 			.map(|line| {
 				let mut fields = line.split('\t');
@@ -1539,7 +1541,7 @@ mod tests {
 			repo
 				.diff_text(&DiffOptions::default())
 				.expect("intent-to-add diff"),
-			git(dir.path(), &["diff"])
+			git(dir.path(), &["diff", "--no-ext-diff"])
 		);
 	}
 
@@ -1570,7 +1572,7 @@ mod tests {
 			repo
 				.diff_text(&DiffOptions::default())
 				.expect("worktree diff"),
-			git(dir.path(), &["diff"])
+			git(dir.path(), &["diff", "--no-ext-diff"])
 		);
 		assert_eq!(
 			repo
@@ -1609,11 +1611,14 @@ mod tests {
 			.expect("discover")
 			.expect("repository");
 		let options = DiffOptions { cached: true, ..DiffOptions::default() };
-		assert_eq!(repo.diff_text(&options).expect("diff"), git(dir.path(), &["diff", "--cached"]));
+		assert_eq!(
+			repo.diff_text(&options).expect("diff"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached"])
+		);
 		let filtered = DiffOptions { files: vec!["added.txt".into()], ..options };
 		assert_eq!(
 			repo.diff_text(&filtered).expect("filtered diff"),
-			git(dir.path(), &["diff", "--cached", "--", "added.txt"])
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "--", "added.txt"])
 		);
 	}
 
@@ -1637,7 +1642,7 @@ mod tests {
 		};
 		assert_eq!(
 			repo.diff_text(&options).expect("diff"),
-			git(dir.path(), &["diff", "-U1", "HEAD^", "HEAD"])
+			git(dir.path(), &["diff", "--no-ext-diff", "-U1", "HEAD^", "HEAD"])
 		);
 		assert_eq!(
 			repo.diff_tree("HEAD^", "HEAD", false).expect("diff-tree"),
@@ -1652,7 +1657,7 @@ mod tests {
 		let base_only = DiffOptions { base: Some("HEAD^".into()), ..DiffOptions::default() };
 		assert_eq!(
 			repo.diff_text(&base_only).expect("base diff"),
-			git(dir.path(), &["diff", "HEAD^"])
+			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^"])
 		);
 	}
 
@@ -1680,12 +1685,12 @@ mod tests {
 			.expect("repository");
 		assert_eq!(
 			repo.diff_text(&DiffOptions::default()).expect("diff"),
-			git(dir.path(), &["diff"])
+			git(dir.path(), &["diff", "--no-ext-diff"])
 		);
 		let binary = DiffOptions { binary: true, ..DiffOptions::default() };
 		assert_eq!(
 			repo.diff_text(&binary).expect("binary diff"),
-			git(dir.path(), &["diff", "--binary"])
+			git(dir.path(), &["diff", "--no-ext-diff", "--binary"])
 		);
 		let stats = repo.numstat(&DiffOptions::default()).expect("numstat");
 		assert!(stats.iter().any(|entry| entry.path == "binary.dat"
@@ -1697,7 +1702,7 @@ mod tests {
 		let cached_binary = DiffOptions { cached: true, binary: true, ..DiffOptions::default() };
 		assert_eq!(
 			repo.diff_text(&cached_binary).expect("cached binary diff"),
-			git(dir.path(), &["diff", "--cached", "--binary"])
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "--binary"])
 		);
 	}
 
@@ -1920,7 +1925,14 @@ mod tests {
 				repo
 					.diff_no_index(Path::new("/dev/null"), Path::new(path), true)
 					.expect("no-index diff"),
-				git_diff(dir.path(), &["diff", "--no-index", "--binary", "/dev/null", path])
+				git_diff(dir.path(), &[
+					"diff",
+					"--no-ext-diff",
+					"--no-index",
+					"--binary",
+					"/dev/null",
+					path
+				])
 			);
 		}
 	}
@@ -1944,7 +1956,7 @@ mod tests {
 			.expect("repository");
 		assert_eq!(
 			repo.diff_text(&DiffOptions::default()).expect("diff"),
-			git(dir.path(), &["diff"])
+			git(dir.path(), &["diff", "--no-ext-diff"])
 		);
 	}
 }

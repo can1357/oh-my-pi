@@ -20,7 +20,12 @@ import { matchesKey } from "../keys";
 import type { SgrMouseEvent } from "../mouse";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseConfiguredThinkingLevel,
+} from "../thinking";
 import { thinkingLevelGlyph } from "../render/render-utils";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
@@ -32,6 +37,12 @@ import {
 } from "../keybinding-matchers";
 import { MenuSelection } from "../components/menu-selection";
 import { clampScrollOffset, scrollOffsetForRow } from "../components/scroll-viewport";
+import type { TspPickerColumn, TspPickerGroup, TspPickerItem, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import { col, md, node, row, span, text } from "../native/describe";
+import { pickerFuzzyHits } from "../native/picker";
+import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { sameItems } from "../native/memo";
+import { plainText } from "../native/spans";
 
 /** Canonical display ordering of built-in model roles. */
 export type ModelRole =
@@ -113,6 +124,11 @@ export interface ResolvedModelRoleValue {
 
 /** Host-provided preferences and model-role resolution for the browser. */
 export interface ModelBrowserSource extends ModelRoleLookup {
+	/**
+	 * Changes whenever any preference this source reads or resolves against changes,
+	 * except the storage-backed `mruOrder` and `modelPerf`. Keys derived-scope caches.
+	 */
+	readonly revision: number;
 	readonly defaultThinkingLevel: string;
 	readonly modelProviderOrder: readonly string[];
 	readonly knownRoleIds: readonly string[];
@@ -175,16 +191,32 @@ export function resolveRoleAssignments(
 		return ThinkingLevel.Inherit;
 	};
 
+	// Roles sharing an `accepts` predicate share one filtered array, so the
+	// resolver's array-keyed indexes are built once per pool, not once per role.
+	const eligible = (
+		pool: ReadonlyArray<Model>,
+		byAccepts: Map<ModelBrowserRoleInfo["accepts"], Model[]>,
+		role: string,
+	): Model[] => {
+		const accepts = settings.getRoleInfo(role).accepts;
+		let models = byAccepts.get(accepts);
+		if (!models) {
+			models = pool.filter(accepts);
+			byAccepts.set(accepts, models);
+		}
+		return models;
+	};
+
 	const roles: RoleAssignments = {};
 	const knownRoles = settings.knownRoleIds;
 	const configuredRoles = new Set<string>();
-	const catalog = [...allModels];
+	const catalogByAccepts = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 
 	for (const role of knownRoles) {
 		const roleValue = settings.getModelRole(role);
 		if (!roleValue) continue;
 		configuredRoles.add(role);
-		const resolved = settings.resolveRoleValue(roleValue, catalog.filter(settings.getRoleInfo(role).accepts));
+		const resolved = settings.resolveRoleValue(roleValue, eligible(allModels, catalogByAccepts, role));
 		if (resolved.model) {
 			roles[role] = {
 				model: resolved.model,
@@ -195,13 +227,10 @@ export function resolveRoleAssignments(
 	}
 
 	if (autoCandidates.length > 0) {
-		const candidates = [...autoCandidates];
+		const candidatesByAccepts = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 		for (const role of knownRoles) {
 			if (configuredRoles.has(role)) continue;
-			const resolved = settings.resolveRoleValue(
-				`pi/${role}`,
-				candidates.filter(settings.getRoleInfo(role).accepts),
-			);
+			const resolved = settings.resolveRoleValue(`pi/${role}`, eligible(autoCandidates, candidatesByAccepts, role));
 			if (!resolved.model) continue;
 			roles[role] = {
 				model: resolved.model,
@@ -332,32 +361,86 @@ export interface SessionModelScope {
 	error: string | undefined;
 }
 
+/** Catalog inputs a {@link SessionModelScope} is derived from. */
+interface SessionModelScopeInputs {
+	models: ReadonlyArray<Model>;
+	allModels: ReadonlyArray<Model>;
+	error: string | undefined;
+}
+
+function readSessionModelScopeInputs(
+	registry: ModelBrowserRegistry,
+	scopedModels: ReadonlyArray<Model>,
+): SessionModelScopeInputs {
+	if (scopedModels.length > 0) return { models: scopedModels, allModels: scopedModels, error: undefined };
+	const loadError = registry.getError();
+	let error = loadError ? String(loadError) : undefined;
+	let models: ReadonlyArray<Model>;
+	try {
+		models = registry.getAvailable();
+	} catch (cause) {
+		error = cause instanceof Error ? cause.message : String(cause);
+		models = [];
+	}
+	return { models, allModels: registry.getAll("all"), error };
+}
+
+function scopeFromInputs(settings: ModelBrowserSource, inputs: SessionModelScopeInputs): SessionModelScope {
+	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.models);
+	const mruOrder = settings.mruOrder;
+	const items = buildBrowserItems(inputs.models);
+	sortModelItems(items, { roles, mruOrder });
+	return { items, roles, mruOrder, error: inputs.error };
+}
+
 /** Build the session picker's current scope without creating an interactive browser. */
 export function buildSessionModelScope(
 	settings: ModelBrowserSource,
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
 ): SessionModelScope {
-	let models: ReadonlyArray<Model>;
-	let error: string | undefined;
-	if (scopedModels.length > 0) {
-		models = scopedModels;
-	} else {
-		const loadError = registry.getError();
-		error = loadError ? String(loadError) : undefined;
-		try {
-			models = registry.getAvailable();
-		} catch (cause) {
-			error = cause instanceof Error ? cause.message : String(cause);
-			models = [];
-		}
+	return scopeFromInputs(settings, readSessionModelScopeInputs(registry, scopedModels));
+}
+
+/**
+ * {@link buildSessionModelScope} for per-keystroke callers: returns the same
+ * scope until the source revision, MRU order, scoped models, or the registry's
+ * available models, catalog, or load error change.
+ */
+export class SessionModelScopeCache {
+	#settings: ModelBrowserSource;
+	#registry: ModelBrowserRegistry;
+	#revision = 0;
+	#inputs: SessionModelScopeInputs | undefined;
+	#scope: SessionModelScope | undefined;
+
+	constructor(settings: ModelBrowserSource, registry: ModelBrowserRegistry) {
+		this.#settings = settings;
+		this.#registry = registry;
 	}
-	const allModels = scopedModels.length > 0 ? models : registry.getAll("all");
-	const roles = resolveRoleAssignments(settings, allModels, models);
-	const mruOrder = settings.mruOrder;
-	const items = buildBrowserItems(models);
-	sortModelItems(items, { roles, mruOrder });
-	return { items, roles, mruOrder, error };
+
+	get(scopedModels: ReadonlyArray<Model>): SessionModelScope {
+		const revision = this.#settings.revision;
+		const inputs = readSessionModelScopeInputs(this.#registry, scopedModels);
+		const cachedInputs = this.#inputs;
+		const cached = this.#scope;
+		if (
+			cached &&
+			cachedInputs &&
+			revision === this.#revision &&
+			inputs.error === cachedInputs.error &&
+			sameItems(inputs.models, cachedInputs.models) &&
+			sameItems(inputs.allModels, cachedInputs.allModels) &&
+			sameItems(this.#settings.mruOrder, cached.mruOrder)
+		) {
+			return cached;
+		}
+		const scope = scopeFromInputs(this.#settings, inputs);
+		this.#revision = revision;
+		this.#inputs = inputs;
+		this.#scope = scope;
+		return scope;
+	}
 }
 
 interface RoleProviderStats {
@@ -524,26 +607,66 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
+/** {@link formatRoleChip} as styled spans for a described node. */
+function roleChipSpans(role: string, assignment: RoleAssignment, settings: ModelBrowserSource): TspSpan[] {
+	const info = settings.getRoleInfo(role);
+	const label = (info.tag ?? info.name ?? role).toLowerCase();
+	const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
+	const spans = assignment.autoSelected
+		? [span(`${theme.status.shadowed} ${label}`, "dim")]
+		: [span(`${theme.status.enabled} ${label}`, info.color ?? "muted")];
+	if (glyph) spans.push(span(` ${glyph}`, "dim"));
+	return spans;
+}
+
 /** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
 function isFreeModel(model: Model): boolean {
 	const cost = model.cost;
 	return !cost || (cost.input === 0 && cost.output === 0);
 }
 
+/** One per-million price leg: `3`, `0.25`, `12.5`; `?` when unknown. */
+function formatCostLeg(n: number): string {
+	if (!Number.isFinite(n) || n < 0) return "?";
+	if (n > 0 && n < 0.01) {
+		return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
+	}
+	const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
+	return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
+}
+
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
 	if (isFreeModel(model)) return "free";
-	const cost = model.cost;
+	return `$${formatCostLeg(model.cost.input)}/${formatCostLeg(model.cost.output)}`;
+}
 
-	const fmt = (n: number): string => {
-		if (!Number.isFinite(n) || n < 0) return "?";
-		if (n > 0 && n < 0.01) {
-			return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
-		}
-		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
-		return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
-	};
-	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+/** Fact columns of a model picker (Stencil `NATIVE_REDESIGN.md` §4.7); the lowest priority hides first. */
+export const MODEL_PICKER_COLUMNS: readonly TspPickerColumn[] = [
+	{ id: "int", head: "Int", format: "num", priority: 1 },
+	{ id: "speed", head: "t/s", format: "num", priority: 2 },
+	{ id: "ctx", head: "Ctx", format: "num", priority: 4 },
+	{ id: "price", head: "$/M", format: "price", priority: 3 },
+];
+
+/** `$3·15` price fact of a picker row (`free` at zero cost). */
+function pickerPrice(model: Model): string {
+	if (isFreeModel(model)) return "free";
+	return `$${formatCostLeg(model.cost.input)}·${formatCostLeg(model.cost.output)}`;
+}
+
+/** `$2 in · $10 out · $0.2 cache` for a model preview. */
+function previewPrice(model: Model): string {
+	const cost = model.cost;
+	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
+	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
+	return parts.join(" · ");
+}
+
+/** The omp theme token of a thinking level's dot (`thinkingHigh`); none for inherit and auto. */
+export function thinkingDotToken(level: ConfiguredThinkingLevel): string | undefined {
+	if (level === ThinkingLevel.Inherit || level === AUTO_THINKING) return undefined;
+	return `thinking${level.charAt(0).toUpperCase()}${level.slice(1)}`;
 }
 
 /**
@@ -603,6 +726,33 @@ function padLeftVisible(text: string, width: number): string {
 	return missing > 0 ? " ".repeat(missing) + text : text;
 }
 
+/** A model browser's visible rows as picker `order` plus the query's hit ranges. */
+export interface ModelPickerOrder {
+	readonly order: readonly (string | TspPickerGroup)[];
+	readonly hits: Readonly<Record<string, readonly (readonly [number, number])[]>> | undefined;
+	/** Selectable rows in `order`. */
+	readonly count: number;
+}
+
+/**
+ * A model picker's catalogue props: `items` as last sent whole, plus the
+ * rows changed or added since (`itemsAdd`) and the ids gone (`itemsDel`), so
+ * a discovery refresh that touches a few rows does not resend a thousand.
+ */
+export interface ModelPickerCatalogue {
+	readonly items: readonly TspPickerItem[];
+	readonly itemsAdd?: readonly TspPickerItem[];
+	readonly itemsDel?: readonly string[];
+}
+
+/** How {@link ModelBrowser.pickerOrder} heads its rows. */
+export interface ModelPickerGrouping {
+	/** One group per provider after the Recent block (the unfiltered All models view). */
+	readonly providers: boolean;
+	/** Label of the rows after the Recent block when they are not split by provider; null drops every head. */
+	readonly rest: string | null;
+}
+
 /** Behavior switches for {@link ModelBrowser}. */
 export interface ModelBrowserOptions {
 	/** Render the dim `provider/` prefix before model ids. Default true. */
@@ -659,6 +809,54 @@ export class ModelBrowser implements Component {
 	#focused = true;
 	/** `provider/id` of the session's active model; marked in rows and detail. */
 	#currentSelector: string | undefined;
+	/**
+	 * Bumped whenever a per-row or detail input (provider prefix, current mark,
+	 * over-context flagging, perf) changes; described nodes rebuild on a new epoch.
+	 */
+	#nativeEpoch = 0;
+	/** Described item nodes by selector, valid for {@link #nativeEpoch} and the same item object. */
+	#itemNodes = new Map<string, { item: ModelBrowserItem; node: NativeNode }>();
+	#nativeSearch: NativeNode | undefined;
+	#nativeList: { items: readonly ModelBrowserItem[]; epoch: number; children: NativeChild[] } | undefined;
+	#nativeListNode:
+		| { children: NativeChild[]; selected: string | null; filter: string; empty: string; node: NativeNode }
+		| undefined;
+	#nativeDetail:
+		| { item: ModelBrowserItem | undefined; epoch: number; roles: RoleAssignments; node: NativeNode }
+		| undefined;
+	#nativeRoot: { list: NativeNode; detail: NativeNode; node: NativeNode } | undefined;
+	/** Bumped when a picker row input other than roles changes (perf, over-context flagging). */
+	#pickerEpoch = 0;
+	/** Picker rows by selector, reused while the model and the roles it holds are unchanged. */
+	#pickerItemCache = new Map<
+		string,
+		{ model: Model; label: string; held: string; epoch: number; value: TspPickerItem }
+	>();
+	#pickerItems:
+		| {
+				catalogue: readonly ModelBrowserItem[];
+				epoch: number;
+				roles: RoleAssignments;
+				value: ModelPickerCatalogue;
+		  }
+		| undefined;
+	/** The rows last sent as a whole `items`; later catalogues patch it. */
+	#pickerBase: readonly TspPickerItem[] | undefined;
+	/**
+	 * Ids patched since {@link #pickerBase} went out. The terminal keeps
+	 * applied patches, so a row that returns to its base value is still sent.
+	 */
+	#pickerPatched = new Set<string>();
+	#pickerOrder: { visible: readonly ModelBrowserItem[]; key: string; value: ModelPickerOrder } | undefined;
+	#pickerPreview:
+		| {
+				item: ModelBrowserItem | undefined;
+				epoch: number;
+				roles: RoleAssignments;
+				key: string;
+				children: readonly NativeChild[];
+		  }
+		| undefined;
 
 	/** Enter or click-on-selected. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -679,6 +877,7 @@ export class ModelBrowser implements Component {
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
 	setCurrentSelector(selector: string | undefined): void {
+		if (selector !== this.#currentSelector) this.#bumpNativeEpoch();
 		this.#currentSelector = selector;
 	}
 
@@ -708,6 +907,7 @@ export class ModelBrowser implements Component {
 
 	/** Measured TPS/TTFT averages keyed by `provider/id` selector (see AgentStorage.getModelPerf). */
 	setPerfStats(perf: ReadonlyMap<string, ModelBrowserPerf>): void {
+		if (perf !== this.#perf) this.#bumpPickerEpoch();
 		this.#perf = perf;
 	}
 
@@ -718,6 +918,7 @@ export class ModelBrowser implements Component {
 	}
 
 	setShowProvider(show: boolean): void {
+		if (show !== this.#showProvider) this.#bumpNativeEpoch();
 		this.#showProvider = show;
 	}
 	/** Keep the source order after fuzzy filtering instead of applying model-specific ranking. */
@@ -726,6 +927,7 @@ export class ModelBrowser implements Component {
 	}
 	/** Allow hosts to toggle context-window flagging between browser modes. */
 	setMarkOverContext(mark: boolean): void {
+		if (mark !== this.#markOverContext) this.#bumpPickerEpoch();
 		this.#markOverContext = mark;
 	}
 	/** Focused: accent cursor + selected-row background band. Unfocused: dim cursor, no band. */
@@ -740,6 +942,11 @@ export class ModelBrowser implements Component {
 
 	get query(): string {
 		return this.#searchInput.getValue();
+	}
+
+	/** Caret into {@link query} (UTF-16 offset), for native picker `cursor`. */
+	get cursor(): number {
+		return this.#searchInput.getCursor();
 	}
 
 	setQuery(query: string): void {
@@ -1214,4 +1421,537 @@ export class ModelBrowser implements Component {
 	}
 
 	invalidate(): void {}
+
+	#bumpNativeEpoch(): void {
+		this.#nativeEpoch++;
+		this.#itemNodes.clear();
+	}
+
+	/** Perf and over-context flags feed both the generic rows and the picker rows. */
+	#bumpPickerEpoch(): void {
+		this.#bumpNativeEpoch();
+		// Rows are rebuilt on the next read; equal ones keep their identity (see #pickerItem).
+		this.#pickerEpoch++;
+	}
+
+	/**
+	 * `col[search row, list, detail]`: the query field (the embedded `Input`),
+	 * every visible model as a keyed `item` (the terminal virtualizes and
+	 * scrolls), and the selection's facts and role chips.
+	 */
+	describe(): NativeNode {
+		this.#nativeSearch ??= row([text([span(theme.symbol("icon.search"), "accent")]), this.#searchInput], {
+			gap: "sm",
+			align: "center",
+		});
+		const list = this.#describeList();
+		const detail = this.#describeDetail();
+		const root = this.#nativeRoot;
+		if (root?.list === list && root.detail === detail) return root.node;
+		const node = col([this.#nativeSearch, list, detail], { gap: "sm" });
+		this.#nativeRoot = { list, detail, node };
+		return node;
+	}
+
+	/** List `select`/`activate` on a model = highlight it, then Enter. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if ((event.type !== "select" && event.type !== "activate") || event.key !== "list") return;
+		const index = this.#menu.visibleItems.findIndex(item => item.selector === event.item);
+		const item = this.#menu.visibleItems[index];
+		if (!item || this.#isDisabled(item)) return;
+		if (this.#menu.setSelectedIndex(index)) {
+			this.#ensureSelectedVisible();
+			this.onSelectionChange?.(this.getSelected());
+		}
+		this.onActivate?.(item);
+	}
+
+	#describeList(): NativeNode {
+		const items = this.#menu.visibleItems;
+		let cached = this.#nativeList;
+		if (cached?.items !== items || cached.epoch !== this.#nativeEpoch) {
+			cached = { items, epoch: this.#nativeEpoch, children: items.map(item => this.#describeItem(item)) };
+			this.#nativeList = cached;
+		}
+		const selected = this.getSelected()?.selector ?? null;
+		const filter = this.query.trim();
+		const empty =
+			items.length > 0
+				? ""
+				: plainText(this.#emptyText?.() ?? "").trim() ||
+					(filter ? "No matching models" : "No models available in this scope");
+		const prev = this.#nativeListNode;
+		if (
+			prev?.children === cached.children &&
+			prev.selected === selected &&
+			prev.filter === filter &&
+			prev.empty === empty
+		) {
+			return prev.node;
+		}
+		const listNode = node(
+			"list",
+			{
+				role: "omp.model-browser.list",
+				selected,
+				filter: filter || undefined,
+				empty: empty ? [span(empty, "muted")] : undefined,
+				virtual: true,
+				grow: 1,
+			},
+			cached.children,
+			"list",
+		);
+		this.#nativeListNode = { children: cached.children, selected, filter, empty, node: listNode };
+		return listNode;
+	}
+
+	#describeItem(item: ModelBrowserItem): NativeNode {
+		if (item.id === "separator") return node("rule", undefined, undefined, "separator");
+		const cached = this.#itemNodes.get(item.selector);
+		if (cached?.item === item) return cached.node;
+
+		const label: TspSpan[] = [];
+		if (this.#showProvider) label.push(span(`${item.provider}/`, "dim"));
+		label.push(span(item.id, item.labelColor));
+		if (item.selector === this.#currentSelector) label.push(span(` ${theme.status.enabled}`, "success"));
+		const metrics = [
+			formatIntelligence(item.model),
+			this.#perfCell(item, "full"),
+			formatContext(item.model),
+			formatCostPair(item.model),
+		].filter(Boolean);
+		const overContext = this.isOverContext(item);
+		const itemNode = node(
+			"item",
+			{
+				label,
+				value: [span(metrics.join("  "), "dim")],
+				detail: overContext
+					? [
+							span(
+								`${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`,
+								"warning",
+							),
+						]
+					: undefined,
+				tone: overContext ? "muted" : undefined,
+			},
+			undefined,
+			item.selector,
+		);
+		this.#itemNodes.set(item.selector, { item, node: itemNode });
+		return itemNode;
+	}
+
+	/** Facts, upstream badges, and the over-context warning or role chips for the selection. */
+	#describeDetail(): NativeNode {
+		const selected = this.getSelected();
+		const prev = this.#nativeDetail;
+		if (prev && prev.item === selected && prev.epoch === this.#nativeEpoch && prev.roles === this.#roles) {
+			return prev.node;
+		}
+
+		const children: NativeChild[] = [];
+		if (selected) {
+			const model = selected.model;
+			const head: NativeChild[] = [text([span(model.name, "strong")])];
+			if (model.isNew) head.push(node("badge", { text: "new", tone: "accent" }));
+			if (model.isBeta) head.push(node("badge", { text: "beta", tone: "warning" }));
+			if (model.isRecommended) head.push(node("badge", { text: "recommended", tone: "success" }));
+			children.push(row(head, { gap: "sm", align: "center", wrap: true }));
+
+			const facts: string[] = [];
+			if (model.contextWindow) facts.push(`${formatNumber(model.contextWindow).toLowerCase()} ctx`);
+			if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
+			facts.push(`${formatCostPair(model)} per M`);
+			if (model.reasoning) facts.push("reasoning");
+			if (model.input.includes("image")) facts.push("vision");
+			const intelligence = formatIntelligence(model);
+			if (intelligence) facts.push(intelligence);
+			const perf = this.#perf.get(selected.selector);
+			if (perf) {
+				facts.push(`~${formatTps(perf.tps)}`);
+				if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+			} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
+				facts.push(`~${formatTps(model.tps)}`);
+			}
+			children.push(text([span(facts.join(" · "), "muted")], { wrap: "word" }));
+			const description = model.description ? formatDescription(model.description) : "";
+			if (description) children.push(text([span(description, "dim")], { wrap: "word", lines: 2 }));
+
+			if (this.isOverContext(selected)) {
+				const warning = `${theme.status.disabled} context ${formatNumber(this.#currentContextTokens).toLowerCase()} exceeds ${formatNumber(model.contextWindow ?? 0).toLowerCase()} limit · compacts with current model, then switches`;
+				children.push(text([span(warning, "warning")], { wrap: "word" }));
+			} else {
+				const chips: TspSpan[] = [];
+				if (selected.selector === this.#currentSelector) {
+					chips.push(span(`${theme.status.enabled} current`, "success"));
+				}
+				const seen = new Set<string>();
+				const pushRole = (role: string) => {
+					if (seen.has(role)) return;
+					seen.add(role);
+					const assignment = this.#roles[role];
+					if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+					if (this.#settings.getRoleInfo(role).hidden) return;
+					if (chips.length > 0) chips.push(span(" · ", "dim"));
+					chips.push(...roleChipSpans(role, assignment, this.#settings));
+				};
+				for (const role of MODEL_ROLE_IDS) pushRole(role);
+				for (const role in this.#roles) pushRole(role);
+				if (chips.length > 0) children.push(text(chips, { wrap: "word" }));
+			}
+		}
+		const detailNode = node("col", { role: "omp.model-browser.detail", gap: "none" }, children, "detail");
+		this.#nativeDetail = { item: selected, epoch: this.#nativeEpoch, roles: this.#roles, node: detailNode };
+		return detailNode;
+	}
+
+	// ─── Picker (data-first `picker` kind) ────────────────────────────────
+
+	/** Base rows of the current scope, before the query (the head's "of N"). */
+	get baseCount(): number {
+		let count = 0;
+		for (const item of this.#menu.items) if (!this.#isDisabled(item)) count++;
+		return count;
+	}
+
+	/** The selected row's selector, null when nothing selectable is selected. */
+	get pickerSelected(): string | null {
+		const selected = this.getSelected();
+		return selected && !this.#isDisabled(selected) ? selected.selector : null;
+	}
+
+	/**
+	 * Picker rows for `catalogue`: the same object while the catalogue, roles
+	 * and row inputs are unchanged, so typing and scope hops never resend it.
+	 * A rebuilt catalogue that differs in a few rows (a provider refresh, a
+	 * role moving) keeps the last whole `items` and patches it.
+	 */
+	pickerItems(catalogue: readonly ModelBrowserItem[]): ModelPickerCatalogue {
+		const memo = this.#pickerItems;
+		if (memo?.catalogue === catalogue && memo.epoch === this.#pickerEpoch && memo.roles === this.#roles) {
+			return memo.value;
+		}
+		const rows = catalogue.map(item => this.#pickerItem(item));
+		const value = this.#patchCatalogue(rows);
+		this.#pickerItems = { catalogue, epoch: this.#pickerEpoch, roles: this.#roles, value };
+		return value;
+	}
+
+	#patchCatalogue(rows: readonly TspPickerItem[]): ModelPickerCatalogue {
+		const base = this.#pickerBase;
+		if (base) {
+			const baseById = new Map(base.map(row => [row.id, row]));
+			const current = new Set(rows.map(row => row.id));
+			const add = rows.filter(row => baseById.get(row.id) !== row || this.#pickerPatched.has(row.id));
+			const del: string[] = [];
+			for (const row of base) if (!current.has(row.id)) del.push(row.id);
+			for (const id of this.#pickerPatched) if (!baseById.has(id) && !current.has(id)) del.push(id);
+			if (add.length + del.length === 0) return { items: base };
+			// Past a quarter of the catalogue a whole resend is cheaper than the patch.
+			if ((add.length + del.length) * 4 <= base.length) {
+				for (const row of add) this.#pickerPatched.add(row.id);
+				for (const id of del) this.#pickerPatched.add(id);
+				return {
+					items: base,
+					...(add.length > 0 ? { itemsAdd: add } : {}),
+					...(del.length > 0 ? { itemsDel: del } : {}),
+				};
+			}
+		}
+		this.#pickerBase = rows;
+		this.#pickerPatched.clear();
+		return { items: rows };
+	}
+
+	#pickerItem(item: ModelBrowserItem): TspPickerItem {
+		const model = item.model;
+		const heldRoles = this.#heldRoles(model);
+		const held = heldRoles
+			.map(({ role, assignment }) => `${role}:${assignment.autoSelected}:${assignment.thinkingLevel}`)
+			.join(",");
+		const cached = this.#pickerItemCache.get(item.selector);
+		if (
+			cached?.model === model &&
+			cached.label === item.id &&
+			cached.held === held &&
+			cached.epoch === this.#pickerEpoch
+		) {
+			return cached.value;
+		}
+		const facts: Record<string, TspText | number> = {};
+		const int = model.int != null && Number.isFinite(model.int) ? model.int : undefined;
+		if (int !== undefined) facts.int = String(Math.round(int));
+		const speed = this.#perfCell(item, "tps").replace(/t\/s$/, "");
+		if (speed) facts.speed = speed;
+		if (model.contextWindow) facts.ctx = model.contextWindow;
+		facts.price = pickerPrice(model);
+		const badges: { text: string; tone?: "accent" | "warning" | "success"; title?: string }[] = [];
+		if (this.isOverContext(item)) {
+			badges.push({
+				text: `ctx>${formatNumber(model.contextWindow ?? 0).toLowerCase()}`,
+				tone: "warning",
+				title: `Context ${formatNumber(this.#currentContextTokens).toLowerCase()} exceeds this model's limit; picking it compacts first`,
+			});
+		}
+		if (model.isNew) badges.push({ text: "new", tone: "accent" });
+		if (model.isBeta) badges.push({ text: "beta", tone: "warning" });
+		if (isFreeModel(model)) badges.push({ text: "free", tone: "success" });
+		const chips = heldRoles.map(({ role, assignment }) => {
+			const info = this.#settings.getRoleInfo(role);
+			const dot = thinkingDotToken(assignment.thinkingLevel);
+			return {
+				text: (info.tag ?? info.name ?? role).toLowerCase(),
+				on: !assignment.autoSelected,
+				...(assignment.autoSelected ? { auto: true } : {}),
+				...(dot ? { dot } : {}),
+			};
+		});
+		// Quick-role rows (`@role`) name the role and trail the model they apply.
+		const quickRole = item.provider === "" && item.id.startsWith("@");
+		const value: TspPickerItem = {
+			id: item.selector,
+			label: quickRole ? item.id : item.selector,
+			mono: true,
+			...(quickRole ? { detail: `${item.model.provider}/${item.model.id}` } : {}),
+			facts,
+			...(badges.length > 0 ? { badges: badges.slice(0, 3) } : {}),
+			...(chips.length > 0 ? { chips } : {}),
+			...(int !== undefined ? { title: `Intelligence ${Math.round(int)}` } : {}),
+		};
+		// Discovery re-mints Model objects for unchanged models; an equal row keeps its identity.
+		const kept = cached && Bun.deepEquals(cached.value, value) ? cached.value : value;
+		this.#pickerItemCache.set(item.selector, { model, label: item.id, held, epoch: this.#pickerEpoch, value: kept });
+		return kept;
+	}
+
+	/** Visible roles `model` holds, built-in order first (the detail line's chips). */
+	#heldRoles(model: Model): { role: string; assignment: RoleAssignment }[] {
+		const held: { role: string; assignment: RoleAssignment }[] = [];
+		const seen = new Set<string>();
+		const push = (role: string) => {
+			if (seen.has(role)) return;
+			seen.add(role);
+			const assignment = this.#roles[role];
+			if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+			if (this.#settings.getRoleInfo(role).hidden) return;
+			held.push({ role, assignment });
+		};
+		for (const role of MODEL_ROLE_IDS) push(role);
+		for (const role in this.#roles) push(role);
+		return held;
+	}
+
+	/**
+	 * The visible rows as picker `order`: the Recent block (recent and
+	 * role-assigned models, the ANSI separator's upper side) under "Recent",
+	 * then the rest per provider or under `grouping.rest`. Memoized per
+	 * result list and query, so selection moves reuse it.
+	 */
+	pickerOrder(grouping: ModelPickerGrouping): ModelPickerOrder {
+		const visible = this.#menu.visibleItems;
+		const query = this.query.trim();
+		const key = `${grouping.providers}\0${grouping.rest}\0${query}`;
+		const memo = this.#pickerOrder;
+		if (memo?.visible === visible && memo.key === key) return memo.value;
+
+		const split = visible.findIndex(item => this.#isDisabled(item));
+		const order: (string | TspPickerGroup)[] = [];
+		let count = 0;
+		const pushRows = (rows: readonly ModelBrowserItem[]) => {
+			for (const item of rows) {
+				if (this.#isDisabled(item)) continue;
+				order.push(item.selector);
+				count++;
+			}
+		};
+		const recent = split > 0 ? visible.slice(0, split) : [];
+		const rest = split > 0 ? visible.slice(split + 1) : visible;
+		if (grouping.rest === null) {
+			pushRows(visible);
+		} else {
+			if (recent.length > 0) {
+				order.push({ group: "recent", label: "Recent", count: recent.length });
+				pushRows(recent);
+			}
+			if (grouping.providers) this.#pushProviderGroups(order, rest, pushRows);
+			else {
+				if (recent.length > 0 && rest.length > 0) {
+					order.push({ group: "rest", label: grouping.rest, count: rest.length });
+				}
+				pushRows(rest);
+			}
+		}
+
+		let hits: Record<string, [number, number][]> | undefined;
+		if (query) {
+			hits = {};
+			for (const item of visible) {
+				if (this.#isDisabled(item)) continue;
+				const label = item.provider === "" ? item.id : item.selector;
+				const ranges = pickerFuzzyHits(label, query);
+				if (ranges) hits[item.selector] = ranges;
+			}
+		}
+		const value: ModelPickerOrder = { order, hits, count };
+		this.#pickerOrder = { visible, key, value };
+		return value;
+	}
+
+	/** One group head per run of same-provider rows (the unfiltered list is provider-sorted past the Recent block). */
+	#pushProviderGroups(
+		order: (string | TspPickerGroup)[],
+		rest: readonly ModelBrowserItem[],
+		pushRows: (rows: readonly ModelBrowserItem[]) => void,
+	): void {
+		let start = 0;
+		while (start < rest.length) {
+			const provider = rest[start]!.provider;
+			let end = start + 1;
+			while (end < rest.length && rest[end]!.provider === provider) end++;
+			order.push({ group: `provider:${provider}:${start}`, label: provider, count: end - start });
+			pushRows(rest.slice(start, end));
+			start = end;
+		}
+	}
+
+	/**
+	 * Preview children for the selection. `full` (the model hub's side pane):
+	 * title, copyable id, badges, a fact grid, every role the model can fill
+	 * (held ones on) and the description. `compact` (the quick picker's strip
+	 * below the list): one inline fact line and the held-role chips.
+	 */
+	pickerPreview(mode: "full" | "compact", current?: string): readonly NativeChild[] {
+		const selected = this.getSelected();
+		const item = selected && !this.#isDisabled(selected) ? selected : undefined;
+		const key = `${mode}\0${current ?? ""}`;
+		const memo = this.#pickerPreview;
+		if (
+			memo !== undefined &&
+			memo.item === item &&
+			memo.epoch === this.#pickerEpoch &&
+			memo.roles === this.#roles &&
+			memo.key === key
+		) {
+			return memo.children;
+		}
+		const children = item ? this.modelPreview(item, mode, current) : [];
+		this.#pickerPreview = { item, epoch: this.#pickerEpoch, roles: this.#roles, key, children };
+		return children;
+	}
+
+	/** Preview children for any model row (the hub's Roles view previews assigned models with it); unmemoized. */
+	modelPreview(item: ModelBrowserItem, mode: "full" | "compact", current: string | undefined): NativeChild[] {
+		const model = item.model;
+		const selector = `${model.provider}/${model.id}`;
+		const perf = this.#perf.get(selector);
+		const ctx = model.contextWindow ?? 0;
+		const out = model.maxTokens ?? 0;
+		const overContext = this.isOverContext(item);
+		const warning = overContext
+			? text(
+					[
+						span(
+							`Context ${formatNumber(this.#currentContextTokens).toLowerCase()} exceeds the ${formatNumber(ctx).toLowerCase()} limit · compacts with the current model, then switches`,
+							"warning",
+						),
+					],
+					{ wrap: "word" },
+				)
+			: undefined;
+		const held = this.#heldRoles(model);
+		const roleBadge = (role: string, assignment: RoleAssignment | undefined): NativeNode => {
+			const info = this.#settings.getRoleInfo(role);
+			const level =
+				assignment && assignment.thinkingLevel !== ThinkingLevel.Inherit
+					? getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label
+					: undefined;
+			return node("badge", {
+				text: (info.tag ?? info.name ?? role).toLowerCase(),
+				...(assignment ? { tone: assignment.autoSelected ? "muted" : "accent" } : {}),
+				title: assignment
+					? `${info.name}${assignment.autoSelected ? " (auto-selected)" : ""}${level ? ` · thinking ${level}` : ""}`
+					: `${info.name}: not assigned`,
+			});
+		};
+
+		if (mode === "compact") {
+			const facts: { k: TspText; v: TspText }[] = [];
+			if (ctx > 0) facts.push({ k: "ctx", v: formatNumber(ctx).toLowerCase() });
+			if (out > 0) facts.push({ k: "out", v: formatNumber(out).toLowerCase() });
+			facts.push({ k: "price", v: isFreeModel(model) ? "free" : `${formatCostPair(model)} per M` });
+			facts.push({ k: "reasoning", v: model.reasoning ? "yes" : "no" });
+			const children: NativeChild[] = [node("kv", { items: facts, layout: "inline" })];
+			const chips: NativeChild[] = [];
+			if (item.selector === current) chips.push(node("badge", { text: "current", tone: "success" }));
+			for (const { role, assignment } of held) chips.push(roleBadge(role, assignment));
+			if (chips.length > 0) children.push(row(chips, { gap: "xs", wrap: true }));
+			if (warning) children.push(warning);
+			return children;
+		}
+
+		const children: NativeChild[] = [
+			text(model.name, { role: "omp.picker.title" }),
+			text([span(selector, "mono")], { actions: { click: "copy" }, title: "Copy model id", truncate: "middle" }),
+		];
+		const badges: NativeChild[] = [];
+		if (item.selector === current) badges.push(node("badge", { text: "current", tone: "success" }));
+		if (model.isNew) badges.push(node("badge", { text: "new", tone: "accent" }));
+		if (model.isBeta) badges.push(node("badge", { text: "beta", tone: "warning" }));
+		if (model.isRecommended) badges.push(node("badge", { text: "recommended", tone: "success" }));
+		if (model.reasoning) badges.push(node("badge", { text: "reasoning" }));
+		if (model.input.includes("image")) badges.push(node("badge", { text: "vision" }));
+		if (badges.length > 0) children.push(row(badges, { gap: "xs", wrap: true }));
+
+		const speed: string[] = [];
+		if (perf) {
+			speed.push(`${formatTps(perf.tps).replace("t/s", " t/s")}`);
+			if (perf.ttftMs !== null) speed.push(`${formatTtft(perf.ttftMs).replace("s", " s")} TTFT`);
+			speed.push(`${perf.samples} ${perf.samples === 1 ? "sample" : "samples"}`);
+		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
+			speed.push(`~${formatTps(model.tps).replace("t/s", " t/s")} (catalog)`);
+		}
+		const facts: { k: TspText; v: TspText }[] = [];
+		const fact = (k: string, v: string | undefined) => {
+			if (v) facts.push({ k: [span(k, "muted")], v: [span(v, "mono")] });
+		};
+		fact("Context", ctx > 0 ? ctx.toLocaleString("en-US") : undefined);
+		fact("Max output", out > 0 ? out.toLocaleString("en-US") : undefined);
+		fact("Price", isFreeModel(model) ? "free" : `${previewPrice(model)} per M`);
+		fact("Speed", speed.length > 0 ? speed.join(" · ") : undefined);
+		fact("Intelligence", model.int != null && Number.isFinite(model.int) ? String(Math.round(model.int)) : undefined);
+		fact("Input", model.input.join(" · "));
+		fact("Reasoning", model.reasoning ? "yes" : "no");
+		children.push(node("kv", { items: facts }));
+		if (warning) children.push(warning);
+
+		const heldBy = new Map(held.map(entry => [entry.role, entry.assignment]));
+		const roleBadges: NativeChild[] = [];
+		for (const role of this.#settings.knownRoleIds) {
+			const info = this.#settings.getRoleInfo(role);
+			if (info.hidden || !info.accepts(model)) continue;
+			roleBadges.push(roleBadge(role, heldBy.get(role)));
+		}
+		if (roleBadges.length > 0) {
+			children.push(node("section", { head: "Roles" }, [row(roleBadges, { gap: "xs", wrap: true })]));
+		}
+		const description = model.description ? sanitizeText(model.description).trim() : "";
+		if (description) children.push(md(description));
+		return children;
+	}
+
+	/** A picker row click: `select` highlights it, `activate` also runs Enter's path. False when not a visible row. */
+	routePickerItem(selector: string, activate: boolean): boolean {
+		const index = this.#menu.visibleItems.findIndex(item => item.selector === selector);
+		const item = this.#menu.visibleItems[index];
+		if (!item || this.#isDisabled(item)) return false;
+		if (this.#menu.setSelectedIndex(index)) {
+			this.#ensureSelectedVisible();
+			this.onSelectionChange?.(this.getSelected());
+		}
+		if (activate) this.onActivate?.(item);
+		return true;
+	}
 }

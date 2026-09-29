@@ -7,6 +7,7 @@ import { GlobTool } from "../../src/tools/glob";
 import { findUniqueWorkspaceSuffixWithGlobForTest } from "../../src/tools/path-utils";
 import { ToolAbortError } from "../../src/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 function createSession(cwd = process.cwd()): ToolSession {
 	return {
@@ -201,5 +202,55 @@ describe("GlobTool.execute", () => {
 		controller.abort();
 		releaseResult.resolve();
 		await expect(execution).rejects.toBeInstanceOf(ToolAbortError);
+	});
+});
+
+describe("GlobTool hard-cap limit notice", () => {
+	const files230 = Array.from({ length: 230 }, (_, i) => `file-${String(i).padStart(3, "0")}.txt`);
+
+	function globToolWith(files: string[]): GlobTool {
+		return new GlobTool(createSession(), {
+			nativeGlob: async () => ({
+				matches: files.map(file => ({ path: file, mtime: 0, fileType: FileType.File })),
+				totalMatches: files.length,
+			}),
+		});
+	}
+
+	type GlobExecuteResult = Awaited<ReturnType<GlobTool["execute"]>>;
+
+	function textOf(result: GlobExecuteResult): string {
+		const first = result.content[0];
+		return first?.type === "text" && first.text !== undefined ? first.text : "";
+	}
+
+	function limitNotice(result: GlobExecuteResult): string {
+		return formatOutputNotice((result.details as { meta?: OutputMeta } | undefined)?.meta);
+	}
+
+	test("discloses a clamped request and never advises a value that clamps back", async () => {
+		const result = await globToolWith(files230).execute("glob-clamp-notice", {
+			path: ".",
+			limit: 1000,
+			gitignore: false,
+		});
+
+		expect(textOf(result)).toContain("Requested limit 1000 clamped to the max of 200");
+		expect(limitNotice(result)).toContain("200 results limit reached");
+		expect(limitNotice(result)).not.toContain("Use limit=");
+	});
+
+	test("the default limit sitting on the cap keeps the reached notice without doomed advice", async () => {
+		const result = await globToolWith(files230).execute("glob-cap-default", { path: ".", gitignore: false });
+
+		expect(textOf(result)).not.toContain("clamped");
+		expect(limitNotice(result)).toContain("200 results limit reached");
+		expect(limitNotice(result)).not.toContain("Use limit=");
+	});
+
+	test("below the cap the doubled suggestion is capped at the hard limit and stays usable", async () => {
+		const result = await globToolWith(files230).execute("glob-below-cap", { path: ".", limit: 50, gitignore: false });
+
+		expect(limitNotice(result)).toContain("[50 results limit reached. Use limit=100 for more]");
 	});
 });

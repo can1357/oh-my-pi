@@ -32,7 +32,9 @@ export interface GrepIndexOptions {
  * Count keyword occurrences (case-insensitive, any keyword) in every file under
  * `root`, keyed like `FileEntry.rel`: root-relative, or a file root's own
  * path. Only lines containing a keyword are inspected, so counts are per
- * matching line rather than per file byte.
+ * matching line rather than per file byte. Matching lines stream from the
+ * native scan and are folded into counts as they arrive, so memory stays
+ * bounded by the batches in flight however many lines match.
  */
 export async function grepIndex(
 	root: string,
@@ -42,6 +44,7 @@ export async function grepIndex(
 	const keywords = rawKeywords.map(keyword => keyword.toLowerCase()).filter(keyword => keyword.length > 0);
 	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0 };
 	if (keywords.length === 0) return index;
+	const { perFileKw } = index;
 	const result = await natives.grep({
 		pattern: keywords.map(escapeRegex).join("|"),
 		path: root,
@@ -52,19 +55,21 @@ export async function grepIndex(
 		filesystem: options.filesystem,
 		signal: options.signal,
 		timeoutMs: options.timeoutMs,
+		onMatches: matches => {
+			for (const match of matches) {
+				let counts = perFileKw.get(match.path);
+				if (!counts) {
+					counts = Array.from({ length: keywords.length }, () => 0);
+					perFileKw.set(match.path, counts);
+				}
+				const line = match.line.toLowerCase();
+				for (let k = 0; k < keywords.length; k++) {
+					counts[k]! += countOccurrences(line, keywords[k]!);
+				}
+			}
+		},
 	});
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
-	for (const match of result.matches) {
-		let counts = index.perFileKw.get(match.path);
-		if (!counts) {
-			counts = Array.from({ length: keywords.length }, () => 0);
-			index.perFileKw.set(match.path, counts);
-		}
-		const line = match.line.toLowerCase();
-		for (let k = 0; k < keywords.length; k++) {
-			counts[k]! += countOccurrences(line, keywords[k]!);
-		}
-	}
 	return index;
 }
 

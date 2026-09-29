@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { renderSearchResult, type SearchRenderDetails } from "@oh-my-pi/pi-tui/tools/web-search";
-import type { SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search-types";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 const ANSWER = [

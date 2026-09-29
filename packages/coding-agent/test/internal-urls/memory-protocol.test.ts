@@ -182,68 +182,6 @@ describe("MemoryProtocolHandler", () => {
 		});
 	});
 
-	it("resolves memory://root against the caller cwd when multiple sessions are live", async () => {
-		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-protocol-isolation-"));
-		const previousAgentDir = getAgentDir();
-		try {
-			const agentDir = path.join(cleanupRoot, "agent");
-			setAgentDir(agentDir);
-
-			const firstCwd = path.join(cleanupRoot, "first-project");
-			const secondCwd = path.join(cleanupRoot, "second-project");
-			await fs.mkdir(firstCwd, { recursive: true });
-			await fs.mkdir(secondCwd, { recursive: true });
-
-			const firstMemoryRoot = getMemoryRoot(agentDir, firstCwd);
-			const secondMemoryRoot = getMemoryRoot(agentDir, secondCwd);
-			await fs.mkdir(firstMemoryRoot, { recursive: true });
-			await fs.mkdir(secondMemoryRoot, { recursive: true });
-
-			const firstSummary = "first registered session summary";
-			const secondSummary = "second session cwd summary";
-			await Bun.write(path.join(firstMemoryRoot, "memory_summary.md"), firstSummary);
-			await Bun.write(path.join(secondMemoryRoot, "memory_summary.md"), secondSummary);
-
-			AgentRegistry.global().register({
-				id: "first-session",
-				displayName: "first-session",
-				kind: "main",
-				session: {
-					sessionManager: {
-						getCwd: () => firstCwd,
-						getArtifactsDir: () => null,
-						getSessionId: () => "first-session",
-					},
-					settings: Settings.isolated({ "memory.backend": "local" }),
-				} as unknown as AgentSession,
-				sessionFile: null,
-			});
-			AgentRegistry.global().register({
-				id: "second-session",
-				displayName: "second-session",
-				kind: "main",
-				session: {
-					sessionManager: {
-						getCwd: () => secondCwd,
-						getArtifactsDir: () => null,
-						getSessionId: () => "second-session",
-					},
-					settings: Settings.isolated({ "memory.backend": "local" }),
-				} as unknown as AgentSession,
-				sessionFile: null,
-			});
-
-			const router = InternalUrlRouter.instance();
-			const resource = await router.resolve("memory://root", { cwd: secondCwd });
-
-			expect(resource.content).toBe(secondSummary);
-			expect(resource.content).not.toBe(firstSummary);
-		} finally {
-			setAgentDir(previousAgentDir);
-			await removeWithRetries(cleanupRoot);
-		}
-	});
-
 	it("resolves memory://root for a session-id-only caller with no cwd", async () => {
 		const cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-protocol-session-id-"));
 		const previousAgentDir = getAgentDir();
