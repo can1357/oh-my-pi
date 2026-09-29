@@ -825,6 +825,32 @@ export const cfgDoubleEscapeAction = register({
 	},
 });
 
+export const cfgBareExitOnEmptySession = register({
+	id: "input.bareExitOnEmptySession",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Exit on Empty Session",
+		description:
+			"Submitting exactly `exit`, `quit`, or `q` (any case) before the first message quits instead of prompting the model",
+	},
+});
+
+export const cfgBareSlashCommands = register({
+	id: "input.bareSlashCommands",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Slash Commands",
+		description:
+			"Submitting exactly a command name without the leading `/` (e.g. `model`, `compact`) runs that slash command; once the session has messages, press Enter twice to confirm",
+	},
+});
+
 export const cfgTreeFilterMode = register({
 	id: "treeFilterMode",
 	type: "enum",

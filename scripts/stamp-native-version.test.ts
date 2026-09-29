@@ -2,14 +2,12 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { containsVersionStamp } from "../packages/natives/native/version-sentinel.js";
 import {
-	MAX_STAMP_VERSION_LENGTH,
-	stampNativeBytes,
-	stampNativeVersion,
+	containsVersionStamp,
 	VERSION_STAMP_MAGIC,
 	VERSION_STAMP_SIZE,
-} from "./stamp-native-version";
+} from "../packages/natives/native/version-sentinel.js";
+import { MAX_STAMP_VERSION_LENGTH, stampNativeBytes, stampNativeVersion } from "./stamp-native-version";
 
 function placeholder(): Buffer {
 	const slot = Buffer.alloc(VERSION_STAMP_SIZE);

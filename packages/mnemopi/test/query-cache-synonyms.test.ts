@@ -78,6 +78,19 @@ describe("QueryCache", () => {
 		expect(qc.tier4Hits).toBe(1);
 	});
 
+	it("matches only entries of the same scope in every tier", () => {
+		const qc = cache({ maxSize: 100 });
+		qc.put("deploy server status", [{ content: "top five" }], [1, 0, 0], "topK=5");
+
+		expect(qc.get("deploy server status", [1, 0, 0], "topK=10")).toBeNull();
+		expect(qc.get("different words", [0.99, 0.01, 0], "topK=10")).toBeNull();
+		expect(qc.get("deploy server", null, "topK=10")).toBeNull();
+		expect(qc.tier1Hits + qc.tier2Hits + qc.tier3Hits + qc.tier4Hits).toBe(0);
+
+		expect(qc.get("different words", [0.99, 0.01, 0], "topK=5")?.[0]?.content).toBe("top five");
+		expect(qc.get("deploy server", null, "topK=5")?.[0]?.content).toBe("top five");
+	});
+
 	it("expires entries by TTL and invalidates all tiers", async () => {
 		const qc = cache({ maxSize: 100, ttlSeconds: 0.001 });
 		qc.put("query one", [{ content: "test", score: 0.5 }], [1, 0]);

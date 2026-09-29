@@ -165,4 +165,19 @@ export type ThemeBg =
 	| "toolErrorBg"
 	| "statusLineBg";
 
+const VALID_THEME_BGS: ReadonlySet<string> = new Set([
+	"selectedBg",
+	"userMessageBg",
+	"customMessageBg",
+	"toolPendingBg",
+	"toolSuccessBg",
+	"toolErrorBg",
+	"statusLineBg",
+] satisfies ThemeBg[]);
+
+/** Check if a string is a valid ThemeBg value */
+export function isValidThemeBg(color: string): color is ThemeBg {
+	return VALID_THEME_BGS.has(color);
+}
+
 export type ColorMode = "truecolor" | "256color";

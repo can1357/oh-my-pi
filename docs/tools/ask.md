@@ -33,6 +33,8 @@
   - single question: selected/custom answer plus an optional `User added note: ...`
   - multiple questions: `User answers:` followed by one line per `id`
   - rich-dialog chat redirect: `User chose to chat about this instead of answering...`
+- Images pasted into rich-dialog custom answers and notes follow the text block, each with the source-path notice a main-editor attachment gets. `[Image #N]` markers are numbered across the whole result, in text order within each answer, and `attachment://N` resolves to them until a newer message attaches images; image data stays out of `details`.
+- For a text-only active model with `images.describeForTextModels` on (the default), each answer image is followed by the vision-model description a pasted prompt image gets.
 - `details`:
   - single question: `{ question, options, multi, selectedOptions, customInput?, note?, timedOut? }`
   - multiple questions: `{ results: QuestionResult[] }`; each item includes `id`, `question`, `options`, `multi`, `selectedOptions`, and optional `customInput`, `note`, and `timedOut`
@@ -44,7 +46,7 @@
 2. `execute()` also requires `context.hasUI` and `context.ui`; if missing it aborts the context and throws `ToolAbortError("Ask tool requires interactive mode")`.
 3. It reads `ask.timeout` from settings, converts seconds to milliseconds (`0` disables timeout), and disables timeout entirely while plan mode is enabled.
 4. If `ask.notify` is not `off`, it sends a terminal notification: `Waiting for input`. When `speech.enabled` is true, it also sends all question text to the vocalizer before opening the dialog.
-5. When the UI supplies `askDialog`, the tool opens one rich multi-question form. Rich options receive `header`, `description`, and `preview`; results may contain an answer note or choose the dialog's `Chat about this` redirect.
+5. When the UI supplies `askDialog`, the tool opens one rich multi-question form. Rich options receive `header`, `description`, and `preview`; results may contain custom answers and notes with pasted images, or choose the dialog's `Chat about this` redirect.
 6. Otherwise it uses the selector/editor fallback for each question:
    - single-select list plus `Other (type your own)`
    - multi-select checkbox loop plus `Done selecting` when applicable and `Other (type your own)`
@@ -58,9 +60,10 @@
 - Multiple questions: returns `details.results[]`; the fallback permits arrow-key back/forward navigation, while a rich UI presents the complete form.
 - Single-select: one option or custom input.
 - Multi-select: toggled choices or custom input. In the fallback, `Done selecting` appears only when forward navigation is not active and at least one choice is selected.
-- Rich ask dialog: supports per-question headers, option previews, answer notes, and a `Chat about this` redirect. Submitting a nonempty custom answer advances to the next question, or to review for a single multi-select question; existing checkbox selections are preserved. A single-select question still submits immediately when it is the only question.
+- Rich ask dialog: supports per-question headers, option previews, answer notes, pasted images in custom answers and notes, and a `Chat about this` redirect. Submitting a nonempty custom answer advances to the next question, or to review for a single multi-select question; existing checkbox selections are preserved. A single-select question still submits immediately when it is the only question.
+- Pasted images: the custom-answer and note prompts take images the same ways the main editor does and mark them `[Image #N, WxH]`; deleting a marker drops its image. Extensions calling `ui.askDialog` get this only with `acceptImages: true`; collab guests, RPC, and ACP stay text-only.
 - Custom editor: paste followed by Enter submits the pasted text, including when they arrive together. Submission waits for an in-flight clipboard read; cancellation discards pending clipboard delivery.
-- Selector/editor fallback: supports labels/descriptions but not headers, previews, notes, or chat redirect.
+- Selector/editor fallback: supports labels/descriptions but not headers, previews, notes, images, or chat redirect.
 
 ## Side Effects
 - User-visible prompts / interactive UI

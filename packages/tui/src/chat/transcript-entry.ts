@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { MessageAttribution } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
 	type CustomMessageContent,
@@ -104,6 +104,15 @@ export function textContent(content: string | ReadonlyArray<{ type: string; text
 		boundary = separator;
 	}
 	return text;
+}
+
+/** Well-formed image blocks in order: a `[Image #N]` marker in the text names the Nth. */
+export function imageContent(content: string | ReadonlyArray<TextContent | ImageContent>): ImageContent[] {
+	if (typeof content === "string") return [];
+	return content.filter(
+		(block): block is ImageContent =>
+			block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string",
+	);
 }
 
 /** Join text blocks with spaces and collapse whitespace into a single-line label. */

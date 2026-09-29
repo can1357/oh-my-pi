@@ -14,7 +14,10 @@ import { wrapTextWithAnsi } from "../../utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
 import { theme } from "../../theme/theme";
-import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
+import { col, node, span, text } from "../../native/describe";
+import type { NativeChild, NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
+import type { SetupScene, SetupSceneController, SetupSceneHost, StyledLine } from "./types";
 
 function loginUrlLink(url: string): string {
 	return `\x1b]8;;${url}\x07Open login URL\x1b]8;;\x07`;
@@ -27,10 +30,12 @@ function loginCopyHint(): string {
 class CopyablePromptInput implements Component, Focusable {
 	#input: Input;
 	#onCopy: () => void;
+	readonly #native: NativeNode;
 
 	constructor(input: Input, onCopy: () => void) {
 		this.#input = input;
 		this.#onCopy = onCopy;
+		this.#native = col([input]);
 	}
 
 	get focused(): boolean {
@@ -47,6 +52,11 @@ class CopyablePromptInput implements Component, Focusable {
 
 	render(width: number): readonly string[] {
 		return this.#input.render(width);
+	}
+
+	/** The wrapped field describes itself (`input`, caret while focused); alt+c stays a key here. */
+	describe(): NativeNode {
+		return this.#native;
 	}
 
 	handleInput(data: string): void {
@@ -81,7 +91,8 @@ export class SignInScene implements SetupSceneController {
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
-	#statusLines: string[] = [];
+	/** Status copy under the selector or login flow; replaced (never mutated) on change. */
+	#statusLines: readonly StyledLine[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
 	#prompt: PromptState | undefined;
@@ -92,6 +103,7 @@ export class SignInScene implements SetupSceneController {
 	#loggingInProvider: string | undefined;
 	#disposed = false;
 	#step: WizardStep | undefined;
+	#native = new Memo();
 
 	readonly #host: SetupSceneHost;
 
@@ -109,6 +121,7 @@ export class SignInScene implements SetupSceneController {
 	}
 
 	invalidate(): void {
+		this.#native.clear();
 		this.#step?.invalidate();
 		this.#selector.invalidate();
 		this.#prompt?.input.invalidate();
@@ -174,7 +187,7 @@ export class SignInScene implements SetupSceneController {
 			}
 		}
 		for (const line of this.#statusLines) {
-			for (const wrapped of wrapTextWithAnsi(line, width)) {
+			for (const wrapped of wrapTextWithAnsi(theme.fg(line.color, line.text), width)) {
 				tail.addChild(new Text(wrapped, 0, 0));
 			}
 		}
@@ -205,6 +218,98 @@ export class SignInScene implements SetupSceneController {
 		return this.#step.render(width);
 	}
 
+	/**
+	 * Picking: intro, the provider selector (describes itself) and the last
+	 * outcome. Signing in: a spinner heading, the login link (with the full
+	 * URL once, char-wrapped), any code prompt and the flow's progress lines.
+	 */
+	describe(): NativeNode {
+		const provider = this.#loggingInProvider;
+		const authUrl = this.#authUrl;
+		const launchUrl = this.#authLaunchUrl;
+		const prompt = this.#prompt;
+		const statusLines = this.#statusLines;
+		const copyKey = formatKeyHint("alt+c");
+		return this.#native.get([provider, authUrl, launchUrl, prompt, statusLines, this.#selector, copyKey], () => {
+			const tail: NativeChild[] = [];
+			if (authUrl) {
+				tail.push(
+					node(
+						"text",
+						{
+							spans: [
+								span("Browser login: ", "accent"),
+								span("Open login URL", "accent link", { href: authUrl }),
+								span(` (clipboard copy attempted; ${copyKey} retries)`, "dim"),
+							],
+						},
+						undefined,
+						"login",
+					),
+					node(
+						"text",
+						{ spans: [span(authUrl, "dim link", { href: authUrl })], wrap: "char", actions: { menu: ["copy"] } },
+						undefined,
+						"url",
+					),
+				);
+				if (launchUrl) {
+					tail.push(
+						node(
+							"text",
+							{
+								spans: [
+									span("Local shortcut (this machine only): ", "dim"),
+									span(launchUrl, "dim link", { href: launchUrl }),
+								],
+								wrap: "char",
+							},
+							undefined,
+							"launch",
+						),
+					);
+				}
+			}
+			if (prompt) {
+				const promptChildren: NativeChild[] = [text([span(prompt.message, "warning")])];
+				if (prompt.placeholder) promptChildren.push(text([span(prompt.placeholder, "dim")]));
+				promptChildren.push(prompt.input);
+				tail.push(node("col", {}, promptChildren, "prompt"));
+			}
+			statusLines.forEach((line, index) => {
+				tail.push(node("text", { spans: [span(line.text, line.color)] }, undefined, `status:${index}`));
+			});
+
+			if (provider) {
+				return col(
+					[
+						node(
+							"row",
+							{ gap: "sm", align: "center" },
+							[node("spinner", {}), text([span(`Signing in to ${provider}`, "strong")])],
+							"heading",
+						),
+						...tail,
+					],
+					{ gap: "sm", role: "omp.setup.sign-in", tone: "pending" },
+				);
+			}
+			return col(
+				[
+					node(
+						"text",
+						{ spans: [span("Pick a provider to sign in — you can connect more than one.", "muted")] },
+						undefined,
+						"intro",
+					),
+					this.#selector,
+					...tail,
+				],
+				{ gap: "sm", role: "omp.setup.sign-in" },
+			);
+		});
+	}
+
 	#createSelector(): OAuthSelectorComponent {
 		return new OAuthSelectorComponent(
 			"login",
@@ -222,7 +327,7 @@ export class SignInScene implements SetupSceneController {
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		this.#selector.stopValidation();
 		this.#loggingInProvider = providerId;
-		this.#statusLines = [theme.fg("dim", "Starting OAuth flow…")];
+		this.#statusLines = [{ text: "Starting OAuth flow…", color: "dim" }];
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
 		this.#loginAbort = new AbortController();
@@ -244,20 +349,21 @@ export class SignInScene implements SetupSceneController {
 					// shortcut for wide-terminal local users.
 					this.#authUrl = info.url;
 					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
-					this.#statusLines = [];
+					const statusLines: StyledLine[] = [];
 					if (info.instructions) {
-						this.#statusLines.push(theme.fg("warning", info.instructions));
+						statusLines.push({ text: info.instructions, color: "warning" });
 					}
 					if (useManualInput) {
-						this.#statusLines.push(theme.fg("dim", "Paste the returned code or redirect URL when prompted."));
+						statusLines.push({ text: "Paste the returned code or redirect URL when prompted.", color: "dim" });
 					}
+					this.#statusLines = statusLines;
 					void this.#copyAuthUrl();
 					this.#host.ctx.openInBrowser(info.url);
 					this.#host.requestRender();
 				},
 				onPrompt: prompt => this.#showPrompt(prompt),
 				onProgress: message => {
-					this.#statusLines.push(theme.fg("dim", message));
+					this.#statusLines = [...this.#statusLines, { text: message, color: "dim" }];
 					this.#host.requestRender();
 				},
 				onManualCodeInput: signal =>
@@ -268,8 +374,8 @@ export class SignInScene implements SetupSceneController {
 			await this.#host.ctx.refreshProvider(providerId);
 			if (this.#disposed) return;
 			this.#statusLines = [
-				theme.fg("success", `${theme.status.success} Signed in to ${providerId}`),
-				theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`),
+				{ text: `${theme.status.success} Signed in to ${providerId}`, color: "success" },
+				{ text: `Credentials saved to ${getAgentDbPath()}`, color: "dim" },
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
@@ -282,14 +388,17 @@ export class SignInScene implements SetupSceneController {
 		} catch (error) {
 			if (this.#disposed) return;
 			if (this.#loginAbort?.signal.aborted) {
-				this.#statusLines = [theme.fg("dim", "Login cancelled.")];
+				this.#statusLines = [{ text: "Login cancelled.", color: "dim" }];
 				this.#authUrl = undefined;
 				this.#authLaunchUrl = undefined;
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
-					theme.fg("error", `Login failed: ${message}`),
-					theme.fg("dim", `Choose another provider or press ${editorKey("tui.select.cancel")} to continue.`),
+					{ text: `Login failed: ${message}`, color: "error" },
+					{
+						text: `Choose another provider or press ${editorKey("tui.select.cancel")} to continue.`,
+						color: "dim",
+					},
 				];
 				this.#authUrl = undefined;
 				this.#authLaunchUrl = undefined;

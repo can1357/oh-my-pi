@@ -6,9 +6,16 @@
  */
 import { type Component, Markdown } from "../index";
 
-import type { RenderResultOptions } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { ansi, md } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorText, noteText, truncationNotice } from "./native-view";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
 import {
+	describeJsonTree,
 	formatArgsInline,
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -228,6 +235,78 @@ export function renderMCPResult(
 		},
 		{ paddingX: 0, paddingY: 0 },
 	);
+}
+
+/** Visible MCP argument entries (streaming/intent bookkeeping keys dropped). */
+function visibleMcpArgs(args: Record<string, unknown> | undefined): [string, unknown][] {
+	if (!args || typeof args !== "object") return [];
+	return Object.entries(args).filter(([key]) => key !== INTENT_FIELD && key !== "__partialJson");
+}
+
+/** Inline args summary budget in characters (a data cap, not a width). */
+const MCP_ARGS_SUMMARY_CHARS = 160;
+
+/** Native MCP head: the tool title with a one-line args summary as target. */
+function mcpHead(title: string, args: Record<string, unknown> | undefined): NativeToolHead {
+	const entries = visibleMcpArgs(args);
+	const summary =
+		entries.length > 0
+			? formatArgsInline(Object.fromEntries(entries), MCP_ARGS_SUMMARY_CHARS, { characterBudget: true })
+			: "";
+	return { title, target: summary ? plainText(summary) : undefined, targetKind: "text" };
+}
+
+/** Native MCP call view: the head only, inline while pending. */
+export function describeMCPCall(args: Record<string, unknown>, label: string): NativeToolView {
+	return { tool: mcpHead(label, args), inline: true };
+}
+
+const mcpResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
+/**
+ * Native MCP result view: JSON output as a JSON tree, Markdown when the
+ * preference is on, otherwise the raw text as tool output. The head's args
+ * summary stands in for the ANSI card's Args tree.
+ */
+export function describeMCPResult(
+	result: { content: Array<{ type: string; text?: string }>; details?: MCPToolDetails; isError?: boolean },
+	_options: RenderResultOptions,
+	args?: Record<string, unknown>,
+): NativeToolView | undefined {
+	return mcpResultMemo.get(result, [renderMarkdownResults, JSON.stringify(args ?? null)], () => {
+		const textContent = (result.content ?? [])
+			.filter(block => block.type === "text")
+			.map(block => block.text ?? "")
+			.filter(text => text.length > 0)
+			.join("\n\n");
+		const output = stripOutputNotice(textContent, result.details?.meta).trimEnd();
+		const isError = result.isError ?? result.details?.isError ?? false;
+		const title = result.details ? `${result.details.serverName}/${result.details.mcpToolName}` : "MCP";
+		const body: NativeChild[] = [];
+		let parsed: unknown;
+		let isJson = false;
+		if (output.startsWith("{") || output.startsWith("[")) {
+			try {
+				parsed = JSON.parse(output);
+				isJson = true;
+			} catch {
+				// Bracketed non-JSON text falls through to Markdown/raw output.
+			}
+		}
+		if (!output) body.push(noteText("(no output)"));
+		else if (isError) body.push(errorText(output));
+		else if (isJson) body.push(describeJsonTree(parsed));
+		else if (renderMarkdownResults) body.push(md(output));
+		else body.push(ansi(output));
+		const warning = truncationNotice(result.details?.meta);
+		if (warning) body.push(warning);
+		return {
+			tool: mcpHead(title, args),
+			tone: isError ? "error" : undefined,
+			body,
+			preview: { lines: 4 },
+		};
+	});
 }
 
 import type { OutputMeta } from "./output-meta";
