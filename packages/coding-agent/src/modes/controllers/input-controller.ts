@@ -72,6 +72,7 @@ import { resizeImage } from "../../utils/image-resize";
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
+	cfgBareSlashCommands,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -293,6 +294,11 @@ export class InputController {
 	// Visible-chip signature from the last editor change; a difference escapes the
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
+	// Bare command word held for a confirming second Enter (`input.bareSlashCommands`
+	// outside an empty session), bound to the session it was armed in. Any other
+	// submission disarms it; a session switch invalidates it, so a word armed in
+	// one session can never run on a single Enter in another.
+	#armedBareCommand: { text: string; sessionId: string } | undefined;
 	/** Main-editor destination: images become pending attachments. */
 	readonly #editorImageSink: ImagePasteSink = {
 		attach: (image, unsupportedMessage, sourcePath) =>
@@ -928,6 +934,9 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			const submittedText = text;
+			const armed = this.#armedBareCommand;
+			this.#armedBareCommand = undefined;
+			const armedBareCommand = armed?.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
@@ -1021,25 +1030,16 @@ export class InputController {
 				return;
 			}
 
-			// Bare `exit`/`quit`/`q` on a session with no messages: nobody opens a
-			// fresh session to send that word to the model, so route it to the
-			// slash command (collab-guest gating applies there unchanged). The whole
-			// submitted input must be the word, case-insensitive — no surrounding
-			// whitespace, extra text, or extension rewrite. A first prompt still in
-			// flight (pending submission, preflight, or streaming) has not reached
-			// `messages` yet, so it must not count as an empty session.
-			const bareExitWord = text.toLowerCase();
-			if (
-				text === submittedText &&
-				Object.hasOwn(BARE_EXIT_WORDS, bareExitWord) &&
-				!hasInputImages &&
-				!this.ctx.session.isStreaming &&
-				this.ctx.locallySubmittedUserSignatures.size === 0 &&
-				this.ctx.session.messages.length === 0 &&
-				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
-			) {
-				text = `/${bareExitWord}`;
+			const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
+			if (bareSlashCommand?.confirm) {
+				this.#armedBareCommand = { text, sessionId: this.ctx.sessionManager.getSessionId() };
+				this.ctx.editor.setText(text);
+				this.ctx.showStatus(
+					`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,
+				);
+				return;
 			}
+			if (bareSlashCommand) text = bareSlashCommand.command;
 
 			// Handle built-in slash commands
 			if (text) {
@@ -1334,6 +1334,65 @@ export class InputController {
 			}
 			this.ctx.editor.addToHistory(text);
 		};
+	}
+
+	/**
+	 * Map a bare command word (no leading `/`) to its slash form, or return
+	 * `undefined` to leave the submission as a prompt. The whole submitted input
+	 * must be the word — no surrounding whitespace, arguments, attachments, or
+	 * extension rewrite — so ordinary prose never changes meaning.
+	 *
+	 * An "empty session" has no messages and nothing in flight: a first prompt
+	 * still pending, in preflight, or streaming has not reached `messages` yet.
+	 *
+	 * - `input.bareExitOnEmptySession` (default on): `exit`/`quit`/`q` in any
+	 *   case run immediately in an empty session. Nobody opens a fresh session
+	 *   to send that word to the model.
+	 * - `input.bareSlashCommands` (opt-in): any known command name or alias
+	 *   (exact spelling first, then case-folded), in any session state. Once a
+	 *   conversation exists the word may be a genuine reply, so the first Enter
+	 *   returns `confirm` and only a repeat of the same word (`armed`) runs it.
+	 *
+	 * Collab-guest gating applies unchanged in the slash dispatch that follows.
+	 */
+	#resolveBareSlashCommand(
+		text: string,
+		submittedText: string,
+		hasImages: boolean,
+		armed: string | undefined,
+	): { command: string; confirm: boolean } | undefined {
+		if (text !== submittedText || hasImages || !text || text.startsWith("/") || /\s/.test(text)) return undefined;
+		const emptySession =
+			!this.ctx.session.isStreaming &&
+			this.ctx.locallySubmittedUserSignatures.size === 0 &&
+			this.ctx.session.messages.length === 0;
+		const folded = text.toLowerCase();
+		if (
+			emptySession &&
+			Object.hasOwn(BARE_EXIT_WORDS, folded) &&
+			(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
+		) {
+			return { command: `/${folded}`, confirm: false };
+		}
+		if (!isSettingsInitialized() || !cfgBareSlashCommands.get(settings)) return undefined;
+		for (const token of folded === text ? [text] : [text, folded]) {
+			if (lookupBuiltinSlashCommand(token) || this.#isKnownNonBuiltinSlashCommandToken(token)) {
+				return { command: `/${token}`, confirm: !emptySession && armed !== text };
+			}
+		}
+		return undefined;
+	}
+
+	/** Whether `token` names a skill, file, extension, custom, or prompt-template command. */
+	#isKnownNonBuiltinSlashCommandToken(token: string): boolean {
+		const session = this.ctx.session;
+		return (
+			this.ctx.skillCommands.has(token) ||
+			this.ctx.fileSlashCommands.has(token) ||
+			session.extensionRunner?.getCommand(token) !== undefined ||
+			session.customCommands.some(loaded => loaded.command.name === token) ||
+			session.promptTemplates.some(template => template.name === token)
+		);
 	}
 
 	/**
@@ -2516,14 +2575,7 @@ export class InputController {
 		if (!text.startsWith("/")) return;
 		const token = text.slice(1).split(/\s+/, 1)[0] ?? "";
 		if (!token) return;
-		const session = this.ctx.session;
-		const knownToken =
-			this.ctx.skillCommands.has(token) ||
-			this.ctx.fileSlashCommands.has(token) ||
-			session.extensionRunner?.getCommand(token) !== undefined ||
-			session.customCommands.some(loaded => loaded.command.name === token) ||
-			session.promptTemplates.some(template => template.name === token);
-		if (knownToken) {
+		if (this.#isKnownNonBuiltinSlashCommandToken(token)) {
 			commandUsage.record(token);
 			return;
 		}

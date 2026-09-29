@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -252,13 +252,13 @@ function formatCapturedHttpError(captured: CapturedHttpErrorResponse | undefined
 }
 
 function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<string, unknown> | undefined {
-	if (isObject(captured.bodyJson)) {
+	if (isRecord(captured.bodyJson)) {
 		return captured.bodyJson;
 	}
 	if (!captured.bodyText) return undefined;
 	try {
 		const parsed = JSON.parse(captured.bodyText);
-		return isObject(parsed) ? parsed : undefined;
+		return isRecord(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
@@ -266,14 +266,10 @@ function parseCapturedErrorPayload(captured: CapturedHttpErrorResponse): Record<
 
 function getObjectProperty(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
 	const property = value[key];
-	return isObject(property) ? property : undefined;
+	return isRecord(property) ? property : undefined;
 }
 
 function getStringProperty(value: Record<string, unknown>, key: string): string | undefined {
 	const property = value[key];
 	return typeof property === "string" && property.trim().length > 0 ? property : undefined;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

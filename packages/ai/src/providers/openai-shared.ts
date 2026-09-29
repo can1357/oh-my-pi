@@ -61,6 +61,7 @@ import {
 	type Usage,
 } from "../types";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
+import { resolveXaiBaseUrl } from "./xai-base-url";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -255,6 +256,9 @@ export function resolveOpenAIRequestSetup(
 		if (sakanaBaseUrl) {
 			baseUrl = sakanaBaseUrl;
 		}
+	}
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		baseUrl = resolveXaiBaseUrl(model.provider, baseUrl, rawApiKey);
 	}
 	if (model.provider === "github-copilot") {
 		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);

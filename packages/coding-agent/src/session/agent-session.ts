@@ -9413,6 +9413,16 @@ export class AgentSession implements SettingsScope {
 		return this.#models.toggleFastMode();
 	}
 
+	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */
+	isUltrafastModeEnabled(): boolean {
+		return this.#models.isUltrafastModeEnabled();
+	}
+
+	/** Enables or disables the OpenAI `ultrafast` tier; `false` when the active model does not offer it. */
+	setUltrafastMode(enabled: boolean): boolean {
+		return this.#models.setUltrafastMode(enabled);
+	}
+
 	/**
 	 * What `/slow` controls for the active model: the `flex` service tier on the
 	 * OpenAI/Google families, or subscription slow mode on direct Anthropic.
