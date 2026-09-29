@@ -569,6 +569,8 @@ export class InputController {
 		this.ctx.editor.onExit = () => this.handleCtrlD();
 		this.ctx.editor.setActionKeys("app.suspend", this.ctx.keybindings.getKeys("app.suspend"));
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
+		this.ctx.editor.setActionKeys("app.settings.open", this.ctx.keybindings.getKeys("app.settings.open"));
+		this.ctx.editor.onOpenSettings = () => this.ctx.showSettingsSelector();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => {
 			hintUsage.record("effort");
