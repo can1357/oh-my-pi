@@ -657,6 +657,41 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
+	reportTernSessionFile();
+}
+
+/** The OSC 1337 user variable Tern reads the session file from. */
+const TERN_SESSION_FILE_VAR = "omp_session_file";
+/** Where the current session file is read from (the interactive session manager). */
+let sessionFileSource: (() => string | undefined) | undefined;
+/** The session file Tern was last told about. */
+let reportedSessionFile: string | undefined;
+
+/**
+ * Name the live session's file source. Every session title update (start, new
+ * session, resume, cwd switch) and {@link reportTernSessionFile} re-read it and,
+ * in Tern, report a changed file, so Tern's daemon can relaunch
+ * `omp --resume <file>` after it restarts.
+ */
+export function setTerminalSessionFileSource(source: (() => string | undefined) | undefined): void {
+	sessionFileSource = source;
+	reportTernSessionFile();
+}
+
+/**
+ * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) the session file, if it changed,
+ * as an OSC 1337 user variable holding its absolute path in base64; no file
+ * removes the variable.
+ */
+export function reportTernSessionFile(): void {
+	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
+	if (!process.stdout.isTTY || isTerminalHeadless()) return;
+	const file = sessionFileSource?.();
+	const resolved = file ? path.resolve(file) : undefined;
+	if (resolved === reportedSessionFile) return;
+	reportedSessionFile = resolved;
+	const value = resolved ? `=${Buffer.from(resolved).toString("base64")}` : "";
+	writeTitleSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 }
 
 /**
@@ -943,6 +978,9 @@ export function initTerminalTitleState(): void {
  * shell's tab. Released only by {@link initTerminalTitleState}.
  */
 export function disposeTerminalTitleState(): void {
+	// The session ends with the UI: Tern must not resume it in this pane.
+	sessionFileSource = undefined;
+	reportTernSessionFile();
 	terminalTitleRuntime.disposed = true;
 	terminalTitleRuntime.unwatchNative?.();
 	terminalTitleRuntime.unwatchNative = undefined;

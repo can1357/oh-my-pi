@@ -199,7 +199,9 @@ import {
 	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
+	reportTernSessionFile,
 	setSessionTerminalTitle,
+	setTerminalSessionFileSource,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
@@ -2095,6 +2097,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalSessionFileSource(() => this.sessionManager.getSessionFile());
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -2119,6 +2122,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
 			}),
+			// Fork and branch adopt a new session file without retitling.
+			this.session.registerSessionChangeCallback(reportTernSessionFile),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -7652,6 +7657,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleImagePaste(): Promise<boolean> {
 		return this.#inputController.handleImagePaste();
+	}
+
+	handleImagePathPaste(path: string): Promise<void> {
+		return this.#inputController.handleImagePathPaste(path);
 	}
 
 	/** Queue slash-command input behind the active turn. */

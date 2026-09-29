@@ -3,7 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { cfgBareExitOnEmptySession } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
@@ -298,6 +298,164 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 
 		expect(shutdown).not.toHaveBeenCalled();
 		expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: "exit" }));
+	});
+});
+
+describe("input controller — bare slash commands opt-in", () => {
+	async function enable() {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		cfgBareSlashCommands.set(Settings.instance, true);
+	}
+
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it.each(["hotkeys", "HotKeys"])("runs builtin %p as its slash command before the first message", async word => {
+		await enable();
+		const { ctx, editor, addToHistory, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.(word);
+
+		expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	it("runs a bare extension command locally", async () => {
+		await enable();
+		const { ctx, editor, onInputCallback, prompt } = makeCtx();
+		Object.defineProperty(ctx.session, "extensionRunner", {
+			value: {
+				getCommand: (name: string) => (name === "id" ? { name } : undefined),
+				hasHandlers: () => false,
+			},
+		});
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("id");
+
+		expect(prompt).toHaveBeenCalledWith("/id", { images: undefined });
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	describe("once the session has messages", () => {
+		const history: AgentMessage[] = [{ role: "user", content: "hi", timestamp: 0 }];
+
+		it("holds the first Enter for confirmation and runs on the second", async () => {
+			await enable();
+			const { ctx, editor, addToHistory, onInputCallback, showStatus } = makeCtx(false, history);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.("hotkeys");
+
+			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+			expect(onInputCallback).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe("hotkeys");
+			expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Enter again to run /hotkeys"));
+
+			await editor.onSubmit?.(editor.getText());
+
+			expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
+			expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+			expect(onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("confirms bare exit instead of sending it to the model", async () => {
+			await enable();
+			const { ctx, editor, shutdown, onInputCallback } = makeCtx(false, history);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.("exit");
+			expect(shutdown).not.toHaveBeenCalled();
+			await editor.onSubmit?.("exit");
+
+			expect(shutdown).toHaveBeenCalledTimes(1);
+			expect(onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("disarms the confirmation when a different submission comes in between", async () => {
+			await enable();
+			const { ctx, editor, onInputCallback } = makeCtx(false, history);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.("hotkeys");
+			await editor.onSubmit?.(" hotkeys");
+			await editor.onSubmit?.("hotkeys");
+
+			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+			expect(onInputCallback.mock.calls.map(call => call[0].text)).toEqual(["hotkeys"]);
+		});
+
+		it("does not let a different command word confirm the armed one", async () => {
+			await enable();
+			const { ctx, editor, shutdown, showStatus } = makeCtx(false, history);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.("hotkeys");
+			await editor.onSubmit?.("exit");
+
+			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+			expect(shutdown).not.toHaveBeenCalled();
+			expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Enter again to run /exit"));
+		});
+	});
+
+	it("asks for confirmation while the first prompt is still in flight", async () => {
+		await enable();
+		const { ctx, editor, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("fix the build");
+		await editor.onSubmit?.("hotkeys");
+
+		expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+		expect(onInputCallback.mock.calls.map(call => call[0].text)).toEqual(["fix the build"]);
+		expect(editor.getText()).toBe("hotkeys");
+	});
+
+	it.each(["hotkeys please", " hotkeys", "hotkeys.", "notacommand"])(
+		"sends %p to the model because it is not exactly a command name",
+		async input => {
+			await enable();
+			const { ctx, editor, onInputCallback } = makeCtx();
+			controllerFor(ctx);
+
+			await editor.onSubmit?.(input);
+
+			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+			expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: input.trim() }));
+		},
+	);
+
+	it("delivers an image attached to a command name instead of running it", async () => {
+		await enable();
+		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+		const { ctx, editor, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = [undefined];
+
+		await editor.onSubmit?.("hotkeys [Image #1]");
+
+		expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalledWith(
+			expect.objectContaining({ text: "hotkeys [Image #1]", images: [image] }),
+		);
+	});
+
+	it("sends a bare command name to the model when the setting is off (default)", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		const { ctx, editor, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("hotkeys");
+
+		expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: "hotkeys" }));
 	});
 });
 
