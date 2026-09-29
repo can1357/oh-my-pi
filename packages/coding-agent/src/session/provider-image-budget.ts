@@ -76,6 +76,10 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 	const totalImages = countImages(context);
 	if (totalImages <= limit) return context;
 
+	// When using llama.cpp, dropping images invalidates the prompt cache.
+	// We retain all images if the provider is llama.cpp to preserve cache integrity.
+	if (model.provider === "llama.cpp") return context;
+
 	const state = { remainingDrops: totalImages - limit };
 	const messages = context.messages.map(message => {
 		switch (message.role) {
