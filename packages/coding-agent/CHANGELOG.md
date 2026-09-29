@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transcript scroll mode. Press Ctrl+Up or Ctrl+Down at the prompt to jump between your earlier prompts, and drag across text to copy it. Press Esc, or any key the mode does not use, to return to the prompt with your draft intact ([#13285](https://github.com/can1357/oh-my-pi/pull/13285) by [@affaffaff](https://github.com/affaffaff)).
+
 ### Fixed
 
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
