@@ -28,6 +28,7 @@ type Scenario =
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
+	| { kind: "end-frame-awaits-half-close" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-hang" }
@@ -264,6 +265,15 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "end-frame-awaits-half-close") {
+			// Through an HTTP CONNECT proxy the server's Connect end frame is the
+			// last byte until the client half-closes; only then does the HTTP/2
+			// stream end. A client that never ends its request side hangs here.
+			stream.write(frameConnectMessage(Buffer.from("{}"), CONNECT_END_STREAM_FLAG));
+			stream.on("end", () => stream.end());
+			return;
+		}
+
 		stream.end();
 	});
 
@@ -346,6 +356,14 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
+	});
+
+	it("half-closes its request once the Connect end frame arrives", async () => {
+		scenario = { kind: "end-frame-awaits-half-close" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl), { signal: AbortSignal.timeout(5000) });
+		expect(eventTypes.at(-1)).toBe("done");
+		expect(result.stopReason).toBe("stop");
 	});
 
 	it("surfaces CONNECT end-stream errors that arrive after turnEnded", async () => {

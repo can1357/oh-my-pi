@@ -60,11 +60,13 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 ## Limits & Caps
 - Candidates judged by name: 128; files read: 20; windows per file: 24; window size: 8 KB; sketch: 384 B; passages verified: 40; sketch cutoff 0.45; hit threshold 0.20 (`packages/coding-agent/src/tools/jfind/cascade.ts`).
 - Native scan timeout: 30 s. Judge attempts time out per `TypeSafeJudge` (10 s, three attempts).
+- Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`); hitting it raises `find timed out after 20.0s` instead of blocking the turn. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
 
 ## Errors
 - `ToolError` for an empty `query`, a `path` that does not exist (`Path not found: …`) or is neither a file nor a directory, a URL `:start-end` selector, or a session without a model registry.
 - Judge failures are not thrown: a failed request leaves its entries unjudged (filename and verification) or routes them onward as unknown (sketch scoring, so an outage never prunes). Failures are listed in the footer; the result becomes an error only when every request failed.
+- `find timed out after 20.0s` when the `FIND_TIMEOUT_MS` (20 s) wall-clock budget elapses; a caller abort is rethrown as-is, not converted.
 
 ## Notes
 - Scores are absolute yes/no probabilities from the judge, so they are comparable across calls and batches.
