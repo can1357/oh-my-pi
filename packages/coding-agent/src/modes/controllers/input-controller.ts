@@ -69,6 +69,7 @@ import { resizeImage } from "../../utils/image-resize";
 
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
+	cfgBareExitOnEmptySession,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -77,6 +78,9 @@ import {
 	cfgTuiMouse,
 } from "../settings";
 import { cfgHideThinkingBlock } from "../../session/settings";
+
+/** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
+const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -869,6 +873,7 @@ export class InputController {
 
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
+			const submittedText = text;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
@@ -965,6 +970,26 @@ export class InputController {
 					imageLinks: inputImageLinks,
 				});
 				return;
+			}
+
+			// Bare `exit`/`quit`/`q` on a session with no messages: nobody opens a
+			// fresh session to send that word to the model, so route it to the
+			// slash command (collab-guest gating applies there unchanged). The whole
+			// submitted input must be the word, case-insensitive — no surrounding
+			// whitespace, extra text, or extension rewrite. A first prompt still in
+			// flight (pending submission, preflight, or streaming) has not reached
+			// `messages` yet, so it must not count as an empty session.
+			const bareExitWord = text.toLowerCase();
+			if (
+				text === submittedText &&
+				Object.hasOwn(BARE_EXIT_WORDS, bareExitWord) &&
+				!hasInputImages &&
+				!this.ctx.session.isStreaming &&
+				this.ctx.locallySubmittedUserSignatures.size === 0 &&
+				this.ctx.session.messages.length === 0 &&
+				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
+			) {
+				text = `/${bareExitWord}`;
 			}
 
 			// Handle built-in slash commands

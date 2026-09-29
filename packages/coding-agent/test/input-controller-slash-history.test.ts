@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { cfgBareExitOnEmptySession } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
@@ -12,13 +15,15 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 // addToHistory call. The fix centralizes recording after dispatch, with a
 // secret filter (shouldSkipHistory) for credential-bearing commands.
 const DEFAULT_SESSION_ID = "session-1";
-function makeCtx(isStreaming = false) {
+
+function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	const addToHistory = vi.fn();
 	const handleMCPCommand = vi.fn(async () => {});
 	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const prompt = vi.fn(async () => false);
 	const onInputCallback = vi.fn();
+	const shutdown = vi.fn(async () => {});
 	let text = "";
 	const editor = {
 		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
@@ -43,10 +48,15 @@ function makeCtx(isStreaming = false) {
 			this.pendingImageLinks = [];
 		},
 	};
+	// Mirrors the real contract: a pending submission is recorded as a local
+	// submission until its canonical user `message_start` lands.
+	const locallySubmittedUserSignatures = new Set<string>();
 	const ctx = {
 		editor,
 		sessionManager: { getSessionId: () => DEFAULT_SESSION_ID },
 		session: {
+			messages,
+			maybeStartTitleGeneration: vi.fn(),
 			isStreaming,
 			isCompacting: false,
 			queuedMessageCount: 0,
@@ -59,6 +69,9 @@ function makeCtx(isStreaming = false) {
 		},
 		focusedAgentId: undefined,
 		collabGuest: undefined,
+		shutdown,
+		locallySubmittedUserSignatures,
+		flushPendingBashComponents: vi.fn(),
 		handleHotkeysCommand: vi.fn(),
 		handleMCPCommand,
 		showStatus: vi.fn(),
@@ -70,7 +83,10 @@ function makeCtx(isStreaming = false) {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
-		}) => ({ ...input, cancelled: false, started: false }),
+		}) => {
+			locallySubmittedUserSignatures.add(`${input.text}\u0000${input.images?.length ?? 0}`);
+			return { ...input, cancelled: false, started: false };
+		},
 		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
 		skillCommands: new Map(),
@@ -90,6 +106,7 @@ function makeCtx(isStreaming = false) {
 		handleMCPCommand,
 		showStatus: ctx.showStatus,
 		prompt,
+		shutdown,
 	};
 }
 
@@ -327,6 +344,95 @@ describe("input controller — collab guest history", () => {
 		allowed.editor.setText("/hotkeys");
 		await allowed.controller.handleFollowUp();
 		expect(allowed.addToHistory).toHaveBeenCalledWith("/hotkeys");
+	});
+});
+
+describe("input controller — bare exit on empty session (#3850)", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it.each(["exit", "quit", "q", "Exit", "QUIT", "Q"])("quits on exactly %p before the first message", async word => {
+		const { ctx, editor, shutdown, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.(word);
+
+		expect(shutdown).toHaveBeenCalledTimes(1);
+		expect(onInputCallback).not.toHaveBeenCalled();
+	});
+
+	it.each([" exit", "q ", "exit.", "exit the loop"])(
+		"sends %p to the model because the whole input is not exactly the word",
+		async input => {
+			const { ctx, editor, shutdown, onInputCallback } = makeCtx();
+			controllerFor(ctx);
+
+			await editor.onSubmit?.(input);
+
+			expect(shutdown).not.toHaveBeenCalled();
+			expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: input.trim() }));
+		},
+	);
+
+	it("sends bare exit to the model once the session has messages", async () => {
+		const history: AgentMessage[] = [{ role: "user", content: "hi", timestamp: 0 }];
+		const { ctx, editor, shutdown, onInputCallback } = makeCtx(false, history);
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("exit");
+
+		expect(shutdown).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: "exit" }));
+	});
+
+	it("does not quit while the first prompt is still in flight before reaching history", async () => {
+		const { ctx, editor, shutdown, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("fix the build");
+		await editor.onSubmit?.("exit");
+
+		expect(shutdown).not.toHaveBeenCalled();
+		expect(onInputCallback.mock.calls.map(call => call[0].text)).toEqual(["fix the build", "exit"]);
+	});
+
+	it("steers bare exit into a streaming first turn instead of quitting", async () => {
+		const { ctx, editor, shutdown, prompt } = makeCtx(true);
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("exit");
+
+		expect(shutdown).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledWith("exit", expect.objectContaining({ streamingBehavior: "steer" }));
+	});
+
+	it("delivers an image attached to exit instead of quitting", async () => {
+		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+		const { ctx, editor, shutdown, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = [undefined];
+
+		await editor.onSubmit?.("exit [Image #1]");
+
+		expect(shutdown).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalledWith(
+			expect.objectContaining({ text: "exit [Image #1]", images: [image] }),
+		);
+	});
+
+	it("sends bare exit to the model when input.bareExitOnEmptySession is off", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		cfgBareExitOnEmptySession.set(Settings.instance, false);
+		const { ctx, editor, shutdown, onInputCallback } = makeCtx();
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("exit");
+
+		expect(shutdown).not.toHaveBeenCalled();
+		expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: "exit" }));
 	});
 });
 

@@ -9,7 +9,14 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CredentialDisabledEvent,
+	ImageContent,
+	Model,
+	ProviderResponseMetadata,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -35,6 +42,8 @@ import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
+	AssistantMessageRewriteEvent,
+	AssistantMessageRewriteResult,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -1613,6 +1622,92 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/**
+	 * Run extension rewrites on a detached finalized assistant message. Text may
+	 * change only in its original block position; all other metadata and blocks
+	 * remain unchanged. Text replay signatures are tied to their original text.
+	 *
+	 * Handlers see a structured clone, but the result is rebuilt from the
+	 * original blocks: unchanged blocks keep their identity and symbol-keyed
+	 * provider markers (e.g. `kCursorExecResolved`, which `structuredClone`
+	 * drops and without which agent-loop re-runs Cursor-settled tool calls).
+	 */
+	async emitAssistantMessage(
+		message: AssistantMessage,
+		signal?: AbortSignal,
+	): Promise<AssistantMessage["content"] | undefined> {
+		if (!this.hasHandlers("assistant_message")) return undefined;
+		const ctx = this.createContext();
+		const original = message.content;
+		// Accepted text per block position; every other field comes from `original`.
+		const texts = original.map(block => (block.type === "text" ? block.text : undefined));
+		const isRewritten = (index: number) => {
+			const block = original[index];
+			return block?.type === "text" && texts[index] !== block.text;
+		};
+		const currentContent = (): AssistantMessage["content"] =>
+			original.map((block, index) => {
+				if (block.type !== "text" || !isRewritten(index)) return block;
+				const { textSignature: _stale, ...rest } = block;
+				return { ...rest, text: texts[index] as string };
+			});
+		const textMetadata = (block: TextContent) => {
+			const { text: _text, textSignature: _textSignature, ...metadata } = block;
+			return metadata;
+		};
+
+		extensions: for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("assistant_message");
+			if (!handlers?.length) continue;
+			for (const handler of handlers) {
+				if (signal?.aborted) break extensions;
+				// Detach the whole message, not just `content`: in-place edits to `usage`
+				// or other fields must not leak into the finalized message.
+				const presented = structuredClone({ ...message, content: currentContent() });
+				const event: AssistantMessageRewriteEvent = { type: "assistant_message", message: presented };
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+				)) as AssistantMessageRewriteResult | undefined;
+				if (signal?.aborted) break extensions;
+				if (result?.content === undefined) continue;
+				const replacement = result.content;
+				// Compare against a fresh clone: the handler may have mutated `presented`.
+				const expected = structuredClone(currentContent());
+				if (
+					!Array.isArray(replacement) ||
+					replacement.length !== expected.length ||
+					replacement.some((block, index) => {
+						const previous = expected[index];
+						if (!block || typeof block !== "object" || block.type !== previous?.type) return true;
+						if (block.type !== "text") return !Bun.deepEquals(block, previous);
+						return (
+							typeof block.text !== "string" ||
+							previous?.type !== "text" ||
+							!Bun.deepEquals(textMetadata(block), textMetadata(previous))
+						);
+					})
+				) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "assistant_message",
+						error: "content replacement may only change text in existing blocks; block positions, non-text blocks, and other metadata must remain unchanged",
+					});
+					continue;
+				}
+				for (const [index, block] of replacement.entries()) {
+					if (block.type === "text") texts[index] = block.text;
+				}
+			}
+		}
+		return original.some((_block, index) => isRewritten(index)) ? currentContent() : undefined;
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
