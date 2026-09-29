@@ -36,9 +36,11 @@ thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
 }
 
-/// Syntaxes bundled in addition to syntect's defaults: syntect ships none of
-/// these, so we vendor their `.sublime-syntax` sources and fold them into the
-/// set.
+/// Syntaxes vendored as `.sublime-syntax` sources and added after syntect's
+/// defaults. Most are grammars syntect lacks; `Markdown` shadows syntect's
+/// built-in one, because a syntax added later wins syntect's name, extension
+/// and token lookups. That file's header records why we carry a copy of a
+/// grammar syntect already ships, and the checks for dropping it again.
 const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/Julia.sublime-syntax"),
 	include_str!("syntaxes/Nix.sublime-syntax"),
@@ -46,6 +48,7 @@ const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/TypeScript.sublime-syntax"),
 	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
 	include_str!("syntaxes/Astro.sublime-syntax"),
+	include_str!("syntaxes/Markdown.sublime-syntax"),
 ];
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -833,6 +836,28 @@ mod tests {
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
 	}
+
+	/// A Markdown table header must stay recognisable however long its first
+	/// row is — many inline code spans, or many backslash escapes — so the
+	/// row separator keeps its punctuation colour. syntect's built-in grammar
+	/// abandons the table lookahead on these rows, so this also pins the
+	/// vendored grammar as the one resolved for `markdown`.
+	#[test]
+	fn markdown_recognises_table_headers_after_many_inline_spans() {
+		let colors = test_colors();
+		let spans = ["`a`"; 16].join(" ");
+		let escapes = "\\*".repeat(20);
+		for (case, first_row) in [("inline code spans", &spans), ("escaped asterisks", &escapes)] {
+			let out =
+				highlight_code_impl(&format!("{first_row} | x\n---|---\n"), Some("markdown"), &colors);
+			let first = out.lines().next().unwrap();
+			assert!(
+				first.contains("<p>|"),
+				"{case}: table separator lost punctuation highlighting: {first}"
+			);
+		}
+	}
+
 	/// Regression: with the JavaScript grammar, TS type annotations
 	/// (generic return types, arrow-type params) corrupted parser state, and a
 	/// later template literal left an unterminated string scope that painted
