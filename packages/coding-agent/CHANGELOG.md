@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed valid multi-line bash commands that end at EOF without a trailing newline (e.g. ending in a `\` line continuation) being rejected with `pi-natives:command: syntax error …`; they now run as bash runs them
+
 ## [18.4.3] - 2026-09-28
 
 ### Added
