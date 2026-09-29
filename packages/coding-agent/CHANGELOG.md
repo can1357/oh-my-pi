@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
+- Fixed SDK and RPC sessions keeping a stale MCP tool list when a server's tools changed while extensions were loading; `createAgentSession` now adopts the change before it returns ([#11315](https://github.com/can1357/oh-my-pi/pull/11315) by [@aktanazat](https://github.com/aktanazat)).
 
 ## [18.4.3] - 2026-09-28
 
