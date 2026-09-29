@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed tool-call echo cards corrupting payload bytes (`$` sigils dropped, identifiers subscripted, lines re-flowed); bash command, task brief/context, and file-content/code echoes now render byte-verbatim.
+- Fixed tool-call echo cards corrupting payload bytes (`$` sigils dropped, identifiers subscripted, lines re-flowed); bash command, task brief/context, and file-content/code echoes now render byte-verbatim ([#13736](https://github.com/can1357/oh-my-pi/pull/13736) by [@yingliang-zhang](https://github.com/yingliang-zhang)).
 
 ## [18.4.3] - 2026-09-28
 
