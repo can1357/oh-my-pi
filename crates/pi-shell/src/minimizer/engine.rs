@@ -213,15 +213,27 @@ fn is_shell_state_mutating_program(program: &str) -> bool {
 	matches!(program, "exec" | "eval" | "source" | "." | "alias" | "unalias")
 }
 
+/// Scan a `command` / `builtin` wrapper's words for a shell mutator invoked
+/// through it (`command alias …`, `builtin exec …`).
+///
+/// The segment is verbatim source, so the whitespace scan must not reason
+/// from corrupted tokens. `\`+newline line continuations are invisible to the
+/// shell's word lexer — `command \<newline> alias …` names `alias` — so drop
+/// them first, by removal rather than by a space: a continuation inside a
+/// word must keep it joined (`ali\<newline>as` names `alias`, not `ali as`).
+/// What remains can still hide the mutator behind a split word or a
+/// redirection; those stay opaque below.
 fn command_wrapper_invokes_mutator(segment: &plan::ChainSegment) -> bool {
-	for word in segment.command.split_whitespace() {
+	let flattened = segment.command.replace("\\\n", "");
+	for word in flattened.split_whitespace() {
 		if is_shell_state_mutating_program(word) {
 			return true;
 		}
-		// A split quoted assignment means we are no longer looking at real shell
-		// words. Stay opaque rather than proving safety from corrupted tokens.
-		if is_ambiguous_assignment_fragment(word) {
+		if is_split_word_fragment(word) {
 			return true;
+		}
+		if is_redirect_word(word) {
+			continue;
 		}
 		if word == "command" || word == "builtin" || word.starts_with('-') || is_env_assignment(word)
 		{
@@ -232,8 +244,23 @@ fn command_wrapper_invokes_mutator(segment: &plan::ChainSegment) -> bool {
 	false
 }
 
-fn is_ambiguous_assignment_fragment(word: &str) -> bool {
-	is_env_assignment(word) && (word.contains('"') || word.contains('\''))
+/// True for a whitespace-split token that is not a real shell word: an escape
+/// or quote means the split cut a word apart (`FOO="a b"` splits into
+/// `FOO="a` / `b"`, `a\ b` into `a\` / `b`, a bare `\` is half of an escape).
+/// Stay opaque rather than proving safety from corrupted tokens — `"alias"`
+/// names `alias` and so does `al"ia"s`, but neither scans as one.
+fn is_split_word_fragment(word: &str) -> bool {
+	word.contains(['\\', '\'', '"'])
+}
+
+/// True for a redirection word (`>out`, `2>&1`, `<<<x`): it carries no command
+/// word, so skip it while looking for the wrapper's utility — `command >out
+/// exec …` invokes `exec` just like `command exec …`.
+fn is_redirect_word(word: &str) -> bool {
+	word.starts_with("&>")
+		|| word
+			.trim_start_matches(|c: char| c.is_ascii_digit())
+			.starts_with(['<', '>'])
 }
 
 /// True for a leading `KEY=value` environment assignment (a prefix that does
@@ -823,6 +850,40 @@ strip_lines_matching = [".*"]
 		assert_eq!(mode_for("git status | cat", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("sleep 1 &", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("(cd foo && make)", &cfg), MinimizerMode::None);
+	}
+
+	#[test]
+	fn line_continuation_cannot_hide_shell_mutators() {
+		// Regression: the mutator scan must see through `\`+newline line
+		// continuations and refuse to reason about split escaped-word
+		// fragments. `command \<newline> alias git=foo` permanently rewires how
+		// later `git` words expand, and `builtin \<newline> exec >out` rewires
+		// the shell's fds: segmented execution would leak either mutation into
+		// later segments, where unsegmented execution preserves it. A bare `\`
+		// token means the whitespace scan split an escaped word — stay opaque
+		// for the same reason a split quoted assignment does.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert_eq!(
+			mode_for("echo ok && command \\\n alias git=foo && git status", &cfg),
+			MinimizerMode::None,
+		);
+		assert_eq!(mode_for("echo ok && builtin \\\n exec >out", &cfg), MinimizerMode::None,);
+		assert_eq!(mode_for("echo ok && command \\ alias git=foo", &cfg), MinimizerMode::None,);
+		assert_eq!(
+			mode_for("echo ok && command \"alias\" git=foo && git status", &cfg),
+			MinimizerMode::None,
+		);
+		assert_eq!(
+			mode_for("echo ok && command >out exec >out2 && git status", &cfg),
+			MinimizerMode::None,
+		);
+		// Clean wrapper invocations still segment: opacity is for corrupted
+		// tokens and hidden utilities, not for `command` / `builtin` in
+		// general.
+		assert_eq!(
+			mode_for("echo ok && command git status && git diff", &cfg),
+			MinimizerMode::SegmentedChain,
+		);
 	}
 
 	#[test]
