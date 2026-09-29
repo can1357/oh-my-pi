@@ -90,6 +90,63 @@ describe("buildTerminalTitleWithState", () => {
 		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "linux", "line", wslEnv)).toBe(`${BRAND} :`);
 	});
 });
+describe("setSessionTerminalTitle project suffix (issue #12600)", () => {
+	let writes: string[] = [];
+	let stdoutSpy: { mockRestore(): void } | undefined;
+	let prevHeadless = false;
+	let ttyDescriptor: PropertyDescriptor | undefined;
+	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
+
+	beforeEach(() => {
+		prevHeadless = setTerminalHeadless(false);
+		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		windowsTitleMock = mockWindowsConsoleTitle();
+		windowsTitleMock.succeeds = true;
+		writes = [];
+		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
+			return true;
+		});
+		initTerminalTitleState();
+		resetObserved(writes, windowsTitleMock);
+	});
+
+	afterEach(() => {
+		disposeTerminalTitleState();
+		stdoutSpy?.mockRestore();
+		stdoutSpy = undefined;
+		windowsTitleMock?.restore();
+		windowsTitleMock = undefined;
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		setTerminalHeadless(prevHeadless);
+	});
+	it("appends the project directory to the session title", () => {
+		setTerminalTitleState("idle");
+		resetObserved(writes, windowsTitleMock);
+		setSessionTerminalTitle("Fix authentication flow", "/repo/oh-my-pi");
+		const titles = observedTitles(writes, windowsTitleMock);
+		expect(titles[titles.length - 1]).toBe(`${BRAND} > Fix authentication flow - oh-my-pi`);
+	});
+
+	it("omits the suffix when the session title already is the project name", () => {
+		setTerminalTitleState("idle");
+		resetObserved(writes, windowsTitleMock);
+		setSessionTerminalTitle("oh-my-pi", "/repo/oh-my-pi");
+		const titles = observedTitles(writes, windowsTitleMock);
+		expect(titles[titles.length - 1]).toBe(`${BRAND} > oh-my-pi`);
+	});
+
+	it("keeps the no-session fallback as the bare project name", () => {
+		setSessionTerminalTitle("Temporary probe title", "/repo/oh-my-pi");
+		setTerminalTitleState("idle");
+		resetObserved(writes, windowsTitleMock);
+		setSessionTerminalTitle(undefined, "/repo/other-project");
+		const titles = observedTitles(writes, windowsTitleMock);
+		expect(titles[titles.length - 1]).toBe(`${BRAND} > other-project`);
+	});
+});
 
 // Regression coverage for the shutdown-leak bug (PR #4451): the run-state
 // `working` spinner arms a periodic `setInterval` that, on every tick, re-emits
