@@ -1598,8 +1598,10 @@ export class InputController {
 			}
 		};
 
-		if (preserveDraft) this.ctx.editor.addToHistory(text);
-		else this.ctx.editor.clearDraft(text);
+		// No history write here: the slash block above already filed the text before dispatch, so a
+		// second write would bill the same submission twice in `use_count`, and a write after the
+		// command ran would file it under the context the command switched to.
+		if (!preserveDraft) this.ctx.editor.clearDraft();
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,

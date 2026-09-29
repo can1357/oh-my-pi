@@ -458,6 +458,57 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 
 		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
 	});
+
+	it("restores the draft and reports when a detached command throws", async () => {
+		// A detached command (plan/vibe/goal/guided-goal) rethrows so the caller owns
+		// restoration. Without the catch the submission is swallowed: no error, no prompt,
+		// and the draft the user typed is gone.
+		const { ctx, editor, prompt } = makeCtx(false, []);
+		(ctx as unknown as { handlePlanModeCommand: () => Promise<boolean> }).handlePlanModeCommand = async () => {
+			throw new Error("plan mode exploded");
+		};
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/plan do the thing");
+
+		expect(prompt).not.toHaveBeenCalled();
+		expect(ctx.showError).toHaveBeenCalledWith("plan mode exploded");
+	});
+
+	it("files a skill command once, not twice", async () => {
+		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		ctx.skillCommands.set("skill:probe", {
+			name: "probe",
+			run: async () => true,
+		} as unknown as Parameters<InteractiveModeContext["skillCommands"]["set"]>[1]);
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/skill:probe do the thing");
+
+		expect(addToHistory.mock.calls.filter(call => call[0] === "/skill:probe do the thing")).toHaveLength(1);
+	});
+
+	it("files a context-switching command once, under the context it was typed in", async () => {
+		// `/move` changes the cwd, so a second write after the handler ran would re-file the row
+		// under the destination — the exact mis-attribution the pre-dispatch record exists to
+		// prevent — and bill the same submission twice in `use_count`.
+		const origin = getProjectDir();
+		const moved = TempDir.createSync("@omp-move-");
+		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		(ctx as unknown as { handleMoveCommand: (args?: string) => Promise<boolean> }).handleMoveCommand = async () => {
+			setProjectDir(moved.path());
+			return true;
+		};
+		controllerFor(ctx);
+
+		try {
+			await editor.onSubmit?.("/move elsewhere");
+			expect(addToHistory.mock.calls.filter(call => call[0] === "/move elsewhere")).toHaveLength(1);
+		} finally {
+			setProjectDir(origin);
+			await moved.remove().catch(() => {});
+		}
+	});
 });
 
 describe("yield queue list parsing", () => {

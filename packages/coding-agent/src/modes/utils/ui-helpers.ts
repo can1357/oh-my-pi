@@ -6,6 +6,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { shouldSkipHistory } from "../controllers/input-controller";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
@@ -1131,7 +1132,11 @@ export class UiHelpers {
 	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
 		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
-		if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
+		// Queuing bypasses the slash block that guards the other recording sites, so the secret
+		// filter is repeated here: `/join <link>` and `/login <args>` carry a room key or an auth
+		// code, and `history.db` stores the row in the clear.
+		if (shouldSkipHistory(text)) this.ctx.editor.clearDraft();
+		else if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
 		else this.ctx.editor.clearDraft(text);
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(
