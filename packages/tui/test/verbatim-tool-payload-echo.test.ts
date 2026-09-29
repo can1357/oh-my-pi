@@ -117,7 +117,11 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 			"",
 			"- item one",
 		].join("\n");
-		const card = taskToolRenderer.renderCall({ name: "Echo", task: brief }, { expanded: false, isPartial: false }, theme);
+		const card = taskToolRenderer.renderCall(
+			{ name: "Echo", task: brief },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
 		const rows = frameBodyRows(theme, card, 500);
 		const joined = rows.join("\n");
 		expect(rows).toContain("Keep pid=$$ and run: $(grep -c A_rows $P) verbatim, A_rows included.");
@@ -324,7 +328,9 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 		expect(recoverBytes(wideRows)).toBe(wide);
 		for (const row of wideRows) {
 			const stripped = Bun.stripANSI(row);
-			const body = stripped.startsWith(VERBATIM_WRAP_MARKER) ? stripped.slice(VERBATIM_WRAP_MARKER.length) : stripped;
+			const body = stripped.startsWith(VERBATIM_WRAP_MARKER)
+				? stripped.slice(VERBATIM_WRAP_MARKER.length)
+				: stripped;
 			expect(/^(?:界)*$/u.test(body)).toBe(true);
 		}
 
@@ -348,7 +354,9 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 	it("makes the reviewer smoke command fully recoverable at width 80 (expanded) and marked when collapsed", () => {
 		const expanded = frameRowsRaw(
 			theme,
-			bashToolRenderer.renderCall({ command: SMOKE_COMMAND }, { expanded: true, isPartial: false }, theme).render(80),
+			bashToolRenderer
+				.renderCall({ command: SMOKE_COMMAND }, { expanded: true, isPartial: false }, theme)
+				.render(80),
 		);
 		expect(expanded.length).toBeGreaterThan(1);
 		for (const row of expanded.slice(1)) expect(row.startsWith(VERBATIM_WRAP_MARKER)).toBe(true);

@@ -78,7 +78,7 @@ export function renderVerbatimRows(line: string, width: number, theme: Theme, ex
 	const marker = theme.fg("dim", VERBATIM_WRAP_MARKER);
 	const markerWidth = visibleWidth(VERBATIM_WRAP_MARKER);
 	const rows: string[] = [];
-	for (let col = 0; col < total; ) {
+	for (let col = 0; col < total;) {
 		const first = rows.length === 0;
 		const budget = Math.max(1, first ? width : width - markerWidth);
 		// Strict: a wide grapheme straddling the boundary drops to the next row
