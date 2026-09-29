@@ -2,6 +2,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { untilAborted } from "@oh-my-pi/pi-utils";
+import { tryWriteArtifact } from "../session/artifacts";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
@@ -322,8 +323,9 @@ export async function saveArtifactText(
 		return undefined;
 	}
 
-	await Bun.write(artifactPath, text);
-	return artifactId;
+	// Callers embed this id as `artifact://<id>`: publish it only for a confirmed
+	// write, and never let a failed side-channel write discard the tool result.
+	return (await tryWriteArtifact(artifactPath, text, toolType)) ? artifactId : undefined;
 }
 
 export function appendArtifactReference(text: string, artifactId: string | undefined, label: string): string {

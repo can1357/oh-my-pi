@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
 
 /**
@@ -60,6 +61,27 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 		throw error;
 	}
 	return expectedBytes;
+}
+
+/**
+ * Best-effort {@link writeArtifact} for side-channel output next to a finished
+ * tool result. A failed write is logged with its path and reason instead of
+ * thrown, so the caller keeps its result and only omits the `artifact://` link.
+ *
+ * Returns whether the artifact was confirmed on disk.
+ */
+export async function tryWriteArtifact(path: string, content: string, toolType: string): Promise<boolean> {
+	try {
+		await writeArtifact(path, content);
+		return true;
+	} catch (error) {
+		logger.warn("Failed to persist tool output artifact", {
+			toolType,
+			path,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	}
 }
 
 /**

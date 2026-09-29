@@ -183,3 +183,65 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 		expect(loadSpy).toHaveBeenCalledWith("https://example.com/file.txt", expect.anything());
 	});
 });
+
+describe("read URL artifact publication", () => {
+	let testDir: string;
+	beforeEach(() => {
+		testDir = path.join(os.tmpdir(), `fetch-artifact-${Snowflake.next()}`);
+		fs.mkdirSync(testDir, { recursive: true });
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		removeSyncWithRetries(testDir);
+	});
+
+	/** A selector read is the path that sets `ensureArtifact` (read.ts:1151). */
+	function sessionWithArtifactsDir(artifactsDir: string): ToolSession {
+		return {
+			cwd: testDir,
+			hasUI: false,
+			getSessionFile: () => path.join(testDir, "session.jsonl"),
+			getArtifactsDir: () => artifactsDir,
+			getSessionSpawns: () => null,
+			allocateOutputArtifact: async toolType => ({
+				id: "0",
+				path: path.join(artifactsDir, `0.${toolType}.log`),
+			}),
+			settings: Settings.isolated({ "fetch.enabled": true }),
+		};
+	}
+
+	const body = Array.from({ length: 12 }, (_, i) => `content ${i + 1}`).join("\n");
+
+	it("publishes the artifact when the write lands", async () => {
+		const artifactsDir = path.join(testDir, "artifacts");
+		fs.mkdirSync(artifactsDir, { recursive: true });
+		stubLoadPage(body, "text/plain");
+
+		const result = await new ReadTool(sessionWithArtifactsDir(artifactsDir)).execute("call", {
+			// Body line N lands at output line N+6, after the URL header prefix.
+			path: "https://example.com/file.txt:8-9",
+		});
+
+		expect(result.content.length).toBeGreaterThan(0);
+		expect(fs.readFileSync(path.join(artifactsDir, "0.read.log"), "utf8")).toContain("content 2");
+	});
+
+	it("still returns the read when the artifact write fails", async () => {
+		// The artifacts dir path is a regular file, so the write cannot land.
+		// A failed side-channel artifact must not discard a completed read.
+		const blocker = path.join(testDir, "not-a-dir");
+		fs.writeFileSync(blocker, "");
+		stubLoadPage(body, "text/plain");
+
+		const result = await new ReadTool(sessionWithArtifactsDir(blocker)).execute("call", {
+			path: "https://example.com/file.txt:8-9",
+		});
+
+		const text = result.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("\n");
+		expect(text).toContain("content 2");
+	});
+});
