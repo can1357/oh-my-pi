@@ -486,10 +486,10 @@ describe("Cursor request action encoding", () => {
 		expect(payload.conversationState?.turns.length).toBeGreaterThan(0);
 	});
 
-	it("uses a resume action when a tool result is the final context message", async () => {
+	it("opens a new turn when a tool result follows a Cursor turn absent from this process", async () => {
 		const payload = await captureCursorPayload(toolResultContext());
 
-		expect(payload.action?.action.case).toBe("resumeAction");
+		expect(payload.action?.action.case).toBe("userMessageAction");
 	});
 
 	it("uses a user message action with selected context for image-only user turns", async () => {

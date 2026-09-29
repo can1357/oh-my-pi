@@ -213,6 +213,7 @@ import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError } from "./connect-error-detail";
+import cursorContinuation from "./cursor-continuation.md" with { type: "text" };
 import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
@@ -341,6 +342,8 @@ const warnedCursorKimiK3ReplayMessages = new Set<string>();
 const rotatedConversationIds = new Map<string, string>();
 const successfulRotatedConversationIds = new Set<string>();
 const freshRotatedConversationIds = new Set<string>();
+/** Wire ids for which Cursor has acknowledged a server turn in this process. */
+const resumableConversationIds = new Set<string>();
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
@@ -365,6 +368,8 @@ interface CursorRequestState {
 	blobStore: Map<string, Uint8Array>;
 	conversationState?: ConversationStateStructure;
 	rotatedFresh?: boolean;
+	/** Whether Cursor holds a turn on this wire conversation id. */
+	resumable?: boolean;
 }
 
 interface CursorGrpcRequest {
@@ -712,6 +717,7 @@ function streamCursorWithWireMode(
 					blobStore,
 					conversationState: cachedState,
 					rotatedFresh,
+					resumable: resumableConversationIds.has(conversationId),
 				},
 				wireMode,
 			);
@@ -822,6 +828,7 @@ function streamCursorWithWireMode(
 
 			const onConversationCheckpoint = (checkpoint: ConversationStateStructure) => {
 				conversationStateCache.set(conversationId!, checkpoint);
+				resumableConversationIds.add(conversationId!);
 			};
 
 			h2Request.on("response", headers => {
@@ -959,6 +966,7 @@ function streamCursorWithWireMode(
 			h2Request.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
+			resumableConversationIds.add(conversationId);
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
 				freshRotatedConversationIds.delete(conversationId);
@@ -5550,6 +5558,15 @@ async function buildGrpcRequestForWireMode(
 			userText = extractText(userContent);
 			hasUserImages = hasImages(userContent);
 		}
+	}
+	if (
+		!activeUserMessage &&
+		(activeMessage?.role === "assistant" || activeMessage?.role === "toolResult") &&
+		(!state.resumable || context.messages.findLast(message => message.role === "assistant")?.api !== model.api)
+	) {
+		// A foreign or first Cursor tail has no server turn to resume; keep its full history.
+		userContent = cursorContinuation;
+		userText = cursorContinuation;
 	}
 
 	const action = create(ConversationActionSchema, {

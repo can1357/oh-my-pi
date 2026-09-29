@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
-import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import { buildGrpcRequest, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -79,15 +79,15 @@ function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
 }
 
 /** /retry after restart: trailing tool results, no active user message. */
-function resumeContext(): Context {
+function resumeContext(api: "cursor-agent" | "anthropic-messages" = "cursor-agent"): Context {
 	return {
 		messages: [
 			{ role: "user", content: "Use the read tool.", timestamp: 1 },
 			{
 				role: "assistant",
-				api: "cursor-agent",
-				provider: "cursor",
-				model: "cursor-rotation-fixture",
+				api,
+				provider: api === "cursor-agent" ? "cursor" : "anthropic",
+				model: api === "cursor-agent" ? "cursor-rotation-fixture" : "claude-opus-5-5",
 				content: [{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "package.json" } }],
 				usage: {
 					input: 0,
@@ -246,7 +246,7 @@ afterEach(async () => {
 	await stopServer();
 });
 
-describe("Cursor conversationId rotation (issue #8345)", () => {
+describe("Cursor turn selection and conversationId rotation", () => {
 	it("rotates the poisoned conversationId and recovers on the next attempt", async () => {
 		const seenConversationIds: string[] = [];
 		const baseUrl = await startServer(seenConversationIds);
@@ -306,7 +306,55 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seenConversationIds[1]).not.toBe("sess-sticky");
 	});
 
-	it("rotated retry recovers a resume-action turn", async () => {
+	it("opens the first Cursor turn over the complete foreign-provider tool history", async () => {
+		const ctx = resumeContext("anthropic-messages");
+		const blobs = new Map<string, Uint8Array>();
+		const built = await buildGrpcRequest(makeModel("http://127.0.0.1"), ctx, undefined, {
+			conversationId: "sess-foreign-fresh",
+			blobStore: blobs,
+		});
+		const request = fromBinary(AgentClientMessageSchema, built.requestBytes);
+		if (request.message.case !== "runRequest") throw new Error("expected a Cursor Run");
+		expect(request.message.value.action?.action.case).toBe("userMessageAction");
+
+		const read = (id: Uint8Array) => {
+			const blob = blobs.get(Buffer.from(id).toString("hex"));
+			if (!blob) throw new Error("missing Cursor history blob");
+			return JSON.parse(new TextDecoder().decode(blob));
+		};
+		const root = built.conversationState.rootPromptMessagesJson.map(read);
+		expect(root.slice(1)).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Use the read tool." }] },
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "tool-call",
+						toolCallId: "call-read",
+						toolName: "read",
+						args: { path: "package.json" },
+					},
+				],
+			},
+			{
+				role: "tool",
+				id: "call-read",
+				content: [{ type: "tool-result", toolName: "read", toolCallId: "call-read", result: "package contents" }],
+			},
+		]);
+	});
+
+	it("resumes Cursor's own tool tail but opens a new turn after another provider takes over", async () => {
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["ok", "ok", "ok"]);
+		expect((await runToEnd(baseUrl, "sess-bounce")).type).toBe("done");
+		expect((await runToEnd(baseUrl, "sess-bounce", resumeContext())).type).toBe("done");
+		expect((await runToEnd(baseUrl, "sess-bounce", resumeContext("anthropic-messages"))).type).toBe("done");
+
+		expect(seen.map(request => request.action)).toEqual(["userMessageAction", "resumeAction", "userMessageAction"]);
+	});
+
+	it("rotated retry recovers a fresh tool-result tail", async () => {
 		const seen: WireRequest[] = [];
 		const baseUrl = await startScriptedServer(seen, ["reject", "ok"]);
 		const ctx = resumeContext();
@@ -320,7 +368,7 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 
 		expect(seen).toHaveLength(2);
 		expect(seen[0]?.conversationId).toBe("sess-resume");
-		expect(seen[0]?.action).toBe("resumeAction");
+		expect(seen[0]?.action).toBe("userMessageAction");
 		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
 		expect(seen[1]?.action).toBe("userMessageAction");
 		expect(seen[1]?.userText).toBe("Use the read tool.");
