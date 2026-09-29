@@ -9,7 +9,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskModelDivergence } from "@oh-my-pi/pi-tui/tools/task";
 
 /** Inline preview budget before the envelope points at `agent://<id>` instead. */
 const FULL_OUTPUT_THRESHOLD = 5000;
@@ -35,6 +35,25 @@ function previewHead(output: string): string {
 	const slice = output.slice(0, FULL_OUTPUT_THRESHOLD);
 	const lastNewline = slice.lastIndexOf("\n");
 	return lastNewline >= FULL_OUTPUT_THRESHOLD / 2 ? slice.slice(0, lastNewline) : slice;
+}
+
+/**
+ * `<model-receipt>` fields for a run whose model or effort diverged from its
+ * spawn request, built from the settled model fields. Undefined when nothing
+ * diverged, so an honored request adds nothing to the envelope.
+ */
+function modelReceipt(result: SingleResult) {
+	const reasons: TaskModelDivergence[] = [...(result.modelDivergences ?? [])];
+	if (result.resolvedModelIsFallback) reasons.push("model-retry-fallback");
+	if (reasons.length === 0) return undefined;
+	const requestedModel = result.modelOverride;
+	return {
+		requestedModel: Array.isArray(requestedModel) ? requestedModel.join(",") : requestedModel,
+		requestedEffort: result.requestedEffort,
+		model: result.resolvedModelIdentity ?? result.resolvedModel,
+		thinking: result.resolvedThinkingLevel,
+		reasons: reasons.join(","),
+	};
 }
 
 /** Render the `<task-result>` envelope for a settled run. */
@@ -80,6 +99,7 @@ export function formatTaskResultSummary(
 					charSize: formatBytes(result.outputMeta.charCount),
 				}
 			: undefined,
+		modelReceipt: modelReceipt(result),
 		mergeSummary: options.mergeSummary ?? "",
 	});
 }

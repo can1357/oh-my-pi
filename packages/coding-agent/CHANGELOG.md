@@ -30,6 +30,7 @@
 - The default image model chain now uses `openai/gpt-image-2`, `openai-codex/gpt-image-2`, and the GA `gemini-3-pro-image` (Google and OpenRouter) instead of `gpt-image-1` and the Gemini preview id.
 - Reduced CPU while streaming replies and tool calls: the reveal no longer deep-compares frozen leading content on every flush, streamed argument extraction no longer re-verifies the whole prefix, and deltas no longer queue extension notifications when no extension listens for `message_update` ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
 - Reduced CPU and allocations for in-memory reads (URLs, notebooks, converted documents), tool-result spill checks, write read-projection guards, and hashline prefix stripping ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+- Task results now tell the parent agent when a subagent ran on a different model or effort than it asked for: a `<model-receipt>` line names the model and thinking level that ran and a reason code (`model-auth-fallback`, `effort-unsupported`, `effort-clamped`, `model-retry-fallback`) ([#9647](https://github.com/can1357/oh-my-pi/issues/9647), [#9664](https://github.com/can1357/oh-my-pi/pull/9664) by [@aktanazat](https://github.com/aktanazat))
 
 ### Fixed
 

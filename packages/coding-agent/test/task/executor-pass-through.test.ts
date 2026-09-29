@@ -21,6 +21,7 @@ import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -467,6 +468,93 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
+	});
+
+	it("tells the parent when task.maxEffort lowered the requested effort", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated({ "task.maxEffort": "low" });
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(yieldEmittingSession()));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, model: ["@task"] },
+			id: "subagent-receipt-effort-clamped",
+			effort: "hi",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).toContain(
+			'<model-receipt requested-effort="hi" model="openai-codex/gpt-5.6-sol" thinking="low" reasons="effort-clamped" />',
+		);
+	});
+
+	it("adds no model receipt when resolution honors the requested model and effort", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated();
+		settings.setModelRole("task", `${model.provider}/${model.id}`);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(yieldEmittingSession()));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, model: ["@task"] },
+			modelOverride: [`${model.provider}/${model.id}`],
+			id: "subagent-receipt-honored",
+			effort: "hi",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).not.toContain("<model-receipt");
+	});
+
+	it("tells the parent when a requested model without credentials fell back to its model", async () => {
+		const requested = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const parentModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!requested || !parentModel) throw new Error("Expected bundled models to exist");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		// The requested Anthropic model has no working credentials; the parent's OpenAI model does.
+		const modelRegistry = createModelRegistry([requested, parentModel], async model =>
+			model.provider === parentModel.provider ? "test-key" : undefined,
+		);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			modelOverride: [`${requested.provider}/${requested.id}`],
+			parentActiveModelPattern: `${parentModel.provider}/${parentModel.id}`,
+			id: "subagent-receipt-auth-fallback",
+			modelRegistry,
+		});
+
+		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).toContain(
+			'<model-receipt requested-model="anthropic/claude-sonnet-4-5" model="openai-codex/gpt-5.6-sol" reasons="model-auth-fallback" />',
+		);
+	});
+
+	it("tells the parent when a deferred model pattern fell back for missing credentials", async () => {
+		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!parentModel) throw new Error("Expected bundled anthropic model to exist");
+		const session = Object.assign(yieldEmittingSession(), { model: parentModel });
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			...createSessionResult(session),
+			modelPatternAuthFallbackUsed: true,
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			modelOverride: ["runtime-provider/runtime-model"],
+			parentActiveModelPattern: `${parentModel.provider}/${parentModel.id}`,
+			id: "subagent-receipt-deferred-auth-fallback",
+			modelRegistry: createModelRegistry([]),
+		});
+
+		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).toContain(
+			'<model-receipt requested-model="runtime-provider/runtime-model" reasons="model-auth-fallback" />',
+		);
 	});
 
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {

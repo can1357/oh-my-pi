@@ -83,4 +83,17 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("<output>\nagent failed\n</output>");
 		expect(summary).not.toContain("<error>");
 	});
+
+	it("tells the parent when a retry-fallback model served the run", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("done"),
+				resolvedModel: "openai-codex/gpt-5.6-sol",
+				resolvedModelIdentity: "openai-codex/gpt-5.6-sol",
+				resolvedModelIsFallback: true,
+			},
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain('<model-receipt model="openai-codex/gpt-5.6-sol" reasons="model-retry-fallback" />');
+	});
 });

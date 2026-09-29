@@ -9,6 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -107,6 +108,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type TaskModelDivergence,
 	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
@@ -2521,6 +2523,33 @@ async function driveSessionToYield(
 	return { exitCode, error, aborted, abortReasonText };
 }
 
+/**
+ * Divergences between a spawn's model request and what resolution selected, in
+ * the order {@link TaskModelDivergence} lists them. Undefined when resolution
+ * honored the request.
+ */
+function resolveModelDivergences(
+	model: Model | undefined,
+	authFallbackUsed: boolean,
+	effort: TaskEffort | undefined,
+	effortCeiling: Effort | undefined,
+): TaskModelDivergence[] | undefined {
+	const divergences: TaskModelDivergence[] = [];
+	if (authFallbackUsed) divergences.push("model-auth-fallback");
+	if (model && effort !== undefined) {
+		const uncapped = resolveTaskEffortLevel(model, effort);
+		if (uncapped === undefined) {
+			divergences.push("effort-unsupported");
+		} else if (
+			effortCeiling !== undefined &&
+			THINKING_EFFORTS.indexOf(uncapped) > THINKING_EFFORTS.indexOf(effortCeiling)
+		) {
+			divergences.push("effort-clamped");
+		}
+	}
+	return divergences.length > 0 ? divergences : undefined;
+}
+
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
 	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
@@ -2532,6 +2561,10 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** Coarse effort the spawn requested. */
+	requestedEffort?: TaskEffort;
+	/** Divergences decided when the model resolved; see {@link resolveModelDivergences}. */
+	modelDivergences?: TaskModelDivergence[];
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2748,6 +2781,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
+		requestedEffort: args.requestedEffort,
+		modelDivergences: args.modelDivergences,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -3613,6 +3648,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
+	// Decided once the child session exists, because a deferred model pattern
+	// only resolves (or falls back for missing credentials) inside it.
+	let modelDivergences: TaskModelDivergence[] | undefined;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -4043,8 +4081,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
+			let deferredAuthFallbackUsed: boolean | undefined;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				({ session, modelPatternAuthFallbackUsed: deferredAuthFallbackUsed } =
+					await awaitAbortable(sessionPromise));
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -4065,6 +4105,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
 			}
 			sessionCreatedAt = performance.now();
+			modelDivergences = resolveModelDivergences(
+				model ?? session.model,
+				authFallbackUsed || deferredAuthFallbackUsed === true,
+				options.effort,
+				spawnEffortCeiling,
+			);
 
 			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,
@@ -4474,6 +4520,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		modelOverride,
 		modelRole,
+		requestedEffort: options.effort,
+		modelDivergences,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,

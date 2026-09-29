@@ -2,6 +2,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
+import type { TaskEffort } from "../thinking";
 import type { ToolRenderer } from "./renderer";
 /**
  * TUI rendering for task tool.
@@ -1921,6 +1922,20 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/**
+ * Why a run's model or thinking effort differs from what its spawn requested.
+ * A closed set, so the parent branches on a code instead of parsing prose.
+ */
+export type TaskModelDivergence =
+	/** The requested model had no working credentials, so the run fell back to the parent session's model. */
+	| "model-auth-fallback"
+	/** An effort was requested but the resolved model exposes no controllable thinking effort. */
+	| "effort-unsupported"
+	/** The `task.maxEffort` ceiling lowered the requested effort. */
+	| "effort-clamped"
+	/** A retry-fallback model served the run instead of the resolved one. */
+	| "model-retry-fallback";
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -1964,6 +1979,14 @@ export interface SingleResult {
 	resolvedModelRoute?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
+	/** Coarse effort the spawn requested. */
+	requestedEffort?: TaskEffort;
+	/**
+	 * Divergences decided when the model resolved, in a fixed order. Absent when
+	 * resolution honored the request. `model-retry-fallback` is never stored here;
+	 * it is read from {@link resolvedModelIsFallback}.
+	 */
+	modelDivergences?: TaskModelDivergence[];
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
