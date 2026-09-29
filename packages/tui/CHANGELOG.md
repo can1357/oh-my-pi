@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.4.4] - 2026-09-29
+
 ### Added
 
 - Added Tern Surface Protocol (TSP) integration for native terminal rendering
@@ -9,12 +16,8 @@
 - `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Added `formatFileMatches` and `FileMatchSection` to `tools/grouped-file-output` for rendering per-file grep/ast-grep matches in grouped or flat mode.
 
-### Fixed
-
-- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-
 ## [18.4.3] - 2026-09-28
+
 ### Added
 
 - Added the native composer and dock redesign for Tern: the composer carries its attachment chips, a `bash`/`python` mode chip (with an eye-off mark for `!!`/`$$`), a thinking-effort chip that cycles on click, and a send keycap that turns into Stop while a turn runs; the working row shows the intent, elapsed time and an `esc Stop` button (a countdown ring and Cancel while retrying, indeterminate progress while compacting); queued messages are pills with a count and an Edit button; todos and running subagents are HUD pills; the status strip draws context as a ring meter with the auto-compaction tick, splits the path into a dim parent and strong leaf, keeps model, context and git longest, and opens the model picker, `/context`, `/git`, `/usage` or the project folder on click; autocomplete items carry named icons, the matched prefix, the full description, live state as a value, and scroll the selection into view
