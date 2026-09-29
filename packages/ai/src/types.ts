@@ -1161,6 +1161,15 @@ export interface AssistantMessage {
 	ttft?: number; // Time to first token in milliseconds
 	/** Local wall-clock time the response finished streaming (ms since epoch); stamped by the session at message_end so prompt→yield timing never depends on provider-reported duration. */
 	completedAt?: number;
+	/**
+	 * Locally observed elapsed ms per thinking block, keyed by content index.
+	 * A leading block starts at the observed message start; later blocks start at
+	 * their first thinking event. Stops at thinking_end, the next block, or message
+	 * completion/interruption. Published on partials as blocks close and persisted
+	 * on the final message. Not provider-internal reasoning time or unseen request
+	 * latency; absent when no measurement was observed, including older sessions.
+	 */
+	thinkingMs?: Record<number, number>;
 }
 
 export interface ToolResultMessage<TDetails = unknown> {

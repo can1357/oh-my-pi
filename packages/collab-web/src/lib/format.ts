@@ -54,6 +54,13 @@ export function relTime(tsMs: number): string {
 	return `${Math.floor(h / 24)}d ago`;
 }
 
+/** Local "14:02" from an ISO timestamp; empty for unparsable input. */
+export function fmtClock(iso: string): string {
+	const ms = Date.parse(iso);
+	if (!Number.isFinite(ms)) return "";
+	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 /** "73%" from a 0–100 percent; em dash for null/non-finite. */
 export function fmtPercent(p: number | null | undefined): string {
 	if (p === null || p === undefined || !Number.isFinite(p)) return "—";

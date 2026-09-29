@@ -1,12 +1,23 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
-import { ChevronRight } from "lucide-react";
+import type {
+	AssistantMessage,
+	CustomMessageEntry,
+	ImageContent,
+	SessionEntry,
+	TextContent,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-wire";
+import { ArrowDown, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
-import { fmtTokens } from "../../lib/format";
+import { fmtClock, fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
+import { BrandMark } from "../shell/BrandMark";
+import { ActivityGroup } from "./ActivityGroup";
+import { AsyncResultNotice, IrcNotice, SubagentCard } from "./AgentCards";
 import { Markdown } from "./Markdown";
-import { ToolCard } from "./ToolCard";
+import { type AgentRowModel, buildTranscriptRows, type HumanRowModel } from "./rows";
+import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptScrollAnchor } from "./scroll-anchor";
 import "./transcript.css";
 
 export interface TranscriptProps {
@@ -14,10 +25,20 @@ export interface TranscriptProps {
 	stream: AssistantMessage | null;
 	streamDone: boolean;
 	activeTools: ReadonlyMap<string, ActiveTool>;
+	/** Completed execution results held until the matching toolResult entry arrives. */
+	liveResults?: ReadonlyMap<string, ToolResultMessage>;
+	/** Finished live messages whose persisted entries have not arrived yet. */
+	completedStreams?: readonly AssistantMessage[];
+	/** Latest real tool intent from the current run; null before an intent arrives. */
+	workingIntent?: string | null;
 	working: boolean;
 	compact?: boolean; // dense variant for the agent drawer
 	/** Sub-session drill-down capabilities forwarded to tool renderers. */
 	host?: ToolRenderHost;
+	/** Host participant's display name, shown on host prompts (falls back to "host"). */
+	hostName?: string;
+	/** Agent whose transcript is being viewed; used for incoming IRC attribution. */
+	recipientName?: string;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
 	phase?: ConnectionPhase;
 }
@@ -43,36 +64,42 @@ export function updateTranscriptTailLock(element: ScrollGeometry, lock: TailLock
 	lock.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
 }
 
-function Row({
-	kind,
-	gutter,
-	title,
-	children,
-}: {
-	kind: "user" | "assistant" | "custom" | "marker";
-	gutter: ReactNode;
-	title?: string;
-	children: ReactNode;
-}): ReactNode {
+type Voice = "agent" | "host" | "guest";
+
+/** Turn heading: a quiet byline — who is speaking, and when. Content, not identity chrome, carries the turn. */
+function Speaker({ voice, name, timestamp }: { voice: Voice; name: string; timestamp?: string }): ReactNode {
+	const clock = timestamp ? fmtClock(timestamp) : "";
 	return (
-		<div className={`tr-row tr-row--${kind}`}>
-			<div className="tr-gutter" title={title}>
-				{gutter}
-			</div>
-			<div className="tr-body">{children}</div>
+		<div className={`tr-speaker tr-speaker--${voice}`}>
+			{voice === "agent" && <BrandMark size={12} />}
+			<span className="tr-speaker-name">{name}</span>
+			{voice === "host" && name !== "host" && <span className="tr-speaker-meta">host</span>}
+			{clock && (
+				<time className="tr-speaker-meta" dateTime={timestamp} title={timestamp}>
+					{clock}
+				</time>
+			)}
 		</div>
 	);
 }
 
-function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean }): ReactNode {
-	const [open, setOpen] = useState(false);
+/**
+ * One transcript turn. `speaker` is omitted when the previous visible row had the
+ * same voice, so consecutive rows from one speaker read as one continuous turn.
+ */
+function Row({
+	kind,
+	speaker,
+	children,
+}: {
+	kind: "user" | "assistant" | "custom" | "marker";
+	speaker?: ReactNode;
+	children: ReactNode;
+}): ReactNode {
 	return (
-		<div className="tr-think">
-			<button type="button" className="tr-think-head" onClick={() => setOpen(v => !v)}>
-				<ChevronRight size={11} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
-				thinking{redacted ? " · redacted" : ""}
-			</button>
-			{open && <div className="tr-think-body">{redacted ? "(redacted by provider)" : text}</div>}
+		<div className={`tr-row tr-row--${kind}${speaker ? " tr-row--turn" : ""}`}>
+			{speaker}
+			<div className="tr-body">{children}</div>
 		</div>
 	);
 }
@@ -103,134 +130,180 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 	);
 }
 
-function AssistantBody({
-	message,
-	results,
-	active,
-	pending,
-	host,
-}: {
-	message: AssistantMessage;
-	results: ReadonlyMap<string, ToolResultMessage>;
-	active: ReadonlyMap<string, ActiveTool>;
-	/** Still streaming — suppress stop-reason chips on the partial message. */
-	pending: boolean;
-	host?: ToolRenderHost;
-}): ReactNode {
-	const blocks = message.content.map((block, i) => {
-		switch (block.type) {
-			case "thinking":
-				return <ThinkingBlock key={i} text={block.thinking} />;
-			case "redactedThinking":
-				return <ThinkingBlock key={i} text="" redacted />;
-			case "text":
-				return <Markdown key={i} text={block.text} />;
-			case "toolCall": {
-				const act = active.get(block.id);
-				const result = results.get(block.id);
-				const args = act?.args ?? block.arguments;
-				return (
-					<ToolCard
-						key={block.id}
-						toolCallId={block.id}
-						name={block.name}
-						intent={block.intent ?? act?.intent}
-						args={args}
-						result={result}
-						host={host}
-						running={!result && (act !== undefined || pending)}
-						partialResult={act?.partialResult}
-					/>
-				);
-			}
-			default:
-				return null;
-		}
-	});
-	const stop = message.stopReason;
-	const failed = !pending && (stop === "error" || stop === "aborted");
+/**
+ * A host or guest prompt: the chat message the agent's turn answers. Takes the
+ * model's fields, not the model object, which is rebuilt on every stream token.
+ */
+const HumanRow = memo(function HumanRow({
+	entry,
+	voice,
+	from,
+	continued,
+	hostName,
+}: Omit<HumanRowModel, "kind" | "key"> & { hostName?: string }): ReactNode {
+	let content: string | readonly (TextContent | ImageContent)[] = "";
+	if (entry.type === "message" && entry.message.role === "user") content = entry.message.content;
+	else if (entry.type === "custom_message") content = entry.content;
+	const name = voice === "host" ? (hostName ?? "host") : from;
 	return (
-		<>
-			{blocks}
-			{failed && (
-				<div className="tr-stop">
-					<span className={`tr-chip ${stop === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>{stop}</span>
-					{message.errorMessage !== undefined && message.errorMessage.length > 0 && (
-						<span className="tr-stop-msg">{message.errorMessage}</span>
-					)}
-				</div>
-			)}
-		</>
+		<Row
+			kind="user"
+			speaker={continued ? undefined : <Speaker voice={voice} name={name} timestamp={entry.timestamp} />}
+		>
+			<div className="tr-prompt">
+				<MsgContent content={content} />
+			</div>
+		</Row>
+	);
+});
+
+/** One run-level status, separate from immutable reasoning and tool output. */
+function ThinkingStatus({ label }: { label?: string | null }): ReactNode {
+	return (
+		<div className="tr-think-status" role="status">
+			<span className="tr-working-node" aria-hidden="true" />
+			<span className="tr-working-label" title={label ?? undefined}>
+				{label || "Thinking…"}
+			</span>
+		</div>
 	);
 }
 
-interface EntryRowProps {
-	entry: SessionEntry;
-	results: ReadonlyMap<string, ToolResultMessage>;
-	active: ReadonlyMap<string, ActiveTool>;
-	host?: ToolRenderHost;
+/** Visible reasoning segment, styled like TUI thinking prose rather than a tool disclosure. */
+const ThinkingBlock = memo(function ThinkingBlock({
+	text,
+	redacted,
+	live,
+	durationMs,
+}: {
+	text: string;
+	redacted: boolean;
+	live: boolean;
+	durationMs?: number;
+}): ReactNode {
+	const measured = durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0;
+	const seconds = measured ? Math.round(durationMs / 1000) : 0;
+	return (
+		<div className="tr-think" aria-label="Reasoning" aria-busy={live}>
+			{redacted ? <p className="tr-think-redacted">Reasoning hidden by the provider.</p> : <Markdown text={text} />}
+			{!live && measured ? (
+				<div className="tr-think-time">
+					{seconds === 0
+						? "Thought for less than a second"
+						: `Thought for ${seconds} ${seconds === 1 ? "second" : "seconds"}`}
+				</div>
+			) : null}
+		</div>
+	);
+});
+
+/** Agent turn: chat text and reasoning in the flow, tool calls folded into work blocks. */
+function AgentRow({ row, host }: { row: AgentRowModel; host?: ToolRenderHost }): ReactNode {
+	return (
+		<Row
+			kind="assistant"
+			speaker={row.continued ? undefined : <Speaker voice="agent" name="agent" timestamp={row.timestamp} />}
+		>
+			{row.units.map(unit => {
+				switch (unit.type) {
+					case "text":
+						return (
+							<Anchored key={unit.key} keys={[unit.anchor]} className="tr-unit">
+								<Markdown text={unit.text} />
+							</Anchored>
+						);
+					case "thinking":
+						return (
+							<Anchored key={unit.key} keys={[unit.anchor]} className="tr-unit">
+								<ThinkingBlock
+									text={unit.text}
+									redacted={unit.redacted}
+									live={unit.live}
+									durationMs={unit.durationMs}
+								/>
+							</Anchored>
+						);
+					case "activity":
+						return (
+							<Anchored key={unit.key} keys={unit.items.map(item => `tool:${item.id}`)} className="tr-unit">
+								<ActivityGroup items={unit.items} host={host} />
+							</Anchored>
+						);
+					case "subagents":
+						return (
+							<Anchored key={unit.key} keys={[`tool:${unit.item.id}`]} className="tr-unit">
+								<SubagentCard item={unit.item} host={host} />
+							</Anchored>
+						);
+					case "stop":
+						return (
+							<Anchored key={unit.key} keys={[unit.anchor]} className="tr-stop">
+								<span className={`tr-chip ${unit.stop === "error" ? "tr-chip--err" : "tr-chip--warn"}`}>
+									{unit.stop}
+								</span>
+								{unit.message !== undefined && unit.message.length > 0 && (
+									<span className="tr-stop-msg">{unit.message}</span>
+								)}
+							</Anchored>
+						);
+				}
+			})}
+		</Row>
+	);
 }
 
-/** Re-render only when the entry itself or one of its tool pairings changed. */
-function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
-	if (prev.entry !== next.entry || prev.host !== next.host) return false;
-	const e = next.entry;
-	if (e.type !== "message" || e.message.role !== "assistant") return true;
-	for (const block of e.message.content) {
-		if (block.type !== "toolCall") continue;
-		if (prev.results.get(block.id) !== next.results.get(block.id)) return false;
-		if (prev.active.get(block.id) !== next.active.get(block.id)) return false;
-	}
-	return true;
-}
-
-const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryRowProps): ReactNode {
-	switch (entry.type) {
-		case "message": {
-			const msg = entry.message;
-			switch (msg.role) {
-				case "user":
-					return (
-						<Row kind="user" gutter="host" title={entry.timestamp}>
-							<MsgContent content={msg.content} />
-						</Row>
-					);
-				case "assistant":
-					return (
-						<Row kind="assistant" gutter="agent" title={entry.timestamp}>
-							<AssistantBody message={msg} results={results} active={active} pending={false} host={host} />
-						</Row>
-					);
-				default:
-					// toolResult entries are consumed via pairing; developer & unknown roles skipped
-					return null;
-			}
+/** Heading for a folded custom message: skill name + args for skill prompts, else the first text line. */
+function customNoticeTitle(entry: CustomMessageEntry): { chip: string; label: string; detail?: string } {
+	if (entry.customType === "skill-prompt" && entry.details !== null && typeof entry.details === "object") {
+		const { name, args } = entry.details as Record<string, unknown>;
+		if (typeof name === "string" && name.length > 0) {
+			return { chip: "skill", label: name, detail: typeof args === "string" ? args.trim() || undefined : undefined };
 		}
-		case "custom_message": {
-			if (entry.customType === "collab-prompt") {
-				const details = entry.details;
-				const from =
-					details !== null &&
-					typeof details === "object" &&
-					typeof (details as Record<string, unknown>).from === "string"
-						? ((details as Record<string, unknown>).from as string)
-						: "guest";
-				return (
-					<Row kind="user" gutter={<span className="tr-badge">{from}</span>} title={entry.timestamp}>
-						<MsgContent content={entry.content} />
-					</Row>
-				);
-			}
-			if (!entry.display) return null;
-			return (
-				<Row kind="custom" gutter="" title={entry.timestamp}>
-					<div className="tr-custom">
-						<span className="tr-chip">{entry.customType}</span>
+	}
+	const text =
+		typeof entry.content === "string"
+			? entry.content
+			: entry.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+	const line =
+		text
+			.split("\n")
+			.find(l => l.trim().length > 0)
+			?.trim() ?? "";
+	return { chip: entry.customType, label: line };
+}
+
+/**
+ * Host-injected messages (skill prompts, hook notices) carry large expanded
+ * bodies that aren't chat — folded to one line by default, expandable on click.
+ */
+function CustomNotice({ entry }: { entry: CustomMessageEntry }): ReactNode {
+	const [open, setOpen] = useState(false);
+	const title = customNoticeTitle(entry);
+	return (
+		<Row kind="custom">
+			<div className={open ? "tr-custom tr-custom--open" : "tr-custom"}>
+				<button type="button" className="tr-custom-head" aria-expanded={open} onClick={() => setOpen(v => !v)}>
+					<ChevronRight size={13} className={`tr-chev${open ? " tr-chev--open" : ""}`} aria-hidden="true" />
+					<span className="tr-chip">{title.chip}</span>
+					<span className="tr-custom-label">{title.label}</span>
+					{title.detail && <span className="tr-custom-detail">{title.detail}</span>}
+				</button>
+				{open && (
+					<div className="tr-custom-body">
 						<MsgContent content={entry.content} />
 					</div>
-				</Row>
-			);
-		}
+				)}
+			</div>
+		</Row>
+	);
+}
+
+/** Dividers, marker lines, and custom notices. */
+const NoticeRow = memo(function NoticeRow({ entry, host }: { entry: SessionEntry; host?: ToolRenderHost }): ReactNode {
+	switch (entry.type) {
+		case "custom_message":
+			if (entry.customType === "async-result") return <AsyncResultNotice entry={entry} host={host} />;
+			return <CustomNotice entry={entry} />;
 		case "compaction":
 			return (
 				<div className="tr-divider" title={entry.shortSummary ?? entry.summary}>
@@ -245,33 +318,61 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			);
 		case "model_change":
 			return (
-				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">model → {entry.model}</span>
+				<Row kind="marker">
+					<span className="tr-marker" title={entry.timestamp}>
+						model <span className="tr-marker-arrow">→</span> {entry.model}
+					</span>
 				</Row>
 			);
 		case "thinking_level_change":
 			return (
-				<Row kind="marker" gutter="" title={entry.timestamp}>
-					<span className="tr-marker">thinking → {entry.thinkingLevel ?? "off"}</span>
+				<Row kind="marker">
+					<span className="tr-marker" title={entry.timestamp}>
+						thinking <span className="tr-marker-arrow">→</span> {entry.thinkingLevel ?? "off"}
+					</span>
 				</Row>
 			);
 		default:
-			// unknown entry types from newer hosts — skip tolerantly
 			return null;
 	}
-}, entryRowEqual);
+});
+
+/** Entries a reader would call a new message: prompts, agent replies with text, visible notices. */
+function isChatEntry(entry: SessionEntry): boolean {
+	if (entry.type === "custom_message") return entry.display;
+	if (entry.type !== "message") return false;
+	if (entry.message.role === "user") return true;
+	return (
+		entry.message.role === "assistant" &&
+		entry.message.content.some(block => block.type === "text" && block.text.trim().length > 0)
+	);
+}
 
 /**
- * Rows mounted at the tail. Large sessions carry thousands of entries; mounting
+ * Entries mounted at the tail. Large sessions carry thousands of entries; mounting
  * all of them makes every streamed token re-reconcile and re-lay-out the whole
- * transcript. Older rows mount a window at a time from the top.
+ * transcript. Older entries mount a window at a time from the top.
  */
 const WINDOW = 100;
 /** Distance from the top (px) at which scrolling up mounts the previous window. */
 const EARLIER_TRIGGER_PX = 200;
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+	const {
+		entries,
+		stream,
+		streamDone,
+		activeTools,
+		liveResults,
+		completedStreams,
+		workingIntent,
+		working,
+		compact,
+		host,
+		hostName,
+		recipientName = "agent",
+		phase,
+	} = props;
 
 	// null follows the tail. A number pins the first mounted entry while the
 	// reader is scrolled away from the bottom, so appended entries never
@@ -281,7 +382,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const start = pinnedStart === null ? tailStart : Math.min(pinnedStart, tailStart);
 	const visible = useMemo(() => entries.slice(start), [entries, start]);
 
-	// A tool result always follows its call, so visible rows only pair with visible results.
+	// A tool result always follows its call, so visible rows pair with visible entries and completed live tools.
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();
 		for (const entry of visible) {
@@ -289,23 +390,26 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				map.set(entry.message.toolCallId, entry.message);
 			}
 		}
+		if (liveResults) {
+			for (const [id, res] of liveResults) {
+				if (!map.has(id)) map.set(id, res);
+			}
+		}
 		return map;
-	}, [visible]);
+	}, [visible, liveResults]);
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const lockRef = useRef(true);
-	/**
-	 * First visible row and its offset from the viewport top, captured before
-	 * mounting earlier rows. Restoring against the row, not the total height
-	 * delta, stays exact when the same commit also appends live entries.
-	 */
-	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
+	// Entry count when the reader scrolled away from the tail; null while following it.
+	const [unseenFrom, setUnseenFrom] = useState<number | null>(null);
+	// Content identity survives prepending within a grouped turn and remounting its DOM.
+	const prependRef = useRef<TranscriptScrollAnchor | null>(null);
 
 	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
 	useEffect(() => {
 		const el = rootRef.current;
 		if (el !== null) followTranscriptTail(el, lockRef);
-	}, [entries, stream, activeTools, working]);
+	}, [entries, stream, activeTools, liveResults, completedStreams, working, workingIntent]);
 
 	// A `live` transition (initial connect or reconnect) jumps to the latest message
 	// regardless of the prior scroll position. Absent for the agent drawer's compact transcript.
@@ -313,6 +417,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		const el = rootRef.current;
 		if (phase !== "live" || el === null) return;
 		setPinnedStart(null);
+		setUnseenFrom(null);
 		followTranscriptTail(el, lockRef, true);
 	}, [phase]);
 
@@ -322,23 +427,29 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		const before = prependRef.current;
 		if (el === null || before === null) return;
 		prependRef.current = null;
-		if (!before.anchor.isConnected) return;
-		el.scrollTop += before.anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
+		restoreTranscriptAnchor(el, before);
 	}, [start]);
 
 	const showEarlier = (): void => {
 		const el = rootRef.current;
 		if (el === null || start === 0 || prependRef.current !== null) return;
-		const top = el.getBoundingClientRect().top;
-		for (const row of el.children) {
-			if (row.classList.contains("tr-earlier")) continue;
-			const rect = row.getBoundingClientRect();
-			if (rect.bottom <= top) continue;
-			prependRef.current = { anchor: row, offset: rect.top - top };
-			break;
-		}
+		prependRef.current = captureTranscriptAnchor(el);
 		setPinnedStart(Math.max(0, start - WINDOW));
 	};
+
+	const jumpToLatest = (): void => {
+		const el = rootRef.current;
+		if (el === null) return;
+		setPinnedStart(null);
+		setUnseenFrom(null);
+		followTranscriptTail(el, lockRef, true);
+	};
+
+	// Chat-visible entries that arrived while the reader was scrolled up (tool results and markers don't count).
+	const unseen = useMemo(
+		() => (unseenFrom === null ? 0 : entries.slice(unseenFrom).filter(isChatEntry).length),
+		[entries, unseenFrom],
+	);
 
 	// Tool calls committed anywhere in the session: rescanned when entries change,
 	// not per streaming token or tool output update.
@@ -359,74 +470,119 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		for (const tool of activeTools.values()) {
 			if (committedToolIds.has(tool.toolCallId)) continue;
 			if (stream?.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId)) continue;
+			if (
+				completedStreams?.some(message =>
+					message.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId),
+				)
+			)
+				continue;
 			tail.push(tool);
 		}
 		return tail;
-	}, [committedToolIds, stream, activeTools]);
+	}, [committedToolIds, stream, activeTools, completedStreams]);
+	const rows = useMemo(
+		() =>
+			buildTranscriptRows({
+				visible,
+				results,
+				active: activeTools,
+				completedStreams,
+				stream,
+				streamDone,
+				tailTools,
+			}),
+		[visible, results, activeTools, completedStreams, stream, streamDone, tailTools],
+	);
 
 	// While the snapshot downloads the banner reports progress; an empty transcript isn't "no activity".
 	const settled = phase === undefined || phase === "live";
 
 	return (
-		<div
-			ref={rootRef}
-			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
-			onScroll={() => {
-				const el = rootRef.current;
-				if (el === null) return;
-				updateTranscriptTailLock(el, lockRef);
-				// Back at the bottom: drop the pin so the window trims to the tail again.
-				if (lockRef.current) {
-					if (pinnedStart !== null) setPinnedStart(null);
-				} else if (pinnedStart === null) {
-					setPinnedStart(start);
-				}
-				if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
-			}}
-		>
-			{settled && entries.length === 0 && stream === null && !working && (
-				<div className="tr-empty">no activity yet</div>
-			)}
-			{start > 0 && (
-				<button type="button" className="tr-earlier" onClick={showEarlier}>
-					show {start.toLocaleString("en-US")} earlier
+		<div className="tr-frame">
+			<div
+				ref={rootRef}
+				className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
+				onScroll={() => {
+					const el = rootRef.current;
+					if (el === null) return;
+					updateTranscriptTailLock(el, lockRef);
+					// Back at the bottom: drop the pin so the window trims to the tail again.
+					if (lockRef.current) {
+						if (pinnedStart !== null) setPinnedStart(null);
+						if (unseenFrom !== null) setUnseenFrom(null);
+					} else {
+						if (pinnedStart === null) setPinnedStart(start);
+						if (unseenFrom === null) setUnseenFrom(entries.length);
+					}
+					if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
+				}}
+			>
+				{settled && entries.length === 0 && stream === null && !working && (
+					<div className="tr-empty">no activity yet</div>
+				)}
+				{start > 0 && (
+					<button type="button" className="tr-earlier" onClick={showEarlier}>
+						show {start.toLocaleString("en-US")} earlier
+					</button>
+				)}
+				{rows.map(row => {
+					switch (row.kind) {
+						case "agent":
+							return <AgentRow key={row.key} row={row} host={host} />;
+						case "human":
+							return (
+								<Anchored key={row.key} keys={[`entry:${row.key}`]}>
+									<HumanRow
+										entry={row.entry}
+										voice={row.voice}
+										from={row.from}
+										continued={row.continued}
+										hostName={hostName}
+									/>
+								</Anchored>
+							);
+						case "notice":
+							return (
+								<Anchored key={row.key} keys={[`entry:${row.key}`]}>
+									<NoticeRow entry={row.entry} host={host} />
+								</Anchored>
+							);
+						case "irc":
+							return (
+								<Anchored key={row.key} keys={[`entry:${row.key}`]}>
+									<IrcNotice traffic={row.traffic} recipient={recipientName} />
+								</Anchored>
+							);
+					}
+				})}
+				{working && (
+					<div className="tr-live-status">
+						<ThinkingStatus label={workingIntent} />
+					</div>
+				)}
+			</div>
+			{unseenFrom !== null && (
+				<button type="button" className="tr-jump" onClick={jumpToLatest}>
+					<ArrowDown size={13} aria-hidden="true" />
+					{unseen > 0 ? `${unseen} new ${unseen === 1 ? "message" : "messages"}` : "Jump to latest"}
 				</button>
 			)}
-			{visible.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
-			))}
-			{stream !== null && (
-				<Row kind="assistant" gutter="agent">
-					<AssistantBody
-						message={stream}
-						results={results}
-						active={activeTools}
-						pending={!streamDone}
-						host={host}
-					/>
-				</Row>
-			)}
-			{tailTools.length > 0 && (
-				<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
-					{tailTools.map(tool => (
-						<ToolCard
-							key={tool.toolCallId}
-							toolCallId={tool.toolCallId}
-							name={tool.toolName}
-							intent={tool.intent}
-							args={tool.args}
-							running
-							partialResult={tool.partialResult}
-							host={host}
-						/>
-					))}
-				</Row>
-			)}
-			{working && stream === null && activeTools.size === 0 && (
-				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
-				</Row>
-			)}
+		</div>
+	);
+}
+
+function Anchored({
+	keys,
+	className,
+	children,
+}: {
+	keys: string[];
+	className?: string;
+	children: ReactNode;
+}): ReactNode {
+	return (
+		<div className={className} data-scroll-anchors={JSON.stringify(keys)}>
+			{children}
 		</div>
 	);
 }

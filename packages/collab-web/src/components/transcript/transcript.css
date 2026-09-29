@@ -1,134 +1,264 @@
-/* Transcript — calm gutter-labeled rows; user turns sit on a raised card. tr-* namespace. */
+/* Transcript — speaker-attributed turns in a reading column; agent tool activity
+ * threads along a trail spine. tr-* namespace. */
+/* The frame hosts the scroller plus overlays pinned to the visible viewport (jump pill). */
+.tr-frame {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+.tr-frame > .tr-root {
+	flex: 1;
+	min-height: 0;
+}
+
+/* Scrolled away from the tail: one tap back to the live edge, with what was missed. */
+.tr-jump {
+	position: absolute;
+	bottom: 12px;
+	left: 50%;
+	z-index: 5;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 0 14px 0 11px;
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	background: var(--bg-overlay);
+	box-shadow: var(--shadow-overlay);
+	color: var(--fg-muted);
+	font: 500 12.5px / 1 var(--font-ui);
+	white-space: nowrap;
+	cursor: pointer;
+	transform: translateX(-50%);
+	animation: tr-jump-in 150ms ease-out;
+	transition:
+		color 150ms ease-out,
+		border-color 150ms ease-out;
+}
+
+.tr-jump:hover {
+	color: var(--fg);
+	border-color: var(--ring);
+}
+
+@keyframes tr-jump-in {
+	from {
+		opacity: 0;
+		transform: translate(-50%, 6px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.tr-jump {
+		animation: none;
+	}
+}
 
 .tr-root {
 	height: 100%;
 	overflow-y: auto;
 	overflow-x: hidden;
-	padding: 24px 24px 16px;
+	/* The scroller spans the full pane (scrollbar at the edge); content keeps the reading measure. */
+	padding: 8px max(20px, calc((100% - var(--column)) / 2)) 28px;
 	font-family: var(--font-ui);
 	font-size: 14px;
 	line-height: 1.6;
 	color: var(--fg);
+	--tr-node-ring: var(--bg);
+	/* History prepends restore an explicit content anchor; native anchoring must not also shift the viewport. */
+	overflow-anchor: none;
 }
 
 .tr-empty {
-	padding: 48px 0;
+	display: grid;
+	place-items: center;
+	gap: 6px;
+	padding: 72px 0;
 	text-align: center;
 	color: var(--fg-faint);
 	font-size: 13px;
 }
 
-/* ---- rows ---- */
+/* ---- rows & turns ---- */
 
 .tr-row {
-	display: grid;
-	grid-template-columns: 64px minmax(0, 1fr);
-	gap: 0 16px;
-	padding: 7px 0;
-	animation: rise 320ms var(--ease-out) backwards;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding-top: 10px;
 }
 
-.tr-gutter {
-	padding-top: 3px;
-	text-align: right;
-	font-family: var(--font-mono);
-	font-size: 11.5px;
-	font-weight: 500;
-	color: var(--fg-faint);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	user-select: none;
+.tr-row--turn {
+	padding-top: 26px;
 }
 
-.tr-row--user .tr-gutter {
-	padding-top: 12px;
-	color: var(--fg-muted);
+.tr-row--marker {
+	padding-top: 6px;
 }
 
-/* User turns: a raised card so prompts stand apart from agent prose. */
-.tr-row--user .tr-body {
-	justify-self: start;
-	max-width: 100%;
-	padding: 9px 14px;
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-lg);
-	box-shadow: var(--shadow-card);
+.tr-unit {
+	min-width: 0;
 }
 
 .tr-body {
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
-	align-items: flex-start;
-	gap: 4px;
+	align-items: stretch;
+	gap: 10px;
 }
-
-.tr-row--assistant .tr-body {
-	gap: 8px;
-}
-
-.tr-body > .tr-md {
-	align-self: stretch;
-}
-
 
 .tr-row--custom .tr-body {
 	color: var(--fg-muted);
 }
 
+/* ---- speaker heading ---- */
+
+/* A quiet byline, not an identity badge: small type, no avatars or chips.
+ * Name leads, metadata trails in the faint tone separated by middots. */
+.tr-speaker {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	font-size: 12.5px;
+	line-height: 18px;
+	user-select: none;
+}
+
+.tr-speaker-name {
+	overflow: hidden;
+	font-weight: 600;
+	color: var(--fg-muted);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-speaker-meta {
+	flex: none;
+	color: var(--fg-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+.tr-speaker-meta::before {
+	content: "·";
+	margin-right: 6px;
+	color: var(--fg-ghost);
+}
+
+/* ---- human prompts ---- */
+
+.tr-row--user > .tr-speaker {
+	justify-content: flex-end;
+}
+
+.tr-prompt {
+	align-self: flex-end;
+	max-width: 90%;
+	padding: 10px 14px;
+	border: 1px solid var(--prompt-border);
+	border-radius: var(--radius-lg);
+	background: var(--prompt-bg);
+	box-shadow: var(--prompt-shadow);
+}
+
+/* Folded host-injected message (skill prompt, hook notice): one line, like an activity group. */
 .tr-custom {
 	display: flex;
 	flex-direction: column;
-	align-items: flex-start;
-	gap: 4px;
+	align-items: stretch;
+	margin-left: -8px;
+}
+
+.tr-custom-head {
+	display: inline-flex;
+	align-items: center;
+	align-self: flex-start;
+	gap: 8px;
+	max-width: 100%;
+	padding: 3px 10px 3px 6px;
+	border: 0;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg-muted);
+	font-size: 13px;
+	line-height: 20px;
+	text-align: left;
+	cursor: pointer;
+	transition: background 150ms ease-out;
+}
+
+.tr-custom-head:hover {
+	background: var(--bg-hover);
+}
+
+.tr-custom-head .tr-chev {
+	margin-inline: -1px;
+}
+
+.tr-custom-label,
+.tr-custom-detail {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-custom-label {
+	flex: 0 1 auto;
+}
+
+.tr-custom-detail {
+	flex: 1 1 0;
+	color: var(--fg-faint);
+}
+
+.tr-custom-body {
+	margin: 4px 0 4px 13px;
+	padding: 2px 0 2px 14px;
+	border-left: 2px solid var(--border);
+	color: var(--fg-muted);
 }
 
 .tr-msg-img {
-	max-height: 240px;
-	max-width: 100%;
+	display: block;
+	align-self: flex-start;
+	width: auto;
+	height: auto;
+	max-height: 180px;
+	max-width: min(100%, 480px);
 	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
+	border-radius: var(--radius);
 }
 
-/* ---- chips & badges ---- */
-
-.tr-badge {
-	display: inline-block;
-	padding: 0 7px;
-	border-radius: 999px;
-	background: var(--accent-muted);
-	color: var(--accent);
-	font-family: var(--font-mono);
-	font-size: 11px;
-	line-height: 18px;
-	text-transform: none;
-	letter-spacing: 0;
-}
+/* ---- chips ---- */
 
 .tr-chip {
 	display: inline-flex;
 	align-items: center;
-	height: 20px;
-	padding: 0 8px;
+	height: 18px;
+	padding: 0 7px;
 	border: 1px solid var(--border);
-	border-radius: 999px;
-	background: var(--bg-raised);
+	border-radius: var(--radius-sm);
+	background: var(--bg-inset);
 	color: var(--fg-muted);
 	font-family: var(--font-mono);
-	font-size: 11px;
+	font-size: 10.5px;
 	white-space: nowrap;
 }
 
 .tr-chip--err {
-	border-color: color-mix(in oklch, var(--err) 50%, var(--border));
+	border-color: color-mix(in oklch, var(--err) 45%, var(--border));
 	color: var(--err);
 	background: color-mix(in oklch, var(--err) 10%, transparent);
 }
 
 .tr-chip--warn {
-	border-color: color-mix(in oklch, var(--warn) 50%, var(--border));
+	border-color: color-mix(in oklch, var(--warn) 45%, var(--border));
 	color: var(--warn);
 	background: color-mix(in oklch, var(--warn) 10%, transparent);
 }
@@ -137,47 +267,75 @@
 	display: flex;
 	align-items: baseline;
 	gap: 8px;
-	margin-top: 2px;
 }
 
 .tr-stop-msg {
 	color: var(--err);
 	font-family: var(--font-mono);
-	font-size: 11.5px;
+	font-size: 12px;
 	white-space: pre-wrap;
 	word-break: break-word;
 }
 
 /* ---- thinking ---- */
 
-.tr-think-head {
-	display: inline-flex;
+/* Reasoning is first-class prose, not a card. Match the TUI's muted italic
+ * Markdown and separate segments with whitespace rather than nested borders. */
+.tr-think {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 0;
+	color: var(--fg-muted);
+}
+
+.tr-think > .tr-md {
+	font-size: inherit;
+	font-style: italic;
+	line-height: 1.7;
+}
+
+.tr-think .tr-md :is(p, li) {
+	white-space: normal;
+}
+
+.tr-think .tr-md :is(h1, h2, h3, h4, h5, h6) {
+	font-size: 1em;
+	line-height: 1.5;
+}
+
+.tr-think .tr-md :is(code, pre, table) {
+	font-style: normal;
+}
+
+/* Status lines share the byline's rhythm: 12.5px type on an 18px line. */
+.tr-think-time,
+.tr-think-status {
+	display: flex;
 	align-items: center;
-	gap: 4px;
-	padding: 0;
-	border: none;
-	background: none;
-	cursor: pointer;
+	align-self: flex-start;
+	gap: 6px;
 	color: var(--fg-faint);
-	font-family: var(--font-ui);
-	font-size: 12px;
-	font-style: italic;
+	font: 400 12.5px / 18px var(--font-ui);
+	font-variant-numeric: tabular-nums;
 }
 
-.tr-think-head:hover {
-	color: var(--fg-muted);
+.tr-live-status {
+	padding-top: 12px;
 }
 
-.tr-think-body {
-	align-self: stretch;
-	margin: 2px 0;
-	padding: 2px 0 2px 10px;
-	border-left: 2px solid var(--border);
-	color: var(--fg-muted);
+.tr-think-status {
+	max-width: 100%;
+	align-items: baseline;
+}
+
+.tr-working-label {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.tr-think-redacted {
 	font-style: italic;
-	font-size: 12px;
-	white-space: pre-wrap;
-	word-break: break-word;
 }
 
 .tr-chev {
@@ -190,15 +348,470 @@
 	transform: rotate(90deg);
 }
 
+/* ---- activity: up to three tool calls folded into one summary line ---- */
+
+.tr-activity {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	margin: -2px 0 -2px -8px;
+}
+
+.tr-activity-head {
+	display: inline-flex;
+	align-items: center;
+	align-self: flex-start;
+	gap: 8px;
+	max-width: 100%;
+	padding: 3px 10px 3px 6px;
+	border: 0;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg-faint);
+	font-size: 13px;
+	line-height: 20px;
+	text-align: left;
+	cursor: pointer;
+	transition:
+		color 150ms ease-out,
+		background 150ms ease-out;
+}
+
+.tr-activity-head:hover,
+.tr-activity--open > .tr-activity-head {
+	color: var(--fg-muted);
+}
+
+.tr-activity-head:hover {
+	background: var(--bg-hover);
+}
+
+.tr-activity-head .tr-chev {
+	margin-inline: -1px;
+}
+
+.tr-activity-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-activity-failed {
+	flex: none;
+	padding: 0 6px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in oklch, var(--err) 12%, transparent);
+	color: var(--err);
+	font: 500 10.5px / 17px var(--font-mono);
+}
+
+.tr-activity-steps {
+	flex: none;
+	color: var(--fg-ghost);
+	font: 400 11px / 1 var(--font-mono);
+	font-variant-numeric: tabular-nums;
+}
+
+.tr-activity-spin {
+	flex: none;
+	width: 11px;
+	height: 11px;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in oklch, var(--fg-faint) 45%, transparent);
+	border-top-color: var(--accent);
+	animation: tr-rot 0.8s linear infinite;
+}
+
+/* ---- trail: the expanded steps of an activity group, on one spine ----
+ * Cards are rendered by src/tool-render (tv-* namespace, shared with HTML
+ * exports); everything below re-skins them for this host only. The spine runs
+ * through the status-node centers: head padding-left 8px + node radius 3.5px. */
+
+.tr-trail {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	margin-top: 2px;
+}
+
+.tr-trail::before {
+	content: "";
+	position: absolute;
+	left: 11px;
+	top: 15px;
+	bottom: 15px;
+	width: 1px;
+	background: var(--border-strong);
+}
+
+.tr-trail > .tv-card {
+	position: relative;
+	border: 0;
+	border-radius: var(--radius);
+	background: transparent;
+	overflow: visible;
+}
+
+.tr-trail .tv-head {
+	gap: 10px;
+	padding: 5px 8px;
+	border-radius: var(--radius);
+}
+
+.tr-trail .tv-head:hover {
+	background: var(--bg-hover);
+}
+
+.tr-trail .tv-status {
+	box-shadow: 0 0 0 3px var(--tr-node-ring);
+}
+
+.tr-trail .tv-spin {
+	margin-inline: -1px;
+	background: var(--tr-node-ring);
+	box-shadow: 0 0 0 2px var(--tr-node-ring);
+}
+
+.tr-trail .tv-name {
+	font-size: 12px;
+	color: var(--fg);
+}
+
+.tr-trail .tv-card--error .tv-name {
+	color: var(--err);
+}
+
+.tr-trail .tv-sum {
+	font-size: 12px;
+	color: var(--fg-muted);
+}
+
+.tr-trail .tv-body,
+.tr-trail .tv-partial {
+	margin: 2px 0 8px 26px;
+	border: 1px solid var(--border-soft);
+	border-radius: var(--radius);
+	background: var(--bg-inset);
+}
+
+.tr-trail .tv-body {
+	padding: 10px 12px;
+}
+
+/* ---- subagents: spawned tasks as a first-class card ---- */
+
+.tr-subagents {
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	background: var(--bg-raised);
+	overflow: hidden;
+}
+
+.tr-subagents-head {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.tr-subagents-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--fg-muted);
+}
+
+.tr-subagents-counts {
+	margin-left: auto;
+	color: var(--fg-faint);
+	font: 400 11px / 1 var(--font-mono);
+}
+
+.tr-subagents-list {
+	margin: 0;
+	padding: 4px;
+	list-style: none;
+}
+
+.tr-subagent {
+	display: grid;
+	grid-template-columns: 12px minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	padding: 7px 8px;
+	border: 0;
+	border-radius: var(--radius);
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+}
+
+button.tr-subagent {
+	cursor: pointer;
+	transition: background 150ms ease-out;
+}
+
+button.tr-subagent:hover {
+	background: var(--bg-hover);
+}
+
+.tr-subagent-main {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.tr-subagent-line {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	min-width: 0;
+	font-size: 13px;
+}
+
+.tr-subagent-id {
+	flex: none;
+	font-weight: 600;
+	color: var(--fg);
+}
+
+.tr-subagent-desc,
+.tr-subagent-activity {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-subagent-desc {
+	color: var(--fg-muted);
+}
+
+.tr-subagent-activity {
+	color: var(--fg-faint);
+	font: 400 11.5px / 1.5 var(--font-mono);
+}
+
+.tr-subagent-meta {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	color: var(--fg-faint);
+	font: 400 11px / 1 var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.tr-subagent-state--running {
+	color: var(--ok);
+}
+
+.tr-subagent-state--done {
+	color: var(--fg-muted);
+}
+
+.tr-subagent-state--failed,
+.tr-subagent-state--aborted {
+	color: var(--err);
+}
+
+.tr-agent-dot {
+	flex: none;
+	justify-self: center;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--fg-ghost);
+}
+
+.tr-agent-dot--done {
+	background: var(--ok);
+}
+
+.tr-agent-dot--failed {
+	background: var(--err);
+}
+
+.tr-agent-dot--aborted {
+	background: var(--warn);
+}
+
+.tr-agent-spin {
+	justify-self: center;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in oklch, var(--fg-faint) 45%, transparent);
+	border-top-color: var(--ok);
+	animation: tr-rot 0.8s linear infinite;
+}
+
+/* ---- background job completions ---- */
+
+.tr-jobs {
+	gap: 2px;
+}
+
+.tr-job-line {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	margin-left: -8px;
+}
+
+.tr-job-head {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	padding: 3px 10px 3px 6px;
+	border: 0;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg-muted);
+	font-size: 13px;
+	line-height: 20px;
+	text-align: left;
+	cursor: pointer;
+	transition: background 150ms ease-out;
+}
+
+.tr-job-head:hover:not(:disabled) {
+	background: var(--bg-hover);
+}
+
+.tr-job-head:disabled {
+	cursor: default;
+}
+
+.tr-job-head:disabled .tr-chev {
+	visibility: hidden;
+}
+
+.tr-job-head .tr-chev {
+	margin-inline: -1px;
+}
+
+.tr-job-id {
+	font-weight: 600;
+	color: var(--fg);
+}
+
+.tr-job-label {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--fg-faint);
+	font: 400 11.5px / 1.5 var(--font-mono);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tr-job-time {
+	flex: none;
+	color: var(--fg-faint);
+	font: 400 11px / 1 var(--font-mono);
+	font-variant-numeric: tabular-nums;
+}
+
+.tr-job-open {
+	display: inline-grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	border: 0;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg-faint);
+	cursor: pointer;
+}
+
+.tr-job-open:hover {
+	color: var(--fg);
+	background: var(--bg-hover);
+}
+
+.tr-job-body {
+	margin: 4px 0 6px 13px;
+	padding: 2px 0 2px 14px;
+	border-left: 2px solid var(--border);
+	color: var(--fg-muted);
+}
+
+.tr-job-note {
+	margin: 0 0 6px;
+	font-size: 12.5px;
+}
+
+.tr-job-note--err {
+	color: var(--err);
+}
+
+/* ---- inter-agent messages ---- */
+
+.tr-irc {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.tr-irc-head {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	color: var(--fg-faint);
+	font-size: 12px;
+}
+
+.tr-irc-from,
+.tr-irc-to {
+	font-weight: 600;
+	color: var(--fg-muted);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.tr-irc-arrow {
+	color: var(--fg-ghost);
+}
+
+.tr-irc-body {
+	padding-left: 18px;
+	color: var(--fg-muted);
+	font-size: 13.5px;
+}
+
+/* ---- live tail ---- */
+
+/* Sits in a 12px slot — the width of the byline's π mark — so the dot centers
+ * under the mark and "Thinking…" lines up with the speaker name. */
+.tr-working-node {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	margin-inline: 3px;
+	border-radius: 50%;
+	background: var(--accent);
+	animation: tr-breathe 1.4s ease-in-out infinite;
+}
+
 /* ---- dividers & markers ---- */
 
 .tr-divider {
 	display: flex;
 	align-items: center;
-	gap: 10px;
-	margin: 16px 0;
+	gap: 12px;
+	margin: 28px 0 4px;
 	color: var(--fg-faint);
-	font-size: 12px;
+	font-family: var(--font-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 	user-select: none;
 }
 
@@ -211,22 +824,30 @@
 }
 
 .tr-marker {
+	align-self: flex-start;
 	color: var(--fg-faint);
 	font-family: var(--font-mono);
-	font-size: 11px;
+	font-size: 11.5px;
+}
+
+.tr-marker-arrow {
+	color: var(--fg-ghost);
 }
 
 .tr-earlier {
 	display: block;
-	margin: 4px auto 16px;
-	height: 28px;
-	padding: 0 14px;
-	border: 1px solid var(--border-strong);
+	margin: 12px auto 4px;
+	padding: 4px 14px;
+	border: 1px solid var(--border);
 	border-radius: 999px;
-	background: var(--bg-raised);
-	color: var(--fg-muted);
-	font-size: 12px;
+	background: none;
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 11px;
 	cursor: pointer;
+	transition:
+		color 150ms ease-out,
+		border-color 150ms ease-out;
 }
 
 .tr-earlier:hover {
@@ -234,206 +855,29 @@
 	border-color: var(--border-strong);
 }
 
-.tr-shimmer {
-	color: var(--fg-muted);
-	font-size: 12.5px;
-	animation: tr-pulse 1.4s ease-in-out infinite;
-}
-
-/* ---- tool cards ----
- * Cards themselves are rendered by src/tool-render (tv-* namespace);
- * only host-level layout lives here. */
-
-.tr-body > .tv-card {
-	align-self: stretch;
-	background: var(--bg-raised);
-	border-radius: var(--radius);
-}
-
-/* ---- markdown ---- */
-
-/* Match the TUI's word-boundary wrapping: keep Korean/CJK words intact when
- * possible, but still emergency-break long URLs or identifiers before they
- * overflow the transcript. */
-.tr-md {
-	line-height: 1.55;
-	overflow-wrap: break-word;
-	word-break: keep-all;
-}
-
-.tr-md > :first-child {
-	margin-top: 0;
-}
-
-.tr-md > :last-child {
-	margin-bottom: 0;
-}
-
-.tr-md p {
-	margin: 6px 0;
-}
-
-.tr-md p,
-.tr-md li {
-	white-space: pre-wrap;
-}
-
-.tr-md h1,
-.tr-md h2,
-.tr-md h3,
-.tr-md h4,
-.tr-md h5,
-.tr-md h6 {
-	margin: 14px 0 6px;
-	font-weight: 600;
-	line-height: 1.3;
-}
-
-.tr-md h1 {
-	font-size: 17px;
-}
-
-.tr-md h2 {
-	font-size: 15px;
-}
-
-.tr-md h3 {
-	font-size: 14px;
-}
-
-.tr-md h4,
-.tr-md h5,
-.tr-md h6 {
-	font-size: 13px;
-}
-
-.tr-md ul,
-.tr-md ol {
-	margin: 6px 0;
-	padding-left: 22px;
-}
-
-.tr-md li {
-	margin: 2px 0;
-}
-
-.tr-md li > ul,
-.tr-md li > ol {
-	white-space: normal;
-}
-
-.tr-md li > p {
-	margin: 2px 0;
-}
-
-.tr-md code {
-	padding: 1px 5px;
-	border: 1px solid var(--border);
-	border-radius: 5px;
-	background: var(--bg-raised);
-	font-family: var(--font-mono);
-	font-size: 0.86em;
-}
-
-.tr-md pre {
-	margin: 10px 0;
-	padding: 12px 14px;
-	overflow-x: auto;
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	background: var(--bg-inset);
-}
-
-.tr-md pre code {
-	padding: 0;
-	border: 0;
-	border-radius: 0;
-	background: none;
-	font-size: 12px;
-	line-height: 1.5;
-}
-
-.tr-md blockquote {
-	margin: 8px 0;
-	padding: 2px 12px;
-	border-left: 2px solid var(--accent);
-	color: var(--fg-muted);
-}
-
-.tr-md table {
-	margin: 8px 0;
-	border-collapse: collapse;
-	font-size: 12.5px;
-}
-
-/* Table cells need `anywhere` so long URLs/identifiers contribute a shrinkable
- * intrinsic width instead of expanding under the transcript's clipped overflow. */
-.tr-md th,
-.tr-md td {
-	padding: 3px 8px;
-	border: 1px solid var(--border);
-	overflow-wrap: anywhere;
-	text-align: left;
-	word-break: keep-all;
-}
-
-.tr-md th {
-	background: var(--bg-raised);
-	font-weight: 550;
-}
-
-.tr-md a {
-	color: var(--accent);
-	text-decoration: none;
-}
-
-.tr-md a:hover {
-	text-decoration: underline;
-}
-
-.tr-md hr {
-	margin: 12px 0;
-	border: none;
-	height: 1px;
-	background: var(--border);
-}
-
-.tr-md img {
-	max-width: 100%;
-	max-height: 320px;
-	border-radius: var(--radius-sm);
-}
-
-/* Math is native MathML (see transcript/math.ts): it must opt out of the
- * `pre-wrap` on `.tr-md p`/`li`. Display equations scroll inside `.tr-math`
- * rather than inside the `math` element, whose ink overflows its own box; the
- * vertical padding absorbs that ink so the box never scrolls vertically. */
-.tr-md math {
-	white-space: normal;
-}
-
-.tr-md .tr-math {
-	display: block;
-	margin: 4px 0;
-	padding-block: 0.5em;
-	overflow-x: auto;
-}
-
 /* ---- compact variant (agent drawer) ---- */
 
 .tr-root--compact {
-	padding: 12px 14px 16px;
+	padding: 4px 16px 20px;
 	font-size: 13px;
+	--tr-node-ring: var(--bg-overlay);
 }
 
-.tr-root--compact .tr-row {
-	grid-template-columns: 52px 1fr;
-	gap: 0 8px;
-	padding: 3px 0;
+.tr-root--compact .tr-row--turn {
+	padding-top: 18px;
 }
 
-.tr-root--compact .tr-gutter {
-	font-size: 10.5px;
+.tr-root--compact .tr-speaker {
+	font-size: 12px;
+}
+
+.tr-root--compact .tr-speaker .sh-mark {
+	width: 11px;
+	height: 11px;
+}
+
+.tr-root--compact .tr-prompt {
+	padding: 7px 12px;
 }
 
 .tr-root--compact .tv-pre {
@@ -443,35 +887,44 @@
 
 /* ---- animation ---- */
 
-@keyframes tr-pulse {
+@keyframes tr-rot {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@keyframes tr-breathe {
 	0%,
 	100% {
-		opacity: 0.45;
+		opacity: 0.35;
 	}
 	50% {
 		opacity: 1;
 	}
 }
 
+@media (prefers-reduced-motion: reduce) {
+	.tr-working-node {
+		animation: none;
+	}
+}
+
 /* ---- responsive mobile styles ---- */
 @media (max-width: 640px) {
-	.tr-row {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 8px 0;
-	}
 	.tr-root {
-		padding: 16px 14px 12px;
+		padding-inline: 14px;
 	}
-	.tr-gutter,
-	.tr-row--user .tr-gutter {
-		text-align: left;
-		padding-top: 0;
-		font-size: 11px;
-		margin-bottom: 2px;
+	.tr-subagent {
+		grid-template-columns: 12px minmax(0, 1fr);
 	}
-	.tr-gutter:empty {
-		display: none;
+	.tr-subagent-meta {
+		grid-column: 2;
+	}
+	.tr-row--turn {
+		padding-top: 20px;
+	}
+	.tr-trail .tv-body,
+	.tr-trail .tv-partial {
+		margin-left: 8px;
 	}
 }

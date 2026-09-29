@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { memo, useMemo } from "react";
 import { escapeHtml } from "../../lib/format";
 import { mathExtension } from "./math";
+import "./markdown.css";
 
 function unescapeHtml(raw: string): string {
 	const parseCodePoint = (value: number): string => {

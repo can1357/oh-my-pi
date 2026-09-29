@@ -1,158 +1,106 @@
-/* Design tokens — pure-black chassis, one inset panel, alpha hairlines, and
- * one omp accent gradient (cyan → pink). Dark is the default;
- * `[data-theme="light"]` and the prefers-color-scheme fallback flip to light.
- * The ONLY file allowed to contain raw color values. */
+/* Design tokens — "control room at night": aubergine surfaces from the omp brand
+ * (#0f0a14), phosphor-white text, brand pink as the human voice (caret, prompts,
+ * primary action), brand cyan for focus. Dark is the default;
+ * `[data-theme="light"]` flips to paper surfaces (set by inline script in
+ * index.html before first paint). The ONLY file allowed to contain raw color values. */
 :root {
 	color-scheme: dark;
 
-	/* surface ramp: page → inset panel → card → raised */
-	--bg: #000;
-	--panel: #09090a;
-	--bg-raised: #0e0e10;
-	--bg-inset: #060607;
-	--bg-overlay: #17171a;
-	--glass: rgba(14, 14, 16, 0.78);
-	--hover: rgba(255, 255, 255, 0.035);
-	--selected: rgba(255, 255, 255, 0.075);
+	/* surfaces — one hue (307), lightness-only steps a few points apart */
+	--bg: oklch(0.155 0.018 307);
+	--bg-raised: oklch(0.185 0.021 307);
+	--bg-inset: oklch(0.128 0.015 307);
+	--bg-overlay: oklch(0.21 0.024 307);
+	--bg-hover: oklch(1 0 0 / 4.5%);
 
-	/* text */
-	--fg: #ededef;
-	--fg-muted: #a0a0a8;
-	--fg-faint: #6c6c74;
-	--fg-inverse: #0a0a0b;
+	/* text — primary, supporting, metadata, ghost (disabled/placeholder) */
+	--fg: oklch(0.93 0.008 307);
+	--fg-muted: oklch(0.75 0.014 307);
+	--fg-faint: oklch(0.58 0.017 307);
+	--fg-ghost: oklch(0.44 0.017 307);
 
-	/* accent: omp cyan → pink; solid pink for text and strokes */
-	--accent-a: #5ad8e6;
-	--accent-b: #ed4abf;
-	--accent: #f068c8;
-	--accent-fg: #fff;
-	--accent-muted: rgba(237, 74, 191, 0.14);
-	--accent-gradient: linear-gradient(100deg, var(--accent-a), var(--accent-b));
-	--ambient-a: rgba(90, 216, 230, 0.07);
-	--ambient-b: rgba(237, 74, 191, 0.06);
+	/* one accent: brand pink (#ed4abf) */
+	--accent: oklch(0.674 0.23 341);
+	--accent-fg: oklch(0.99 0.01 341);
+	--accent-muted: oklch(0.674 0.23 341 / 18%);
+	--accent-soft: oklch(0.674 0.23 341 / 9%);
 
-	/* omp mark gradient stops (magenta → iris → cyan) */
-	--mark-a: oklch(0.7 0.24 340);
-	--mark-b: oklch(0.62 0.21 295);
-	--mark-c: oklch(0.81 0.14 200);
+	/* brand lockup */
+	--brand-mark-gradient: linear-gradient(135deg, #ed4abf 0%, #9b4dff 50%, #5ad8e6 100%);
+	--brand-pink: #ed4abf;
+	--brand-violet: #9b4dff;
+	--brand-cyan: #5ad8e6;
 
-	/* status; green `--live` is reserved for real-time presence */
-	--ok: #3ecf8e;
-	--live: #3ecf8e;
-	--warn: #f5a524;
-	--err: #ff6166;
+	/* status — used sparingly */
+	--ok: oklch(0.76 0.14 150);
+	--warn: oklch(0.79 0.14 85);
+	--err: oklch(0.68 0.18 25);
 
-	/* hairlines: alpha so one value reads on every surface step */
-	--border: rgba(255, 255, 255, 0.07);
-	--border-strong: rgba(255, 255, 255, 0.13);
-	--edge-top: rgba(255, 255, 255, 0.14);
-	--edge-bottom: rgba(255, 255, 255, 0.05);
-	--ring: #5ad8e6;
-	--ring-soft: rgba(90, 216, 230, 0.18);
+	/* hairlines — soft (within a group), standard, strong (emphasis) */
+	--border-soft: oklch(1 0 0 / 5.5%);
+	--border: oklch(1 0 0 / 9%);
+	--border-strong: oklch(1 0 0 / 15%);
+	/* focus ring: brand cyan (#5ad8e6) — distinct from the accent */
+	--ring: oklch(0.817 0.112 205 / 70%);
 
-	/* type — system stacks only */
-	--font-ui: "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	/* type — system stacks only (static SPA, no third-party font fetch) */
+	--font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
 	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
-	/* radii by role: chip · control · card · panel */
-	--radius-sm: 6px;
-	--radius: 8px;
-	--radius-lg: 12px;
-	--radius-xl: 16px;
+	/* radii — small controls, cards, docks/dialogs */
+	--radius-sm: 4px;
+	--radius: 6px;
+	--radius-lg: 10px;
+	--radius-xl: 14px;
 
-	--topbar-h: 52px;
-	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	/* reading column — prose stays at a readable measure at any window width */
+	--column: 760px;
 
-	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
-	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
-	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.6);
-	--backdrop: rgba(0, 0, 0, 0.55);
+	/* elevation helpers (kept here so no raw colors leak outside this file) */
+	/* human prompt surface — warm violet/aubergine tint distinct from neutral cards */
+	--prompt-bg: oklch(0.195 0.032 315);
+	--prompt-border: oklch(0.36 0.06 315 / 40%);
+	--prompt-shadow: 0 1px 3px oklch(0 0 0 / 25%);
+	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 45%), 0 2px 8px oklch(0 0 0 / 30%);
+	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 30%);
+	--backdrop: oklch(0.1 0.014 307 / 62%);
 }
 
-/* Light theme — explicit override (toggle writes data-theme="light"). */
+/* Light theme — applied by JS (theme.ts always sets data-theme on load).
+ * System-preference fallback for the pre-JS flash is handled by the inline
+ * script in index.html; no @media duplication needed here. */
 [data-theme="light"] {
 	color-scheme: light;
 
-	--bg: #f2f2f3;
-	--panel: #fff;
-	--bg-raised: #fff;
-	--bg-inset: #f6f6f7;
-	--bg-overlay: #fff;
-	--glass: rgba(255, 255, 255, 0.82);
-	--hover: rgba(0, 0, 0, 0.03);
-	--selected: rgba(0, 0, 0, 0.06);
+	--bg: oklch(0.985 0.003 307);
+	--bg-raised: oklch(1 0 0);
+	--bg-inset: oklch(0.962 0.006 307);
+	--bg-overlay: oklch(1 0 0);
+	--bg-hover: oklch(0.3 0.03 307 / 4.5%);
 
-	--fg: #151518;
-	--fg-muted: #5a5a63;
-	--fg-faint: #8b8b94;
-	--fg-inverse: #fff;
+	--fg: oklch(0.24 0.028 307);
+	--fg-muted: oklch(0.45 0.028 307);
+	--fg-faint: oklch(0.58 0.022 307);
+	--fg-ghost: oklch(0.72 0.016 307);
 
-	--accent-a: #1fa9bb;
-	--accent-b: #d42ea3;
-	--accent: #c42596;
-	--accent-muted: rgba(212, 46, 163, 0.1);
-	--ambient-a: rgba(31, 169, 187, 0.06);
-	--ambient-b: rgba(212, 46, 163, 0.05);
+	--accent: oklch(0.6 0.23 341);
+	--accent-fg: oklch(0.99 0.01 341);
+	--accent-muted: oklch(0.6 0.23 341 / 14%);
+	--accent-soft: oklch(0.6 0.23 341 / 7%);
 
-	--ok: #12a36b;
-	--live: #12a36b;
-	--warn: #c77c02;
-	--err: #dc3a40;
+	--ok: oklch(0.56 0.14 150);
+	--warn: oklch(0.62 0.14 70);
+	--err: oklch(0.55 0.19 25);
 
-	--border: rgba(0, 0, 0, 0.08);
-	--border-strong: rgba(0, 0, 0, 0.14);
-	--edge-top: rgba(0, 0, 0, 0.1);
-	--edge-bottom: rgba(0, 0, 0, 0.06);
-	--ring: #1fa9bb;
-	--ring-soft: rgba(31, 169, 187, 0.16);
+	--border-soft: oklch(0.3 0.03 307 / 6%);
+	--border: oklch(0.3 0.03 307 / 11%);
+	--border-strong: oklch(0.3 0.03 307 / 18%);
+	--ring: oklch(0.58 0.13 230 / 70%);
 
-	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
-	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
-	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
-	--backdrop: rgba(0, 0, 0, 0.25);
-}
-
-/* Light theme — system fallback when no explicit preference is stored. */
-@media (prefers-color-scheme: light) {
-	:root:not([data-theme]) {
-		color-scheme: light;
-
-		--bg: #f2f2f3;
-		--panel: #fff;
-		--bg-raised: #fff;
-		--bg-inset: #f6f6f7;
-		--bg-overlay: #fff;
-		--glass: rgba(255, 255, 255, 0.82);
-		--hover: rgba(0, 0, 0, 0.03);
-		--selected: rgba(0, 0, 0, 0.06);
-
-		--fg: #151518;
-		--fg-muted: #5a5a63;
-		--fg-faint: #8b8b94;
-		--fg-inverse: #fff;
-
-		--accent-a: #1fa9bb;
-		--accent-b: #d42ea3;
-		--accent: #c42596;
-		--accent-muted: rgba(212, 46, 163, 0.1);
-		--ambient-a: rgba(31, 169, 187, 0.06);
-		--ambient-b: rgba(212, 46, 163, 0.05);
-
-		--ok: #12a36b;
-		--live: #12a36b;
-		--warn: #c77c02;
-		--err: #dc3a40;
-
-		--border: rgba(0, 0, 0, 0.08);
-		--border-strong: rgba(0, 0, 0, 0.14);
-		--edge-top: rgba(0, 0, 0, 0.1);
-		--edge-bottom: rgba(0, 0, 0, 0.06);
-		--ring: #1fa9bb;
-		--ring-soft: rgba(31, 169, 187, 0.16);
-
-		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
-		--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
-		--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
-		--backdrop: rgba(0, 0, 0, 0.25);
-	}
+	--shadow-overlay: 0 12px 32px oklch(0.3 0.04 307 / 14%), 0 2px 8px oklch(0.3 0.04 307 / 10%);
+	--prompt-bg: oklch(0.965 0.016 315);
+	--prompt-border: oklch(0.86 0.03 315 / 60%);
+	--prompt-shadow: 0 1px 2px oklch(0.3 0.04 315 / 6%);
+	--rail-mobile-shadow: -4px 0 16px oklch(0.3 0.04 307 / 14%);
+	--backdrop: oklch(0.55 0.02 307 / 28%);
 }

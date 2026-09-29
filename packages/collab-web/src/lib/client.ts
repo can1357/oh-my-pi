@@ -19,10 +19,13 @@ import type {
 	SessionState,
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
+	ToolResultMessage,
 } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
+import { toolIntent } from "./tool-intent";
+import { normalizeToolResult } from "./tool-result";
 
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
 
@@ -56,9 +59,13 @@ export interface GuestSnapshot {
 	/** Streaming assistant ghost; held until the matching entry lands. */
 	stream: AssistantMessage | null;
 	streamDone: boolean;
+	/** Completed ghosts displaced by a newer stream, awaiting published entries. */
+	completedStreams: readonly AssistantMessage[];
 	activeTools: ReadonlyMap<string, ActiveTool>;
-	/** agent_start..agent_end, reconciled by state.isStreaming. */
+	liveResults: ReadonlyMap<string, ToolResultMessage>;
 	working: boolean;
+	/** Last valid tool intent in the current agent run. */
+	workingIntent: string | null;
 	/** True when this guest joined through a read-only (view) link. */
 	readOnly: boolean;
 	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
@@ -90,6 +97,64 @@ interface PendingTranscript {
 	timer: Timer;
 }
 
+/** Compare wire-visible identity; partial prose can grow before persistence. */
+function matchesAssistantMessage(partial: AssistantMessage, complete: AssistantMessage, growing = false): boolean {
+	if (partial.timestamp !== complete.timestamp || partial.model !== complete.model) return false;
+	if (growing ? partial.content.length > complete.content.length : partial.content.length !== complete.content.length)
+		return false;
+	if (!growing && (partial.stopReason !== complete.stopReason || partial.errorMessage !== complete.errorMessage))
+		return false;
+	return partial.content.every((block, index) => {
+		const other = complete.content[index];
+		const canGrow = growing && index === partial.content.length - 1;
+		switch (block.type) {
+			case "text":
+				return other?.type === "text" && (canGrow ? other.text.startsWith(block.text) : other.text === block.text);
+			case "thinking":
+				return (
+					other?.type === "thinking" &&
+					(canGrow ? other.thinking.startsWith(block.thinking) : other.thinking === block.thinking)
+				);
+			case "redactedThinking":
+				return other?.type === "redactedThinking" && other.data === block.data;
+			case "toolCall":
+				return other?.type === "toolCall" && other.id === block.id;
+		}
+	});
+}
+
+/** Match persisted assistant identity without inspecting text or thinking content. */
+function matchesAssistantIdentity(left: AssistantMessage, right: AssistantMessage): boolean {
+	if (
+		left.timestamp !== right.timestamp ||
+		left.model !== right.model ||
+		left.stopReason !== right.stopReason ||
+		left.errorMessage !== right.errorMessage
+	) {
+		return false;
+	}
+	let leftIndex = 0;
+	let rightIndex = 0;
+	while (true) {
+		while (leftIndex < left.content.length && left.content[leftIndex].type !== "toolCall") leftIndex++;
+		while (rightIndex < right.content.length && right.content[rightIndex].type !== "toolCall") rightIndex++;
+		if (leftIndex === left.content.length || rightIndex === right.content.length) {
+			return leftIndex === left.content.length && rightIndex === right.content.length;
+		}
+		const leftBlock = left.content[leftIndex];
+		const rightBlock = right.content[rightIndex];
+		if (leftBlock?.type !== "toolCall" || rightBlock?.type !== "toolCall" || leftBlock.id !== rightBlock.id) {
+			return false;
+		}
+		leftIndex++;
+		rightIndex++;
+	}
+}
+
+function matchesPublishedAssistant(left: AssistantMessage, right: AssistantMessage): boolean {
+	return matchesAssistantMessage(left, right) || matchesAssistantIdentity(left, right);
+}
+
 export class GuestClient {
 	readonly #socket: CollabSocket;
 	readonly #name: string;
@@ -119,8 +184,14 @@ export class GuestClient {
 	#lifecycle: ReadonlyMap<string, SubagentLifecyclePayload> = new Map();
 	#stream: AssistantMessage | null = null;
 	#streamDone = false;
+	#completedStreams: readonly AssistantMessage[] = [];
+	#publishedAssistants = new Map<number, AssistantMessage[]>();
+	#publishedToolResults = new Set<string>();
 	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
+	#liveResults: ReadonlyMap<string, ToolResultMessage> = new Map();
+	#executionIntents = new Map<string, string>();
 	#working = false;
+	#workingIntent: string | null = null;
 	#readOnly = false;
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
@@ -250,6 +321,11 @@ export class GuestClient {
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		this.#pendingSnapshot = null;
+		this.#working = false;
+		this.#workingIntent = null;
+		this.#executionIntents.clear();
+		this.#activeTools = new Map();
+		if (this.#stream !== null) this.#streamDone = true;
 		for (const [, pending] of this.#pendingTranscripts) {
 			clearTimeout(pending.timer);
 			pending.resolve(null);
@@ -307,6 +383,8 @@ export class GuestClient {
 				if (frame.entryCount === 0) {
 					this.#entries = [];
 					this.#publishedEntries = [];
+					this.#publishedAssistants.clear();
+					this.#publishedToolResults.clear();
 					this.#pendingSnapshot = null;
 				} else {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
@@ -315,10 +393,14 @@ export class GuestClient {
 				this.#agents = [...frame.agents];
 				this.#stream = null;
 				this.#streamDone = false;
+				this.#completedStreams = [];
 				this.#activeTools = new Map();
+				this.#liveResults = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
 				this.#working = frame.state.isStreaming;
+				this.#workingIntent = null;
+				this.#executionIntents.clear();
 				this.#readOnly = frame.readOnly === true;
 				this.#clearUiRequests();
 				this.#welcomed = true;
@@ -351,21 +433,19 @@ export class GuestClient {
 				this.#pendingSnapshot = null;
 				this.#clearSnapshotProgressTimer();
 				this.#phase = "live";
+				this.#publishedAssistants.clear();
+				this.#publishedToolResults.clear();
+				for (const entry of this.#entries) this.#reconcilePublishedEntry(entry);
 				break;
 			}
 			case "entry":
-				// The committed row supersedes the finished stream ghost, even when
-				// the row is buffered behind an in-flight snapshot.
-				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
-					this.#stream = null;
-					this.#streamDone = false;
-				}
 				if (this.#pendingSnapshot !== null) {
 					this.#pendingSnapshot.live.push(frame.entry);
 					break;
 				}
 				this.#entries.push(frame.entry);
 				this.#publishedEntries = [...this.#entries];
+				this.#reconcilePublishedEntry(frame.entry);
 				break;
 			case "event":
 				this.#applyEvent(frame.event);
@@ -381,10 +461,9 @@ export class GuestClient {
 					// Host idle implies no tool can be running, so clear any card
 					// pinned by a dropped `tool_execution_end` off this signal.
 					this.#activeTools = new Map();
-					if (this.#streamDone) {
-						this.#stream = null;
-						this.#streamDone = false;
-					}
+					this.#workingIntent = null;
+					this.#executionIntents.clear();
+					if (this.#stream !== null) this.#streamDone = true;
 				}
 				break;
 			case "agents":
@@ -441,27 +520,104 @@ export class GuestClient {
 		this.#commit();
 	}
 
+	#reconcilePublishedEntry(entry: SessionEntry): void {
+		if (entry.type !== "message") return;
+		const message = entry.message;
+		if (message.role === "assistant") {
+			const messages = this.#publishedAssistants.get(message.timestamp);
+			if (messages) messages.push(message);
+			else this.#publishedAssistants.set(message.timestamp, [message]);
+			if (
+				this.#stream !== null &&
+				(matchesAssistantMessage(this.#stream, message, !this.#streamDone) ||
+					matchesAssistantIdentity(this.#stream, message))
+			) {
+				this.#stream = null;
+				this.#streamDone = false;
+			}
+			if (this.#completedStreams.some(stream => matchesPublishedAssistant(stream, message))) {
+				this.#completedStreams = this.#completedStreams.filter(
+					stream => !matchesPublishedAssistant(stream, message),
+				);
+			}
+		} else if (message.role === "toolResult") {
+			this.#publishedToolResults.add(message.toolCallId);
+			if (this.#liveResults.has(message.toolCallId)) {
+				const next = new Map(this.#liveResults);
+				next.delete(message.toolCallId);
+				this.#liveResults = next;
+			}
+		}
+	}
+
+	#retainCompletedStream(message: AssistantMessage): void {
+		const published = this.#publishedAssistants
+			.get(message.timestamp)
+			?.some(entry => matchesPublishedAssistant(message, entry));
+		if (!published && !this.#completedStreams.some(stream => matchesPublishedAssistant(stream, message))) {
+			this.#completedStreams = [...this.#completedStreams, message];
+		}
+	}
+
+	#updateWorkingIntent(message: AssistantMessage): void {
+		for (let index = message.content.length - 1; index >= 0; index--) {
+			const block = message.content[index];
+			if (block.type !== "toolCall") continue;
+			const intent = toolIntent(block.arguments, this.#executionIntents.get(block.id) ?? block.intent);
+			if (intent) {
+				this.#workingIntent = intent;
+				return;
+			}
+		}
+	}
+
 	#applyEvent(event: Extract<HostFrame, { t: "event" }>["event"]): void {
 		switch (event.type) {
 			case "message_start":
 			case "message_update":
 				if (event.message.role === "assistant") {
+					this.#working = true;
+					this.#updateWorkingIntent(event.message);
+					if (this.#streamDone && this.#stream !== null) this.#retainCompletedStream(this.#stream);
 					this.#stream = event.message;
 					this.#streamDone = false;
 				}
 				break;
 			case "message_end":
 				if (event.message.role === "assistant") {
-					this.#stream = event.message;
-					this.#streamDone = true;
+					this.#working = true;
+					const message = event.message;
+					this.#updateWorkingIntent(message);
+					if (
+						this.#stream !== null &&
+						!matchesAssistantMessage(this.#stream, message, !this.#streamDone) &&
+						!matchesAssistantIdentity(this.#stream, message)
+					) {
+						if (!this.#streamDone) {
+							this.#retainCompletedStream(message);
+							break;
+						}
+						this.#retainCompletedStream(this.#stream);
+					}
+					const published = this.#publishedAssistants
+						.get(message.timestamp)
+						?.some(entry => matchesPublishedAssistant(message, entry));
+					this.#stream = published ? null : message;
+					this.#streamDone = !published;
 				}
 				break;
 			case "tool_execution_start": {
+				this.#working = true;
+				const intent = toolIntent(event.args, event.intent);
+				if (intent) {
+					this.#workingIntent = intent;
+					this.#executionIntents.set(event.toolCallId, intent);
+				}
 				const tool: ActiveTool = {
 					toolCallId: event.toolCallId,
 					toolName: event.toolName,
 					args: event.args,
-					intent: event.intent,
+					intent,
 					startedAt: Date.now(),
 				};
 				this.#activeTools = new Map(this.#activeTools).set(event.toolCallId, tool);
@@ -469,29 +625,55 @@ export class GuestClient {
 			}
 			case "tool_execution_update": {
 				const existing = this.#activeTools.get(event.toolCallId);
-				const tool: ActiveTool = existing
-					? { ...existing, partialResult: event.partialResult }
-					: {
-							toolCallId: event.toolCallId,
-							toolName: event.toolName,
-							args: event.args,
-							partialResult: event.partialResult,
-							startedAt: Date.now(),
-						};
+				this.#working = true;
+				const intent = toolIntent(event.args, "intent" in event ? event.intent : undefined) ?? existing?.intent;
+				if (intent) {
+					this.#workingIntent = intent;
+					this.#executionIntents.set(event.toolCallId, intent);
+				}
+				const tool: ActiveTool = {
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: event.args,
+					intent,
+					partialResult: event.partialResult,
+					startedAt: existing?.startedAt ?? Date.now(),
+				};
 				this.#activeTools = new Map(this.#activeTools).set(event.toolCallId, tool);
 				break;
 			}
 			case "tool_execution_end": {
-				const next = new Map(this.#activeTools);
-				next.delete(event.toolCallId);
-				this.#activeTools = next;
+				const nextTools = new Map(this.#activeTools);
+				nextTools.delete(event.toolCallId);
+				this.#activeTools = nextTools;
+
+				if (this.#publishedToolResults.has(event.toolCallId)) break;
+				const nextResults = new Map(this.#liveResults);
+				nextResults.set(
+					event.toolCallId,
+					normalizeToolResult(event.toolCallId, event.toolName, event.result, event.isError),
+				);
+				this.#liveResults = nextResults;
 				break;
 			}
 			case "agent_start":
 				this.#working = true;
+				this.#workingIntent = null;
+				this.#executionIntents.clear();
 				break;
 			case "agent_end":
 				this.#working = false;
+				this.#workingIntent = null;
+				this.#executionIntents.clear();
+				this.#activeTools = new Map();
+				if (this.#pendingSnapshot === null) {
+					this.#stream = null;
+					this.#streamDone = false;
+					this.#completedStreams = [];
+					this.#liveResults = new Map();
+				} else if (this.#stream !== null) {
+					this.#streamDone = true;
+				}
 				break;
 			case "notice":
 				this.#pushNotice(event.level, event.message);
@@ -557,8 +739,11 @@ export class GuestClient {
 			lifecycle: this.#lifecycle,
 			stream: this.#stream,
 			streamDone: this.#streamDone,
+			completedStreams: this.#completedStreams,
 			activeTools: this.#activeTools,
+			liveResults: this.#liveResults,
 			working: this.#working,
+			workingIntent: this.#workingIntent,
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			notices: this.#notices,

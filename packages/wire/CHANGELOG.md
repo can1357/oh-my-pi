@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Collab assistant messages carry optional per-block thinking durations for streaming and replayed transcripts; older unmeasured sessions remain compatible ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+
 ## [18.2.11] - 2026-09-23
 
 ### Added

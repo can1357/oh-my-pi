@@ -1,0 +1,122 @@
+/* Structured job output reads like the transcript: labels and prose, not a wall of source code. */
+.tr-report {
+	min-width: 0;
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.tr-report-toolbar {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 16px;
+}
+
+.tr-report-toolbar button {
+	padding: 4px 10px;
+	border: 1px solid transparent;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg-faint);
+	font-size: 12px;
+}
+
+.tr-report-toolbar button:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+.tr-report-toolbar button[aria-pressed="true"] {
+	border-color: var(--border);
+	background: var(--bg-raised);
+	color: var(--fg);
+}
+
+.tr-report-fields {
+	display: grid;
+	gap: 16px;
+	margin: 0;
+	min-width: 0;
+}
+
+.tr-report-field {
+	display: grid;
+	grid-template-columns: 116px minmax(0, 1fr);
+	gap: 4px 16px;
+	min-width: 0;
+}
+
+.tr-report-field > dt {
+	font-weight: 600;
+	color: var(--fg);
+	overflow-wrap: anywhere;
+}
+
+.tr-report-field > dd {
+	margin: 0;
+	min-width: 0;
+}
+
+.tr-report-field .tr-report-field {
+	grid-template-columns: minmax(0, 1fr);
+	gap: 4px;
+}
+
+.tr-report-field .tr-report-fields {
+	padding-left: 12px;
+	border-left: 1px solid var(--border-soft);
+	gap: 12px;
+}
+
+.tr-report-list {
+	display: grid;
+	gap: 6px;
+	margin: 0;
+	padding-left: 18px;
+	list-style: disc;
+}
+
+.tr-report-list > li {
+	min-width: 0;
+}
+
+.tr-report-list > li::marker {
+	color: var(--fg-faint);
+}
+
+.tr-report-text {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.tr-report-empty {
+	font-style: italic;
+	color: var(--fg-faint);
+}
+
+.tr-report-scalar {
+	color: var(--fg-muted);
+	font: inherit;
+	font-family: var(--font-mono);
+	overflow-wrap: anywhere;
+}
+
+.tr-report-json {
+	margin: 0;
+	padding: 12px;
+	border: 1px solid var(--border-soft);
+	border-radius: var(--radius);
+	background: var(--bg-inset);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font: 400 12px / 1.6 var(--font-mono);
+}
+
+.tr-root--compact .tr-report-field {
+	grid-template-columns: minmax(0, 1fr);
+}
+
+@media (max-width: 640px) {
+	.tr-report-field {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}

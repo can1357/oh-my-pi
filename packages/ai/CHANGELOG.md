@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Assistant messages expose optional per-block `thinkingMs` measurements on partial and persisted messages, without estimating unobserved reasoning time ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+
+### Fixed
+
+- Fixed DeepSeek `/responses` requests failing with `400 No tool output found` when a repaired orphan tool-result note landed between two outputs of the same tool round, and with `400 The reasoning_text in the thinking mode must be passed back` when replayed history lacked reasoning for an assistant turn ([#13083](https://github.com/can1357/oh-my-pi/issues/13083)).
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

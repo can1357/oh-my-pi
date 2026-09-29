@@ -209,6 +209,21 @@ export const fixtureEntries: SessionEntry[] = [
 		display: true,
 	},
 	{
+		id: "e08s",
+		parentId: "e08",
+		timestamp: iso(NOW - 21 * MIN),
+		type: "custom_message",
+		customType: "skill-prompt",
+		content:
+			'[IMPORTANT: User invoked the "diagnose" skill; follow its instructions. Full skill below.]\n\n# Diagnose\n\nDisciplined diagnosis loop for hard bugs.\n\n## Loop\n\n1. Reproduce the failure.\n2. List competing hypotheses.\n3. Pick the observation that splits them.\n\nUser: buffer growth on long sessions',
+		details: {
+			name: "diagnose",
+			path: "/Users/kai/.agents/skills/diagnose/SKILL.md",
+			args: "buffer growth on long sessions",
+		},
+		display: true,
+	},
+	{
 		id: "e09",
 		parentId: "e08",
 		timestamp: iso(NOW - 20 * MIN),
@@ -309,6 +324,98 @@ export const fixtureEntries: SessionEntry[] = [
 		timestamp: iso(NOW - 13 * MIN + 5_000),
 		type: "thinking_level_change",
 		thinkingLevel: "medium",
+	},
+	{
+		id: "e12-task-call",
+		parentId: "e12",
+		timestamp: iso(NOW - 12 * MIN),
+		type: "message",
+		message: {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: "Splitting the rest across two subagents so the probe and the doc sweep run in parallel.",
+				},
+				{
+					type: "toolCall",
+					id: "call-task-01",
+					name: "task",
+					arguments: {
+						agent: "task",
+						tasks: [
+							{
+								id: "RelayProbe",
+								description: "probe relay reconnect under packet loss",
+								assignment:
+									"Kill the relay mid-stream and assert the guest resyncs from welcome without duplicate entries.",
+							},
+							{
+								id: "DocSweep",
+								description: "sweep docs for stale close codes",
+								assignment: "Sweep docs/collab.md for stale close-code references and report mismatches.",
+							},
+						],
+					},
+					intent: "Spawning the probe and doc sweep",
+				},
+			],
+			model: fixtureModel.id,
+			usage: mkUsage(4_210, 180, 24_100, 0.0151),
+			stopReason: "toolUse",
+			timestamp: NOW - 12 * MIN,
+		},
+	},
+	{
+		id: "e12-task-result",
+		parentId: "e12-task-call",
+		timestamp: iso(NOW - 12 * MIN + 800),
+		type: "message",
+		message: {
+			role: "toolResult",
+			toolCallId: "call-task-01",
+			toolName: "task",
+			content: [{ type: "text", text: "Spawned 2 agents: RelayProbe, DocSweep." }],
+			details: {
+				results: [],
+				progress: [
+					{ id: "RelayProbe", status: "running", description: "probe relay reconnect under packet loss" },
+					{ id: "DocSweep", status: "running", description: "sweep docs for stale close codes" },
+				],
+				async: { state: "running", jobId: "RelayProbe", type: "task" },
+			},
+			isError: false,
+			timestamp: NOW - 12 * MIN + 800,
+		},
+	},
+	{
+		id: "e12-docsweep-done",
+		parentId: "e12-task-result",
+		timestamp: iso(NOW - 11 * MIN),
+		type: "custom_message",
+		customType: "async-result",
+		content:
+			'<system-notice>\nBackground job DocSweep has completed. Resume your work using the result below.\n<task-result id="DocSweep" agent="task" status="completed" duration="45.2s">\n<meta lines="3" size="214B" />\n<output>\nAll four close codes in `docs/collab.md` match `FATAL_CLOSE_REASONS` — no stale references.\n\n- Suggest documenting that decrypt failures are fatal.\n</output>\n</task-result>\n</system-notice>',
+		details: {
+			jobs: [{ jobId: "DocSweep", type: "task", label: "sweep docs for stale close codes", durationMs: 45_200 }],
+		},
+		display: true,
+	},
+	{
+		id: "e12-relayprobe-irc",
+		parentId: "e12-docsweep-done",
+		timestamp: iso(NOW - 10 * MIN),
+		type: "custom_message",
+		customType: "irc:incoming",
+		content:
+			"<irc>\nIncoming IRC message from agent `RelayProbe`:\n\nRelay restart reproduced; first resync delivered **0 duplicate entries**. Running the packet-loss variant next.\n</irc>",
+		details: {
+			id: "irc-1",
+			from: "RelayProbe",
+			message:
+				"Relay restart reproduced; first resync delivered **0 duplicate entries**. Running the packet-loss variant next.",
+		},
+		display: true,
 	},
 	{
 		id: "e13",
@@ -526,8 +633,32 @@ const subagentTranscriptLines: unknown[] = [
 		},
 	},
 	{
-		id: "s06",
+		id: "s05-parent-irc",
 		parentId: "s05",
+		timestamp: iso(SUB_T0 + 24_000),
+		type: "message",
+		message: {
+			role: "user",
+			content:
+				'[Wait interrupted by message]\n<irc from="parent" agent="Main">\nInspect **both paths** before reporting. Check `relay-client.ts` and the reconnect tests.\n\nKeep the final reply concise.\n</irc>',
+			attribution: "agent",
+			steering: true,
+			timestamp: SUB_T0 + 24_000,
+		},
+	},
+	{
+		id: "s05-peer-irc",
+		parentId: "s05-parent-irc",
+		timestamp: iso(SUB_T0 + 26_000),
+		type: "custom_message",
+		customType: "irc:incoming",
+		content: "<irc>\nIncoming IRC message from agent `DocSweep`:\n\nThe docs match **all four close codes**.\n</irc>",
+		details: { from: "DocSweep", message: "The docs match **all four close codes**." },
+		display: true,
+	},
+	{
+		id: "s06",
+		parentId: "s05-peer-irc",
 		timestamp: iso(SUB_T0 + 30_000),
 		type: "message",
 		message: {

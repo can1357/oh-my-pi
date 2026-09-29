@@ -8,6 +8,7 @@ import type {
 	SessionHeader,
 	SessionState,
 	SubagentProgressPayload,
+	ToolResultMessage,
 	WireMessage,
 } from "@oh-my-pi/pi-wire";
 import { GuestClient } from "../src/lib/client";
@@ -157,7 +158,7 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().entries).toEqual([e1, e2, live]);
 	});
 
-	it("drops the finished stream ghost when its entry lands mid-snapshot", () => {
+	it("keeps the finished stream until its buffered entry is published", () => {
 		const e1 = messageEntry("e1", { role: "user", content: "one", timestamp: 1 });
 		const e2 = messageEntry("e2", { role: "user", content: "two", timestamp: 2 });
 		const message = assistantMessage("hello");
@@ -167,6 +168,8 @@ describe("GuestClient frame apply", () => {
 		client.applyFrameForTest(snapshotChunk([e1], false));
 		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
 		client.applyFrameForTest({ t: "entry", entry: messageEntry("a1", message) });
+		expect(client.getSnapshot().stream).toEqual(message);
+		expect(client.getSnapshot().entries).toEqual([]);
 		client.applyFrameForTest(snapshotChunk([e2]));
 
 		const snap = client.getSnapshot();
@@ -194,6 +197,7 @@ describe("GuestClient frame apply", () => {
 		const snap = client.getSnapshot();
 		expect(snap.stream).toEqual(partial);
 		expect(snap.streamDone).toBe(false);
+		expect(snap.working).toBe(true);
 	});
 
 	it("message_end keeps the ghost until the matching entry lands", () => {
@@ -212,6 +216,135 @@ describe("GuestClient frame apply", () => {
 		expect(snap.entries).toHaveLength(1);
 	});
 
+	it("reconciles a persisted assistant entry when its content is obfuscated", () => {
+		const client = liveClient();
+		const streamed = assistantMessage("key is hunter2");
+		const persisted: AssistantMessage = {
+			...streamed,
+			content: [{ type: "text", text: "key is $$A1B2$$" }],
+		};
+
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message: streamed } });
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("obfuscated", persisted) });
+
+		expect(client.getSnapshot().stream).toBeNull();
+		expect(client.getSnapshot().streamDone).toBe(false);
+		expect(client.getSnapshot().entries).toEqual([messageEntry("obfuscated", persisted)]);
+	});
+
+	it("drops terminal ghosts and live tool results when no persisted entries arrive", () => {
+		const client = liveClient();
+		const message = assistantMessage("omitted assistant");
+
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
+		client.applyFrameForTest({
+			t: "event",
+			event: { type: "tool_execution_end", toolCallId: "tc1", toolName: "read", result: "omitted result" },
+		});
+		expect(client.getSnapshot().stream).toEqual(message);
+		expect(client.getSnapshot().liveResults.size).toBe(1);
+
+		client.applyFrameForTest({ t: "event", event: { type: "agent_end" } });
+
+		expect(client.getSnapshot().stream).toBeNull();
+		expect(client.getSnapshot().streamDone).toBe(false);
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+		expect(client.getSnapshot().liveResults.size).toBe(0);
+	});
+
+	it("keeps reasoning through unrelated entries and idle before its own entry", () => {
+		const client = liveClient();
+		const message: AssistantMessage = {
+			...assistantMessage(""),
+			content: [{ type: "thinking", thinking: "Keep the full reasoning on screen." }],
+		};
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
+		client.applyFrameForTest({
+			t: "entry",
+			entry: messageEntry("unrelated", { ...assistantMessage("Older reply"), timestamp: 2 }),
+		});
+		client.applyFrameForTest({ t: "state", state: STATE });
+		expect(client.getSnapshot().working).toBe(false);
+		expect(client.getSnapshot().stream).toEqual(message);
+		expect(client.getSnapshot().streamDone).toBe(true);
+
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("reasoning", structuredClone(message)) });
+		expect(client.getSnapshot().stream).toBeNull();
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+		expect(client.getSnapshot().entries.at(-1)).toEqual(messageEntry("reasoning", message));
+	});
+
+	it("does not recreate reasoning when its entry precedes message_end", () => {
+		const client = liveClient();
+		const message: AssistantMessage = {
+			...assistantMessage(""),
+			content: [{ type: "thinking", thinking: "Complete reasoning" }],
+		};
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "message_update",
+				message: { ...message, content: [{ type: "thinking", thinking: "Complete" }] },
+			},
+		});
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("a1", structuredClone(message)) });
+		expect(client.getSnapshot().stream).toBeNull();
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
+		expect(client.getSnapshot().stream).toBeNull();
+		expect(client.getSnapshot().streamDone).toBe(false);
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+		expect(client.getSnapshot().entries).toEqual([messageEntry("a1", message)]);
+	});
+
+	it("preserves the new active stream when an older completion is committed", () => {
+		const client = liveClient();
+		const first = assistantMessage("First reasoning");
+		const second = { ...assistantMessage("Second reasoning"), timestamp: 2 };
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message: first } });
+		client.applyFrameForTest({ t: "event", event: { type: "message_start", message: second } });
+		const pending = client.getSnapshot();
+		expect(pending.completedStreams).toEqual([first]);
+		expect(pending.stream).toEqual(second);
+
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("a1", structuredClone(first)) });
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+		expect(client.getSnapshot().stream).toEqual(second);
+		expect(client.getSnapshot().streamDone).toBe(false);
+		expect(pending.completedStreams).toEqual([first]);
+		expect(pending.stream).toEqual(second);
+
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message: first } });
+		expect(client.getSnapshot().stream).toEqual(second);
+		expect(client.getSnapshot().streamDone).toBe(false);
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+	});
+
+	it("holds multiple completed messages while snapshot entries are buffered", () => {
+		const client = new GuestClient(LINK, "tester");
+		const history = messageEntry("history", { role: "user", content: "Question", timestamp: 0 });
+		const first = assistantMessage("First reasoning");
+		const second = { ...assistantMessage("Second reasoning"), timestamp: 2 };
+		client.applyFrameForTest(welcomeFrame(1));
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message: first } });
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("a1", first) });
+		client.applyFrameForTest({ t: "event", event: { type: "message_start", message: second } });
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message: second } });
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("a2", second) });
+		client.applyFrameForTest({ t: "event", event: { type: "agent_end" } });
+		const buffered = client.getSnapshot();
+		expect(buffered.entries).toEqual([]);
+		expect(buffered.completedStreams).toEqual([first]);
+		expect(buffered.stream).toEqual(second);
+		expect(buffered.working).toBe(false);
+
+		client.applyFrameForTest(snapshotChunk([history]));
+		expect(client.getSnapshot().entries).toEqual([history, messageEntry("a1", first), messageEntry("a2", second)]);
+		expect(client.getSnapshot().completedStreams).toEqual([]);
+		expect(client.getSnapshot().stream).toBeNull();
+		expect(buffered.completedStreams).toEqual([first]);
+		expect(buffered.entries).toEqual([]);
+	});
+
 	it("tool start/update/end maintains activeTools", () => {
 		const client = liveClient();
 		client.applyFrameForTest({
@@ -225,6 +358,7 @@ describe("GuestClient frame apply", () => {
 			},
 		});
 		let tool = client.getSnapshot().activeTools.get("tc1");
+		const started = client.getSnapshot();
 		expect(tool?.toolName).toBe("bash");
 		expect(tool?.intent).toBe("Listing");
 
@@ -234,18 +368,233 @@ describe("GuestClient frame apply", () => {
 				type: "tool_execution_update",
 				toolCallId: "tc1",
 				toolName: "bash",
-				args: { command: "ls" },
+				args: { command: "ls src", i: "Inspecting source" },
 				partialResult: "src",
 			},
 		});
 		tool = client.getSnapshot().activeTools.get("tc1");
 		expect(tool?.partialResult).toBe("src");
+		expect(tool?.args).toEqual({ command: "ls src", i: "Inspecting source" });
+		expect(tool?.intent).toBe("Inspecting source");
+		expect(tool?.startedAt).toBe(started.activeTools.get("tc1")?.startedAt);
+		expect(started.activeTools.get("tc1")?.args).toEqual({ command: "ls" });
+		expect(started.activeTools.get("tc1")?.partialResult).toBeUndefined();
 
 		client.applyFrameForTest({
 			t: "event",
 			event: { type: "tool_execution_end", toolCallId: "tc1", toolName: "bash", result: "src\ntest" },
 		});
 		expect(client.getSnapshot().activeTools.size).toBe(0);
+		expect(client.getSnapshot().liveResults.get("tc1")?.content).toEqual([{ type: "text", text: "src\ntest" }]);
+		expect(client.getSnapshot().workingIntent).toBe("Inspecting source");
+	});
+
+	it("shows streamed intents early and carries the latest valid one across thinking", () => {
+		const client = liveClient();
+		client.applyFrameForTest({ t: "event", event: { type: "agent_start" } });
+		const message: AssistantMessage = {
+			...assistantMessage(""),
+			content: [
+				{ type: "thinking", thinking: "Read the relevant source first." },
+				{ type: "toolCall", id: "tc1", name: "read", arguments: { i: "  Reading\n source… " } },
+			],
+		};
+		client.applyFrameForTest({ t: "event", event: { type: "message_update", message } });
+		const early = client.getSnapshot();
+		expect(early.workingIntent).toBe("Reading source");
+		expect(early.activeTools.size).toBe(0);
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "message_update",
+				message: {
+					...message,
+					content: [
+						message.content[0],
+						{ type: "toolCall", id: "tc1", name: "read", arguments: { i: { invalid: true } } },
+					],
+				},
+			},
+		});
+		expect(client.getSnapshot().workingIntent).toBe("Reading source");
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "message_end",
+				message: {
+					...message,
+					content: [
+						...message.content,
+						{ type: "toolCall", id: "tc2", name: "grep", arguments: { i: "Finding callers..." } },
+					],
+				},
+			},
+		});
+		expect(client.getSnapshot().workingIntent).toBe("Finding callers");
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "message_start",
+				message: {
+					...assistantMessage(""),
+					timestamp: 2,
+					content: [{ type: "thinking", thinking: "Thinking on" }],
+				},
+			},
+		});
+		expect(client.getSnapshot().workingIntent).toBe("Finding callers");
+		expect(early.workingIntent).toBe("Reading source");
+		client.applyFrameForTest({ t: "event", event: { type: "agent_end" } });
+		expect(client.getSnapshot().workingIntent).toBeNull();
+		expect(client.getSnapshot().working).toBe(false);
+	});
+
+	it("keeps executed intent over stale tool-call intent through completion", () => {
+		const client = liveClient();
+		const message: AssistantMessage = {
+			...assistantMessage(""),
+			content: [
+				{ type: "toolCall", id: "tc1", name: "read", arguments: { i: "Draft intent" }, intent: "Stale intent" },
+			],
+		};
+		client.applyFrameForTest({ t: "event", event: { type: "message_start", message } });
+		expect(client.getSnapshot().workingIntent).toBe("Stale intent");
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "tc1",
+				toolName: "read",
+				args: {},
+				intent: "Reading actual source",
+			},
+		});
+		expect(client.getSnapshot().workingIntent).toBe("Reading actual source");
+		const update = {
+			type: "tool_execution_update" as const,
+			toolCallId: "tc1",
+			toolName: "read",
+			args: { i: "Draft intent" },
+			intent: "Reading final source",
+			partialResult: "first line",
+		};
+		client.applyFrameForTest({ t: "event", event: update });
+		expect(client.getSnapshot().workingIntent).toBe("Reading final source");
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "tool_execution_update",
+				toolCallId: "tc1",
+				toolName: "read",
+				args: null,
+				partialResult: "last line",
+			},
+		});
+		expect(client.getSnapshot().activeTools.get("tc1")?.intent).toBe("Reading final source");
+		client.applyFrameForTest({
+			t: "event",
+			event: { type: "tool_execution_end", toolCallId: "tc1", toolName: "read", result: "done" },
+		});
+		client.applyFrameForTest({ t: "event", event: { type: "message_end", message } });
+		expect(client.getSnapshot().activeTools.size).toBe(0);
+		expect(client.getSnapshot().workingIntent).toBe("Reading final source");
+	});
+
+	it.each(["agent_start", "agent_end", "idle", "welcome"] as const)("clears working intent on %s", transition => {
+		const client = liveClient();
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "tool_execution_update",
+				toolCallId: "tc1",
+				toolName: "read",
+				args: { i: "Reading source" },
+				partialResult: "line",
+			},
+		});
+		expect(client.getSnapshot().working).toBe(true);
+		expect(client.getSnapshot().workingIntent).toBe("Reading source");
+		if (transition === "welcome") client.applyFrameForTest(welcomeFrame());
+		else if (transition === "idle") client.applyFrameForTest({ t: "state", state: STATE });
+		else client.applyFrameForTest({ t: "event", event: { type: transition } });
+		expect(client.getSnapshot().workingIntent).toBeNull();
+		expect(client.getSnapshot().working).toBe(transition === "agent_start");
+	});
+
+	it("retains structured terminal output until its buffered result is published", () => {
+		const client = new GuestClient(LINK, "tester");
+		const history = messageEntry("history", { role: "user", content: "Read this", timestamp: 0 });
+		const content: ToolResultMessage["content"] = [
+			{ type: "text", text: "Terminal output" },
+			{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+		];
+		const details = { path: "source.ts", nested: { lines: ["one", "two"] } };
+		const result = { content, details, isError: true };
+		client.applyFrameForTest(welcomeFrame(1));
+		client.applyFrameForTest({
+			t: "event",
+			event: { type: "tool_execution_end", toolCallId: "tc1", toolName: "read", result },
+		});
+		const completed = client.getSnapshot();
+		expect(completed.activeTools.size).toBe(0);
+		expect(completed.liveResults.get("tc1")).toMatchObject({
+			role: "toolResult",
+			toolCallId: "tc1",
+			toolName: "read",
+			content,
+			details,
+			isError: true,
+		});
+		client.applyFrameForTest({ t: "state", state: STATE });
+		expect(client.getSnapshot().liveResults.get("tc1")?.content).toEqual(content);
+		const persisted: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tc1",
+			toolName: "read",
+			...result,
+			timestamp: 1,
+		};
+		client.applyFrameForTest({ t: "entry", entry: messageEntry("result", persisted) });
+		expect(client.getSnapshot().entries).toEqual([]);
+		expect(client.getSnapshot().liveResults.get("tc1")?.details).toEqual(details);
+		client.applyFrameForTest(snapshotChunk([history]));
+		expect(client.getSnapshot().liveResults.size).toBe(0);
+		expect(client.getSnapshot().entries).toEqual([history, messageEntry("result", persisted)]);
+		expect(completed.liveResults.get("tc1")?.content).toEqual(content);
+		expect(completed.liveResults.get("tc1")?.isError).toBe(true);
+	});
+
+	it("lets the terminal event error flag override the result envelope", () => {
+		const client = liveClient();
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "tool_execution_end",
+				toolCallId: "tc1",
+				toolName: "read",
+				result: { content: [], isError: true },
+				isError: false,
+			},
+		});
+		expect(client.getSnapshot().liveResults.get("tc1")?.isError).toBe(false);
+	});
+
+	it("does not resurrect an already published result on a late execution end", () => {
+		const persisted: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tc1",
+			toolName: "read",
+			content: [{ type: "text", text: "Persisted output" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const client = liveClient([messageEntry("result", persisted)]);
+		client.applyFrameForTest({
+			t: "event",
+			event: { type: "tool_execution_end", toolCallId: "tc1", toolName: "read", result: "Persisted output" },
+		});
+		expect(client.getSnapshot().liveResults.size).toBe(0);
+		expect(client.getSnapshot().entries).toEqual([messageEntry("result", persisted)]);
 	});
 
 	it("agent_start/agent_end and state reconcile the working flag", () => {
@@ -307,6 +656,10 @@ describe("GuestClient frame apply", () => {
 		};
 		client.applyFrameForTest({ t: "bus", channel: "task:subagent:progress", data: payload });
 		expect(client.getSnapshot().progress.get("Sub1")).toEqual(payload);
+		const previous = client.getSnapshot();
+		client.applyFrameForTest(welcomeFrame());
+		expect(client.getSnapshot().progress.size).toBe(0);
+		expect(previous.progress.get("Sub1")).toEqual(payload);
 	});
 
 	it("bye ends the session with a reason", () => {

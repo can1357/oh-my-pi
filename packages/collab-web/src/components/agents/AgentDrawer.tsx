@@ -176,6 +176,8 @@ export function AgentDrawer(props: {
 							streamDone={false}
 							activeTools={EMPTY_TOOLS}
 							working={agent.status === "running" && fetchError === null}
+							workingIntent={p?.lastIntent}
+							recipientName={agent.displayName}
 							host={host}
 						/>
 						{fetchError !== null ? (

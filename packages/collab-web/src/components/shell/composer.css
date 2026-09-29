@@ -1,0 +1,276 @@
+/* Prompt surface and host configuration footer; shared by prompts and host questions. */
+.sh-composer {
+	flex: none;
+	padding: 0 max(20px, calc((100% - var(--column)) / 2)) 10px;
+	padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+	background: linear-gradient(to bottom, transparent, var(--bg) 14px);
+}
+
+.sh-dock {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-xl);
+	background: var(--bg-overlay);
+	box-shadow: var(--prompt-shadow);
+	transition: border-color 150ms ease-out;
+}
+
+.sh-dock:focus-within {
+	border-color: color-mix(in oklch, var(--ring) 55%, var(--border-strong));
+}
+
+.sh-dock-idle {
+	box-shadow: none;
+	border-color: var(--border);
+	background: var(--bg-raised);
+}
+
+.sh-composer-input {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	min-height: 42px;
+	padding: 10px 12px;
+	font-size: 15px;
+	line-height: 22px;
+	color: var(--fg);
+	background: transparent;
+	border: 0;
+	border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+	resize: none;
+}
+
+.sh-composer-input::placeholder {
+	color: var(--fg-faint);
+}
+
+.sh-composer-input:disabled {
+	cursor: default;
+}
+
+.sh-composer-input:focus-visible {
+	outline: none;
+}
+
+.sh-dock-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	min-height: 44px;
+	margin: 0 12px;
+	padding: 6px 0;
+	border-top: 1px solid var(--border);
+}
+
+.sh-dock-meta {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	flex: 1 1 160px;
+	gap: 8px 16px;
+	min-width: 0;
+	font: 400 13px / 20px var(--font-ui);
+	color: var(--fg-muted);
+}
+
+.sh-dock-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.sh-dock-item > svg {
+	flex: none;
+	color: var(--fg-faint);
+}
+
+.sh-dock-model-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-dock-thinking {
+	white-space: nowrap;
+}
+
+.sh-dock-context {
+	display: inline-flex;
+	flex: none;
+	color: var(--fg-muted);
+}
+
+.sh-context-track {
+	stroke: var(--border-strong);
+}
+
+.sh-context-fill {
+	stroke: currentColor;
+	stroke-linecap: round;
+}
+
+.sh-dock-context-warn {
+	color: var(--warn);
+}
+
+.sh-queued {
+	color: var(--accent);
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.sh-composer-actions {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex: none;
+	margin-left: auto;
+}
+
+.sh-composer .sh-btn {
+	height: 34px;
+	padding: 0 12px;
+	gap: 8px;
+	border-radius: var(--radius-lg);
+}
+
+.sh-composer .sh-btn-label {
+	display: inline;
+}
+
+.sh-composer .sh-btn-send {
+	color: var(--fg);
+	background: var(--bg-inset);
+	border-color: var(--border-soft);
+	font-weight: 600;
+}
+
+.sh-composer .sh-btn-send:disabled {
+	opacity: 1;
+	color: var(--fg-ghost);
+	background: var(--bg-inset);
+	border-color: transparent;
+}
+
+/* Host questions retain the same footer and submission behavior. */
+.sh-dock-ask {
+	border-color: color-mix(in oklch, var(--accent) 45%, var(--border-strong));
+}
+
+.sh-ask-head {
+	display: grid;
+	gap: 2px;
+	padding: 12px 12px 4px;
+}
+
+.sh-ask-kicker {
+	font: 500 10.5px / 1.4 var(--font-mono);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--accent);
+}
+
+.sh-ask-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--fg);
+	white-space: pre-wrap;
+}
+
+.sh-ask-options {
+	display: grid;
+	gap: 4px;
+	padding: 6px 8px 10px;
+	max-height: 40vh;
+	overflow-y: auto;
+}
+
+.sh-ask-option {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	width: 100%;
+	padding: 8px 10px;
+	color: var(--fg);
+	text-align: left;
+	background: none;
+	border: 1px solid transparent;
+	border-radius: var(--radius-lg);
+	transition:
+		background 150ms ease-out,
+		border-color 150ms ease-out;
+}
+
+.sh-ask-option:hover {
+	background: var(--bg-hover);
+	border-color: var(--border);
+}
+
+.sh-ask-option-checked {
+	border-color: var(--accent-muted);
+	background: var(--accent-soft);
+}
+
+.sh-ask-option-marker {
+	width: 16px;
+	font: 400 13px / 20px var(--font-mono);
+	color: var(--accent);
+}
+
+.sh-ask-option-copy {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+.sh-ask-option-label {
+	font-size: 13.5px;
+	font-weight: 500;
+	line-height: 20px;
+}
+
+.sh-ask-option-description {
+	font-size: 12.5px;
+	line-height: 1.4;
+	color: var(--fg-muted);
+}
+
+.sh-ask-editor {
+	display: flex;
+	align-items: flex-end;
+	gap: 8px;
+	padding-right: 12px;
+	padding-bottom: 6px;
+}
+
+@media (max-width: 640px) {
+	.sh-composer {
+		padding-inline: 10px;
+		padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+	}
+	.sh-dock-bar {
+		gap: 8px;
+	}
+	.sh-dock-meta {
+		gap: 4px 12px;
+		font-size: 12px;
+	}
+	.sh-composer-actions {
+		gap: 8px;
+	}
+	.sh-ask-title,
+	.sh-ask-option-label {
+		font-size: 16px;
+	}
+}
+
+/* Prevent iOS focus zoom, including wide touch viewports. */
+@media (any-pointer: coarse) {
+	.sh-composer-input {
+		font-size: 16px;
+	}
+}

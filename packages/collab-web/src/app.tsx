@@ -7,6 +7,7 @@ import { Composer } from "./components/shell/Composer";
 import { ConnectScreen } from "./components/shell/ConnectScreen";
 import { HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
+import { type AgentLive, AgentLiveContext } from "./components/transcript/agent-live";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
 import { useGuestSnapshot } from "./lib/use-guest";
@@ -139,11 +140,12 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		[agentIds],
 	);
 
-	// Auto-open the rail the first time a subagent appears.
+	// Auto-open the rail the first time a subagent appears — only where it docks beside the
+	// transcript. Below the 768px breakpoint (shell.css) it overlays the chat, so it waits for a tap.
 	useEffect(() => {
 		if (subCount > 0 && !autoOpenedRef.current) {
 			autoOpenedRef.current = true;
-			setRailOpen(true);
+			if (window.matchMedia("(min-width: 769px)").matches) setRailOpen(true);
 		}
 	}, [subCount]);
 
@@ -153,68 +155,79 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	}, [title]);
 
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
+	const hostName = snap.state?.participants.find(p => p.role === "host")?.name;
+	const agentLive = useMemo<AgentLive>(
+		() => ({ agents: snap.agents, progress: snap.progress, lifecycle: snap.lifecycle }),
+		[snap.agents, snap.progress, snap.lifecycle],
+	);
 
 	return (
-		<div className="sh-app">
-			<div className="sh-ambient" />
-			<HeaderBar
-				snapshot={snap}
-				subCount={subCount}
-				railOpen={railOpen}
-				onToggleRail={() => setRailOpen(open => !open)}
-				onLeave={onLeave}
-			/>
-			<main className="sh-main">
-				<section className="sh-panel" data-rail={railOpen ? "true" : "false"}>
-					<div className="sh-transcript">
-						<Transcript
-							entries={snap.entries}
-							stream={snap.stream}
-							streamDone={snap.streamDone}
-							activeTools={snap.activeTools}
-							working={snap.working}
-							host={toolHost}
-							phase={snap.phase}
-						/>
-					</div>
-					<Composer client={client} snapshot={snap} />
-				</section>
-				{railOpen && (
-					<>
-						<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
-						<aside className="sh-rail">
-							<AgentsPanel
-								agents={snap.agents}
-								progress={snap.progress}
-								lifecycle={snap.lifecycle}
-								selectedId={selectedId}
-								onSelect={setSelectedId}
+		<AgentLiveContext.Provider value={agentLive}>
+			<div className="sh-app">
+				<HeaderBar
+					snapshot={snap}
+					subCount={subCount}
+					railOpen={railOpen}
+					onToggleRail={() => setRailOpen(open => !open)}
+					onLeave={onLeave}
+				/>
+				<main className="sh-main">
+					<section className="sh-content">
+						<div className="sh-transcript">
+							<Transcript
+								entries={snap.entries}
+								stream={snap.stream}
+								streamDone={snap.streamDone}
+								activeTools={snap.activeTools}
+								liveResults={snap.liveResults}
+								completedStreams={snap.completedStreams}
+								workingIntent={snap.workingIntent}
+								working={snap.working}
+								host={toolHost}
+								hostName={hostName}
+								recipientName={snap.agents.find(agent => agent.kind === "main")?.displayName ?? "Main"}
+								phase={snap.phase}
 							/>
-						</aside>
+						</div>
+						<Composer client={client} snapshot={snap} />
+					</section>
+					{railOpen && (
+						<>
+							<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
+							<aside className="sh-rail">
+								<AgentsPanel
+									agents={snap.agents}
+									progress={snap.progress}
+									lifecycle={snap.lifecycle}
+									selectedId={selectedId}
+									onSelect={setSelectedId}
+								/>
+							</aside>
+						</>
+					)}
+				</main>
+				{drawerAgent && (
+					<>
+						<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />
+						<AgentDrawer
+							agent={drawerAgent}
+							progress={snap.progress.get(drawerAgent.id)}
+							client={client}
+							readOnly={snap.readOnly}
+							host={toolHost}
+							onClose={() => setSelectedId(null)}
+						/>
 					</>
 				)}
-			</main>
-			{drawerAgent && (
-				<>
-					<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />
-					<AgentDrawer
-						agent={drawerAgent}
-						progress={snap.progress.get(drawerAgent.id)}
-						client={client}
-						readOnly={snap.readOnly}
-						host={toolHost}
-						onClose={() => setSelectedId(null)}
-					/>
-				</>
-			)}
-			<Banners
-				phase={snap.phase}
-				endedReason={snap.endedReason}
-				loading={snap.loading}
-				onRejoin={onRejoin}
-				onNewLink={onLeave}
-			/>
-			<Toasts notices={snap.notices} />
-		</div>
+				<Banners
+					phase={snap.phase}
+					endedReason={snap.endedReason}
+					loading={snap.loading}
+					onRejoin={onRejoin}
+					onNewLink={onLeave}
+				/>
+				<Toasts notices={snap.notices} />
+			</div>
+		</AgentLiveContext.Provider>
 	);
 }

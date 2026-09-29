@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Redesigned the collab client with named speakers, a centered transcript, a prompt dock, and a tree-style agents panel ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Restyled the prompt composer with a compact, auto-expanding input, a divided model/effort footer, a context ring, and a labeled Send button on mobile ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Right-aligned host and guest messages and their bylines to distinguish them from agent replies in the main transcript and agent drawer ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Reduced image attachment previews while preserving their aspect ratio and original resolution ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Grouped tool calls into collapsible work blocks; tool details and injected notices expand on demand ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Added streaming reasoning with measured time shown below each completed segment; older sessions remain readable without timing data ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Added subagent cards with live status and transcript drawers, plus readable reports with a JSON toggle for structured results ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Added a "Jump to latest" button with an unread message count; the agents panel no longer opens over the chat on phones ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+
+### Fixed
+
+- Explained why joining over plain HTTP fails outside localhost and how to use a secure connection ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Kept reasoning and opened tool output stable as streamed messages are saved, with one status line for the current tool intent ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Displayed parent steering and inter-agent messages consistently in the main transcript and agent drawer, without raw IRC wrappers ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Kept the visible message in place when scrolling up loads earlier history ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+- Reconciled streamed assistant and tool-result ghosts with persisted entries even when obfuscation changes visible content ([#13597](https://github.com/can1357/oh-my-pi/pull/13597) by [@HACKE-RC](https://github.com/HACKE-RC)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed

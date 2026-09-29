@@ -253,6 +253,7 @@ import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { ThinkingClock } from "../utils/thinking-clock";
 import { TokenRateMeter } from "../utils/token-rate";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { resumeCommand } from "../utils/resume-command";
@@ -1419,6 +1420,11 @@ export class AgentSession implements SettingsScope {
 
 	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
 	readonly tokenRate: TokenRateMeter;
+	/** Per-block observed thinking time, exposed as each block closes and persisted at message_end. */
+	#thinkingClock = new ThinkingClock();
+
+	/** Last timing map published on a streamed assistant envelope. */
+	#publishedThinkingMs: Record<number, number> | undefined;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -3394,6 +3400,37 @@ export class AgentSession implements SettingsScope {
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
+		// Observe timing before any awaited fan-out. Closed-block maps are reused
+		// until the clock records another block, so ordinary text/tool deltas do
+		// not allocate replacement message envelopes.
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			this.#thinkingClock.begin(performance.now());
+			this.#publishedThinkingMs = undefined;
+		} else if (event.type === "message_update" && event.message.role === "assistant") {
+			const delta = event.assistantMessageEvent;
+			const thinkingMs = this.#thinkingClock.observe(delta, performance.now());
+			if (thinkingMs && thinkingMs !== this.#publishedThinkingMs && "partial" in delta) {
+				this.#publishedThinkingMs = thinkingMs;
+				const message: AssistantMessage = { ...event.message, thinkingMs };
+				if (this.agent.state.streamMessage === event.message) this.agent.state.streamMessage = message;
+				event = { ...event, message, assistantMessageEvent: { ...delta, partial: message } };
+			}
+		} else if (event.type === "message_end" && event.message.role === "assistant") {
+			const previous = event.message;
+			const thinkingMs = this.#thinkingClock.finish(performance.now());
+			this.#publishedThinkingMs = undefined;
+			// Keep the agent-owned envelope identity so turn_end/agent_end hooks,
+			// persistence, and abort stamping all observe the same completion data.
+			// Frozen fixtures and immutable external messages use a safe copy.
+			const message: AssistantMessage = Object.isFrozen(previous) ? { ...previous } : previous;
+			message.completedAt = Date.now();
+			if (thinkingMs) message.thinkingMs = thinkingMs;
+			if (message !== previous) {
+				const index = this.agent.state.messages.lastIndexOf(previous);
+				if (index !== -1) this.agent.state.messages[index] = message;
+				event = { ...event, message };
+			}
+		}
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
@@ -3436,9 +3473,10 @@ export class AgentSession implements SettingsScope {
 		// branch identically through `shouldRenderAbortReason`.
 		// Invariant (must hold across refactors): this branch precedes the
 		// `let displayEvent = event; ... displayEvent = { ...event, message: { ...message, content: deobfuscated } }`
-		// block. After stamping, both `displayEvent.message` (via the spread)
-		// and `event.message` (in-place mutation, used by SessionManager
-		// persistence) carry the flag. The one-shot plan flag is consumed here,
+		// block. The message_end timing stamp keeps mutable agent-owned envelopes
+		// shared with persistence and extension hooks; immutable fixtures use the
+		// replacement envelope created above. After this branch, both
+		// `displayEvent.message` (via the spread) and `event.message` carry the flag.
 		// scoped strictly to this aborted message_end; callers still clear it in
 		// `finally` so a leaked flag cannot silence a later unrelated abort. TTSR
 		// keys off the coordinator's live `abortPending` state instead of a
@@ -3507,13 +3545,6 @@ export class AgentSession implements SettingsScope {
 			this.agent.steer(checkpointReminder);
 		}
 
-		// Local completion time for prompt→yield timing: stamped here, not by the
-		// provider, so the usage row's Δ is exact and provider-independent — some
-		// providers never report `duration` (gitlab-duo) or stamp `timestamp` at
-		// request start. Persisted with the message and read on rebuild.
-		if (event.type === "message_end" && event.message.role === "assistant") {
-			event.message.completedAt = Date.now();
-		}
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
 		const messageEndPersistence =

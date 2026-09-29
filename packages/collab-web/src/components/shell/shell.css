@@ -1,10 +1,7 @@
-/* Shell styles (sh-*). Token vars only — no raw colors.
- * Layout: glass topbar, then one inset panel (transcript + docked composer)
- * with the agents rail framed beside it on the page background. */
+/* Shell styles (sh-*). Token vars only — no raw colors. */
 
 /* ---- app frame ---- */
 .sh-app {
-	position: relative;
 	display: grid;
 	grid-template-rows: auto 1fr;
 	/* Single column pinned to the container width: an `auto` track sizes to its
@@ -13,54 +10,29 @@
 	 * edge. `minmax(0, 1fr)` caps the track so rows shrink and ellipsize. */
 	grid-template-columns: minmax(0, 1fr);
 	height: var(--viewport-height, 100%);
-	background: var(--bg);
-}
-
-.sh-ambient {
-	position: absolute;
-	inset: 0;
-	pointer-events: none;
-	background:
-		radial-gradient(60rem 28rem at 12% -10%, var(--ambient-a), transparent 70%),
-		radial-gradient(50rem 26rem at 95% -12%, var(--ambient-b), transparent 70%);
 }
 
 .sh-main {
-	position: relative;
 	display: flex;
-	gap: 0;
 	min-height: 0;
-	padding: 0 8px 8px;
 	overflow: hidden;
 }
 
-/* The inset panel: one surface step off the page, hairline edge. */
-.sh-panel {
-	position: relative;
+/* Transcript + prompt dock share one pane so the dock always aligns with the reading column. */
+.sh-content {
 	flex: 1;
 	min-width: 0;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
-	align-items: center;
-	background: var(--panel);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-xl);
-	box-shadow: var(--shadow-card);
 	overflow: hidden;
 }
 
 .sh-transcript {
-	width: 100%;
-	max-width: 900px;
 	flex: 1;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
-}
-
-.sh-panel[data-rail="true"] .sh-transcript {
-	max-width: 960px;
 }
 
 .sh-transcript > * {
@@ -68,20 +40,29 @@
 	min-height: 0;
 }
 
-/* Naked rail framed on the page background, like a sidebar. */
 .sh-rail {
-	width: 296px;
+	width: 320px;
 	flex: none;
 	min-height: 0;
 	overflow-y: auto;
-	margin-left: 8px;
-	display: flex;
-	flex-direction: column;
-	animation: rise 360ms var(--ease-out) backwards;
+	border-left: 1px solid var(--border);
+	background: var(--bg);
 }
 
 .sh-rail-backdrop {
 	display: none;
+}
+
+/* ---- brand mark ---- */
+.sh-mark {
+	flex: none;
+	display: block;
+}
+
+.sh-mark-tile {
+	fill: var(--bg-inset);
+	stroke: var(--border-strong);
+	stroke-width: 1.5;
 }
 
 /* ---- shared controls ---- */
@@ -92,27 +73,28 @@
 	gap: 6px;
 	height: 30px;
 	padding: 0 12px;
-	font-size: 13px;
+	font-size: 12.5px;
 	font-weight: 500;
-	white-space: nowrap;
-	color: var(--fg);
-	background: var(--bg-overlay);
-	border: 1px solid var(--border-strong);
+	color: var(--fg-muted);
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
 	border-radius: var(--radius);
+	white-space: nowrap;
 	transition:
-		background 120ms ease-out,
-		color 120ms ease-out,
-		border-color 120ms ease-out,
-		transform 120ms ease-out;
+		background 150ms ease-out,
+		color 150ms ease-out,
+		border-color 150ms ease-out,
+		opacity 150ms ease-out;
 }
 
 .sh-btn:hover:not(:disabled) {
-	border-color: var(--edge-top);
-	background: color-mix(in srgb, var(--bg-overlay) 88%, var(--fg));
+	background: var(--bg-overlay);
+	color: var(--fg);
+	border-color: var(--border-strong);
 }
 
 .sh-btn:active:not(:disabled) {
-	transform: scale(0.97);
+	transform: scale(0.98);
 }
 
 .sh-btn:disabled {
@@ -120,145 +102,117 @@
 	cursor: default;
 }
 
-/* Primary = inverse ink: the one lead action of a surface. */
 .sh-btn-primary {
-	color: var(--fg-inverse);
-	background: var(--fg);
+	color: var(--accent-fg);
+	background: var(--accent);
 	border-color: transparent;
 }
 
 .sh-btn-primary:hover:not(:disabled) {
-	color: var(--fg-inverse);
-	background: color-mix(in srgb, var(--fg) 86%, transparent);
+	color: var(--accent-fg);
+	background: var(--accent);
 	border-color: transparent;
+	filter: brightness(1.06);
 }
 
 .sh-btn-stop {
 	color: var(--err);
-	background: color-mix(in srgb, var(--err) 12%, transparent);
-	border-color: color-mix(in srgb, var(--err) 30%, transparent);
+	background: color-mix(in oklch, var(--err) 8%, transparent);
+	border-color: color-mix(in oklch, var(--err) 30%, transparent);
 }
 
 .sh-btn-stop:hover:not(:disabled) {
-	background: color-mix(in srgb, var(--err) 18%, transparent);
-	border-color: color-mix(in srgb, var(--err) 45%, transparent);
+	color: var(--err);
+	background: color-mix(in oklch, var(--err) 14%, transparent);
+	border-color: color-mix(in oklch, var(--err) 45%, transparent);
 }
 
-.sh-btn-icon {
-	position: relative;
-	width: 30px;
-	padding: 0;
-	color: var(--fg-muted);
-	background: transparent;
-	border-color: transparent;
-}
-
-.sh-btn-icon:hover:not(:disabled) {
-	color: var(--fg);
-	background: var(--hover);
-	border-color: transparent;
-}
-
-.sh-btn-on {
-	color: var(--fg);
-	background: var(--selected);
-}
-
-/* ---- theme toggle (system / light / dark) ---- */
+/* Ghost icon button: header and drawer chrome. */
+.sh-iconbtn,
 .sh-theme-toggle {
+	position: relative;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 30px;
-	height: 30px;
+	gap: 5px;
+	min-width: 32px;
+	height: 32px;
+	padding: 0 8px;
 	flex-shrink: 0;
+	color: var(--fg-faint);
+	background: none;
 	border: 1px solid transparent;
 	border-radius: var(--radius);
-	background: transparent;
-	color: var(--fg-muted);
-	cursor: pointer;
 	transition:
-		color 120ms ease,
-		background 120ms ease;
+		color 150ms ease-out,
+		background 150ms ease-out,
+		border-color 150ms ease-out;
 }
 
+.sh-iconbtn:hover,
 .sh-theme-toggle:hover {
 	color: var(--fg);
-	background: var(--hover);
+	background: var(--bg-hover);
 }
 
-.sh-badge {
-	position: absolute;
-	top: -3px;
-	right: -3px;
-	min-width: 15px;
-	height: 15px;
+.sh-iconbtn-on {
+	color: var(--fg);
+	background: var(--bg-raised);
+	border-color: var(--border);
+}
+
+.sh-count {
+	min-width: 16px;
+	height: 16px;
 	padding: 0 4px;
-	font: 600 9.5px / 15px var(--font-mono);
+	font: 600 10px / 16px var(--font-mono);
 	text-align: center;
 	color: var(--accent-fg);
-	background: var(--accent-gradient);
-	border-radius: 999px;
+	background: var(--accent);
+	border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sh-theme-toggle,
+	.sh-iconbtn,
+	.sh-btn {
+		transition: none;
+	}
 }
 
 .sh-chip {
-	display: inline-flex;
-	align-items: center;
-	height: 22px;
-	padding: 0 8px;
-	font: 400 11.5px / 1 var(--font-mono);
+	padding: 1px 7px;
+	font: 400 11px / 1.5 var(--font-mono);
 	color: var(--fg-muted);
 	background: var(--bg-raised);
 	border: 1px solid var(--border);
-	border-radius: 999px;
+	border-radius: var(--radius-sm);
 	white-space: nowrap;
 }
 
-/* ---- brand ---- */
-.sh-brand {
-	display: inline-flex;
-	align-items: center;
-	gap: 9px;
-	flex: none;
-	font-weight: 600;
-	letter-spacing: -0.01em;
-}
-
-.sh-mark {
-	flex: none;
-	display: block;
-}
-
-.sh-brand-slash {
-	color: var(--fg-faint);
-	font-weight: 300;
-	font-size: 18px;
-	opacity: 0.6;
-}
-
-.sh-brand-app {
-	font-weight: 500;
-}
-
-/* ---- header (glass) ---- */
+/* ---- header ---- */
 .sh-header {
-	position: relative;
-	z-index: 20;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 12px;
-	min-height: var(--topbar-h);
-	padding: 8px 12px 8px 16px;
+	gap: 16px;
+	min-height: 52px;
+	padding: 8px 12px 8px 18px;
 	padding-top: calc(8px + env(safe-area-inset-top, 0px));
-	background: color-mix(in srgb, var(--bg) 72%, transparent);
-	backdrop-filter: blur(14px) saturate(160%);
-	-webkit-backdrop-filter: blur(14px) saturate(160%);
+	border-bottom: 1px solid var(--border);
+	background: var(--bg);
 }
 
 .sh-header-left {
 	display: flex;
 	align-items: center;
+	gap: 12px;
+	min-width: 0;
+}
+
+.sh-heading {
+	display: flex;
+	align-items: baseline;
 	gap: 10px;
 	min-width: 0;
 }
@@ -266,13 +220,14 @@
 .sh-header-right {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	flex: none;
 }
 
 .sh-title {
 	font-size: 14px;
-	font-weight: 500;
+	font-weight: 600;
+	letter-spacing: -0.005em;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -280,7 +235,7 @@
 }
 
 .sh-cwd {
-	font: 400 11.5px / 1.5 var(--font-mono);
+	font: 400 12px / 1.5 var(--font-mono);
 	color: var(--fg-faint);
 	white-space: nowrap;
 	overflow: hidden;
@@ -288,272 +243,104 @@
 	min-width: 0;
 }
 
-/* Connection status pill: dot + word. */
-.sh-status {
+.sh-sep {
+	width: 1px;
+	height: 18px;
+	margin: 0 4px;
+	background: var(--border);
+}
+
+/* Connection state: the one thing a guest must never misread. */
+.sh-live {
 	display: inline-flex;
 	align-items: center;
 	gap: 7px;
-	height: 26px;
-	padding: 0 10px 0 9px;
-	font-size: 12px;
-	font-weight: 500;
-	color: var(--fg-muted);
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
-	border-radius: 999px;
-	white-space: nowrap;
-}
-
-.sh-gauge {
-	display: inline-flex;
-	align-items: center;
-	gap: 7px;
-	height: 26px;
-	padding: 0 10px;
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
-	border-radius: 999px;
-}
-
-.sh-gauge-track {
-	width: 56px;
-	height: 4px;
-	background: var(--border-strong);
-	border-radius: 2px;
-	overflow: hidden;
-}
-
-.sh-gauge-fill {
-	display: block;
-	height: 100%;
-	background: var(--accent-gradient);
-	border-radius: inherit;
-	transition: width 360ms var(--ease-out);
-}
-
-.sh-gauge-warn .sh-gauge-fill {
-	background: var(--warn);
-}
-
-.sh-gauge-pct {
-	font: 400 11.5px / 1 var(--font-mono);
-	color: var(--fg-muted);
-}
-
-.sh-gauge-warn .sh-gauge-pct {
-	color: var(--warn);
-}
-
-.sh-avatars {
-	display: inline-flex;
-	padding-left: 4px;
-}
-
-.sh-avatar {
-	width: 24px;
 	height: 24px;
-	font: 600 10.5px / 22px var(--font-ui);
-	text-align: center;
+	padding: 0 10px 0 9px;
+	margin-right: 4px;
+	font: 500 11.5px / 1 var(--font-mono);
 	color: var(--fg-muted);
-	background: var(--bg-overlay);
-	border: 1px solid var(--border-strong);
-	border-radius: 50%;
-	margin-left: -6px;
-	box-shadow: 0 0 0 2px var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 999px;
 }
 
-.sh-avatar:first-child {
-	margin-left: 0;
-}
-
-.sh-avatar-host {
-	color: var(--fg);
-	border-color: var(--accent);
-}
-
-.sh-dot {
-	position: relative;
-	flex: none;
-	width: 8px;
-	height: 8px;
+.sh-live-dot {
+	width: 7px;
+	height: 7px;
 	border-radius: 50%;
 	background: var(--fg-faint);
 }
 
-.sh-dot-live {
-	background: var(--live);
+.sh-live-live {
+	color: var(--ok);
+	border-color: color-mix(in oklch, var(--ok) 30%, transparent);
+	background: color-mix(in oklch, var(--ok) 8%, transparent);
 }
 
-.sh-dot-live::after {
-	content: "";
-	position: absolute;
-	inset: 0;
-	border-radius: 50%;
-	background: inherit;
-	animation: ping 1.6s var(--ease-out) infinite;
+.sh-live-live .sh-live-dot {
+	background: var(--ok);
+	box-shadow: 0 0 0 3px color-mix(in oklch, var(--ok) 22%, transparent);
 }
 
-.sh-dot-reconnecting,
-.sh-dot-connecting,
-.sh-dot-waiting {
+.sh-live-connecting .sh-live-dot,
+.sh-live-waiting .sh-live-dot,
+.sh-live-reconnecting .sh-live-dot {
 	background: var(--warn);
 	animation: pulse 1.2s ease-in-out infinite;
 }
 
-.sh-dot-ended {
+.sh-live-reconnecting {
+	color: var(--warn);
+	border-color: color-mix(in oklch, var(--warn) 30%, transparent);
+}
+
+.sh-live-ended {
+	color: var(--err);
+	border-color: color-mix(in oklch, var(--err) 30%, transparent);
+}
+
+.sh-live-ended .sh-live-dot {
 	background: var(--err);
 }
 
-/* ---- composer (docked card at the panel foot) ---- */
-.sh-composer {
-	width: 100%;
-	max-width: 900px;
-	padding: 0 16px 16px;
-	padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-}
-
-.sh-composer-inner {
-	display: flex;
-	align-items: flex-end;
-	gap: 8px;
-	padding: 8px 8px 8px 12px;
-	border-radius: var(--radius-lg);
-	border: 1px solid transparent;
-	background:
-		linear-gradient(var(--bg-raised), var(--bg-raised)) padding-box,
-		linear-gradient(180deg, var(--edge-top), var(--edge-bottom) 60%) border-box;
-	box-shadow: var(--shadow-card);
-	transition: box-shadow 160ms ease-out;
-}
-
-.sh-composer-inner:focus-within {
-	box-shadow:
-		0 0 0 3px var(--ring-soft),
-		var(--shadow-card);
-}
-
-.sh-composer-input {
-	flex: 1;
-	min-width: 0;
-	padding: 5px 0;
-	font-size: 14px;
-	line-height: 20px;
-	color: var(--fg);
-	background: transparent;
-	border: 0;
-	resize: none;
-}
-
-.sh-composer-input::placeholder {
-	color: var(--fg-faint);
-}
-
-.sh-composer-input:disabled {
-	opacity: 0.55;
-}
-
-.sh-composer-input:focus-visible {
-	outline: none;
-}
-
-.sh-composer-actions {
-	display: flex;
+.sh-presence {
+	display: inline-flex;
 	align-items: center;
 	gap: 6px;
+	max-width: 220px;
+	min-width: 0;
+	padding: 0 4px;
+	color: var(--fg-faint);
+	font: 400 12.5px / 1 var(--font-ui);
+	cursor: default;
+}
+
+.sh-presence svg {
 	flex: none;
 }
 
-.sh-composer-ask {
-	display: grid;
-	gap: 10px;
-	padding-top: 12px;
-	border-top: 1px solid var(--border);
-}
-
-.sh-ask-title {
-	width: 100%;
-	font-size: 14px;
-	font-weight: 550;
-	color: var(--fg);
-	white-space: pre-wrap;
-}
-
-.sh-ask-options {
-	display: grid;
-	gap: 6px;
-	width: 100%;
-}
-
-.sh-ask-option {
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
-	width: 100%;
-	padding: 10px 12px;
-	color: var(--fg);
-	text-align: left;
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	transition:
-		border-color 120ms ease-out,
-		background 120ms ease-out;
-}
-
-.sh-ask-option:hover {
-	border-color: var(--border-strong);
-	background: color-mix(in srgb, var(--bg-raised) 92%, var(--fg));
-}
-
-.sh-ask-option-checked {
-	border-color: var(--accent);
-	background: var(--accent-muted);
-}
-
-.sh-ask-option-marker {
-	width: 18px;
-	font: 400 13px / 20px var(--font-mono);
-	color: var(--accent);
-}
-
-.sh-ask-option-copy {
-	display: grid;
-	gap: 2px;
+.sh-presence-names {
 	min-width: 0;
-}
-
-.sh-ask-option-label {
-	font-size: 13.5px;
-	font-weight: 500;
-}
-
-.sh-ask-option-description {
-	font-size: 12.5px;
-	line-height: 1.4;
+	overflow: hidden;
 	color: var(--fg-muted);
-}
-
-.sh-ask-actions {
-	justify-content: flex-end;
-	width: 100%;
-}
-
-.sh-queued {
-	display: inline-flex;
-	align-items: center;
-	height: 22px;
-	padding: 0 8px;
-	font: 400 11.5px / 1 var(--font-mono);
-	color: var(--accent);
-	background: var(--accent-muted);
-	border-radius: 999px;
+	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.sh-presence-more {
+	color: var(--fg-faint);
+}
+
+/* Narrow headers show only the head count. */
+.sh-presence-count {
+	display: none;
+	font-variant-numeric: tabular-nums;
 }
 
 /* ---- banners ---- */
 .sh-banner {
 	position: fixed;
-	top: calc(var(--topbar-h) + 10px);
+	top: 62px;
 	left: 50%;
 	transform: translateX(-50%);
 	z-index: 50;
@@ -561,17 +348,14 @@
 	align-items: center;
 	gap: 8px;
 	height: 30px;
-	padding: 0 14px 0 12px;
-	font-size: 12.5px;
+	padding: 0 14px;
+	font: 500 12px / 1 var(--font-mono);
 	white-space: nowrap;
-	color: var(--fg);
-	background: var(--glass);
-	backdrop-filter: blur(14px) saturate(160%);
-	-webkit-backdrop-filter: blur(14px) saturate(160%);
+	color: var(--fg-muted);
+	background: var(--bg-overlay);
 	border: 1px solid var(--border-strong);
 	border-radius: 999px;
 	box-shadow: var(--shadow-overlay);
-	animation: rise 360ms var(--ease-out) backwards;
 }
 
 .sh-banner-dot {
@@ -590,39 +374,37 @@
 	place-items: center;
 	padding: 16px;
 	background: var(--backdrop);
+	backdrop-filter: blur(2px);
 }
 
 .sh-ended-card {
 	width: 100%;
-	max-width: 340px;
-	padding: 22px;
+	max-width: 360px;
+	padding: 24px;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
-	background: var(--glass);
-	backdrop-filter: blur(20px) saturate(170%);
-	-webkit-backdrop-filter: blur(20px) saturate(170%);
+	background: var(--bg-overlay);
 	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-xl);
 	box-shadow: var(--shadow-overlay);
-	animation: rise 360ms var(--ease-out) backwards;
 }
 
 .sh-ended-title {
-	font-size: 15px;
+	font-size: 16px;
 	font-weight: 600;
-	letter-spacing: -0.01em;
 }
 
 .sh-ended-reason {
 	font-size: 13px;
 	color: var(--fg-muted);
+	overflow-wrap: anywhere;
 }
 
 .sh-ended-actions {
 	display: flex;
 	gap: 8px;
-	margin-top: 10px;
+	margin-top: 12px;
 }
 
 /* ---- toasts ---- */
@@ -642,17 +424,14 @@
 .sh-toast {
 	display: flex;
 	align-items: flex-start;
-	gap: 8px;
+	gap: 10px;
 	padding: 10px 12px;
 	font-size: 12.5px;
 	color: var(--fg);
-	background: var(--glass);
-	backdrop-filter: blur(16px) saturate(160%);
-	-webkit-backdrop-filter: blur(16px) saturate(160%);
+	background: var(--bg-overlay);
 	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-lg);
 	box-shadow: var(--shadow-overlay);
-	animation: rise 360ms var(--ease-out) backwards;
 }
 
 .sh-toast::before {
@@ -702,60 +481,60 @@
 	position: relative;
 	height: 100%;
 	display: grid;
-	grid-template-rows: auto 1fr;
-	background: var(--bg);
-	padding: 12px 16px 16px;
-	padding-top: calc(12px + env(safe-area-inset-top, 0px));
-	padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+	place-items: center;
 	overflow-y: auto;
+	background: var(--bg);
+	padding: 24px;
+	padding-top: calc(24px + env(safe-area-inset-top, 0px));
+	padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
 }
 
-.sh-connect-top {
-	position: relative;
+.sh-connect-corner {
+	position: absolute;
+	top: calc(12px + env(safe-area-inset-top, 0px));
+	right: 12px;
+}
+
+.sh-connect-panel {
+	width: 100%;
+	max-width: 400px;
+	display: flex;
+	flex-direction: column;
+	gap: 24px;
+}
+
+.sh-connect-brand {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	height: 36px;
+	gap: 12px;
 }
 
-.sh-connect-card {
-	position: relative;
-	align-self: center;
-	justify-self: center;
-	width: 100%;
-	max-width: 420px;
-	margin-bottom: 8vh;
-	padding: 28px;
-	display: flex;
-	flex-direction: column;
-	gap: 16px;
-	border: 1px solid transparent;
-	border-radius: var(--radius-xl);
-	background:
-		linear-gradient(var(--bg-raised), var(--bg-raised)) padding-box,
-		linear-gradient(180deg, var(--edge-top), var(--edge-bottom) 45%) border-box;
-	box-shadow: var(--shadow-overlay);
-	animation: rise 420ms var(--ease-out) backwards;
+.sh-connect-wordmark {
+	font: 500 14px / 1 var(--font-mono);
+	letter-spacing: 0.02em;
+	color: var(--fg-muted);
 }
 
-.sh-connect-head {
-	display: flex;
-	flex-direction: column;
+.sh-connect-copy {
+	display: grid;
 	gap: 6px;
-	margin-bottom: 4px;
 }
 
 .sh-connect-title {
-	font-size: 22px;
-	font-weight: 600;
-	letter-spacing: -0.02em;
+	font-size: 24px;
+	font-weight: 650;
 	line-height: 1.2;
+	letter-spacing: -0.015em;
 }
 
 .sh-connect-sub {
-	font-size: 13.5px;
+	font-size: 14px;
 	color: var(--fg-muted);
-	line-height: 1.5;
+}
+
+.sh-connect-fields {
+	display: grid;
+	gap: 16px;
 }
 
 .sh-field {
@@ -776,29 +555,31 @@
 }
 
 .sh-field-hint code {
+	padding: 0 4px;
 	font-size: 11.5px;
 	color: var(--fg-muted);
+	background: var(--bg-inset);
+	border: 1px solid var(--border-soft);
+	border-radius: var(--radius-sm);
 }
 
 .sh-input {
-	height: 36px;
-	padding: 0 11px;
-	font-size: 13.5px;
+	height: 40px;
+	padding: 0 12px;
+	font-size: 14px;
 	color: var(--fg);
 	background: var(--bg-inset);
-	border: 1px solid var(--border-strong);
-	border-radius: var(--radius);
-	transition:
-		border-color 120ms ease-out,
-		box-shadow 120ms ease-out;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	transition: border-color 150ms ease-out;
 }
 
 .sh-input::placeholder {
-	color: var(--fg-faint);
+	color: var(--fg-ghost);
 }
 
 .sh-input:hover {
-	border-color: var(--edge-top);
+	border-color: var(--border-strong);
 }
 
 .sh-input:focus-visible {
@@ -807,61 +588,87 @@
 
 .sh-input:focus {
 	border-color: var(--ring);
-	box-shadow: 0 0 0 3px var(--ring-soft);
+}
+
+.sh-input[aria-invalid="true"] {
+	border-color: color-mix(in oklch, var(--err) 55%, transparent);
 }
 
 .sh-input-mono {
 	font-family: var(--font-mono);
-	font-size: 12.5px;
+	font-size: 13px;
+}
+
+.sh-connect-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 12px 14px;
+	border: 1px solid color-mix(in oklch, var(--warn) 35%, transparent);
+	border-radius: var(--radius-lg);
+	background: color-mix(in oklch, var(--warn) 8%, transparent);
+	color: var(--fg-muted);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.sh-connect-warning svg {
+	flex: none;
+	margin-top: 2px;
+	color: var(--warn);
+}
+
+.sh-connect-warning code {
+	padding: 0 4px;
+	font-size: 12px;
+	color: var(--fg);
+	background: var(--bg-inset);
+	border-radius: var(--radius-sm);
+	overflow-wrap: anywhere;
 }
 
 .sh-connect-error {
-	padding: 8px 10px;
-	font-size: 12.5px;
+	margin-top: -12px;
+	font-size: 13px;
 	color: var(--err);
-	background: color-mix(in srgb, var(--err) 12%, transparent);
-	border-radius: var(--radius);
 }
 
 .sh-connect-submit {
-	height: 38px;
-	margin-top: 4px;
-	font-size: 13.5px;
+	height: 40px;
+	font-size: 14px;
+	border-radius: var(--radius-lg);
 }
 
-.sh-connect-foot {
+.sh-connect-note {
 	display: flex;
 	align-items: flex-start;
 	gap: 8px;
-	padding-top: 14px;
-	border-top: 1px solid var(--border);
+	padding-top: 16px;
+	border-top: 1px solid var(--border-soft);
 	font-size: 12px;
 	line-height: 1.5;
 	color: var(--fg-faint);
 }
 
-.sh-connect-foot svg {
+.sh-connect-note svg {
 	flex: none;
 	margin-top: 2px;
 }
 
 /* ---- responsive mobile styles ---- */
-@media (max-width: 900px) {
+@media (max-width: 768px) {
+	.sh-main {
+		position: relative;
+	}
 	.sh-rail {
 		position: absolute;
-		right: 8px;
+		right: 0;
 		top: 0;
-		bottom: 8px;
+		bottom: 0;
 		z-index: 30;
 		width: 300px;
-		max-width: 86vw;
-		margin: 0;
-		padding: 6px;
-		background: var(--glass);
-		backdrop-filter: blur(18px) saturate(160%);
-		-webkit-backdrop-filter: blur(18px) saturate(160%);
-		border: 1px solid var(--border-strong);
-		border-radius: var(--radius-xl);
+		max-width: 85vw;
+		border-left: 1px solid var(--border-strong);
 		box-shadow: var(--rail-mobile-shadow);
 	}
 	.sh-rail-backdrop {
@@ -884,40 +691,26 @@
 }
 
 @media (max-width: 640px) {
-	.sh-main {
-		padding: 0 4px 4px;
+	.sh-header {
+		padding-left: 14px;
+		gap: 8px;
 	}
-	.sh-brand-slash,
+	.sh-presence-names,
 	.sh-cwd,
-	.sh-chip-meta,
-	.sh-gauge-track,
-	.sh-btn-label,
-	.sh-queued-label {
+	.sh-live-label,
+	.sh-sep,
+	.sh-btn-label {
 		display: none;
 	}
-	.sh-status {
-		width: 26px;
-		padding: 0;
-		justify-content: center;
-		font-size: 0;
+	.sh-live {
+		padding: 0 8px;
 	}
-	.sh-composer {
-		padding: 0 8px 8px;
-		padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
-	}
-	.sh-composer-actions .sh-btn {
-		width: 34px;
-		height: 34px;
-		padding: 0;
-	}
-	.sh-ask-title,
-	.sh-ask-option-label {
-		font-size: 16px;
+	.sh-presence-count {
+		display: inline;
 	}
 }
 
 @media (any-pointer: coarse) {
-	.sh-composer-input,
 	.sh-input,
 	.sh-input-mono {
 		font-size: 16px;

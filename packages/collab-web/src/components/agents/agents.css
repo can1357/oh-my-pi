@@ -1,119 +1,160 @@
-/* Agents rail + drawer (T3). `ag-*` prefix; design-token vars only. */
+/* Agents rail + drawer. `ag-*` prefix; design-token vars only. The rail reads
+ * as a tree: the main agent at the root, subagents branching off one spine. */
 
 /* ── Panel ────────────────────────────────────────────────────────── */
 
 .ag-panel {
 	display: flex;
 	flex-direction: column;
-	gap: 1px;
+	gap: 2px;
 	min-height: 0;
-	padding: 4px 0 8px;
+	padding: 12px 10px;
 	overflow-y: auto;
 	font-size: 13px;
 }
 
-.ag-heading {
+.ag-panel-head {
 	display: flex;
-	align-items: center;
-	gap: 6px;
-	padding: 12px 10px 6px;
-	color: var(--fg-faint);
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 0 10px 8px;
+}
+
+.ag-panel-title {
 	font-size: 12px;
-	font-weight: 500;
-}
-
-.ag-heading:first-child {
-	padding-top: 4px;
-}
-
-.ag-heading-count {
-	padding: 0 6px;
-	border-radius: 999px;
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
+	font-weight: 600;
 	color: var(--fg-muted);
-	font-family: var(--font-mono);
-	font-size: 10.5px;
-	line-height: 16px;
+}
+
+.ag-panel-count {
+	color: var(--fg-faint);
+	font: 400 11px / 1 var(--font-mono);
 }
 
 .ag-row {
+	position: relative;
 	display: flex;
 	flex-direction: column;
-	gap: 3px;
+	gap: 2px;
 	width: 100%;
 	padding: 8px 10px;
 	border: 1px solid transparent;
-	border-radius: var(--radius);
+	border-radius: var(--radius-lg);
 	background: none;
 	color: var(--fg);
 	font: inherit;
 	text-align: left;
 	cursor: pointer;
-	transition: background 150ms ease-out;
+	transition:
+		background 150ms ease-out,
+		border-color 150ms ease-out;
 }
 
 .ag-row:hover {
-	background: var(--hover);
+	background: var(--bg-hover);
 }
 
-.ag-row--selected {
+.ag-row--selected,
+.ag-row--selected:hover {
 	border-color: var(--border);
-	background: var(--selected);
+	background: var(--bg-raised);
 }
 
 .ag-row:focus-visible {
 	outline: 2px solid var(--ring);
-	outline-offset: 2px;
+	outline-offset: 0;
 }
 
 .ag-row-head {
 	display: flex;
 	align-items: center;
-	gap: 7px;
+	gap: 8px;
 	min-width: 0;
+	line-height: 20px;
 }
 
 .ag-row-name {
 	flex: 1;
 	min-width: 0;
 	overflow: hidden;
-	font-weight: 500;
+	font-weight: 600;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
-.ag-row-activity {
+.ag-row--sub .ag-row-name {
+	font-weight: 500;
+}
+
+.ag-row-when {
+	flex: none;
+	color: var(--fg-faint);
+	font: 400 11px / 1 var(--font-mono);
+}
+
+.ag-row-activity,
+.ag-row-meta {
 	overflow: hidden;
 	padding-left: 15px;
-	color: var(--fg-muted);
 	font-family: var(--font-mono);
 	font-size: 11.5px;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
+.ag-row-activity {
+	color: var(--fg-muted);
+}
+
 .ag-row-meta {
 	display: flex;
 	gap: 10px;
-	padding-left: 15px;
 	color: var(--fg-faint);
-	font-family: var(--font-mono);
-	font-size: 11px;
+	font-variant-numeric: tabular-nums;
 }
 
-.ag-row-meta-when {
-	margin-left: auto;
+/* Subagents hang off the main agent: a spine segment and a tick per row, so the
+ * spine ends exactly at the last row's node. Offsets are in each row's padding
+ * box (border 1px + padding-top 8px + half the 20px head line = node at 18px). */
+.ag-branch {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-left: 14px;
+	padding-left: 10px;
+}
+
+.ag-branch > .ag-row::before,
+.ag-branch > .ag-row::after {
+	content: "";
+	position: absolute;
+	left: -11px;
+	background: var(--border-strong);
+}
+
+.ag-branch > .ag-row::before {
+	top: 18px;
+	width: 11px;
+	height: 1px;
+}
+
+.ag-branch > .ag-row::after {
+	top: -3px;
+	bottom: -1px;
+	width: 1px;
+}
+
+.ag-branch > .ag-row:last-child::after {
+	bottom: auto;
+	height: 22px;
 }
 
 .ag-empty {
-	margin: 2px 4px;
 	padding: 14px 10px;
 	color: var(--fg-faint);
-	font-size: 12.5px;
+	font-size: 12px;
 	text-align: center;
-	border: 1px dashed var(--border-strong);
-	border-radius: var(--radius);
 }
 
 /* Terminal transcript-read failure reported by the host (drawer stops polling). */
@@ -130,14 +171,14 @@
 
 .ag-dot {
 	flex: none;
-	width: 8px;
-	height: 8px;
+	width: 7px;
+	height: 7px;
 	border-radius: 50%;
 	background: var(--fg-faint);
 }
 
 .ag-dot--running {
-	background: var(--live);
+	background: var(--ok);
 	animation: ag-pulse 1.6s ease-out infinite;
 }
 
@@ -163,13 +204,13 @@
 
 .ag-chip {
 	flex: none;
-	padding: 0 7px;
+	padding: 1px 5px;
 	border: 1px solid var(--border);
-	border-radius: 999px;
+	border-radius: var(--radius-sm);
 	color: var(--fg-muted);
 	font-family: var(--font-mono);
-	font-size: 10.5px;
-	line-height: 17px;
+	font-size: 10px;
+	line-height: 1.5;
 	white-space: nowrap;
 }
 
@@ -216,31 +257,27 @@
 
 .ag-drawer {
 	position: fixed;
-	top: 8px;
-	right: 8px;
-	bottom: 8px;
+	top: 0;
+	right: 0;
+	bottom: 0;
 	z-index: 40;
 	display: flex;
 	flex-direction: column;
-	width: min(520px, calc(100vw - 16px));
-	overflow: hidden;
-	border: 1px solid var(--border-strong);
-	border-radius: var(--radius-xl);
-	background: var(--glass);
-	backdrop-filter: blur(20px) saturate(170%);
-	-webkit-backdrop-filter: blur(20px) saturate(170%);
-	box-shadow: var(--shadow-overlay);
-	animation: ag-drawer-in 360ms var(--ease-out);
+	width: min(440px, 92vw);
+	border-left: 1px solid var(--border-strong);
+	background: var(--bg-overlay);
+	box-shadow:
+		-12px 0 32px color-mix(in srgb, var(--bg-inset) 55%, transparent),
+		-32px 0 80px color-mix(in srgb, var(--bg-inset) 35%, transparent);
+	animation: ag-drawer-in 150ms ease-out;
 }
 
 @keyframes ag-drawer-in {
 	from {
-		transform: translateX(24px);
-		opacity: 0;
+		transform: translateX(100%);
 	}
 	to {
-		transform: none;
-		opacity: 1;
+		transform: translateX(0);
 	}
 }
 
@@ -248,7 +285,7 @@
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	padding: 14px 14px 12px 18px;
+	padding: 12px 12px 12px 16px;
 	border-bottom: 1px solid var(--border);
 }
 
@@ -262,9 +299,8 @@
 
 .ag-drawer-name {
 	overflow: hidden;
-	font-size: 15px;
+	font-size: 13px;
 	font-weight: 600;
-	letter-spacing: -0.01em;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
@@ -281,16 +317,14 @@
 .ag-btn {
 	display: inline-flex;
 	align-items: center;
-	gap: 6px;
-	height: 28px;
-	padding: 0 10px;
-	border: 1px solid var(--border-strong);
+	gap: 5px;
+	padding: 3px 8px;
+	border: 1px solid var(--border);
 	border-radius: var(--radius);
-	background: var(--bg-overlay);
-	color: var(--fg);
+	background: var(--bg-raised);
+	color: var(--fg-muted);
 	font: inherit;
-	font-size: 12.5px;
-	font-weight: 500;
+	font-size: 12px;
 	cursor: pointer;
 	transition:
 		background 150ms ease-out,
@@ -312,8 +346,7 @@
 }
 
 .ag-btn--danger {
-	border-color: color-mix(in srgb, var(--err) 30%, transparent);
-	background: color-mix(in srgb, var(--err) 12%, transparent);
+	border-color: color-mix(in srgb, var(--err) 35%, transparent);
 	color: var(--err);
 }
 
@@ -325,10 +358,9 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 28px;
-	height: 28px;
+	padding: 3px;
 	border: none;
-	border-radius: var(--radius);
+	border-radius: var(--radius-sm);
 	background: none;
 	color: var(--fg-muted);
 	cursor: pointer;
@@ -337,7 +369,6 @@
 
 .ag-iconbtn:hover {
 	color: var(--fg);
-	background: var(--hover);
 }
 
 .ag-iconbtn:active {
@@ -355,12 +386,12 @@
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: 14px;
-	padding: 10px 18px;
+	gap: 12px;
+	padding: 8px 14px;
 	border-bottom: 1px solid var(--border);
 	color: var(--fg-muted);
 	font-family: var(--font-mono);
-	font-size: 11.5px;
+	font-size: 11px;
 }
 
 .ag-stat {
@@ -383,7 +414,7 @@
 	align-self: center;
 	width: 72px;
 	height: 4px;
-	border-radius: 2px;
+	border-radius: var(--radius-sm);
 	background: var(--border-strong);
 }
 
@@ -391,7 +422,7 @@
 	display: block;
 	height: 100%;
 	border-radius: inherit;
-	background: var(--accent-gradient);
+	background: var(--accent);
 }
 
 .ag-gauge-fill--warn {
@@ -405,24 +436,29 @@
 	flex: 1;
 	flex-direction: column;
 	min-height: 0;
-	padding: 10px 14px;
-	overflow-y: auto;
+	padding: 0;
+	overflow: hidden;
+}
+
+.ag-drawer-body > .tr-frame {
+	flex: 1;
+	height: auto;
+	min-height: 0;
 }
 
 .ag-chat {
 	display: flex;
 	flex: none;
 	gap: 6px;
-	padding: 12px 14px;
+	padding: 10px 12px 12px 16px;
 	border-top: 1px solid var(--border);
 }
 
 .ag-chat-input {
 	flex: 1;
 	min-width: 0;
-	height: 32px;
-	padding: 0 11px;
-	border: 1px solid var(--border-strong);
+	padding: 6px 9px;
+	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	background: var(--bg-inset);
 	color: var(--fg);
@@ -441,7 +477,6 @@
 
 .ag-chat-input:focus {
 	border-color: var(--ring);
-	box-shadow: 0 0 0 3px var(--ring-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {

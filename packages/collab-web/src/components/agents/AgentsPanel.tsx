@@ -60,20 +60,22 @@ function AgentRow(props: {
 	return (
 		<button
 			type="button"
-			className={selected ? "ag-row ag-row--selected" : "ag-row"}
+			className={`ag-row ag-row--${agent.kind}${selected ? " ag-row--selected" : ""}`}
 			onClick={() => onSelect(selected ? null : agent.id)}
+			aria-pressed={selected}
 		>
 			<span className="ag-row-head">
 				<span className={`ag-dot ag-dot--${agent.status}`} />
 				<span className="ag-row-name">{agent.displayName}</span>
-				<span className="ag-chip">{agent.kind}</span>
+				<span className="ag-row-when">{relTime(agent.lastActivity)}</span>
 			</span>
 			<span className="ag-row-activity">{activityLine(agent, p, lifecycle, now)}</span>
-			<span className="ag-row-meta">
-				{p ? <span>{fmtTokens(p.tokens)} tok</span> : null}
-				{p ? <span>{fmtCost(p.cost)}</span> : null}
-				<span className="ag-row-meta-when">{relTime(agent.lastActivity)}</span>
-			</span>
+			{p ? (
+				<span className="ag-row-meta">
+					<span>{fmtTokens(p.tokens)} tok</span>
+					<span>{fmtCost(p.cost)}</span>
+				</span>
+			) : null}
 		</button>
 	);
 }
@@ -98,39 +100,38 @@ export function AgentsPanel(props: {
 			if (ar !== br) return ar - br;
 			return b.lastActivity - a.lastActivity;
 		});
-		return { mains, subs };
+		return { mains, subs, running: subs.filter(a => a.status === "running").length };
 	}, [agents]);
+
+	const row = (agent: AgentSnapshot): ReactNode => (
+		<AgentRow
+			key={agent.id}
+			agent={agent}
+			payload={progress.get(agent.id)}
+			lifecycle={lifecycle.get(agent.id)}
+			selected={selectedId === agent.id}
+			now={now}
+			onSelect={onSelect}
+		/>
+	);
 
 	return (
 		<div className="ag-panel">
-			<div className="ag-heading">Session</div>
-			{sorted.mains.map(agent => (
-				<AgentRow
-					key={agent.id}
-					agent={agent}
-					payload={progress.get(agent.id)}
-					lifecycle={lifecycle.get(agent.id)}
-					selected={selectedId === agent.id}
-					now={now}
-					onSelect={onSelect}
-				/>
-			))}
-			<div className="ag-heading">
-				Subagents
-				{sorted.subs.length > 0 && <span className="ag-heading-count">{sorted.subs.length}</span>}
+			<div className="ag-panel-head">
+				<span className="ag-panel-title">Agents</span>
+				{sorted.subs.length > 0 && (
+					<span className="ag-panel-count">
+						{sorted.running > 0 ? `${sorted.running} running · ` : ""}
+						{sorted.subs.length} sub
+					</span>
+				)}
 			</div>
-			{sorted.subs.map(agent => (
-				<AgentRow
-					key={agent.id}
-					agent={agent}
-					payload={progress.get(agent.id)}
-					lifecycle={lifecycle.get(agent.id)}
-					selected={selectedId === agent.id}
-					now={now}
-					onSelect={onSelect}
-				/>
-			))}
-			{sorted.subs.length === 0 ? <div className="ag-empty">No subagents yet</div> : null}
+			{sorted.mains.map(row)}
+			{sorted.subs.length > 0 ? (
+				<div className="ag-branch">{sorted.subs.map(row)}</div>
+			) : (
+				<div className="ag-empty">no subagents yet</div>
+			)}
 		</div>
 	);
 }

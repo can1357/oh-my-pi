@@ -1012,7 +1012,11 @@ describe("AgentSession auto-compaction progress guard", () => {
 			expect(continueSpy).not.toHaveBeenCalled();
 			expect(warnings.some(message => /output limit/.test(message))).toBe(true);
 			expect(sessionManager.getBranch().at(-1)).toMatchObject({ type: "message", message: truncated });
-			expect(session.agent.state.messages).toContain(truncated);
+			expect(session.agent.state.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "half an answer" }],
+				stopReason: "length",
+			});
 		});
 
 		it("retries a reasoning-only turn without compacting, telling the model its reasoning was discarded", async () => {
