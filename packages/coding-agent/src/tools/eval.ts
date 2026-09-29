@@ -998,7 +998,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						let reply: EvalPreludeSettleReply | undefined;
 						try {
 							// A hook that never settles must not hold the cell past its abort.
-							reply = await untilAborted(preludeCell.signal, prelude.settleCell(preludeCell, { failed }));
+							reply = await untilAborted(
+								preludeCell.signal,
+								prelude.settleCell(preludeCell, { failed, output: result.output }),
+							);
 						} catch (error) {
 							if (preludeCell.signal.aborted) break;
 							// One prelude's settle must not cost the cell its output.
@@ -1010,7 +1013,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						if (reply?.text) preludeReplies.push(reply.text);
 					}
 				}
-				// Settling is part of the cell as the model sees it.
+				// Settling is part of the cell as the model sees it, including a cancellation that lands during it.
+				const cancelled = result.cancelled || combinedSignal.aborted;
 				const durationMs = Date.now() - startTime;
 				const cellStatusEvents: EvalStatusEvent[] = [];
 				const cellDisplayTexts: string[] = [];
@@ -1090,12 +1094,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					appendTail(cellOutput);
 				}
 
-				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
+				if (cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
 					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
+					const outputText = cancelled
 						? combinedOutput || result.output || "Command aborted"
 						: combinedOutput
 							? `${combinedOutput}\n\n${exitLine}`

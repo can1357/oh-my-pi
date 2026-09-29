@@ -6,8 +6,11 @@ import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/exec
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
+/** One settled cell as the counting prelude saw it. */
+type Settled = { calls: number; failed: boolean; output?: string };
+
 /** A prelude that counts its calls per cell and reports the count once the cell settles. */
-function countingPrelude(settled: Array<{ calls: number; failed: boolean }>): EvalPreludeDefinition {
+function countingPrelude(settled: Settled[]): EvalPreludeDefinition {
 	const calls = new Map<EvalPreludeCell, number>();
 	return {
 		name: "counter",
@@ -24,7 +27,7 @@ function countingPrelude(settled: Array<{ calls: number; failed: boolean }>): Ev
 			const count = calls.get(cell);
 			if (count === undefined) return undefined;
 			calls.delete(cell);
-			settled.push({ calls: count, failed: outcome.failed });
+			settled.push({ calls: count, failed: outcome.failed, output: outcome.output });
 			return { text: `counter: ${count} call(s) this cell` };
 		},
 	};
@@ -52,7 +55,7 @@ describe("eval prelude cell settlement", () => {
 	});
 
 	it("groups a JavaScript cell's prelude calls and appends the settle text after the cell's own output", async () => {
-		const settled: Array<{ calls: number; failed: boolean }> = [];
+		const settled: Settled[] = [];
 		const tool = new EvalTool(evalSession([countingPrelude(settled)], `prelude-settle-js-${crypto.randomUUID()}`));
 
 		const first = await tool.execute("settle-js-1", {
@@ -70,13 +73,13 @@ describe("eval prelude cell settlement", () => {
 		});
 		expect(text(failed)).toContain("counter: 1 call(s) this cell");
 		expect(settled).toEqual([
-			{ calls: 2, failed: false },
-			{ calls: 1, failed: true },
+			{ calls: 2, failed: false, output: expect.stringContaining("cell body") },
+			{ calls: 1, failed: true, output: expect.any(String) },
 		]);
 	});
 
 	it("groups a Python cell's prelude calls under one cell", async () => {
-		const settled: Array<{ calls: number; failed: boolean }> = [];
+		const settled: Settled[] = [];
 		const tool = new EvalTool(evalSession([countingPrelude(settled)], `prelude-settle-py-${crypto.randomUUID()}`));
 
 		const result = await tool.execute("settle-py-1", {
@@ -84,11 +87,11 @@ describe("eval prelude cell settlement", () => {
 			code: "await counter.hit()\nawait counter.hit()\nawait counter.hit()\nprint('cell body')",
 		});
 		expect(text(result)).toBe("cell body\n\ncounter: 3 call(s) this cell");
-		expect(settled).toEqual([{ calls: 3, failed: false }]);
+		expect(settled).toEqual([{ calls: 3, failed: false, output: expect.stringContaining("cell body") }]);
 	});
 
 	it("keeps the cell's output and the other preludes' replies when one settle throws", async () => {
-		const settled: Array<{ calls: number; failed: boolean }> = [];
+		const settled: Settled[] = [];
 		const throwing: EvalPreludeDefinition = {
 			name: "broken",
 			documentation: "broken",
@@ -114,7 +117,7 @@ describe("eval prelude cell settlement", () => {
 	});
 
 	it("does not settle a cell that timed out", async () => {
-		const settled: Array<{ calls: number; failed: boolean }> = [];
+		const settled: Settled[] = [];
 		const tool = new EvalTool(
 			evalSession([countingPrelude(settled)], `prelude-settle-timeout-${crypto.randomUUID()}`),
 		);
@@ -152,5 +155,32 @@ describe("eval prelude cell settlement", () => {
 			abort.signal,
 		);
 		expect(text(result)).toContain("cell body");
+	});
+
+	it("ends a cell cancelled while it settles as cancelled", async () => {
+		const abort = new AbortController();
+		const cancelling: EvalPreludeDefinition = {
+			name: "cancelling",
+			documentation: "cancelling",
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+			async settleCell() {
+				abort.abort();
+				return undefined;
+			},
+		};
+		const tool = new EvalTool(evalSession([cancelling], `prelude-settle-cancel-${crypto.randomUUID()}`));
+
+		const result = await tool.execute(
+			"settle-cancel-1",
+			{ language: "js", code: "console.log('cell body')" },
+			abort.signal,
+		);
+		expect(result.isError).toBe(true);
+		expect(text(result)).toBe("cell body");
 	});
 });

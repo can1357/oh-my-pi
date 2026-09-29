@@ -39,10 +39,12 @@ export interface ComputerController {
 	/**
 	 * Report what the eval cell that just ended left behind: each window its
 	 * input touched, re-read and marked against the model's last tree of it,
-	 * and windows it opened, closed or focused. Undefined when there is nothing
-	 * to report. Controllers without it report nothing.
+	 * and windows it opened, closed or focused. `output` is what the cell
+	 * printed, so trees the cell's code read but did not print are not taken as
+	 * seen. Undefined when there is nothing to report. Controllers without it
+	 * report nothing.
 	 */
-	settle?(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<string | undefined>;
+	settle?(snapshot: ComputerSessionSnapshot, output: string, signal?: AbortSignal): Promise<string | undefined>;
 	close(): Promise<void>;
 }
 
@@ -202,11 +204,11 @@ export class ComputerSupervisor implements ComputerController {
 		return this.#request(id => ({ type: "run", id, code, timeoutMs, session: snapshot }), timeoutMs, signal);
 	}
 
-	async settle(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<string | undefined> {
+	async settle(snapshot: ComputerSessionSnapshot, output: string, signal?: AbortSignal): Promise<string | undefined> {
 		// A worker that never started has seen no input.
 		if (!this.#worker) return undefined;
 		const result = await this.#request(
-			id => ({ type: "settle", id, timeoutMs: SETTLE_TIMEOUT_MS, session: snapshot }),
+			id => ({ type: "settle", id, timeoutMs: SETTLE_TIMEOUT_MS, session: snapshot, output }),
 			SETTLE_TIMEOUT_MS,
 			signal,
 		);
