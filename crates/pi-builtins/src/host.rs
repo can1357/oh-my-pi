@@ -125,6 +125,15 @@ pub(crate) struct Host {
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
 	stdin_is_search_input: bool,
+	/// Whether fd 1's destination is a regular file, snapshotted before the
+	/// SIGPIPE guard wraps the stream: the guard hides the inner `OpenFile`
+	/// behind `OpenFile::Stream`, which defeats `is_regular_file`'s variant
+	/// match on Windows (Unix sees through it via `try_borrow_as_fd`). Drives
+	/// [`Host::stdout_writer`]'s block-vs-line policy, so `rg pattern > out.txt`
+	/// keeps its output invisible to the walk until the utility exits on every
+	/// platform — line-buffered output let the walker match `out.txt`'s own
+	/// growing content on Windows, amplifying a few matches into gigabytes.
+	stdout_is_regular_file: bool,
 	/// The shared stdout/stderr writer when both fds point at one
 	/// destination; `None` when they diverge.
 	merged_out:            Option<Arc<Mutex<StreamWriter>>>,
@@ -575,6 +584,18 @@ impl Host {
 		self.stderr.dup_file()
 	}
 
+	/// Whether fd 1's destination is a regular file, per the snapshot
+	/// [`build_host`] took before the SIGPIPE guard wrapped the stream.
+	///
+	/// The guard hides the destination behind `OpenFile::Stream`, which
+	/// [`is_regular_file`] cannot see through on Windows (unix reads the
+	/// descriptor out from under the wrapper), so a consumer that buffers its
+	/// own duplicate of stdout — `sed`'s `InPlace`, say — must read this
+	/// rather than re-probe [`Host::stdout_clone`].
+	pub const fn stdout_is_regular_file(&self) -> bool {
+		self.stdout_is_regular_file
+	}
+
 	/// A buffered stdout with a flush policy chosen by the destination of
 	/// fd 1; see [`StdoutWriter`].
 	///
@@ -586,7 +607,8 @@ impl Host {
 	pub fn stdout_writer(&self) -> StreamWriter {
 		match &self.merged_out {
 			Some(shared) => StreamWriter::Shared(Arc::clone(shared)),
-			None => StreamWriter::new(self.stdout.clone()),
+			None if self.stdout_is_regular_file => StreamWriter::block(self.stdout.clone()),
+			None => StreamWriter::line(self.stdout.clone()),
 		}
 	}
 
@@ -998,15 +1020,49 @@ impl Write for StreamWriter {
 	}
 }
 
+/// Windows handle probes backing [`is_regular_file`] and
+/// [`same_destination`].
+///
+/// `metadata` cannot tell Windows destinations apart — an anonymous pipe
+/// handle reports `FILE_ATTRIBUTE_NORMAL`, which reads as a regular file — so
+/// the device type behind the handle is the only reliable signal.
+#[cfg(windows)]
+mod win {
+	use std::os::windows::io::AsRawHandle;
+
+	use windows_sys::Win32::Foundation::CompareObjectHandles;
+	use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+
+	/// Whether `file`'s handle points at a disk file, as opposed to a pipe, a
+	/// character device (the console, the null device), or a socket.
+	pub(super) fn is_disk_file(file: &std::fs::File) -> bool {
+		// SAFETY: `as_raw_handle` is a live handle owned by `file`; the call
+		// only queries its device type.
+		unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
+	}
+
+	/// Duplicated handles share one file object and its offset. Separate opens
+	/// of the same path have independent file objects and must keep their writers.
+	pub(super) fn same_disk_file_object(a: &std::fs::File, b: &std::fs::File) -> bool {
+		if !is_disk_file(a) || !is_disk_file(b) {
+			return false;
+		}
+		// SAFETY: both handles remain live for the duration of the comparison.
+		unsafe { CompareObjectHandles(a.as_raw_handle(), b.as_raw_handle()) != 0 }
+	}
+}
+
 /// Whether writes to `file` land in a regular file, where output is only ever
 /// observed after the utility exits.
 ///
 /// A pipe wrapped in `std::fs::File` (how the shell hands the capture pipe to
 /// a command) reports a fifo file type, and `metadata` on exotic handles can
 /// fail outright; both classify as "not a regular file" and get line
-/// buffering, the visibility-safe default. The check goes through the
-/// descriptor rather than the variant so a [`SigpipeGuard`] around a file
-/// still block-buffers.
+/// buffering, the visibility-safe default. On Windows the same wrapped pipe
+/// reports `FILE_ATTRIBUTE_NORMAL` from `metadata`, so the handle's device
+/// type is the discriminator there. The check goes through the descriptor or
+/// handle rather than the variant so a [`SigpipeGuard`] around a file still
+/// block-buffers.
 pub(crate) fn is_regular_file(file: &OpenFile) -> bool {
 	#[cfg(unix)]
 	{
@@ -1018,13 +1074,26 @@ pub(crate) fn is_regular_file(file: &OpenFile) -> bool {
 		};
 		std::fs::File::from(dup).metadata().is_ok_and(|m| m.is_file())
 	}
-	#[cfg(not(unix))]
+	#[cfg(windows)]
+	{
+		match file {
+			OpenFile::File(f) => win::is_disk_file(f),
+			_ => false,
+		}
+	}
+	#[cfg(not(any(unix, windows)))]
 	{
 		match file {
 			OpenFile::File(f) => f.metadata().is_ok_and(|m| m.is_file()),
 			_ => false,
 		}
 	}
+}
+
+/// [`StreamWriter::new`] for a file whose regular-file status was snapshotted
+/// before the SIGPIPE guard hid it on Windows; see [`build_host`].
+fn buffered_writer(file: OpenFile, regular_file: bool) -> StreamWriter {
+	if regular_file { StreamWriter::block(file) } else { StreamWriter::line(file) }
 }
 
 /// Whether two open files refer to the same non-seekable destination — the
@@ -1054,7 +1123,18 @@ fn same_destination(a: &OpenFile, b: &OpenFile) -> bool {
 	}
 }
 
-#[cfg(not(unix))]
+/// The Windows counterpart compares disk file objects, preserving the shared
+/// offset of `>f 2>&1` without merging independent opens from `>f 2>f`.
+/// Non-disk handles retain separate writers.
+#[cfg(windows)]
+fn same_destination(a: &OpenFile, b: &OpenFile) -> bool {
+	match (a, b) {
+		(OpenFile::File(a), OpenFile::File(b)) => win::same_disk_file_object(a, b),
+		_ => false,
+	}
+}
+
+#[cfg(not(any(unix, windows)))]
 fn same_destination(_a: &OpenFile, _b: &OpenFile) -> bool {
 	false
 }
@@ -1626,6 +1706,10 @@ fn build_host<SE: ShellExtensions>(
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stdout_handle = output_handle(&stdout);
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
+	// Snapshot before the SIGPIPE guard wraps the streams: after wrapping, the
+	// `OpenFile::Stream` variant hides the destination on Windows.
+	let stdout_is_regular_file = is_regular_file(&stdout);
+	let stderr_is_regular_file = is_regular_file(&stderr_file);
 	let sigpipe = Arc::new(Sigpipe::default());
 	// `2>&1` (and the default capture pipe): one shared writer keeps
 	// diagnostics and output in exact write order. It carries stdout output,
@@ -1633,11 +1717,11 @@ fn build_host<SE: ShellExtensions>(
 	// and nothing is observable either way.
 	let (merged_out, stderr) = if same_destination(&stdout, &stderr_file) {
 		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe);
-		let shared = Arc::new(Mutex::new(StreamWriter::new(guarded)));
+		let shared = Arc::new(Mutex::new(buffered_writer(guarded, stderr_is_regular_file)));
 		(Some(Arc::clone(&shared)), StreamWriter::Shared(shared))
 	} else {
 		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe);
-		(None, StreamWriter::new(guarded))
+		(None, buffered_writer(guarded, stderr_is_regular_file))
 	};
 	let stdout = SigpipeGuard::wrap(stdout, GuardedStream::Stdout, &sigpipe);
 
@@ -1657,6 +1741,7 @@ fn build_host<SE: ShellExtensions>(
 		cancel,
 		exit_code: 0,
 		stdin_is_search_input,
+		stdout_is_regular_file,
 		merged_out,
 		sigpipe,
 		commands: None,
@@ -1720,8 +1805,8 @@ mod testing {
 
 	use super::{
 		Arc, AtomicBool, GuardedStream, HashMap, Host, OpenFile, OpenFiles, OsString, PathBuf, Read,
-		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, openfiles,
-		output_handle, run_caught,
+		ShellPaths, Sigpipe, SigpipeGuard, Stdin, StreamWriter, Utility, Write, io, is_regular_file,
+		openfiles, output_handle, run_caught,
 	};
 
 	/// Captured in-memory output from [`Host::for_test`].
@@ -1808,6 +1893,7 @@ mod testing {
 				cancel,
 				exit_code:             0,
 				stdin_is_search_input: false,
+				stdout_is_regular_file: false,
 				merged_out:            None,
 				sigpipe,
 				commands:              None,
@@ -1820,6 +1906,7 @@ mod testing {
 		/// that model a departed reader (`… | head`) hand in the write end of a
 		/// pipe whose read end is already dropped.
 		pub(crate) fn set_test_stdout(&mut self, file: OpenFile) {
+			self.stdout_is_regular_file = is_regular_file(&file);
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
@@ -2039,6 +2126,23 @@ mod testing {
 			drop(reader);
 		}
 
+		/// Contract: the Windows twin — `metadata` on the pipe's handle reports
+		/// `FILE_ATTRIBUTE_NORMAL`, which `is_file` reads as a regular file, so
+		/// the handle's device type must reject it or live tool output stalls
+		/// until the utility exits.
+		#[cfg(windows)]
+		#[test]
+		fn pipe_wrapped_as_file_gets_line_buffering() {
+			use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+
+			let (reader, writer) = os_pipe::pipe().unwrap();
+			// SAFETY: `into_raw_handle` hands over sole ownership of the
+			// write end, making the `File` its only owner.
+			let file = unsafe { std::fs::File::from_raw_handle(writer.into_raw_handle()) };
+			assert!(matches!(StreamWriter::new(OpenFile::File(file)), StreamWriter::Line(_)));
+			drop(reader);
+		}
+
 		/// Contract for `2>&1`: two handles onto one shared writer interleave
 		/// in exact write order — diagnostics land where they were emitted
 		/// relative to output, not where a second buffer happened to flush.
@@ -2083,6 +2187,21 @@ mod testing {
 			assert!(!same_destination(&f1, &f2));
 
 			drop((reader, reader2));
+		}
+
+		#[cfg(windows)]
+		#[test]
+		fn same_destination_distinguishes_duplicate_handles_from_separate_opens() {
+			use crate::host::same_destination;
+
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("out.txt");
+			let original = std::fs::File::create(&path).unwrap();
+			let duplicate = original.try_clone().unwrap();
+			let independent = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+			let original = OpenFile::File(original);
+			assert!(same_destination(&original, &OpenFile::File(duplicate)));
+			assert!(!same_destination(&original, &OpenFile::File(independent)));
 		}
 	}
 

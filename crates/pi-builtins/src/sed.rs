@@ -7309,25 +7309,37 @@ impl Drop for TempFile {
 // `output` precedes `temp_file` so on drop the output's handle closes
 // before an unpersisted temporary file is removed.
 pub struct InPlace {
-	stdout:              OpenFile,
-	fs:                  BlockingFs,
-	pub output:          OutputBuffer,
-	pub in_place:        bool,
-	pub in_place_suffix: Option<String>,
-	pub follow_symlinks: bool,
-	pub temp_file:       Option<TempFile>,
-	pub original_path:   Option<PathBuf>,
+	stdout:                 OpenFile,
+	stdout_is_regular_file: bool,
+	fs:                     BlockingFs,
+	pub output:             OutputBuffer,
+	pub in_place:           bool,
+	pub in_place_suffix:    Option<String>,
+	pub follow_symlinks:    bool,
+	pub temp_file:          Option<TempFile>,
+	pub original_path:      Option<PathBuf>,
 }
 
 impl InPlace {
 	/// Create an in-place editing engine based on ProcessingContext.
 	/// Depending on its settings it may or may not perform in-place
 	/// editing, backup the original file, or follow symlinks.
-	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
+	///
+	/// `stdout_is_regular_file` is the host's snapshot of fd 1's destination
+	/// ([`Host::stdout_is_regular_file`]): `stdout` arrives SIGPIPE-guard
+	/// wrapped, which hides that destination on Windows, so the buffering
+	/// policy cannot be re-derived from the wrapped handle there.
+	pub fn new_with_stdout(
+		context: ProcessingContext,
+		stdout: OpenFile,
+		stdout_is_regular_file: bool,
+	) -> Self {
+		let line_buffered = !stdout_is_regular_file;
 		Self {
-			output:          stdout_output(&stdout),
-			stdout,
+			stdout: stdout.clone(),
+			stdout_is_regular_file,
 			fs:              context.paths.fs().clone(),
+			output:          OutputBuffer::new(Box::new(stdout.clone()), line_buffered),
 			in_place:        context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
@@ -7340,7 +7352,7 @@ impl InPlace {
 	#[cfg(test)]
 	pub fn new(context: ProcessingContext) -> Self {
 		let (host, _) = crate::host::Host::for_test("sed", "", ".");
-		Self::new_with_stdout(context, host.stdout_clone())
+		Self::new_with_stdout(context, host.stdout_clone(), host.stdout_is_regular_file())
 	}
 
 	/// Return an OutputBuffer for outputting the edits to the specified file.
@@ -7362,7 +7374,10 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = stdout_output(&self.stdout);
+			self.output = OutputBuffer::new(
+				Box::new(self.stdout.clone()),
+				!self.stdout_is_regular_file,
+			);
 			return Ok(&mut self.output);
 		}
 
@@ -8540,7 +8555,11 @@ pub fn process_all_files(
 	// terminal, so upstream's stdout-tty check for auto-unbuffered output is
 	// dropped; `-u` alone controls flushing.
 
-	let mut in_place = InPlace::new_with_stdout(context.clone(), host.stdout_clone());
+	let mut in_place = InPlace::new_with_stdout(
+		context.clone(),
+		host.stdout_clone(),
+		host.stdout_is_regular_file(),
+	);
 	let last_file_index = files.len() - 1;
 
 	for (index, path) in files.iter().enumerate() {
