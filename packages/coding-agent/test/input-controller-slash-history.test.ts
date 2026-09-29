@@ -567,6 +567,10 @@ describe("input controller — bare slash commands opt-in", () => {
 			expect(onInputCallback).not.toHaveBeenCalled();
 			expect(editor.getText()).toBe("hotkeys");
 			expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Enter again to run /hotkeys"));
+			// An armed word has not run yet, so it must not be filed: recording it would put a
+			// command the user declined into the recall of every project under `global`. This is the
+			// property the whole bare-word model rests on.
+			expect(addToHistory).not.toHaveBeenCalled();
 
 			await editor.onSubmit?.(editor.getText());
 
