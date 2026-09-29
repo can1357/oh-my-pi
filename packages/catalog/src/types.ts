@@ -681,11 +681,7 @@ export interface BedrockCompat {
 	 * Capability metadata only; zero means no explicit checkpoints.
 	 */
 	promptCacheMaximumCheckpoints?: number;
-	/**
-	 * Whether Converse accepts `inferenceConfig.temperature`/`topP`. Claude
-	 * Opus 4.7+/Sonnet 5+, OpenAI GPT-5+ and Grok 4.6+ reject them with a 400.
-	 * Default: true.
-	 */
+	/** Whether Converse may send `inferenceConfig.temperature`/`topP`. */
 	supportsSamplingParams?: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms; 0 disables the idle watchdog.
