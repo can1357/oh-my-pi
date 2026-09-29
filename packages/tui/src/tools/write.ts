@@ -8,7 +8,6 @@ import { getLanguageFromPath } from "../lang-from-path";
 import { createHighlightStream, highlightCode, type Theme } from "../theme/theme";
 import { fileHyperlink, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { wrapPrefixedLine } from "../render/hanging-wrap";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -382,15 +381,6 @@ function formatStreamingContent(
 	});
 }
 
-function wrapWritePreviewRows(lines: string[], width: number): string[] {
-	return lines.flatMap(line => {
-		const gutter = /^(\x1b\[[0-9;]*m)( *\d+ )(\x1b\[[0-9;]*m)(.*)$/.exec(line);
-		if (!gutter) return line;
-		const prefix = `${gutter[1]}${gutter[2]}${gutter[3]}`;
-		return wrapPrefixedLine(prefix, " ".repeat(Bun.stringWidth(gutter[2]!)), gutter[4] ?? "", width);
-	});
-}
-
 function renderContentPreview(
 	content: string,
 	expanded: boolean,
@@ -642,7 +632,7 @@ export const writeToolRenderer = {
 		const streamingCache = createRenderedStringCache();
 		return framedToolCard(
 			uiTheme,
-			({ contentWidth }) => {
+			() => {
 				// Only a live spinner fills the icon slot, as in Edit's call card.
 				const header = renderStatusLine(
 					{
@@ -674,7 +664,7 @@ export const writeToolRenderer = {
 					header,
 					// The label ends with the args: once the content is complete the write is just running.
 					footerMeta: body && !options?.argsComplete ? uiTheme.fg("dim", "streaming") : undefined,
-					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
+					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true }] : [],
 					phase: "pending",
 					borderColor: "borderMuted",
 				};
@@ -757,7 +747,7 @@ export const writeToolRenderer = {
 		const previewCache = createRenderedStringCache();
 		return framedToolCard(
 			uiTheme,
-			({ contentWidth }) => {
+			() => {
 				const { expanded } = options;
 				let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
 				if (isPartial && progressText) {
@@ -782,7 +772,7 @@ export const writeToolRenderer = {
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 				return {
 					header,
-					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
+					sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true }] : [],
 					phase: isPartial ? "partial" : "success",
 					borderColor: "borderMuted",
 				};

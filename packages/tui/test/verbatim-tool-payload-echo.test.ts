@@ -2,6 +2,9 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 import { taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
+import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
+import { renderCodeCell } from "@oh-my-pi/pi-tui/render/code-cell";
+import { plainToolCard } from "@oh-my-pi/pi-tui/render/tool-card";
 
 // Regression: tool-call payload echoes ran through the markdown/LaTeX
 // typesetter and came out corrupted — `$(grep -c A_rows $P)` echoed as
@@ -20,20 +23,29 @@ const PAYLOAD_LINES = [
 	"done $$",
 ];
 const PAYLOAD = PAYLOAD_LINES.join("\n");
+/** One source line longer than any test frame width: 204 visible columns. */
+const LONG_SOURCE = "x".repeat(204);
 const SUBSCRIPT_R = "ᵣ";
 
-/** Body rows of a framed card with the border and cell padding stripped. */
-function frameBodyRows(
-	theme: Theme,
-	card: { render(width: number): readonly string[] },
-	width: number,
-): string[] {
+/**
+ * Body rows of a framed card with the border and cell padding columns
+ * stripped. Rows keep their bytes — including the frame's right pad-to-width —
+ * so byte-identical assertions compare against the source line padded to the
+ * frame's inner width.
+ */
+function frameRowsRaw(theme: Theme, rendered: readonly string[]): string[] {
 	const border = theme.boxRound.vertical;
-	return Bun.stripANSI(card.render(width).join("\n"))
+	return Bun.stripANSI(rendered.join("\n"))
 		.split("\n")
 		.map(row => row.split(border))
 		.filter(parts => parts.length === 3)
-		.map(parts => parts[1]!.slice(1, -1).trimEnd());
+		.map(parts => parts[1]!.slice(1, -1));
+}
+
+// Six call sites share this extraction (border/pad columns stripped, frame's
+// right pad-to-width trimmed); lockstep behavior matters for every assertion.
+function frameBodyRows(theme: Theme, card: { render(width: number): readonly string[] }, width: number): string[] {
+	return frameRowsRaw(theme, card.render(width)).map(row => row.trimEnd());
 }
 
 describe("tool-call payload echoes render byte-verbatim", () => {
@@ -86,13 +98,95 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 	});
 
 	it("echoes the bash command byte-identical when it fits the frame", () => {
-		const card = bashToolRenderer.renderCall({ command: PAYLOAD }, { expanded: false, isPartial: false }, theme);
-		const rows = frameBodyRows(theme, card, 500);
-		expect(rows).toHaveLength(PAYLOAD_LINES.length);
+		// Byte-fidelity discriminator is the blank row: the non-verbatim frame
+		// right-trims (`line.trimEnd()`), but plain trailing spaces are absorbed
+		// by the frame's pad-to-width (stripped + re-padded renders an identical
+		// row) and highlighted trailing runs sit before their closing SGR code,
+		// where trimEnd is a no-op. A whitespace-only row is left UNSTYLED by the
+		// highlighter, and its U+00A0 blanks are stripped by trimEnd but cannot
+		// be re-emulated by pad-to-width — so this test fails if the echo path
+		// ever leaves the verbatim convention.
+		const payload = ["pid=$$", "run: $(grep -c A_rows $P)", "trailing ws: A_rows $P  ", "\u00a0\u00a0", "done $"];
+		const card = bashToolRenderer.renderCall(
+			{ command: payload.join("\n") },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		// Frame width 500: 2 borders + 1-col padding per side = 496 inner cols.
+		const innerWidth = 496;
+		const rows = frameRowsRaw(theme, card.render(500));
+		expect(rows).toHaveLength(payload.length);
 		// Row 0 carries the dim `$ ` prompt prefix chrome; the command bytes trail it.
-		expect(rows[0]!.endsWith(PAYLOAD_LINES[0]!)).toBe(true);
-		for (let i = 1; i < PAYLOAD_LINES.length; i++) {
-			expect(rows[i]).toBe(PAYLOAD_LINES[i]);
+		expect(rows[0]).toBe(`$ ${payload[0]}`.padEnd(innerWidth));
+		for (let i = 1; i < payload.length; i++) {
+			expect(rows[i]).toBe(payload[i]!.padEnd(innerWidth));
 		}
+	});
+
+	// A tool PARAMETER follows the parameter convention (`sanitizeCarriageReturns`:
+	// CR runs are word separators), not the subprocess-output progress-overwrite
+	// convention (`sanitizeDisplayLines` alone keeps only the segment after the
+	// last `\r`, dropping payload words: `Retry\rnow` -> `now`).
+	it("keeps every word of CR-separated brief text (parameter convention)", () => {
+		const card = taskToolRenderer.renderCall(
+			{ name: "Echo", task: "Retry\rnow" },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		const rows = frameBodyRows(theme, card, 500);
+		expect(rows).toContain("Retry now");
+		expect(rows).not.toContain("now");
+	});
+
+	// Payload echo sections must not re-flow: a 204-char source line at width
+	// 80 is ONE clipped row — wrapped (76/76/52) its breaks read as payload
+	// newlines. This covers every renderCodeCell source echo (eval `code` arg,
+	// read file content, read-tool-group preview).
+	it("keeps one code-cell source row per source line (read/eval payload echo)", () => {
+		const rendered = renderCodeCell({ code: LONG_SOURCE, width: 80, status: "complete", title: "Cell" }, theme);
+		const rows = frameRowsRaw(theme, rendered).map(row => row.trimEnd());
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toBe("x".repeat(76));
+	});
+
+	it("keeps one file-content echo row per source line (write call card)", () => {
+		const card = writeToolRenderer.renderCall(
+			{ path: "probe.txt", content: LONG_SOURCE },
+			{ expanded: false, isPartial: false },
+			theme,
+		);
+		expect(card).toBeDefined();
+		const rows = frameBodyRows(theme, card!, 80);
+		// One source row (line-number gutter chrome + clipped source) plus the
+		// streaming liveness cue row.
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toBe(`  1 ${"x".repeat(72)}`);
+		expect(rows[1]).toContain("(streaming)");
+	});
+
+	it("keeps one file-content echo row per source line (write result card)", () => {
+		const card = writeToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "Wrote 1 line" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ path: "probe.txt", content: LONG_SOURCE },
+		);
+		const rows = frameBodyRows(theme, card, 80);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toBe(`  1 ${"x".repeat(72)}`);
+	});
+
+	// `verbatim` must not silently no-op on the plain card variant (exported
+	// for payload-echoing surfaces like the MCP and default tool cards).
+	it("forwards verbatim through the plain card variant (no re-wrap, no right-trim)", () => {
+		const card = plainToolCard(
+			theme,
+			() => ({ sections: [{ content: [LONG_SOURCE.replaceAll("x", "y"), "trailing ws: y  "], verbatim: true }] }),
+			{ paddingX: 0, paddingY: 0 },
+		);
+		const rows = Bun.stripANSI(card.render(80).join("\n")).split("\n");
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toBe("y".repeat(80));
+		expect(rows[1]).toBe("trailing ws: y  ".padEnd(80));
 	});
 });
