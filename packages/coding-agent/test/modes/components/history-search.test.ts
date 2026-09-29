@@ -95,4 +95,32 @@ describe("HistorySearchComponent", () => {
 		component.handleInput("\r");
 		expect(selected).toEqual(["release"]);
 	});
+
+	it("moves the query cursor with Left/Right instead of cycling the scope", () => {
+		const component = new HistorySearchComponent(
+			[source("folder", ["abc folder"]), source("conversation", ["abc conversation"])],
+			() => {},
+			() => {},
+		);
+
+		// Left/Right belong to the query field, not the scope ring: `handleTabSwitchKey` would
+		// consume them and cycle the scope, so the insertion below would land at the end of the
+		// query and the title would move off the initial scope.
+		for (const char of "abc") component.handleInput(char);
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).toContain("abc folder");
+
+		component.handleInput("\x1b[D"); // Left
+		component.handleInput("z");
+
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).not.toContain("abc folder");
+
+		// Right must move the cursor back toward the end: typing then appends ("abzcy"),
+		// where an unhandled Right would leave the cursor before "c" and yield "abzyc".
+		component.handleInput("\x1b[C"); // Right
+		component.handleInput("y");
+		expect(component.title).toBe("History (folder)");
+		expect(render(component)).toContain("abzcy");
+	});
 });
