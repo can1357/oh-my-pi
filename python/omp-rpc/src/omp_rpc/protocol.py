@@ -19,6 +19,7 @@ StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 QueuedMessageQueue: TypeAlias = Literal["steering", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
+CacheWarmingMode: TypeAlias = Literal["off", "streaming", "idle"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 PromptStatus: TypeAlias = Literal["completed", "aborted", "error"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
@@ -74,6 +75,7 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
+_CACHE_WARMING_MODE_VALUES: Final[frozenset[str]] = frozenset({"off", "streaming", "idle"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {"stop", "length", "toolUse", "error", "aborted"}
 )
@@ -1576,6 +1578,15 @@ def parse_fast_mode_result(payload: JsonObject) -> FastModeResult:
     return FastModeResult(
         enabled=_require_bool(payload, "enabled"),
         active=_require_bool(payload, "active"),
+    )
+
+
+def parse_cache_warming_mode(payload: JsonObject) -> CacheWarmingMode:
+    return cast(
+        CacheWarmingMode,
+        _require_literal(
+            payload.get("mode"), _CACHE_WARMING_MODE_VALUES, field="set_cache_warming.mode"
+        ),
     )
 
 

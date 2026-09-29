@@ -194,6 +194,27 @@ async function withRpcServer<T>(
 }
 
 describe("RPC Pi-compatible primitives (live server)", () => {
+	test("rejects invalid cache warming modes and accepts a subsequent session-scoped mode change", async () => {
+		await withRpcServer(async (send, next) => {
+			send({ type: "set_cache_warming", id: "bad-warming", mode: "always" });
+			expect(await next()).toEqual({
+				id: "bad-warming",
+				type: "response",
+				command: "set_cache_warming",
+				success: false,
+				error: "Invalid cache warming mode: always",
+			});
+			send({ type: "set_cache_warming", id: "warming-off", mode: "off" });
+			expect(await next()).toEqual({
+				id: "warming-off",
+				type: "response",
+				command: "set_cache_warming",
+				success: true,
+				data: { mode: "off" },
+			});
+		});
+	}, 60000);
+
 	test("get_entries, get_tree, thinking levels, and command-discovery dialect", async () => {
 		await withRpcServer(async (send, next) => {
 			send({ type: "get_entries", id: "entries-base" });
