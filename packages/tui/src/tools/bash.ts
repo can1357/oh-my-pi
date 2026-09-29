@@ -470,7 +470,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						elapsedMs === undefined || elapsedMs < 1000
 							? undefined
 							: uiTheme.fg("dim", `elapsed ${formatDuration(Math.floor(elapsedMs / 1000) * 1000)}`),
-					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
+					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }), verbatim: true }],
 				};
 			});
 		},
@@ -628,6 +628,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									uiTheme,
 									{ expanded },
 								),
+								verbatim: true,
 							},
 							{ label: uiTheme.fg("toolTitle", "Output"), content: outputLines },
 						],

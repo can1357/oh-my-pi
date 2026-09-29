@@ -34,6 +34,8 @@ export interface ToolCardSection {
 	label?: string;
 	content: ToolCardContent;
 	separator?: boolean;
+	/** Echo rows for raw tool payloads: one source line per row, never re-wrapped. */
+	verbatim?: boolean;
 }
 
 /** Snapshot returned by a ToolCard builder on each render. */
@@ -181,7 +183,7 @@ export class ToolCard implements Component {
 			nextChildSet.add(component);
 			nextChildren.push(component);
 		};
-		const sections: Array<{ label?: string; lines: readonly string[]; separator?: boolean }> = [];
+		const sections: Array<{ label?: string; lines: readonly string[]; separator?: boolean; verbatim?: boolean }> = [];
 		if (snapshot.body) {
 			const body = resolveContent(snapshot.body, contentWidth);
 			sections.push({ lines: body.lines });
@@ -189,7 +191,12 @@ export class ToolCard implements Component {
 		}
 		for (const section of snapshot.sections ?? []) {
 			const resolved = resolveContent(section.content, contentWidth);
-			sections.push({ label: section.label, lines: resolved.lines, separator: section.separator });
+			sections.push({
+				label: section.label,
+				lines: resolved.lines,
+				separator: section.separator,
+				verbatim: section.verbatim,
+			});
 			retainChild(resolved.component);
 		}
 		if (snapshot.footer) {
@@ -214,7 +221,8 @@ export class ToolCard implements Component {
 					return (
 						previous?.label === section.label &&
 						previous.lines === section.lines &&
-						previous.separator === section.separator
+						previous.separator === section.separator &&
+						previous.verbatim === section.verbatim
 					);
 				});
 			const reusableOptions =

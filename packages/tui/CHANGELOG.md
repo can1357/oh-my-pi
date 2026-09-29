@@ -937,6 +937,9 @@
 ### Fixed
 
 - The model browser shows `varies`, `included`, or `pricing unknown` for models whose catalog declares that state, instead of labeling them `free` ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+### Fixed
+
+- Fixed tool-call echo cards corrupting payload bytes — shell `$` sigils dropped (`$(grep -c X $P)` shown as `(grep -c X P)`), `A_rows` shown as `Aᵣows`, and command/brief lines re-flowed mid-string; bash command and task brief/context echoes now render byte-verbatim.
 
 ## [18.4.3] - 2026-09-28
 
