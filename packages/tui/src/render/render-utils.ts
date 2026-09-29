@@ -389,13 +389,22 @@ function sanitizeErrorText(message: string | undefined): string {
  * segment (mirroring terminal rendering), and expands tabs — so raw
  * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
  * web content) can't corrupt the framed block layout with cursor-moving
- * control characters or tab-stop width mismatches.
+ * control characters or tab-stop width mismatches. Trailing line terminators
+ * end the last real row instead of yielding phantom blank rows.
  */
 export function sanitizeDisplayLines(text: string): string[] {
-	return text.split(/\r?\n/).map(line => {
+	const lines = text.split(/\r?\n/).map(line => {
 		const idx = line.lastIndexOf("\r");
 		return replaceTabs(sanitizeText(idx < 0 ? line : line.slice(idx + 1)));
 	});
+	// A trailing line terminator ends the last real row; the empty element the
+	// split yields past it belongs to the terminator, not to the text. Drop the
+	// empties trailing terminators produce so the display keeps the text's own
+	// line structure (interior blank lines are kept).
+	if (/(?:\r\n|\r|\n)$/u.test(text)) {
+		while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	}
+	return lines;
 }
 
 /** Render a sanitized error message with its status icon. */

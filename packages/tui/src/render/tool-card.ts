@@ -1,7 +1,7 @@
 import { Text } from "../components/text";
 import type { Theme, ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
-import { getPaddingX } from "../utils";
+import { getPaddingX, truncateToWidth } from "../utils";
 import {
 	CachedOutputBlock,
 	markFramedBlockComponent,
@@ -210,7 +210,15 @@ export class ToolCard implements Component {
 		for (const section of sections) {
 			if (section.separator && lines.length > 0) lines.push("");
 			if (section.label) lines.push(section.label);
-			lines.push(...section.lines);
+			// Verbatim payload-echo rows survive the plain variant too: pre-truncate
+			// each row to the text's content width so one source line stays one row —
+			// the wrap pass below can't re-flow (or right-trim) a row that already
+			// fits. Overflow clips to a byte-prefix of the row.
+			lines.push(
+				...(section.verbatim
+					? section.lines.map(line => truncateToWidth(line, defaultContentWidth, ""))
+					: section.lines),
+			);
 		}
 		const text = lines.join("\n");
 		const key = `${width}:${text.length}:${Bun.hash(text).toString(36)}:${state ?? "info"}:${snapshot.applyBg ?? true}`;

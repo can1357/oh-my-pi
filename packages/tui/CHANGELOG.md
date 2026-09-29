@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed tool-call echo cards corrupting payload bytes — shell `$` sigils dropped (`$(grep -c X $P)` shown as `(grep -c X P)`), `A_rows` shown as `Aᵣows`, and command/brief lines re-flowed mid-string; bash command and task brief/context echoes now render byte-verbatim.
+- Fixed tool-call echo cards corrupting payload bytes (`$` sigils dropped, identifiers subscripted, lines re-flowed); bash command, task brief/context, and file-content/code echoes now render byte-verbatim.
 
 ## [18.4.3] - 2026-09-28
 

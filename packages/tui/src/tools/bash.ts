@@ -295,7 +295,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				return {
 					header,
 					phase: options.spinnerFrame !== undefined ? "running" : "pending",
-					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }), verbatim: true }],
+					sections: [
+						{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }), verbatim: true },
+					],
 				};
 			});
 		},

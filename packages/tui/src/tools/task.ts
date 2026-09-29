@@ -31,6 +31,7 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	sanitizeCarriageReturns,
 	sanitizeDisplayLines,
 	shortenPath,
 	type ToolUIStatus,
@@ -544,10 +545,11 @@ function createAssignmentSectionRenderer(
 ): AssignmentSectionRenderer | undefined {
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
-	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	);
+	// here too. The repair is idempotent on already-clean text. Sanitization
+	// happens inside the verbatim renderer, which must see the raw `\r` runs
+	// first — `sanitizeText` drops `\r` outright and would merge the words
+	// around it (`Retry\rnow` -> `Retrynow`).
+	const assignment = repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : "");
 	if (!assignment.trim()) return undefined;
 	return createVerbatimSectionRenderer(assignment, theme);
 }
@@ -561,9 +563,9 @@ function createContextSectionRenderer(
 	args: Partial<TaskParams> | undefined,
 	theme: Theme,
 ): AssignmentSectionRenderer | undefined {
-	const context = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : ""),
-	);
+	// Same raw-`\r` requirement as the assignment brief: the verbatim renderer
+	// owns sanitization so CR runs survive as word separators.
+	const context = repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : "");
 	if (!context.trim()) return undefined;
 	return createVerbatimSectionRenderer(context, theme);
 }
@@ -574,11 +576,13 @@ function createContextSectionRenderer(
  * markdown: the typesetter mutates them (a `$$` shell-PID pair opens a math
  * span that eats `$…$` sigils and turns `A_rows` into `Aᵣows`; prose wrap
  * re-flows lines), so the echo renders sanitized display lines with the
- * payload's own line structure intact. `verbatim` keeps the frame from
- * re-wrapping the rows at its width.
+ * payload's own line structure intact. Stray `\r` runs follow the parameter
+ * convention (`sanitizeCarriageReturns`: CR runs are word separators, not
+ * progress overwrites), so no payload word is dropped. `verbatim` keeps the
+ * frame from re-wrapping the rows at its width.
  */
 function createVerbatimSectionRenderer(text: string, theme: Theme): AssignmentSectionRenderer {
-	const lines = sanitizeDisplayLines(text).map(line => theme.fg("muted", line));
+	const lines = sanitizeDisplayLines(sanitizeCarriageReturns(text)).map(line => theme.fg("muted", line));
 	return () => ({ content: lines, verbatim: true });
 }
 
@@ -614,7 +618,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 			// call view. This also matches the schema's field order (`context`
 			// streams before `tasks`), so the streaming preview grows
 			// append-only instead of inserting agent rows above the
-			// already-rendered markdown and pushing it down on every item.
+			// already-rendered brief rows and pushing it down on every item.
 			if (contextSection) sections.push(contextSection(width));
 			if (assignmentSection) sections.push(assignmentSection(width));
 			const callLines = renderTaskCallLines(args, theme);

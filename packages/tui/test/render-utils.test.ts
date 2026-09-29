@@ -500,6 +500,14 @@ describe("sanitizeDisplayLines", () => {
 	it("collapses carriage-return progress overwrites to the final segment", () => {
 		expect(sanitizeDisplayLines("50%\r100%")).toEqual(["100%"]);
 	});
+
+	// A trailing line terminator ends the last real row; the empty element the
+	// split yields past it is a terminator artifact, not a display row.
+	it("drops the phantom blank rows trailing line terminators produce", () => {
+		expect(sanitizeDisplayLines("foo\n")).toEqual(["foo"]);
+		expect(sanitizeDisplayLines("foo\n\n")).toEqual(["foo"]);
+		expect(sanitizeDisplayLines("foo\n\nbar\n")).toEqual(["foo", "", "bar"]);
+	});
 });
 
 describe("sanitizeDisplayWarning", () => {
