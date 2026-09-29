@@ -185,6 +185,17 @@ const STDOUT_STALL_TIMEOUT_MS = 60_000;
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
 
+/** How long a handoff settle waits for the output backlog to drain before dropping it. */
+const STOP_DRAIN_MS = 1000;
+
+/**
+ * Closes whatever a discard may have cut mid-frame: ST ends an open OSC/DCS/APC
+ * string, then synchronized output ends, SGR resets, an open OSC 8 hyperlink
+ * closes, and the cursor (hidden by every paint) shows. ESC also aborts a cut
+ * CSI in the DEC parser.
+ */
+const SETTLE_RESET = "\x1b\\\x1b[?2026l\x1b[0m\x1b]8;;\x07\x1b[?25h";
+
 /**
  * Bounds a never-draining stdout backlog without killing a single large but
  * actively-draining frame.
@@ -530,8 +541,20 @@ export interface Terminal {
 	stop(): void;
 
 	/**
+	 * Hand the terminal back with nothing still queued: wait (bounded) for the
+	 * output backlog to drain, then drop what is left, so the writes that
+	 * follow reach the terminal last. Returns whether the backlog drained;
+	 * false means output was dropped, or is stuck behind a write the terminal
+	 * is not reading. Optional so custom Terminals built against older pi-tui
+	 * versions keep working.
+	 */
+	settleOutput?(): boolean;
+
+	/**
 	 * Drain stdin before exiting to prevent Kitty key release events from
-	 * leaking to the parent shell over slow SSH connections.
+	 * leaking to the parent shell over slow SSH connections. Settles queued
+	 * output first (see {@link settleOutput}), so it can wait up to a second
+	 * for the output backlog and drop what is still queued.
 	 * @param maxMs - Maximum time to drain (default: 1000ms)
 	 * @param idleMs - Exit early if no input arrives within this time (default: 50ms)
 	 */
@@ -731,6 +754,17 @@ function isPrivateModeSupported(status: string): boolean {
 	return status !== "0" && status !== "4";
 }
 
+/** The terminal's off-thread writer: `TtyWriter` in production, a fake in tests. */
+export interface OutputPump {
+	write(data: string): number;
+	pending(): number;
+	readonly dead: boolean;
+	flushSync(timeoutMs: number): boolean;
+	/** Absent on stale prebuilt natives. */
+	discard?(): void;
+	stop(flushTimeoutMs: number): void;
+}
+
 /** Construction-time overrides for {@link ProcessTerminal}. */
 export interface ProcessTerminalOptions {
 	/**
@@ -741,6 +775,12 @@ export interface ProcessTerminalOptions {
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
+	/**
+	 * Builds the off-thread output writer in place of the native `TtyWriter`.
+	 * Still gated on a non-Windows TTY stdout, but not on `bun test`, so tests
+	 * can drive the pump paths with a fake.
+	 */
+	outputPump?: () => OutputPump;
 }
 
 /**
@@ -771,6 +811,16 @@ export class ProcessTerminal implements Terminal {
 		this.#markTerminalDisconnected("stdin failed", err);
 	};
 	#dead = false;
+	// What pending() reads if the pump has written nothing since a settle's
+	// discard, or since a stale addon's undrained wait: the backlog then, plus
+	// the UTF-8 length of every (well-formed) string queued since. While it
+	// still matches, the pump is stalled or still inside the write that was in
+	// flight, and a later settle neither waits nor discards: that would only
+	// drop the handoff bytes queued behind it, which arrive in order once the
+	// terminal reads again.
+	#stalledBacklog: number | undefined;
+	// A stale addon cannot discard; warn about it once, not at every settle.
+	#staleDiscardWarned = false;
 	#active = false;
 	// Last cursor visibility written to the terminal, sniffed from every
 	// outgoing sequence (frame buffers embed their own ?25h/?25l), so
@@ -807,7 +857,9 @@ export class ProcessTerminal implements Terminal {
 	// froze the whole TUI for the duration of a multi-MB repaint. The pump
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
-	#outputPump?: TtyWriter;
+	#outputPump?: OutputPump;
+	// Construction-time stand-in for the native pump (ProcessTerminalOptions.outputPump).
+	readonly #createOutputPump?: () => OutputPump;
 	// Upper bound on the pump's backlog: the count its last enqueue or read
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
@@ -865,6 +917,7 @@ export class ProcessTerminal implements Terminal {
 
 	constructor(options?: ProcessTerminalOptions) {
 		this.#conpty = options?.conpty ?? isConPTYHosted();
+		this.#createOutputPump = options?.outputPump;
 	}
 
 	get kittyProtocolActive(): boolean {
@@ -1001,10 +1054,17 @@ export class ProcessTerminal implements Terminal {
 		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
-		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+		// native pump stays off under `bun test` — same philosophy as
+		// isTerminalHeadless. An injected pump factory is still honored there.
+		const createOutputPump = this.#createOutputPump;
+		if (
+			process.platform !== "win32" &&
+			process.stdout.isTTY &&
+			(createOutputPump || !isBunTestRuntime()) &&
+			!this.#outputPump
+		) {
 			try {
-				this.#outputPump = new TtyWriter(1);
+				this.#outputPump = createOutputPump ? createOutputPump() : new TtyWriter(1);
 				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
@@ -2011,6 +2071,11 @@ export class ProcessTerminal implements Terminal {
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
 		if (this.#headless) return;
+		// The keyboard-protocol pops below clear their flags, so stop() never
+		// re-emits them. Settle first so they head the queue: they drain during
+		// the wait below and the next settle's bound, ahead of any frame rendered
+		// meanwhile, instead of waiting behind a backlog a later discard drops.
+		this.settleOutput();
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
@@ -2052,6 +2117,45 @@ export class ProcessTerminal implements Terminal {
 		}
 	}
 
+	/**
+	 * Hand the terminal back with nothing still queued: wait for the output
+	 * backlog to drain (bounded, so a stalled PTY cannot wedge exit), then drop
+	 * what is left and write a reset that closes whatever the cut left open.
+	 * Whatever is written after this - the TUI's handoff writes, the restore
+	 * sequences, the resume hint - reaches the terminal after it, and no
+	 * detached writer keeps painting into whatever owns the terminal next.
+	 *
+	 * Returns whether the backlog drained. A disconnect already dropped it
+	 * (#markTerminalDisconnected), and a pump still blocked in the write an
+	 * earlier discard could not interrupt is left alone: waiting again buys
+	 * nothing, and a discard would drop only the handoff bytes queued behind
+	 * that write, which arrive in order once the terminal reads again.
+	 */
+	settleOutput(): boolean {
+		const pump = this.#outputPump;
+		if (!pump) return true;
+		if (this.#dead) return false;
+		if (this.#stalledBacklog !== undefined && pump.pending() === this.#stalledBacklog) return false;
+		const bytes = pump.flushSync(STOP_DRAIN_MS) ? 0 : pump.pending();
+		if (bytes === 0) {
+			this.#stalledBacklog = undefined;
+			return true;
+		}
+		if (!pump.discard) {
+			if (!this.#staleDiscardWarned) {
+				this.#staleDiscardWarned = true;
+				logger.warn("Undelivered terminal output could not be discarded (stale natives)", { bytes });
+			}
+			this.#stalledBacklog = pump.pending();
+			return false;
+		}
+		pump.discard();
+		logger.warn("Discarded undelivered terminal output at a terminal handoff", { bytes });
+		this.#stalledBacklog = pump.pending();
+		this.write(SETTLE_RESET);
+		return false;
+	}
+
 	stop(): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
@@ -2070,6 +2174,9 @@ export class ProcessTerminal implements Terminal {
 		// suspend, and shutdown see the real stderr even if a later teardown
 		// step throws.
 		restoreTerminalStderr();
+		// Nothing queued may land after the restore writes below. After a caller's
+		// settle the pump is empty or still blocked, so this returns at once.
+		this.settleOutput();
 
 		this.#clearProgressTimer();
 		if (this.#progressActive) {
@@ -2199,6 +2306,7 @@ export class ProcessTerminal implements Terminal {
 		if (this.#outputPump) {
 			this.#outputPump.stop(1000);
 			this.#outputPump = undefined;
+			this.#stalledBacklog = undefined;
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -2235,7 +2343,11 @@ export class ProcessTerminal implements Terminal {
 			this.#bracketedPasteRefreshTimer = undefined;
 		}
 		this.#disarmStdoutStallWatchdog();
-		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
+		// Every later write is a no-op, so nothing can follow the backlog to the
+		// terminal: drop it now, once.
+		const undeliveredBytes = this.#outputPump?.pending() ?? 0;
+		this.#outputPump?.discard?.();
+		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err, undeliveredBytes });
 
 		const disconnectHandler = this.#disconnectHandler;
 		this.#disconnectHandler = undefined;
@@ -2279,12 +2391,16 @@ export class ProcessTerminal implements Terminal {
 		// files). They serve no purpose there and would surface as visible noise.
 		if (!process.stdout.isTTY) return;
 		this.#ensureStdoutErrorHandler();
-		this.#trackCursorVisibility(data);
+		// A lone surrogate cannot be encoded: the pump's transcoder pairs it with
+		// the next code unit and swallows that character. Send U+FFFD instead, as
+		// the stream fallback would, so both paths and the stall mark agree.
+		const text = data.isWellFormed() ? data : data.toWellFormed();
+		this.#trackCursorVisibility(text);
 		const pump = this.#outputPump;
 		if (pump) {
 			let pending: number;
 			try {
-				pending = pump.write(data);
+				pending = pump.write(text);
 			} catch (err) {
 				this.#markTerminalDisconnected("stdout failed", err);
 				return;
@@ -2293,11 +2409,12 @@ export class ProcessTerminal implements Terminal {
 			// its UTF-16 length; a dead pump enqueues nothing and reports only the
 			// remainder it is dropping (soon zero). Only a report that small can
 			// come from a dead pump, so the native `dead` read is skipped otherwise.
-			if ((pending < data.length || data.length === 0) && pump.dead) {
+			if ((pending < text.length || text.length === 0) && pump.dead) {
 				this.#markTerminalDisconnected("stdout failed; output pump died");
 				return;
 			}
 			this.#pumpBacklogBound = pending;
+			if (this.#stalledBacklog !== undefined) this.#stalledBacklog += Buffer.byteLength(text, "utf8");
 			// Feed the live backlog to the stall watchdog rather than tripping on
 			// the instantaneous byte count: a single large-but-draining frame (a
 			// resume repaint of many inline images) must open normally, while a
@@ -2322,14 +2439,14 @@ export class ProcessTerminal implements Terminal {
 			// `process.stdout.write(string)` UTF-8-encodes before `WriteFile`,
 			// and a code-unit cap would let CJK transcript rows expand past the
 			// threshold. See #2034 and #2095.
-			const bytes = Buffer.byteLength(data, "utf8");
+			const bytes = Buffer.byteLength(text, "utf8");
 			if (this.#conpty && bytes > MAX_CONPTY_WRITE_CHUNK_BYTES) {
-				for (const chunk of chunkForConPTY(data, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
+				for (const chunk of chunkForConPTY(text, MAX_CONPTY_WRITE_CHUNK_BYTES)) {
 					if (this.#dead) break;
 					process.stdout.write(chunk);
 				}
 			} else {
-				process.stdout.write(data);
+				process.stdout.write(text);
 			}
 			// A stalled-but-alive PTY consumer never throws: write() just queues the
 			// bytes and writableLength grows. Feed that backlog to the stall watchdog
