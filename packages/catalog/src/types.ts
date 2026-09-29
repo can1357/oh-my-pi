@@ -660,12 +660,14 @@ export interface AnthropicCompat {
 }
 
 /**
- * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
- * deliberately not used to infer these request-shape capabilities.
+ * Bedrock Converse request compatibility and prompt-cache capabilities.
+ * Cache pricing is deliberately not used to infer request shapes.
  */
 export interface BedrockCompat {
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
+	/** Whether this model accepts Converse `temperature` and `topP`; defaults to true. */
+	supportsSamplingParams?: boolean;
 	/** Whether this wire may revise already-streamed text (`stream-revision` axis). Unassigned: append-only. */
 	streamRevision?: "none" | "possible";
 	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
@@ -689,11 +691,13 @@ export interface BedrockCompat {
 	streamIdleTimeoutMs?: number;
 }
 
-/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+/** Bedrock Converse capabilities materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
 	/** See {@link BedrockCompat.streamRevision}. */
 	streamRevision?: BedrockCompat["streamRevision"];
+	/** See {@link BedrockCompat.supportsSamplingParams}. */
+	supportsSamplingParams: boolean;
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;

@@ -31,11 +31,15 @@ provider "amazon-bedrock" {
 			revision ">=4.6" {
 				thinking-mode "effort"
 				thinking-efforts "low" "medium" "high" "xhigh"
+				supports-sampling-params #false
 			}
 		}
 	}
 	class "openai" {
 		thinking-mode "effort"
+		revision ">=5" {
+			supports-sampling-params #false
+		}
 		// OpenAI models reject Converse image blocks nested inside toolResult content.
 		requires-tool-result-image-hoisting #true
 	}

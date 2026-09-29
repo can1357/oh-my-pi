@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Bedrock background titles and judgments failing on Grok 4.6+ and GPT-5+ models that reject sampling parameters ([#13730](https://github.com/can1357/oh-my-pi/issues/13730)).
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

@@ -26,6 +26,8 @@
 
 ### Fixed
 
+- Fixed Bedrock Grok 4.6+ and GPT-5+ model compatibility so unsupported sampling parameters are omitted ([#13730](https://github.com/can1357/oh-my-pi/issues/13730)).
+
 - Fixed missing thinking levels, image input, and prices for Command Code models ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
 
 ## [18.4.2] - 2026-09-28

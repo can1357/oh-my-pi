@@ -478,14 +478,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				);
 			}
 
+			const inferenceConfig: ConverseStreamRequest["inferenceConfig"] = { maxTokens: options.maxTokens };
+			if (model.compat.supportsSamplingParams) {
+				inferenceConfig.temperature = options.temperature;
+				inferenceConfig.topP = options.topP;
+			}
 			let commandInput: ConverseStreamRequest = {
 				messages: convertedMessages,
 				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
-				inferenceConfig: {
-					maxTokens: options.maxTokens,
-					temperature: options.temperature,
-					topP: options.topP,
-				},
+				inferenceConfig,
 				toolConfig,
 				guardrailConfig: buildGuardrailConfig(options),
 				additionalModelRequestFields,
