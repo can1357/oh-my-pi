@@ -4,7 +4,7 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -1014,13 +1014,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			let body = await openStream();
 			stream.push({ type: "start", partial: output });
 
+			// Attach the observer only when a diagnostic listener exists: any
+			// observer turns on per-line raw capture in `readSseJson`.
+			const onSseEvent = options?.onSseEvent;
+			const sseObserver: SseEventObserver | undefined = onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+				: undefined;
 			// Gemini occasionally finishes with `finishReason: STOP` while emitting only an empty
 			// text part and no tool call. Delivered as-is the agent receives a blank message and
 			// silently halts mid-task, so retry a bounded number of times before giving up.
 			for (let emptyAttempt = 0; ; emptyAttempt++) {
-				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, event =>
-					options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
-				);
+				const googleStream = readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver);
 				await consumeGoogleStream({
 					googleStream,
 					output,

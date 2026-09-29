@@ -415,6 +415,15 @@ function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	return frame;
 }
 
+/**
+ * Write one client message. Once the server's end frame has half-closed our
+ * side, late writes (heartbeats, exec replies from a handler still running)
+ * are dropped: writing after `end()` would error the stream.
+ */
+function writeClientMessage(h2Request: http2.ClientHttp2Stream, data: Uint8Array): void {
+	if (!h2Request.writableEnded) h2Request.write(frameConnectMessage(data));
+}
+
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
 
@@ -845,6 +854,11 @@ function streamCursorWithWireMode(
 						if (endError) {
 							endStreamError = endError;
 							h2Request?.close();
+						} else {
+							// The end frame is the server's last message. Half-close our
+							// side so the stream can finish: a CONNECT proxy holds the
+							// HTTP/2 stream open until the client ends its request.
+							h2Request?.end();
 						}
 						continue;
 					}
@@ -903,7 +917,7 @@ function streamCursorWithWireMode(
 					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
 				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
+				writeClientMessage(h2Request, heartbeatBytes);
 			};
 
 			const closeDebugLog = async (): Promise<void> => {
@@ -1281,7 +1295,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		writeClientMessage(h2Request, responseBytes);
 
 		log("kvClient", "getBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	} else if (kvCase === "setBlobArgs") {
@@ -1302,7 +1316,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		writeClientMessage(h2Request, responseBytes);
 
 		log("kvClient", "setBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	}
@@ -2604,7 +2618,7 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	writeClientMessage(h2Request, responseBytes);
 
 	log("execClientMessage", messageCase, value);
 }
@@ -2640,7 +2654,7 @@ function sendExecClientThrow(
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientControlMessage", value: controlMessage },
 	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	writeClientMessage(h2Request, toBinary(AgentClientMessageSchema, clientMessage));
 	log("execClientControl", "throw", { id: execMsg.id, execId: execMsg.execId, error, errorCode });
 	sendExecClientStreamClose(h2Request, execMsg);
 }
@@ -2658,7 +2672,7 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
 		message: { case: "execClientControlMessage", value: closeMessage },
 	});
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	writeClientMessage(h2Request, responseBytes);
 	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
 }
 

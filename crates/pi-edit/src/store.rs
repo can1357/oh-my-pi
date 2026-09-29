@@ -3,12 +3,12 @@
 use std::{
 	collections::{BTreeSet, HashMap},
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, LazyLock},
 };
 
 use parking_lot::Mutex;
 use regex::Regex;
-use xxhash_rust::{xxh32::xxh32, xxh64::xxh64};
+use xxhash_rust::{xxh32::Xxh32, xxh64::xxh64};
 
 /// Retained path count before LRU eviction.
 pub const DEFAULT_MAX_PATHS: usize = 256;
@@ -67,16 +67,26 @@ impl Clipboard {
 }
 
 /// Compute the four-hex uppercase hashline content tag.
+///
+/// Hashes the text with trailing spaces, tabs, and CRs stripped from every
+/// line. Unchanged runs between stripped spans are fed straight from `text`, so
+/// no normalized copy is built.
 pub fn file_hash(text: &str) -> String {
-	let mut normalized = String::with_capacity(text.len());
+	let bytes = text.as_bytes();
+	let mut hasher = Xxh32::new(0);
+	let mut run_start = 0;
+	let mut line_start = 0;
 	for segment in text.split_inclusive('\n') {
-		let (line, newline) = segment
-			.strip_suffix('\n')
-			.map_or((segment, ""), |line| (line, "\n"));
-		normalized.push_str(line.trim_end_matches([' ', '\t', '\r']));
-		normalized.push_str(newline);
+		let line = segment.strip_suffix('\n').unwrap_or(segment);
+		let kept = line.trim_end_matches([' ', '\t', '\r']).len();
+		if kept < line.len() {
+			hasher.update(&bytes[run_start..line_start + kept]);
+			run_start = line_start + line.len();
+		}
+		line_start += segment.len();
 	}
-	format!("{:04X}", xxh32(normalized.as_bytes(), 0) & 0xffff)
+	hasher.update(&bytes[run_start..]);
+	format!("{:04X}", hasher.digest() & 0xffff)
 }
 
 /// Compute a stable 64-bit key for raw patch input.
@@ -84,12 +94,14 @@ pub fn payload_hash(text: &str) -> u64 {
 	xxh64(text.as_bytes(), 0)
 }
 
+static SEEN_LINE_PREFIX_RE: LazyLock<Regex> =
+	LazyLock::new(|| Regex::new(r"^[ *]?(\d+)(?:-(\d+))?:").expect("valid hashline prefix regex"));
+
 /// Parse displayed boundary line numbers from a hashline-formatted body.
 pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
-	let prefix = Regex::new(r"^[ *]?(\d+)(?:-(\d+))?:").expect("valid hashline prefix regex");
 	let mut seen = Vec::new();
 	for row in body.split('\n') {
-		let Some(captures) = prefix.captures(row) else {
+		let Some(captures) = SEEN_LINE_PREFIX_RE.captures(row) else {
 			continue;
 		};
 		if let Ok(line) = captures[1].parse() {
@@ -401,6 +413,46 @@ mod tests {
 		assert_eq!(file_hash("a \n b\t\r\nc"), "80BA");
 		assert_eq!(file_hash("hello\n"), "5BF9");
 		assert_eq!(file_hash(""), "5D05");
+	}
+
+	/// Hashes a normalized copy — the reference `file_hash` must stay
+	/// bit-identical to.
+	fn file_hash_of_normalized_copy(text: &str) -> String {
+		let mut normalized = String::with_capacity(text.len());
+		for segment in text.split_inclusive('\n') {
+			let (line, newline) = segment
+				.strip_suffix('\n')
+				.map_or((segment, ""), |line| (line, "\n"));
+			normalized.push_str(line.trim_end_matches([' ', '\t', '\r']));
+			normalized.push_str(newline);
+		}
+		format!("{:04X}", xxhash_rust::xxh32::xxh32(normalized.as_bytes(), 0) & 0xffff)
+	}
+
+	#[test]
+	fn file_hash_streams_the_normalized_text() {
+		let long_line = "x".repeat(100);
+		let cases = [
+			String::new(),
+			"\n".to_owned(),
+			"\r\n".to_owned(),
+			" \t\r".to_owned(),
+			"no final newline".to_owned(),
+			"no final newline with trailing space \t".to_owned(),
+			"crlf\r\nlines\r\nend\r\n".to_owned(),
+			"crlf without final\r\nnewline\r".to_owned(),
+			"trailing  \nwhitespace\t\t\n  only indent kept\n   \n\t\n".to_owned(),
+			"lone\rcarriage\r\rreturns \r\r\n".to_owned(),
+			"mixed 😀 \t\r\nünïcödé  \n中文\r".to_owned(),
+			format!("{long_line} \n{long_line}\r\n{long_line}\n{long_line}\t"),
+			(0..200)
+				.map(|n| format!("line {n}{}", ["", " ", "\t", "\r", " \r"][n % 5]))
+				.collect::<Vec<_>>()
+				.join("\n"),
+		];
+		for text in &cases {
+			assert_eq!(file_hash(text), file_hash_of_normalized_copy(text), "{text:?}");
+		}
 	}
 
 	#[test]

@@ -7,6 +7,7 @@ import { createSpeculativeToolExecutionConfig } from "@oh-my-pi/pi-coding-agent/
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { cfgTaskSpeculativeLaunch } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 import {
 	cfgToolsSpeculativeExecutionEnabled,
@@ -34,7 +35,7 @@ function createSession(cwd: string, settings: Settings): ToolSession {
 // schema defaults so `set` — the same layer the live settings UI writes —
 // takes effect, matching production.
 describe("createSpeculativeToolExecutionConfig", () => {
-	it("reflects a mid-session enable without recreate", async () => {
+	it("stays enabled while either speculation flag is on, following live toggles", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-live-config-"));
 		temporaryDirectories.push(directory);
 		const settings = Settings.isolated({});
@@ -42,6 +43,11 @@ describe("createSpeculativeToolExecutionConfig", () => {
 		const config = createSpeculativeToolExecutionConfig(session.settings, session, {
 			hasHandlers: () => false,
 		});
+
+		// `task.speculativeLaunch` defaults on and alone keeps the coordinator alive.
+		expect(config.enabled).toBe(true);
+
+		cfgTaskSpeculativeLaunch.set(settings, false);
 
 		expect(config.enabled).toBe(false);
 

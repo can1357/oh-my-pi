@@ -2,14 +2,29 @@
 
 ## [Unreleased]
 
-### Removed
+### Changed
 
-- Removed the setup wizard's "Web search" tab; the providers scene is now sign-in only, and web search is chosen through the `web` model role like other kind roles.
+- Improved editor history handling: history can now refresh when its source context changes, while preserving drafts created within the editor; entries are also recorded under the context active when they are added ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
+## [18.4.3] - 2026-09-28
+
+### Changed
+
+- Reduced frame spikes and memory while long assistant replies retire into scrollback mid-stream: retiring rows no longer re-renders the whole published reply once per row, and the transcript no longer rescans the entire session history every frame ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+- Reduced memory held by finished messages: streamed Markdown blocks release their streaming row caches, frozen lex tokens, and syntax-highlight streams when they finalize, and the Mermaid render cache is now size-bounded ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+- Reduced per-frame CPU while streaming Markdown, edit previews (header facts are reused across frames; replace previews process only the visible lines), bash previews (highlighting is deferred to paint and the highlight cache is size-bounded), interleaved thinking blocks, and the live bash/ssh output tail ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+- Changed git status refresh interval to 10 seconds and added generation tracking to avoid stale counts after HEAD moves
 
 ### Fixed
 
+- Fixed streaming bash previews showing fields that follow the `env` object (e.g. `command`) as environment assignments ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+- Fixed model picker latency by avoiding unnecessary catalog rebuilds
 - Fixed the `@` completion popup showing a `Searching…` placeholder while a refreshed file search is pending; the popup now stays hidden until results arrive, and Escape is no longer swallowed by it
 - Fixed multi-line IME and dictation input (for example, voice input in Ghostty or cmux) being sent as one message per line; it now lands in the prompt as a single multi-line draft, while Enter typed during a UI freeze still submits ([#13378](https://github.com/can1357/oh-my-pi/pull/13378) by [@goransh-walia](https://github.com/goransh-walia))
+
+### Removed
+
+- Removed the setup wizard's "Web search" tab; the providers scene is now sign-in only, and web search is chosen through the `web` model role like other kind roles.
 
 ## [18.4.2] - 2026-09-28
 
@@ -124,12 +139,6 @@
 
 ### Changed
 
-- `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation, carrying its own canceled drafts over. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-- `Editor.addToHistory()` records under the context active at the call, so a command that switches sessions or moves the working directory belongs to the host recording it before dispatch ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-
-### Changed
-
-- Updated model hub and oauth selector components to use namespaced `authStorage` API
 - Mermaid flowcharts and state diagrams now automatically choose a layout that best fits the available terminal width and reflow when the terminal is resized.
 - Plan Review annotations now support multi-line editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
