@@ -63,12 +63,12 @@ const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 /**
  * `@` file lists are narrowed in place (`setFilter(liveToken)`) while a fresh
  * search runs, so a slow walk never leaves entries that contradict the typed
- * token on screen. An emptied list means the refresh is still pending.
+ * token on screen. An emptied list means the refresh is still pending; the
+ * popup stays open but renders nothing until results arrive.
  */
 const AT_FILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	...AUTOCOMPLETE_SELECT_LIST_LAYOUT,
 	filterItems: (items, token) => items.filter(item => atCompletionMatches(token, item.value)),
-	noMatchText: "Searching…",
 };
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -1539,15 +1539,15 @@ export class Editor implements Component, Focusable {
 		if (bottomRow !== undefined) result.push(bottomRow);
 
 		// Add autocomplete list if active
-		if (this.#autocompleteState && this.#autocompleteList) {
+		const autocompleteList = this.#visibleAutocompleteList();
+		if (autocompleteList) {
 			// Clamp the dropdown to the terminal viewport: the editor rows already
 			// rendered above plus a small reserve must stay visible.
 			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
-			this.#autocompleteList.setMaxVisible(
+			autocompleteList.setMaxVisible(
 				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
 			);
-			const autocompleteResult = this.#autocompleteList.render(width);
-			result.push(...autocompleteResult);
+			result.push(...autocompleteList.render(width));
 		}
 
 		return result;
@@ -1651,10 +1651,13 @@ export class Editor implements Component, Focusable {
 
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
-			// Escape - cancel autocomplete
+			// Escape - cancel autocomplete. A hidden popup (empty narrowed `@` list) is
+			// dropped too, so its pending refresh cannot pop up afterward, but the key
+			// falls through: the user never saw anything to dismiss.
 			if (kb.matchesCanonical(canonical, "tui.select.cancel")) {
+				const visible = this.isShowingAutocomplete();
 				this.#cancelAutocomplete(true);
-				return;
+				if (visible) return;
 			}
 			// Right arrow at end of line accepts the selection like Tab (fish-style).
 			// Mid-line, right arrow keeps its cursor-movement role and falls through.
@@ -4246,8 +4249,19 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Whether an autocomplete popup is on screen. An `@` list narrowed to no match
+	 * while its refresh is pending stays open internally but is hidden, so it does
+	 * not claim keys (Escape, Vim mode switches) meant for the editor or app.
+	 */
 	isShowingAutocomplete(): boolean {
-		return this.#autocompleteState !== null;
+		return this.#visibleAutocompleteList() !== undefined;
+	}
+
+	/** The open autocomplete list, unless it has no candidate to show. */
+	#visibleAutocompleteList(): SelectList | undefined {
+		if (this.#autocompleteState === null) return undefined;
+		return this.#autocompleteList?.getSelectedItem() ? this.#autocompleteList : undefined;
 	}
 
 	async #updateAutocomplete(): Promise<void> {

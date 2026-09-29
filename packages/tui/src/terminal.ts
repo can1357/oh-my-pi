@@ -460,6 +460,15 @@ export interface TerminalStartOptions {
 	 * echoes even while module loading blocks the event loop.
 	 */
 	deferInput?: boolean;
+	/**
+	 * Reports whether the event loop is stalled or just recovered from a
+	 * stall. Once the terminal confirms bracketed paste, an unmarked multiline
+	 * burst is an input-method commit (IME, dictation) delivered as one paste
+	 * on a responsive loop, but keystrokes a stall batched into one read —
+	 * replayed as keys so Enter submits — while this returns true. Without a
+	 * probe every such burst is treated as an input-method commit.
+	 */
+	isLoopStalled?: () => boolean;
 }
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
@@ -717,6 +726,7 @@ export class ProcessTerminal implements Terminal {
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	#isLoopStalled?: () => boolean;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
 	#kittyEnableSeq: string | null = null;
@@ -923,6 +933,7 @@ export class ProcessTerminal implements Terminal {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
+		this.#isLoopStalled = options?.isLoopStalled;
 		// The host terminal's cursor visibility is unknown until we write it.
 		this.#cursorVisible = undefined;
 
@@ -1081,9 +1092,10 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
 		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
-		// pastes; once confirmed, the unbracketed raw-paste heuristic in
-		// StdinBuffer is disabled so keystrokes an event-loop stall batches into
-		// one read are never misclassified as a paste (#12540).
+		// pastes; once confirmed, StdinBuffer's unbracketed raw-paste heuristic
+		// consults the host's stall probe so keystrokes an event-loop stall
+		// batches into one read stay keys (#12540) while input-method commits
+		// still land as one paste (#13344).
 		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
@@ -1774,15 +1786,17 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
-		// Confirmed bracketed-paste support makes the unbracketed raw-paste
-		// heuristic pure downside — turn it off so stall-batched keystrokes are
-		// not misread as a paste (#12540). `supported` is only true here after an
-		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
+		// Confirmed bracketed-paste support means a genuine paste arrives
+		// wrapped, so an unmarked multiline burst is an input-method commit
+		// (#13344) unless an event-loop stall batched typed keys into one read
+		// (#12540). Let the host's stall probe decide per burst. `supported` is
+		// only true here after an explicit DECRPM reply (the DA1-sentinel
+		// fallback resolves unsupported).
 		if (mode === 2004 && supported) {
-			this.#stdinBuffer?.setRawPasteClassification(false);
+			this.#stdinBuffer?.setRawPasteStallProbe(this.#isLoopStalled);
 			// A terminal can reset this mode after the initial probe (for example,
 			// iTerm2's Terminal State toggle). Keep the mode asserted while we own
-			// the TTY, since the raw fallback is disabled after confirmation.
+			// the TTY, since a stalled loop now replays unmarked bursts as keys.
 			this.#bracketedPasteRefreshTimer ??= setInterval(() => {
 				if (this.#active && !this.#dead) this.#safeWrite("\x1b[?2004h");
 			}, 1000);

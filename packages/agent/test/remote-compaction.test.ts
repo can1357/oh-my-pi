@@ -744,6 +744,32 @@ describe("remote compaction input forwarding", () => {
 		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(15_000);
 	});
 
+	test("excludes opaque encrypted reasoning and compaction state from the fit estimate (#13611)", () => {
+		// Base64 ciphertext tokenizes far above what the provider bills for it;
+		// counting it refused Codex histories that the server accepts.
+		const encrypted = Buffer.from(Array.from({ length: 3_000 }, (_, index) => (index * 131 + 7) % 256)).toString(
+			"base64",
+		);
+		const input: Array<Record<string, unknown>> = [{ type: "compaction", encrypted_content: encrypted }];
+		for (let turn = 0; turn < 20; turn++) {
+			input.push({
+				type: "reasoning",
+				id: `rs_${turn}`,
+				summary: [{ type: "summary_text", text: "Inspecting the module." }],
+				encrypted_content: encrypted,
+			});
+			input.push({ type: "function_call", call_id: `call_${turn}`, name: "read", arguments: "{}" });
+			input.push({ type: "function_call_output", call_id: `call_${turn}`, output: `result ${turn}` });
+		}
+
+		const result = trimRemoteCompactionInputToContextWindow(input, new Tokenizer(), 5_000, "compact");
+
+		expect(result.fits).toBe(true);
+		expect(result.rewrittenOutputs).toBe(0);
+		expect(result.input).toEqual(input);
+		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(5_000);
+	});
+
 	test("uses conservative token accounting for token-dense trailing output", () => {
 		const output = Array.from({ length: 1_000 }, (_, index) => index.toString(16).padStart(8, "0")).join("");
 		const input = [{ type: "function_call_output", call_id: "call_1", output }];

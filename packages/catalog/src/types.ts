@@ -1201,6 +1201,12 @@ export interface Model<TApi extends Api = Api> {
 	kind?: ModelKind;
 	/** Grounding transport supported by this chat model. */
 	webSearch?: WebSearchGrounding;
+	/** Cheaper same-provider model to run hosted web search in this model's place (model id or provider/id). */
+	webSearchModel?: string;
+	/** Whether this chat model can carry the Responses `image_generation` tool itself. */
+	hostedImage?: boolean;
+	/** Same-provider image model to generate images in this model's place (model id or provider/id). */
+	imageModel?: string;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and

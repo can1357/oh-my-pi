@@ -59,7 +59,7 @@ import {
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
-import { cfgToolsMaxTimeout } from "./settings";
+import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -466,6 +466,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
+				// The coordinator also exists for `task.speculativeLaunch`; eval shadows
+				// belong to the read/eval speculation slice only.
+				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
 				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({

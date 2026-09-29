@@ -110,6 +110,10 @@ function normalizeRemoteCompactionEstimateValue(value: unknown): NormalizedEstim
 	const normalized: Record<string, unknown> = {};
 	let imageTokens = 0;
 	for (const [key, item] of Object.entries(record)) {
+		// Opaque encrypted reasoning/compaction state: its local base64 size far
+		// exceeds what the provider bills, so it stays out of the fit estimate
+		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
+		if (key === "encrypted_content" && typeof item === "string") continue;
 		const result = normalizeRemoteCompactionEstimateValue(item);
 		normalized[key] = result.value;
 		imageTokens += result.imageTokens;
@@ -137,9 +141,10 @@ interface RemoteCompactionBudgetProbe {
 /**
  * Cheap-first sizing of a remote-compaction request. Images and the request
  * frame are charged flat, so they come off the budget rather than through the
- * tokenizer; the serialized transcript is then probed with
- * {@link Tokenizer.checkTokenBudget}, which only pays for an exact count when
- * the byte bound cannot already prove the request fits.
+ * tokenizer; opaque `encrypted_content` payloads are excluded. The serialized
+ * transcript is then probed with {@link Tokenizer.checkTokenBudget}, which only
+ * pays for an exact count when the byte bound cannot already prove the request
+ * fits.
  */
 function probeRemoteCompactionInputBudget(
 	input: Array<Record<string, unknown>>,

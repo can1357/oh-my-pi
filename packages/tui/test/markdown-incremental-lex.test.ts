@@ -393,6 +393,58 @@ describe("Markdown incremental streaming lex (E2)", () => {
 			expect(streamLines).toEqual(renderColdTransient(grown, 60));
 		}
 	});
+
+	it("never mutates returned frames and stays byte-identical across finalize and resume", () => {
+		// Streaming reuses private row/highlight caches across frames; a frame
+		// already handed to a caller must never change afterwards. Finalizing
+		// mid-fence (then resuming the stream) releases those caches and must
+		// rebuild byte-identical output.
+		const theme = {
+			...THEME,
+			highlightCode: (code: string): string[] => code.split("\n").map(line => `H<${line}>`),
+			createHighlightStream: () => ({
+				push: (chunk: string): string =>
+					chunk
+						.split("\n")
+						.map((line, i, all) => (i === all.length - 1 ? line : `H<${line}>`))
+						.join("\n"),
+			}),
+		};
+		const renderColdWith = (text: string, transient: boolean): readonly string[] => {
+			clearRenderCache();
+			const md = new Markdown(text, 0, 0, theme);
+			md.transientRenderCache = transient;
+			const lines = md.render(60);
+			clearRenderCache();
+			return lines;
+		};
+		const code = Array.from({ length: 24 }, (_, i) => `const value_${i} = compute(${i});`).join("\n");
+		const doc =
+			"Intro paragraph that freezes first.\n\nSecond paragraph grows the frozen prefix.\n\n" +
+			`\`\`\`ts\n${code}\n\`\`\`\n\nTail prose after the fence keeps streaming on.`;
+		const finalizeAt = doc.indexOf("value_12");
+		const streaming = new Markdown("", 0, 0, theme);
+		streaming.transientRenderCache = true;
+		const handed: Array<{ lines: readonly string[]; snapshot: string[] }> = [];
+		let finalized = false;
+		for (let len = 1; len <= doc.length; len += 5) {
+			const slice = doc.slice(0, len);
+			clearRenderCache();
+			streaming.setText(slice);
+			const lines = streaming.render(60);
+			expect(lines).toEqual(renderColdWith(slice, true));
+			handed.push({ lines, snapshot: [...lines] });
+			if (!finalized && len >= finalizeAt) {
+				finalized = true;
+				streaming.transientRenderCache = false;
+				clearRenderCache();
+				expect(streaming.render(60)).toEqual(renderColdWith(slice, false));
+				streaming.transientRenderCache = true;
+			}
+		}
+		expect(finalized).toBe(true);
+		for (const frame of handed) expect(frame.lines).toEqual(frame.snapshot);
+	});
 });
 
 describe("Markdown OSC 8 tail normalization across streaming appends", () => {

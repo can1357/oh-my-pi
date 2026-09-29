@@ -9,7 +9,8 @@ provider "openai-codex" {
 	web-search "codex"
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
-		model "gpt-image-1" name="GPT Image 1" {
+		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.
+		model "gpt-image-2" name="GPT Image 2" {
 			reasoning #false
 			input "text" "image"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -18,7 +19,7 @@ provider "openai-codex" {
 		}
 	}
 
-	models "gpt-image-1" {
+	models "gpt-image-2" {
 		kind "image"
 	}
 

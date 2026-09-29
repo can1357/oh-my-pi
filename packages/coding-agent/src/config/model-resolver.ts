@@ -1546,12 +1546,7 @@ export interface RoleChainCandidate {
 }
 
 /** Resolve a role's primary and retry candidates in effective attempt order. */
-export function resolveRoleChain(
-	role: string,
-	settings: Settings,
-	pool: Model<Api>[],
-	options?: { hoistProvider?: string },
-): RoleChainCandidate[] {
+export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
 	const primarySelector = configured || formatModelRoleAlias(role);
@@ -1578,16 +1573,7 @@ export function resolveRoleChain(
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
 	}
-
-	const hoistProvider = options?.hoistProvider;
-	if (!hoistProvider) return candidates;
-	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
-	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
-	if (hoisted.length === 0) return candidates;
-	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
-	const reordered = [...hoisted, ...remaining];
-	let reorderedIndex = 0;
-	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));
+	return candidates;
 }
 
 /**

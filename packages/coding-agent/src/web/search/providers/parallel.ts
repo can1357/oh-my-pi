@@ -289,11 +289,8 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.keys.source("parallel") !== undefined;
-	}
-
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	/** Always available: without a credential, search runs through the keyless public MCP. */
+	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

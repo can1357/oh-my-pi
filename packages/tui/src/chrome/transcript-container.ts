@@ -93,6 +93,12 @@ type Offered =
 	| { batch: HistoryBatch; kind: "commit"; end: number }
 	| { batch: HistoryBatch; kind: "replay" };
 
+/** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
+interface AppendBatch {
+	rows: readonly string[];
+	emittedEnd: number;
+}
+
 const MAX_LIVE_BLOCKS = 256;
 /** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
 const PINNED_FRONTIER_WARN_MS = 30_000;
@@ -214,7 +220,6 @@ export class TranscriptContainer extends Container {
 			},
 		});
 	}
-
 	override addChild(component: Component): void {
 		this.#syncEntries();
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
@@ -672,20 +677,9 @@ export class TranscriptContainer extends Container {
 			// rows left behind here are rows dropped from the top of the viewport.
 			// `liveRows` is exact here: the append path measured every live block.
 			const overflow = liveRows - room;
-			const before = this.#renderStablePrefix(appendHead, appendHead.emitted, width);
-			let emittedEnd = appendHead.emitted;
-			let rows: readonly string[] = EMPTY_ROWS;
-			while (emittedEnd < appendHead.stableRows.length && rows.length < overflow) {
-				const after = this.#renderStablePrefix(appendHead, emittedEnd + 1, width);
-				if (!isRowPrefix(before, after) || after.length === before.length) {
-					if (emittedEnd === appendHead.emitted) {
-						this.#freezeStableRows(appendHead, EMPTY_ROWS, "semantic row render added no suffix");
-					}
-					break;
-				}
-				rows = after.slice(before.length);
-				emittedEnd += 1;
-			}
+			const { rows, emittedEnd } =
+				this.#measuredAppendBatch(appendHead, width, overflow) ??
+				this.#renderedAppendBatch(appendHead, width, overflow);
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
@@ -873,6 +867,64 @@ export class TranscriptContainer extends Container {
 		if (memo !== undefined) return memo;
 		return this.#renderStablePrefix(entry, count, width).length;
 	}
+
+	/**
+	 * Size a progressive-append batch from the stable renders `#renderEntry`
+	 * recorded at this width, without rendering any prefix. Each recorded count
+	 * was checked to render as a byte prefix of every later one, and
+	 * `renderedStableByWidth` holds the newest, so each count's rows are a
+	 * prefix of it and the batch is one slice. Undefined when a count the walk
+	 * needs was never recorded here (published between renders, or before a
+	 * resize); the rendered walk then decides.
+	 */
+	#measuredAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch | undefined {
+		const counts = entry.stableRowCountByWidth.get(width);
+		const newest = entry.renderedStableByWidth.get(width);
+		const target = entry.stableRows.length;
+		if (counts === undefined || newest === undefined || counts.get(target) !== newest.length) return undefined;
+		const start = entry.emitted === 0 ? 0 : counts.get(entry.emitted);
+		if (start === undefined) return undefined;
+		let emittedEnd = entry.emitted;
+		let end = start;
+		while (emittedEnd < target && end - start < overflow) {
+			const next = counts.get(emittedEnd + 1);
+			if (next === undefined) return undefined;
+			if (next <= start) {
+				if (emittedEnd === entry.emitted) {
+					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
+				}
+				break;
+			}
+			end = next;
+			emittedEnd += 1;
+		}
+		return { rows: emittedEnd > entry.emitted ? newest.slice(start, end) : EMPTY_ROWS, emittedEnd };
+	}
+
+	/**
+	 * Size a progressive-append batch by rendering each further stable prefix:
+	 * extend the emitted prefix until its new rows cover `overflow`, stopping
+	 * at the first prefix that adds no row or stops extending the emitted one
+	 * (freezing the block when that is the very next prefix).
+	 */
+	#renderedAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch {
+		const before = this.#renderStablePrefix(entry, entry.emitted, width);
+		let emittedEnd = entry.emitted;
+		let after = before;
+		while (emittedEnd < entry.stableRows.length && after.length - before.length < overflow) {
+			const next = this.#renderStablePrefix(entry, emittedEnd + 1, width);
+			if (!isRowPrefix(before, next) || next.length === before.length) {
+				if (emittedEnd === entry.emitted) {
+					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
+				}
+				break;
+			}
+			after = next;
+			emittedEnd += 1;
+		}
+		return { rows: emittedEnd > entry.emitted ? after.slice(before.length) : EMPTY_ROWS, emittedEnd };
+	}
+
 	/**
 	 * Record that pressure retirement is blocked behind a not-yet-settled
 	 * frontier block, and log its identity once the episode outlives the grace
