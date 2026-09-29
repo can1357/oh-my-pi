@@ -9,6 +9,12 @@
 - `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Added `formatFileMatches` and `FileMatchSection` to `tools/grouped-file-output` for rendering per-file grep/ast-grep matches in grouped or flat mode.
 
+### Fixed
+
+- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit. `TUI.stop({ maxRows })` writes only the newest `maxRows` rows to scrollback (omp passes `EXIT_FLUSH_MAX_ROWS`, 2,000), as do a terminal disconnect and a signal or fatal-error restore; the older rows are not written anywhere, so pass a cap only when another copy survives, such as a saved session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed finished messages moving into terminal scrollback immediately, instead of staying live until the screen fills, after returning from a suspend or an external editor ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed opening the external editor or suspending from a fullscreen view, such as `/annotate`, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.4.3] - 2026-09-28
 ### Added
 

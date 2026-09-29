@@ -1556,7 +1556,7 @@ export class InputController {
 
 		// Stop the TUI (restore terminal to normal mode) before sending the
 		// signal so the parent shell sees a sane terminal state.
-		this.ctx.ui.stop();
+		this.ctx.ui.stop({ resuming: true });
 
 		try {
 			// SIGSTOP — not SIGTSTP — to the foreground process group (pid=0).
@@ -2795,7 +2795,7 @@ export class InputController {
 		const currentText = this.ctx.editor.getExpandedText?.() ?? this.ctx.editor.getText();
 
 		try {
-			this.ctx.ui.stop();
+			this.ctx.ui.stop({ resuming: true });
 			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md" });
 			if (result !== null) {
 				this.ctx.editor.setText(result);

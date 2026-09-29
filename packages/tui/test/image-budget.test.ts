@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { EXIT_FLUSH_MAX_ROWS, TUI } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
+import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	encodeKittyVirtualPlacement,
 	getKittyGraphics,
@@ -1420,6 +1422,88 @@ describe("TUI inline-image budget", () => {
 
 			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("hands only the newest rows to scrollback at a capped stop, through an image-budget retry", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		// One-row blocks, so the full flush alternates block rows and separators.
+		// Ten one-row images sit in the newest 200 rows: over the default cap of 8,
+		// so the flush repeats its first pass and re-renders the offered batch.
+		// Block 0 is an image too: it is the frontier head the cap skips, and the
+		// retry must count it as the first pass did.
+		const isImage = (index: number) => index === 0 || (index >= EXIT_FLUSH_MAX_ROWS - 50 && index % 5 === 0);
+		// Renders run synchronously, so no frame waits on the clock.
+		const renderScheduler = {
+			now: () => 0,
+			scheduleImmediate: (callback: () => void) => callback(),
+			scheduleRender: (callback: () => void) => {
+				callback();
+				return { cancel() {} };
+			},
+		};
+		const quit = async (capped: boolean) => {
+			const term = new VirtualTerminal(40, 10, 20_000);
+			const composer = new Composer({
+				terminal: term,
+				tuiOptions: { renderScheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			const transcript = new TranscriptContainer();
+			composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+			composer.start({ playWelcomeIntro: false });
+			// The fullscreen overlay freezes retirement, as the viewport does.
+			composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
+			for (let index = 0; index < EXIT_FLUSH_MAX_ROWS; index++) {
+				transcript.addChild(
+					isImage(index)
+						? new Image(
+								BASE64_ONE_PIXEL_PNG,
+								"image/png",
+								{ fallbackColor: text => text },
+								{
+									maxWidthCells: 1,
+									maxHeightCells: 1,
+									budget: composer.ui.imageBudget,
+									imageKey: `image-${index}`,
+								},
+								{ widthPx: 10, heightPx: 10 },
+							)
+						: new Text(`row-${index}`, 0, 0),
+				);
+			}
+			composer.ui.requestRender();
+			composer.ui.stop(capped ? { maxRows: EXIT_FLUSH_MAX_ROWS } : undefined);
+			await term.flush();
+			return {
+				rows: term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd()),
+				states: transcript.blockStates(),
+			};
+		};
+
+		try {
+			const capped = await quit(true);
+			const full = await quit(false);
+
+			expect(capped.rows).toEqual(full.rows.slice(-capped.rows.length));
+			const transcriptRows = capped.rows.slice(0, capped.rows.indexOf("editor"));
+			expect(transcriptRows).toHaveLength(EXIT_FLUSH_MAX_ROWS);
+			const blockRows = transcriptRows.filter((_, row) => row % 2 === 0);
+			expect(transcriptRows.filter((_, row) => row % 2 === 1).every(row => row === "")).toBe(true);
+			// The newest EXIT_FLUSH_MAX_ROWS / 2 blocks, oldest first; image rows are not text.
+			const newest = Array.from(
+				{ length: EXIT_FLUSH_MAX_ROWS / 2 },
+				(_, offset) => EXIT_FLUSH_MAX_ROWS / 2 + offset,
+			);
+			expect(blockRows.map(row => (row.startsWith("row-") ? row : "image"))).toEqual(
+				newest.map(index => (isImage(index) ? "image" : `row-${index}`)),
+			);
+			expect(blockRows.every(row => row !== "")).toBe(true);
+			expect(capped.states.every(state => state === "committed")).toBe(true);
+			expect(full.states.every(state => state === "committed")).toBe(true);
 		} finally {
 			setKittyGraphics(originalGraphics);
 		}

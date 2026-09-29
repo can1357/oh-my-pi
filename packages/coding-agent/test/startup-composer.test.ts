@@ -500,6 +500,40 @@ describe("Composer prepaint", () => {
 		}
 	});
 
+	it("caps the exit flush only when the session file keeps the rows the cap skips", async () => {
+		// An unsaved (`--no-session`) transcript lives only in scrollback, so its
+		// quit keeps the full flush; a saved one is restored by `omp --resume`.
+		for (const saved of [false, true]) {
+			const terminal = new CountingTerminal();
+			const composer = new Composer({ preferences: config, terminal });
+			composer.start();
+			const lease = new ComposerLease(composer);
+			const testSession = await createTestSession({ inMemory: !saved });
+			if (saved) await testSession.session.sessionManager.ensureOnDisk();
+			const mode = new InteractiveMode(
+				testSession.session,
+				"test",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				lease.composer,
+			);
+			lease.adopt();
+			const stop = vi.spyOn(mode.ui, "stop");
+			try {
+				mode.stop();
+				// One stop, capped exactly when the session is saved.
+				expect(stop.mock.calls.map(([flush]) => flush?.maxRows !== undefined)).toEqual([saved]);
+			} finally {
+				lease.dispose();
+				await testSession.cleanup();
+				vi.restoreAllMocks();
+			}
+		}
+	});
+
 	it("tracks terminal ownership until a lease is adopted", () => {
 		const abandonedTerminal = new CountingTerminal();
 		const abandonedComposer = new Composer({ preferences: config, terminal: abandonedTerminal });
