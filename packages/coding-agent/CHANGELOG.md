@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor keepalive timeouts and GOAWAY disconnects stopping a turn whose tool calls had already finished instead of continuing it ([#13685](https://github.com/can1357/oh-my-pi/pull/13685) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

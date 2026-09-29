@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cursor turns now reconnect and resume in place after a dropped connection without re-running tools that already ran, and dead connections are detected within about 30 seconds through HTTP/2 keepalive pings ([#13685](https://github.com/can1357/oh-my-pi/pull/13685) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.4.3] - 2026-09-28
 
 ### Changed
