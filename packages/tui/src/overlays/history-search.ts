@@ -33,7 +33,6 @@ export interface HistorySource {
 	getRecent(limit: number): HistorySearchEntry[];
 }
 
-/** A labeled source already bound to its scope by the host. */
 import { boundKeys, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { contentRowWidth, renderScrollableList } from "../chrome/selector-helpers";
@@ -63,6 +62,7 @@ interface HistoryNativeMemo {
 	node: NativeNode;
 }
 
+/** Key of the `picker` child a dock-mounted history search describes (hoisted into `layer`). */
 const PICKER_KEY = "picker";
 
 /** A labeled source already bound to its scope by the host. */
