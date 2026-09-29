@@ -155,6 +155,7 @@ import {
 	resolveAnthropicMetadataUserId,
 	stripClaudeToolPrefix,
 } from "./anthropic-identity";
+import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import {
 	anthropicProviderSessionStateKey,
 	clearAnthropicFastModeFallback,
@@ -2264,6 +2265,8 @@ const streamAnthropicOnce = (
 					nextParams = replacementPayload as typeof nextParams;
 				}
 				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
+				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
+				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
