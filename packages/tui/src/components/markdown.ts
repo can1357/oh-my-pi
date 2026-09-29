@@ -1458,6 +1458,27 @@ function renderMathToken(text: string): string {
 	return latexToUnicode(text).replace(MATH_NEWLINES, " ");
 }
 
+export interface DisplayMathSpan {
+	tex: string;
+	raw: string;
+}
+
+/** Display-math blocks recognized by the renderer, excluding inline formulas and code. */
+export function displayMathSpans(markdown: string): DisplayMathSpan[] {
+	const spans: DisplayMathSpan[] = [];
+	for (const token of markdownParser.lexer(normalizeOsc8Terminators(markdown))) {
+		if (isMathToken(token) && token.display) {
+			spans.push({ tex: token.text, raw: token.raw });
+			continue;
+		}
+		if (token.type === "paragraph") {
+			const math = soleDisplayMath(token.tokens);
+			if (math) spans.push({ tex: math.text, raw: math.raw });
+		}
+	}
+	return spans;
+}
+
 /**
  * When a paragraph's only meaningful content is a single display math token
  * (`$$…$$` / `\[…\]`), return it so the paragraph can be stacked multi-line

@@ -46,6 +46,8 @@
 			"@types/react": "^19.2.17",
 			"@types/react-dom": "^19.2.3",
 			"@typescript/native-preview": "7.0.0-dev.20260707.2",
+			"@mathjax/mathjax-newcm-font": "^4.1.3",
+			"@mathjax/src": "^4.1.3",
 			"diff": "^9.0.0",
 			"fastembed": "2.1.0",
 			"katex": "^0.18.4",

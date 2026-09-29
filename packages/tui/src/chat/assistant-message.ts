@@ -2,17 +2,19 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
-import { Markdown, type MarkdownTheme } from "../components/markdown";
+import { displayMathSpans, Markdown, type MarkdownTheme } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { latexImage } from "./latex-image";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -230,6 +232,9 @@ export class AssistantMessageComponent extends Container {
 	 * invalidation) still finds them after the bounded shared cache evicts them.
 	 */
 	#kittyConverted = new Map<string, ImageContent>();
+	#latexImages = new Map<string, ImageContent>();
+	#latexImagesAwaited = new Set<string>();
+	#latexImageFailures = new Set<string>();
 	#showImages = true;
 	#showToolResultImages = true;
 	#transcriptBlockFinalized: boolean;
@@ -1057,6 +1062,37 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	#renderLatexImages(markdown: string, contentIndex: number): void {
+		if (!this.#showImages || !TERMINAL.imageProtocol) return;
+		const spans = displayMathSpans(markdown);
+		const color = theme.getColorHex("text");
+		for (let index = 0; index < spans.length; index++) {
+			const span = spans[index]!;
+			const key = `${color}\0${span.tex}`;
+			const image = this.#latexImages.get(key);
+			if (image) {
+				this.#renderImageEntries([{ image, key: `latex:${contentIndex}:${index}:${key}` }], true);
+				continue;
+			}
+			if (this.#latexImagesAwaited.has(key) || this.#latexImageFailures.has(key)) continue;
+			this.#latexImagesAwaited.add(key);
+			latexImage(span.tex, color)
+				.then(rendered => {
+					this.#latexImages.set(key, rendered);
+					this.#fastPathKey = undefined;
+					this.#fastPathItems = undefined;
+					if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+					this.#onImageUpdate?.();
+				})
+				.catch(error => {
+					this.#latexImageFailures.add(key);
+					logger.debug("LaTeX image rendering failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}
+	}
+
 	#renderToolImages(): void {
 		if (!this.#showToolResultImages) return;
 		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
@@ -1272,6 +1308,7 @@ export class AssistantMessageComponent extends Container {
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				this.#renderLatexImages(trimmed, i);
 				hasRenderedContent = true;
 			} else if (content.type === "thinking") {
 				if (this.#hideThinkingBlock) {

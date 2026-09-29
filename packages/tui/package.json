@@ -4,7 +4,10 @@
   "version": "18.4.3",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
-  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+  "author": {
+    "name": "Stencil Labs, Inc.",
+    "url": "https://stencil.so"
+  },
   "contributors": [
     "Mario Zechner"
   ],
@@ -38,6 +41,8 @@
     "gen:glyphs": "bun scripts/gen-glyphs.ts"
   },
   "dependencies": {
+    "@mathjax/mathjax-newcm-font": "catalog:",
+    "@mathjax/src": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-ai": "catalog:",
