@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a subagent with a declared `tools:` allowlist still receiving the full MCP tool proxy on top of its host allowlist, instead of being restricted to it like plan mode and an already-restricted parent session ([#PR_PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PR_PLACEHOLDER) by [@rhlsthrm](https://github.com/rhlsthrm))
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

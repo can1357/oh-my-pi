@@ -683,7 +683,10 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
-		mockDiscovery();
+		// This test targets plan-mode/explicit-restriction MCP and extension
+		// propagation, not the declared-tools allowlist behavior covered below,
+		// so it strips AGENT.tools rather than inheriting it incidentally.
+		mockDiscovery({ ...AGENT, tools: undefined });
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
 		const preparedExtensions = [
@@ -770,6 +773,34 @@ describe("structured subagent primitive", () => {
 		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
 		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("restricts the executor and disables MCP for an agent with a declared tools allowlist", async () => {
+		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
+		const restrictedAgent: AgentDefinition = { ...AGENT, tools: ["read", "grep"] };
+		const openAgent: AgentDefinition = { ...AGENT, tools: undefined };
+		const restrictedSession = session();
+		Object.assign(restrictedSession, { mcpManager });
+		const openSession = session();
+		Object.assign(openSession, { mcpManager });
+		const options: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options.push(executorOptions);
+			return result();
+		});
+
+		mockDiscovery(restrictedAgent);
+		const restrictedRun = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
+
+		mockDiscovery(openAgent);
+		const openRun = await runStructuredSubagent(request({ session: openSession, retainArtifacts: true }));
+
+		expect(options[0]).toMatchObject({ restrictToolNames: true, enableMCP: false });
+		expect(options[0]?.mcpManager).toBeUndefined();
+		expect(options[1]).toMatchObject({ restrictToolNames: false, enableMCP: true, mcpManager });
+
+		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
+		await fs.rm(openRun.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {

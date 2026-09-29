@@ -483,7 +483,12 @@ function buildExecutorOptions(
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	// An explicit `tools:` allowlist on the effective agent must actually
+	// restrict the child, matching plan mode and an already-restricted parent.
+	// Without this, `enableMCP` below stays true and the child keeps the full
+	// MCP proxy (every server tool) stacked on top of its declared allowlist.
+	const restrictToolNames =
+		policy.planMode || session.restrictToolNames === true || policy.effectiveAgent.tools !== undefined;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
