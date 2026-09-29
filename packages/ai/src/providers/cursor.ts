@@ -991,30 +991,6 @@ function streamCursorWithWireMode(
 						requestBytes = toBinary(AgentClientMessageSchema, resumedClientMessage);
 					} else {
 						requestBytes = builtRequest.requestBytes;
-				// Steady state drains fully per chunk; alias the fresh h2 chunk instead
-				// of copying it through Buffer.concat (see aws-eventstream.ts).
-				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
-
-				while (pendingBuffer.length >= 5) {
-					const flags = pendingBuffer[0];
-					const msgLen = pendingBuffer.readUInt32BE(1);
-					if (pendingBuffer.length < 5 + msgLen) break;
-
-					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
-					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
-
-					if (flags & CONNECT_END_STREAM_FLAG) {
-						const endError = parseConnectEndStream(messageBytes);
-						if (endError) {
-							endStreamError = endError;
-							h2Request?.close();
-						} else {
-							// The end frame is the server's last message. Half-close our
-							// side so the stream can finish: a CONNECT proxy holds the
-							// HTTP/2 stream open until the client ends its request.
-							h2Request?.end();
-						}
-						continue;
 					}
 
 					const debugSession = isRequestDebugEnabled()
@@ -1069,16 +1045,6 @@ function streamCursorWithWireMode(
 					});
 
 					h2Request = h2Client.request(requestHeaders);
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
-					return;
-				}
-				const heartbeatMessage = create(AgentClientMessageSchema, {
-					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
-				});
-				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				writeClientMessage(h2Request, heartbeatBytes);
-			};
 
 					let pendingBuffer: Buffer = Buffer.alloc(0);
 
@@ -1122,6 +1088,11 @@ function streamCursorWithWireMode(
 								if (endError) {
 									endStreamError = endError;
 									h2Request?.close();
+								} else {
+									// The end frame is the server's last message. Half-close our
+									// side so the stream can finish: a CONNECT proxy holds the
+									// HTTP/2 stream open until the client ends its request.
+									h2Request?.end();
 								}
 								continue;
 							}
@@ -1171,7 +1142,7 @@ function streamCursorWithWireMode(
 							message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 						});
 						const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-						h2Request.write(frameConnectMessage(heartbeatBytes));
+						writeClientMessage(h2Request, heartbeatBytes);
 					};
 
 					h2Request.on("trailers", trailers => {
