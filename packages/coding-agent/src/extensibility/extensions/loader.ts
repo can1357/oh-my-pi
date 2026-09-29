@@ -169,10 +169,6 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
-	getAgentId(): string | undefined {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -364,7 +360,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	 * process-global namespace claims, transports, and `remote` refs on `session_shutdown`, so a claim
 	 * never outlives its load in a long-lived (SDK/ACP) host. Registered at claim time (not deferred to
 	 * after the factory) so a delayed claim from a runtime handler — e.g. a bridge calling
-	 * setRemoteTransport from `session_start` once it has `pi.getAgentId()` — is covered too (#7401
+	 * setRemoteTransport from `session_start` once it has `ctx.agent.id` — is covered too (#7401
 	 * review). Ordering among shutdown handlers is irrelevant: the release and the extension's own
 	 * transport clear are each idempotent, and session_shutdown handlers run concurrently anyway.
 	 */
@@ -523,10 +519,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	getSessionName(): string | undefined {
 		return this.runtime.getSessionName();
-	}
-
-	getAgentId(): string | undefined {
-		return this.runtime.getAgentId();
 	}
 
 	setSessionName(name: string): Promise<void> {

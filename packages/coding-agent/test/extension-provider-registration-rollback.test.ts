@@ -168,7 +168,6 @@ describe("extension provider registration rollback", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
-					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -681,7 +680,7 @@ describe("extension provider registration rollback", () => {
 			const extension = await loadExtensionFromFactory(
 				pi => {
 					// The bridge defers its claim to a runtime handler (e.g. session_start, once it has
-					// pi.getAgentId() or an async socket). Nothing is claimed during factory load.
+					// ctx.agent.id or an async socket). Nothing is claimed during factory load.
 					claim = () => {
 						pi.irc.setRemoteTransport?.("cluster-a", {
 							async send(message) {

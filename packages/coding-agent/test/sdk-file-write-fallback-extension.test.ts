@@ -57,7 +57,6 @@ function initializeRunnerForTest(runner: ExtensionRunner | undefined): void {
 		getThinkingLevel: () => undefined,
 		setThinkingLevel: () => {},
 		getSessionName: () => undefined,
-		getAgentId: () => undefined,
 		setSessionName: async () => {},
 	};
 	const contextActions: ExtensionContextActions = {
