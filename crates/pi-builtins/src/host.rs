@@ -2134,7 +2134,8 @@ mod testing {
 		#[test]
 		fn pipe_wrapped_as_file_gets_line_buffering() {
 			let (reader, writer) = std::io::pipe().unwrap();
-			assert!(matches!(StreamWriter::new(OpenFile::File(writer)), StreamWriter::Line(_)));
+			let file = std::fs::File::from(std::os::windows::io::OwnedHandle::from(writer));
+			assert!(matches!(StreamWriter::new(OpenFile::File(file)), StreamWriter::Line(_)));
 			drop(reader);
 		}
 

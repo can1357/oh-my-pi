@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows builtin output destinations being misclassified: piped output was block-buffered until exit while redirected files were line-buffered (letting `rg pattern > out.txt` match its own growing output), and `>f 2>&1` now shares one writer on Windows ([#13764](https://github.com/can1357/oh-my-pi/pull/13764) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.5.0] - 2026-10-03
 
 ### Fixed
@@ -44,7 +48,6 @@
 
 ### Fixed
 
-- Fixed Windows builtin output destinations being misclassified: piped output was block-buffered until exit while redirected files were line-buffered (letting `rg pattern > out.txt` match its own growing output), and `>f 2>&1` now shares one writer on Windows ([#13764](https://github.com/can1357/oh-my-pi/pull/13764) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed `computer.window(id).ax()` and `find()` failing with `AxFailed` on macOS sheets, popovers and open menus that `computer.windows()` lists, such as TextEdit's Save sheet or a Calendar event popover ([#13659](https://github.com/can1357/oh-my-pi/pull/13659) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed macOS 26 background scrolls moving twice the requested distance; background hovers, scrolls and right or middle clicks are now delivered once ([#13739](https://github.com/can1357/oh-my-pi/pull/13739) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed macOS `takeover` clicks and scrolls failing with `AX action 'AXRaise' failed (AXError(-25205))` on covered windows that do not support `AXRaise`, such as iPhone Mirroring, even when activation brings them forward; a window that stays covered still refuses before any input is sent ([#13737](https://github.com/can1357/oh-my-pi/pull/13737) by [@will-bogusz](https://github.com/will-bogusz)).
