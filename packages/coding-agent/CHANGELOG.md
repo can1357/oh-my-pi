@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Long-running Python and JavaScript eval cells now automatically background by default and deliver their results when finished ([#11185](https://github.com/can1357/oh-my-pi/pull/11185) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+
 ### Fixed
 
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
