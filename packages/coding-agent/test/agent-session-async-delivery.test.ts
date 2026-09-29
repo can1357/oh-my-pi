@@ -1075,7 +1075,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			asyncJobManager: manager,
+			ownedAsyncJobManager: manager,
 		});
 
 		const completedJobId = manager.register("task", "prior session", async () => "done", {
@@ -1129,7 +1129,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			asyncJobManager: manager,
+			ownedAsyncJobManager: manager,
 		});
 		const resultQueued = observeAsyncResultEnqueue(session);
 
@@ -1184,7 +1184,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
-			asyncJobManager: manager,
+			ownedAsyncJobManager: manager,
 		});
 
 		// The delivery generation starts at 0; a new session bumps it to 1.
@@ -1534,7 +1534,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "SubAgent",
-			ownedAsyncJobManager: manager,
+			asyncJobManager: manager,
 		});
 
 		const never = Promise.withResolvers<string>();
@@ -1588,7 +1588,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "SubAgent",
-			ownedAsyncJobManager: manager,
+			asyncJobManager: manager,
 		});
 
 		await session.dispose();
