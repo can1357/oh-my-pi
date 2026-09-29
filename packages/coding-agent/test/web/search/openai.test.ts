@@ -19,6 +19,7 @@ interface OpenAITestFixture {
 interface OpenAITestModelOptions {
 	requestModelId?: string;
 	reasoningMode?: "pro";
+	compat?: { supportsNamedToolChoice: boolean };
 }
 
 function createFixture(modelOptions: OpenAITestModelOptions = {}) {
@@ -144,6 +145,45 @@ describe("OpenAI API-billed Responses web search", () => {
 				model: "gpt-5.6-luna",
 				requestId: "resp-openai-search-1",
 				authMode: "api_key",
+			});
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("sends a string tool_choice to hosts that reject named tool choices and still maps the search response", async () => {
+		const fixture = createFixture({ compat: { supportsNamedToolChoice: false } });
+		let requestBody: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					output: [
+						{
+							type: "web_search_call",
+							status: "completed",
+							action: {
+								type: "search",
+								query: "string-only host lookup",
+								sources: [
+									{ type: "url", url: "https://search.example.test/string-only", title: "String-only result" },
+								],
+							},
+						},
+						{ type: "message", content: [{ type: "output_text", text: "Found it." }] },
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		try {
+			const result = await searchOpenAIResponses(makeParams(fixture, fetch));
+			expect(requestBody).toMatchObject({ tools: [{ type: "web_search" }], tool_choice: "required" });
+			expect(result).toMatchObject({
+				answer: "Found it.",
+				sources: [{ url: "https://search.example.test/string-only", title: "String-only result" }],
+				usage: { searchRequests: 1 },
 			});
 		} finally {
 			fixture.authStorage.close();

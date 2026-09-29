@@ -37,6 +37,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { replaceFileAtomically } from "../utils/atomic-file";
+import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
 	type AnySetting,
@@ -3143,18 +3144,13 @@ export class Settings {
 					case "auto":
 						return [];
 					default:
-						return MODEL_PRIO.web.includes(`web/${provider}`) ? [`web/${provider}`] : [];
+						return isRegisteredSearchEngine(provider) ? [`web/${provider}`] : [];
 				}
 			};
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
 					: "gemini-2.5-flash";
-			const webDefaults = MODEL_PRIO.web.flatMap(selector => {
-				if (selector === "google/gemini-2.5-flash") return geminiSelectors(geminiModel);
-				if (selector === "google-antigravity/gemini-2.5-flash") return [];
-				return [selector];
-			});
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
@@ -3183,14 +3179,11 @@ export class Settings {
 			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
 				typeof value === "string" ? webSelectors(value, geminiModel) : [],
 			);
-			const shouldMigrateWeb =
-				orderedWebSelectors.length > 0 ||
-				excludedWebProviders.size > 0 ||
-				(typeof legacyGeminiModel === "string" && legacyGeminiModel.trim().length > 0);
-			if (shouldMigrateWeb) {
+			// The Gemini model only shapes an ordered `gemini` entry; the defaults hold no chat models.
+			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...webDefaults]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
 				);
 			}
 
@@ -3199,17 +3192,17 @@ export class Settings {
 			const imageSelector = (provider: string): string | undefined => {
 				switch (provider) {
 					case "openai":
-						return "openai/gpt-image-1";
+						return "openai/gpt-image-2";
 					case "openai-codex":
-						return "openai-codex/gpt-image-1";
+						return "openai-codex/gpt-image-2";
 					case "antigravity":
 						return "google-antigravity/gemini-3-pro-image";
 					case "xai":
 						return "xai/grok-imagine-image";
 					case "openrouter":
-						return "openrouter/google/gemini-3-pro-image-preview";
+						return "openrouter/google/gemini-3-pro-image";
 					case "gemini":
-						return "google/gemini-3-pro-image-preview";
+						return "google/gemini-3-pro-image";
 					case "deepinfra":
 						return "deepinfra/black-forest-labs/FLUX-2-pro";
 					default:

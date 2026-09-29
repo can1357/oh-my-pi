@@ -191,10 +191,15 @@ behavior {
 			glob="claude-fable-*" glob="claude-mythos-*"
 		route "openai-responses" prefix="grok-4." prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
 	}
-	// Command Code serves Claude models through its Anthropic-compatible
-	// Messages endpoint and every other model through chat completions.
+	// Command Code serves Claude ids through its Anthropic-compatible Messages
+	// endpoint, its ten GPT ids (the same set command-code@1.67.0 marks
+	// `spec: "responses"`) through its Responses endpoint, and every other id
+	// through chat completions.
 	api-routes provider="commandcode" default="openai-completions" {
 		route "anthropic-messages" prefix="claude-"
+		route "openai-responses" exact="gpt-5.3-codex" exact="gpt-5.4" exact="gpt-5.4-mini" exact="gpt-5.5" \
+			exact="gpt-5.6-luna" exact="gpt-5.6-sol" exact="gpt-5.6-terra" exact="gpt-6-astra" \
+			exact="gpt-6-luna" exact="gpt-6-sol"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.

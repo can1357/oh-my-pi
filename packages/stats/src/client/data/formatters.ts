@@ -1,18 +1,25 @@
 import { format, formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
 import type { MessageStats } from "../types";
 
+/**
+ * Every number on the dashboard uses one fixed locale. Labels, percents
+ * (`toFixed`), durations and dates are English, so following the browser
+ * locale mixed conventions (e.g. `1,4 Mr` beside `97.0%` on a tr-TR browser).
+ */
+const NUMBER_LOCALE = "en-US";
+
 export function formatInteger(value: number): string {
-	return value.toLocaleString();
+	return value.toLocaleString(NUMBER_LOCALE);
 }
 
 export function formatCompact(value: number): string {
-	return value.toLocaleString(undefined, { notation: "compact" });
+	return value.toLocaleString(NUMBER_LOCALE, { notation: "compact" });
 }
 
 export function formatCost(value: number, digits?: number): string {
 	if (value === 0) return "$0";
 	const fractionDigits = digits !== undefined ? digits : value > 0 && value < 0.01 ? 4 : 2;
-	return `$${value.toLocaleString(undefined, {
+	return `$${value.toLocaleString(NUMBER_LOCALE, {
 		minimumFractionDigits: fractionDigits,
 		maximumFractionDigits: fractionDigits,
 	})}`;

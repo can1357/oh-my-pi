@@ -31,7 +31,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
   - `content[0].type = "text"`
   - `content[0].text` summarizes provider/model and saved image paths, with each image's reported size/quality when the provider returns them.
   - `details = { provider, model, imageCount, imagePaths, images, responseText?, revisedPrompt?, promptFeedback?, usage? }`
-  - `model` is the image model the provider reports having run when it echoes one (hosted OpenAI transports), otherwise the selected catalog model id. When they differ, the text shows both, e.g. `Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-1)`. Each `images[]` entry may carry the provider-reported `size` and `quality`.
+  - `model` is the image model the provider reports having run when it echoes one (hosted OpenAI transports), otherwise the selected catalog model id. When they differ, the text shows both, e.g. `Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)`. Each `images[]` entry may carry the provider-reported `size` and `quality`.
 - Model responses with no image data return `imageCount: 0`, empty `imagePaths` / `images`, and any provider text/feedback available.
 
 ## Flow

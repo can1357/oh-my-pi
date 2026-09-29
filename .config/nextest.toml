@@ -4,10 +4,10 @@
 #
 # Doctests are NOT run by nextest (upstream limitation: they have no stable
 # libtest-json interface). `scripts/run-rs-task.ts` pairs the nextest run with
-# `cargo test --doc`. That pass executes nothing today — pi-natives is a
-# `cdylib` (rustdoc collects no doctests from it) and pi-builtins' examples are
-# `ignore`d vendored uutils docs — and is kept so the first runnable doctest
-# added to a lib crate actually runs.
+# `cargo test --doc`, which runs every runnable doctest in the workspace's lib
+# crates. Today that is tree-sitter-go's one example: pi-natives is a `cdylib`
+# (rustdoc collects no doctests from it) and pi-builtins' examples are
+# `ignore`d vendored uutils docs.
 
 [profile.default]
 # Print each failure when it happens and again in the final summary — a run

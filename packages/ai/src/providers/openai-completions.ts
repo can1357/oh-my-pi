@@ -4,7 +4,13 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+	type ServerSentEvent,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -16,7 +22,6 @@ import type {
 	MessageAttribution,
 	Model,
 	ProviderSessionState,
-	RawSseEvent,
 	ServiceTier,
 	StopReason,
 	StreamFunction,
@@ -800,28 +805,29 @@ const streamOpenAICompletionsOnce = (
 		// Track the OpenAI `[DONE]` sentinel independently of `onSseEvent`: it is
 		// the streaming protocol's terminal signal, so a stream that ends with it
 		// completed by server agreement even when no `finish_reason` chunk arrived.
+		// It arrives through `onDoneSentinel`, so the diagnostic observer below
+		// stays unset (and raw wire-line capture off) when nobody listens.
 		let sawDoneSentinel = false;
-		const rawSseObserver = (event: RawSseEvent) => {
-			if (event.data === "[DONE]") sawDoneSentinel = true;
-			if (onSseEvent) {
-				if (!event.event && event.data && event.data !== "[DONE]") {
-					try {
-						const parsed = JSON.parse(event.data);
-						const resolvedEvent =
-							typeof parsed.type === "string"
-								? parsed.type
-								: typeof parsed.object === "string"
-									? parsed.object
-									: null;
-						if (resolvedEvent) {
-							event.event = resolvedEvent;
-							event.raw = [`event: ${resolvedEvent}`, ...event.raw];
-						}
-					} catch {}
+		const rawSseObserver = onSseEvent
+			? (event: ServerSentEvent) => {
+					if (!event.event && event.data && event.data !== "[DONE]") {
+						try {
+							const parsed = JSON.parse(event.data);
+							const resolvedEvent =
+								typeof parsed.type === "string"
+									? parsed.type
+									: typeof parsed.object === "string"
+										? parsed.object
+										: null;
+							if (resolvedEvent) {
+								event.event = resolvedEvent;
+								event.raw = [`event: ${resolvedEvent}`, ...event.raw];
+							}
+						} catch {}
+					}
+					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
-				onSseEvent(event, model);
-			}
-		};
+			: undefined;
 		// Assigned once the block helpers exist (they are scoped to the `try`);
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
@@ -931,6 +937,9 @@ const streamOpenAICompletionsOnce = (
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
+						onDoneSentinel: () => {
+							sawDoneSentinel = true;
+						},
 					});
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
@@ -1030,9 +1039,19 @@ const streamOpenAICompletionsOnce = (
 			};
 			let currentBlock: OpenAIStreamBlock | undefined;
 			let messageThoughtSignature: GeminiMessageThoughtSignature | undefined;
+			// Content blocks are append-only for the lifetime of the stream, so each
+			// block's index is stable once pushed. Map block → index to keep the
+			// per-delta contentIndex lookup O(1): a linear `indexOf` per delta turns a
+			// long turn (many blocks × many deltas) quadratic, as openai-shared's
+			// Responses decoder documents (issue #10605).
+			const contentIndexByBlock = new Map<OpenAIStreamBlock, number>();
+			const pushContentBlock = (block: OpenAIStreamBlock): void => {
+				contentIndexByBlock.set(block, output.content.length);
+				output.content.push(block);
+			};
 			const blockIndex = (block: OpenAIStreamBlock | undefined): number => {
 				if (!block) return Math.max(0, output.content.length - 1);
-				return output.content.indexOf(block);
+				return contentIndexByBlock.get(block) ?? output.content.indexOf(block);
 			};
 			const finishToolCallBlock = (block: ToolCallStreamBlock): void => {
 				if (block.partialArgs === undefined) return;
@@ -1087,11 +1106,7 @@ const streamOpenAICompletionsOnce = (
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 				finishPendingToolCallBlocks();
 			};
-			const appendText = (
-				message: AssistantMessage,
-				eventStream: AssistantMessageEventStream,
-				text: string,
-			): void => {
+			const appendText = (text: string): void => {
 				if (currentBlock?.type !== "text") {
 					// Leave toolCall blocks pending across text transitions: chunks after
 					// the first typically carry only `index`, so a finished (de-registered)
@@ -1099,15 +1114,15 @@ const streamOpenAICompletionsOnce = (
 					// resume. The stream-end sweep finalizes pending calls.
 					if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 					currentBlock = { type: "text", text: "" };
-					message.content.push(currentBlock);
-					eventStream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: message });
+					pushContentBlock(currentBlock);
+					stream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: output });
 				}
 				currentBlock.text += text;
-				eventStream.push({
+				stream.push({
 					type: "text_delta",
 					contentIndex: blockIndex(currentBlock),
 					delta: text,
-					partial: message,
+					partial: output,
 				});
 			};
 			const openThinkingBlock = (signature?: string): ThinkingContent => {
@@ -1116,7 +1131,7 @@ const streamOpenAICompletionsOnce = (
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 				const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: signature };
 				currentBlock = block;
-				output.content.push(block);
+				pushContentBlock(block);
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });
 				return block;
 			};
@@ -1177,7 +1192,7 @@ const streamOpenAICompletionsOnce = (
 			const appendTextDelta = (text: string): void => {
 				if (!text) return;
 				if (!firstTokenTime) firstTokenTime = performance.now();
-				appendText(output, stream, text);
+				appendText(text);
 			};
 			// Tracks the last full cumulative reasoning snapshot per signature (the
 			// reasoning field name) so dedup survives block transitions. Required
@@ -1249,7 +1264,7 @@ const streamOpenAICompletionsOnce = (
 				};
 				block.arguments = parseStreamingJson(call.arguments);
 				currentBlock = block;
-				output.content.push(block);
+				pushContentBlock(block);
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(block), partial: output });
 				stream.push({
 					type: "toolcall_delta",
@@ -1473,7 +1488,7 @@ const streamOpenAICompletionsOnce = (
 								if (streamIndex !== undefined) toolCallBlockByIndex.set(streamIndex, block);
 								pendingToolCallBlocks.push(block);
 								currentBlock = block;
-								output.content.push(block);
+								pushContentBlock(block);
 								stream.push({
 									type: "toolcall_start",
 									contentIndex: blockIndex(block),
