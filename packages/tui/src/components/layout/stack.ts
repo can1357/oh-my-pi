@@ -1,4 +1,6 @@
 import type { MouseRoutable, SgrMouseEvent } from "../../mouse";
+import { col } from "../../native/describe";
+import type { DescribeContext, NativeNode } from "../../native/node";
 import type { Component } from "../../tui";
 import { padding } from "../../utils";
 import {
@@ -13,6 +15,8 @@ import {
 	type LayoutInsets,
 	type LayoutRect,
 	layoutSize,
+	nativeLayoutChild,
+	nativeSlotProps,
 	optionalLayoutSize,
 	renderLayoutContent,
 	uniqueLayoutComponents,
@@ -76,6 +80,7 @@ export class Stack implements Component, MouseRoutable {
 	#frames: LayoutRect[] = [];
 	#memo: StackMemo | undefined;
 	#ignoreTight = false;
+	#native: { children: StackChild[]; height: number | undefined; node: NativeNode } | undefined;
 
 	constructor(options: StackOptions) {
 		this.#children = options.children.map(child => ({ ...child, padding: { ...child.padding } }));
@@ -139,6 +144,28 @@ export class Stack implements Component, MouseRoutable {
 		for (const child of uniqueLayoutComponents(this.#children.map(item => item.content))) {
 			child.dispose?.();
 		}
+	}
+
+	/**
+	 * A `col` of slots carrying each child's height bounds (fixed → min = max
+	 * `lines`, else grow/min/max); an exact stack height bounds the column.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const cached = this.#native;
+		if (cached?.children === this.#children && cached.height === this.#height) return cached.node;
+		const slots = this.#children.map(child =>
+			col(
+				[nativeLayoutChild(child.content)],
+				nativeSlotProps("h", { fixed: child.height, grow: child.grow, min: child.minHeight, max: child.maxHeight }),
+			),
+		);
+		const height = this.#height;
+		const described = col(
+			slots,
+			height === undefined ? undefined : { min: { h: `${height}lines` }, max: { h: `${height}lines` } },
+		);
+		this.#native = { children: this.#children, height, node: described };
+		return described;
 	}
 
 	/** Translate a stack-local point into a child's local coordinates. */

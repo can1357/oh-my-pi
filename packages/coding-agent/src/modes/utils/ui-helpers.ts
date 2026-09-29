@@ -1,14 +1,14 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
+import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { shouldSkipHistory } from "../controllers/input-controller";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/background-tan-message";
@@ -27,6 +27,7 @@ import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import {
 	type LateDiagnosticsFile,
 	LateDiagnosticsMessageComponent,
+	routeLateDiagnostics,
 } from "@oh-my-pi/pi-tui/chat/late-diagnostics-message";
 import {
 	groupedReadUsageCallIds,
@@ -35,7 +36,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
-import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -56,7 +57,6 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
-import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
 	createAssistantMessageComponent,
@@ -120,14 +120,10 @@ type AddMessageOptions = {
 };
 
 function imageLinksForMessage(
-	message: Extract<AgentMessage, { role: "developer" | "user" }>,
+	images: readonly ImageContent[],
 	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
 ): (string | undefined)[] | undefined {
-	if (typeof message.content === "string") return undefined;
-	const images = message.content.filter(
-		(content): content is ImageContent =>
-			content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
-	);
+	if (images.length === 0) return undefined;
 	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
 	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
 }
@@ -144,24 +140,20 @@ export class UiHelpers {
 	showStatus(message: string, options?: { dim?: boolean }): void {
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
-		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
 
-		if (last && secondLast && last === this.ctx.lastStatusText && secondLast === this.ctx.lastStatusSpacer) {
-			this.ctx.lastStatusText.setStyleFn(styleFn);
-			this.ctx.lastStatusText.setText(message);
+		if (last && last === this.ctx.lastStatus) {
+			this.ctx.lastStatus.setMessage(message, styleFn);
 			this.ctx.ui.requestRender();
 			return;
 		}
 
-		const spacer = new Spacer(1);
-		const text = new Text(message, 1, 0).setStyleFn(styleFn);
-		this.ctx.present([spacer, text]);
-		this.ctx.lastStatusSpacer = spacer;
-		this.ctx.lastStatusText = text;
+		const notice = new StatusNotice(message, styleFn);
+		this.ctx.present([notice]);
+		this.ctx.lastStatus = notice;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -206,7 +198,10 @@ export class UiHelpers {
 								files?: LateDiagnosticsFile[];
 							}>
 						).details;
-						const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
+						// Native: into the edit/write frames they belong to; the rest stand alone.
+						const files = routeLateDiagnostics(this.ctx.chatContainer.children, details?.files ?? []);
+						if (files.length === 0) break;
+						const component = new LateDiagnosticsMessageComponent(files);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
@@ -293,16 +288,19 @@ export class UiHelpers {
 					if (cached instanceof UserMessageComponent) {
 						userComponent = cached;
 					} else {
+						const images = imageContent(message.content);
 						const imageLinks =
 							options?.imageLinks ??
 							imageLinksForMessage(
-								message,
+								images,
 								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
 							);
 						userComponent = new UserMessageComponent(userText, {
 							synthetic: isSynthetic,
 							imageLinks,
+							images,
 							liveSteered: message.role === "user" && message.liveSteered === true,
+							timestamp: message.timestamp,
 						});
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
@@ -1107,19 +1105,10 @@ export class UiHelpers {
 			{ label: "After yield", messages: followUpMessages },
 		].filter(group => group.messages.length > 0);
 		if (groups.length > 0) {
-			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));
-			for (const group of groups) {
-				const heading = theme.fg("muted", `${group.label}${theme.sep.dot}${group.messages.length}`);
-				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(heading, 1, 0));
-				for (let index = 0; index < group.messages.length; index++) {
-					const message = replaceTabs(group.messages[index] ?? "").replace(/\r?\n/g, " ↵ ");
-					const queuedText = theme.fg("dim", `  ${index + 1}. ${message}`);
-					this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
-				}
-			}
-			const dequeueKey = appKey(this.ctx.keybindings, "app.message.dequeue") || formatKeyHint("alt+up");
-			const hintText = theme.fg("dim", `  ${theme.tree.hook} ${dequeueKey} to edit`);
-			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			const dequeueKey = this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up";
+			this.ctx.pendingMessagesContainer.addChild(
+				new QueuedMessagesBand(groups, dequeueKey, () => this.ctx.handleDequeue()),
+			);
 		}
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}

@@ -199,6 +199,12 @@ export interface AutocompleteItem {
 	description?: string;
 	/** Optional type-indicator glyph rendered in an aligned column before the label */
 	icon?: string;
+	/** Named icon for TSP terminals (`folder`, `file`, a slash-command icon name). */
+	iconName?: string;
+	/** Native detail when it differs from {@link description} (static text, parent dir). */
+	nativeDetail?: string;
+	/** Live state drawn right-aligned natively ("demo/demo", "off"). */
+	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
 }
@@ -211,6 +217,8 @@ export interface SlashCommand {
 	description?: string;
 	/** Optional type-indicator glyph shown before the command name in autocomplete */
 	icon?: string;
+	/** Named icon for TSP terminals, drawn instead of the {@link icon} glyph. */
+	iconName?: string;
 	argumentHint?: string;
 	/** Whether the command consumes argument text after the command name. False means the full input stays normal prompt text once args are present. */
 	allowArgs?: boolean;
@@ -312,6 +320,23 @@ function getAutocompleteCommandDescription(cmd: CommandEntry): string {
 	return cmd.description ?? "";
 }
 
+/**
+ * Native split of a command's autocomplete text: a live description in
+ * `Label: state` form ("Model: demo/demo") becomes the static description as
+ * the detail and the state as the item's right-aligned value.
+ */
+function nativeCommandText(
+	liveDesc: string,
+	staticDesc: string,
+	hint: string | undefined,
+): Pick<AutocompleteItem, "nativeDetail" | "state"> {
+	if (!liveDesc || liveDesc === staticDesc) return {};
+	const colon = liveDesc.indexOf(": ");
+	if (colon <= 0) return {};
+	const detail = staticDesc || liveDesc.slice(0, colon);
+	return { nativeDetail: hint ? `${hint} - ${detail}` : detail, state: liveDesc.slice(colon + 2) };
+}
+
 function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): boolean {
 	const name = getCommandName(cmd);
 	if (name === commandName) return true;
@@ -343,6 +368,7 @@ function buildSlashCommandCompletions(
 				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const staticDesc = getStaticCommandDescription(cmd);
 				let fullDescMemo: string | undefined;
+				let nativeTextMemo: Pick<AutocompleteItem, "nativeDetail" | "state"> = {};
 				let fullDescComputed = false;
 				// Resolve the (possibly live) display description lazily, only once a
 				// candidate actually matches — getAutocompleteDescription reads live
@@ -351,6 +377,7 @@ function buildSlashCommandCompletions(
 					if (!fullDescComputed) {
 						const displayDesc = getAutocompleteCommandDescription(cmd);
 						fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
+						nativeTextMemo = nativeCommandText(displayDesc, staticDesc, hint);
 						fullDescComputed = true;
 					}
 					return fullDescMemo;
@@ -385,7 +412,9 @@ function buildSlashCommandCompletions(
 						score: primaryScore,
 						usage,
 						...(cmd.icon && { icon: cmd.icon }),
+						...(cmd.iconName && { iconName: cmd.iconName }),
 						...(fullDesc && { description: fullDesc }),
+						...nativeTextMemo,
 					};
 				}
 
@@ -401,7 +430,9 @@ function buildSlashCommandCompletions(
 							score: aliasScore,
 							usage,
 							...(cmd.icon && { icon: cmd.icon }),
+							...(cmd.iconName && { iconName: cmd.iconName }),
 							...(fullDesc && { description: fullDesc }),
+							...nativeTextMemo,
 						};
 					}
 				}
@@ -495,11 +526,13 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 	}
 	let skillCount = 0;
 	let skillIcon: string | undefined;
+	let skillIconName: string | undefined;
 	const rest = commands.filter(cmd => {
 		const name = getCommandName(cmd);
 		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
 		skillCount += 1;
 		skillIcon ??= cmd.icon;
+		skillIconName ??= cmd.iconName;
 		return (
 			!approachesNamespace &&
 			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
@@ -511,6 +544,7 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 		name: SKILL_NAMESPACE,
 		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
 		...(skillIcon && { icon: skillIcon }),
+		...(skillIconName && { iconName: skillIconName }),
 	});
 	return rest;
 }
@@ -1120,9 +1154,12 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					isQuotedPrefix,
 				});
 
+				const parentDir = path.posix.dirname(relativePath);
 				suggestions.push({
 					value,
 					label: name + (isDirectory ? "/" : ""),
+					iconName: isDirectory ? "folder" : "file",
+					...(parentDir !== "." && { nativeDetail: parentDir }),
 				});
 			}
 
@@ -1177,10 +1214,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					isAtPrefix: true,
 					isQuotedPrefix: options.isQuotedPrefix,
 				});
+				const parentDir = path.posix.dirname(displayPath);
 				suggestions.push({
 					value,
 					label: entryName + (isDirectory ? "/" : ""),
 					description: displayPath,
+					iconName: isDirectory ? "folder" : "file",
+					nativeDetail: parentDir === "." ? "" : parentDir,
 				});
 			}
 			return suggestions;
