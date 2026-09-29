@@ -63,7 +63,6 @@ describe("JsRuntime.displayValue image coercion", () => {
 		// yielding "137,80,78,71,...". Anthropic rejects that as invalid base64.
 		const { hooks, displays } = collect();
 		const decimalCsv = Array.from(PNG_BYTES).toString();
-		expect(decimalCsv).toBe("137,80,78,71,13,10,26,10");
 		runtime.displayValue({ type: "image", data: decimalCsv, mimeType: "image/png" }, hooks);
 		expect(displays).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
 	});

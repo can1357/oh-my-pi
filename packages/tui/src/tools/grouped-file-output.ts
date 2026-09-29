@@ -4,6 +4,7 @@ import { buildPathTree, isUrlLikePath, type PathTreeInput, walkPathTree } from "
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, col, keyed, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
+import { formatHashlineHeader } from "./hashline-format";
 import { fileRow } from "./native-view";
 
 // =============================================================================
@@ -87,6 +88,51 @@ export function formatGroupedFiles(
 		display.push(header, ...(section.displayLines ?? section.modelLines));
 	}
 
+	return { model, display };
+}
+
+/** One file's rendered search matches, plus its hashline tag when editable. */
+export interface FileMatchSection {
+	model: string[];
+	display: string[];
+	tag?: string;
+}
+
+/**
+ * Render per-file search matches (grep / ast-grep). Grouped mode nests files
+ * via {@link formatGroupedFiles}, appending `#tag` to headers; flat mode
+ * blank-separates files and prefixes each with a hashline header when tagged.
+ * Files with no model lines are omitted.
+ */
+export function formatFileMatches(
+	files: string[],
+	grouped: boolean,
+	renderFile: (filePath: string) => FileMatchSection,
+): GroupedFilesOutput {
+	if (grouped) {
+		return formatGroupedFiles(files, filePath => {
+			const rendered = renderFile(filePath);
+			return {
+				modelLines: rendered.model,
+				displayLines: rendered.display,
+				headerSuffix: rendered.tag ? `#${rendered.tag}` : "",
+				skip: rendered.model.length === 0,
+			};
+		});
+	}
+	const model: string[] = [];
+	const display: string[] = [];
+	for (const filePath of files) {
+		const rendered = renderFile(filePath);
+		if (rendered.model.length === 0) continue;
+		if (model.length > 0) {
+			model.push("");
+			display.push("");
+		}
+		if (rendered.tag) model.push(formatHashlineHeader(filePath, rendered.tag));
+		model.push(...rendered.model);
+		display.push(...rendered.display);
+	}
 	return { model, display };
 }
 

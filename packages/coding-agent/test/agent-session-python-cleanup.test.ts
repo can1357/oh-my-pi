@@ -248,7 +248,6 @@ describe("AgentSession python cleanup", () => {
 		});
 		expect(startSpy).toHaveBeenCalledTimes(2);
 		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
-		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 
 		await pythonExecutor.executePython("print('still alive before')", {
 			cwd: unrelatedCwd,
@@ -317,7 +316,6 @@ describe("AgentSession python cleanup", () => {
 			kernelOwnerId: "fresh-owner-after",
 		});
 		expect(startSpy).toHaveBeenCalledTimes(2);
-		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
 
 		await pythonExecutor.executePython("print('still alive after')", {

@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
+import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
@@ -246,7 +247,7 @@ import {
 	piTimeout,
 	shellTimeoutSeconds,
 } from "./cursor/exec-modern";
-import { handleInteractionQuery } from "./cursor/interaction-query";
+import { frameConnectMessage, handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
@@ -407,14 +408,6 @@ function log(type: string, subtype?: string, data?: unknown): void {
 	void appendCursorDebugLog(entry);
 }
 
-function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
-	const frame = Buffer.alloc(5 + data.length);
-	frame[0] = flags;
-	frame.writeUInt32BE(data.length, 1);
-	frame.set(data, 5);
-	return frame;
-}
-
 /**
  * Write one client message. Once the server's end frame has half-closed our
  * side, late writes (heartbeats, exec replies from a handler still running)
@@ -423,7 +416,6 @@ function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 function writeClientMessage(h2Request: http2.ClientHttp2Stream, data: Uint8Array): void {
 	if (!h2Request.writableEnded) h2Request.write(frameConnectMessage(data));
 }
-
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
 
@@ -1221,8 +1213,6 @@ export async function handleServerMessage(
 	}
 }
 
-type ProtoUnknownField = { no: number; wireType: number; data: Uint8Array };
-
 type HostedFetchCall = {
 	args?: { url?: string; toolCallId?: string };
 	result?: { result?: { case?: string; value?: { content?: string; error?: string; url?: string } } };
@@ -1262,11 +1252,6 @@ function describeHostedFetchResult(call: HostedFetchCall | undefined): { text: s
 		return { text: result.value?.error || "Fetch failed", isError: true };
 	}
 	return { text: "Fetch completed", isError: false };
-}
-
-function protoUnknownFields(message: object): ProtoUnknownField[] {
-	const raw = (message as { $unknown?: ProtoUnknownField[] }).$unknown;
-	return Array.isArray(raw) ? raw : [];
 }
 
 function handleKvServerMessage(
@@ -5501,13 +5486,18 @@ function resolveCursorWireModel(
 			};
 		}
 	}
-	// A bare `composer-2.5` id resolves to the Fast variant server-side
-	// (can1357/oh-my-pi#9012). Pin the Standard tier explicitly; `-fast`
-	// selections keep the Fast lane by omitting the parameter.
-	if (wireModelId === "composer-2.5") {
+	// Fixed per-model parameters come from catalog KDL (`cursor-model-parameter`
+	// in `runtime/behavior.kdl`). A bare `composer-2.5` id resolves to the Fast
+	// variant server-side (can1357/oh-my-pi#9012), so the catalog pins the
+	// Standard tier with `fast=false`; `-fast` selections keep the Fast lane by
+	// declaring no parameter.
+	const fixedParameters = cursorModelParameters(wireModelId);
+	if (fixedParameters.length > 0) {
 		return {
 			modelId: wireModelId,
-			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "fast", value: "false" })],
+			parameters: fixedParameters.map(({ id, value }) =>
+				create(RequestedModel_ModelParameterbytesSchema, { id, value }),
+			),
 			maxMode,
 		};
 	}

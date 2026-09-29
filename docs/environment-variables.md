@@ -272,7 +272,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | ----------------------------------- | ------------------------------------------------------------------------------------------- |
 | `OPENAI_BASE_URL`                   | Base URL fallback for OpenAI-compatible requests when the model/provider supplies a default |
 | `MOONSHOT_BASE_URL`                 | Moonshot chat and model-discovery endpoint override                                         |
-| `XAI_BASE_URL`                      | xAI HTTP endpoint override                                                                  |
+| `XAI_BASE_URL`                      | xAI endpoint override for `xai`/`xai-oauth` chat, image generation, and web search; applies only when the model uses the bundled `https://api.x.ai/v1` endpoint, so a models.yml `baseUrl` wins; never receives `xai-oauth` OAuth credentials |
 | `SAKANA_BASE_URL` / `FUGU_BASE_URL` | Sakana/Fugu endpoint override (`SAKANA_BASE_URL` wins)                                      |
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route        |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly          |

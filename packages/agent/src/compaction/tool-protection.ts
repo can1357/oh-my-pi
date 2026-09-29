@@ -1,5 +1,5 @@
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { AgentToolCall } from "../types";
+import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry } from "./entries";
 
 export interface ProtectedToolContext {
@@ -22,6 +22,14 @@ export function collectToolCallsById(entries: readonly SessionEntry[]): Map<stri
 		}
 	}
 	return toolCalls;
+}
+
+/** Return the tool-result message carried by a session entry, if any. */
+export function getToolResultMessage(entry: SessionEntry): ToolResultMessage | undefined {
+	if (entry.type !== "message") return undefined;
+	const message = entry.message as AgentMessage;
+	if (message.role !== "toolResult") return undefined;
+	return message as ToolResultMessage;
 }
 
 /**

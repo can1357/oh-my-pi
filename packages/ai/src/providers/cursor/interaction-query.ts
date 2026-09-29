@@ -32,7 +32,8 @@ type ProtoUnknownBag = { $unknown?: ProtoUnknownField[] };
 type InteractionQueryCase = NonNullable<InteractionQuery["query"]["case"]>;
 type InteractionResult = Exclude<InteractionResponse["result"], { case: undefined; value?: undefined }>;
 
-function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
+/** Wrap one Connect-protocol message: 1 flag byte + 4-byte big-endian length + payload. */
+export function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	const frame = Buffer.alloc(5 + data.length);
 	frame[0] = flags;
 	frame.writeUInt32BE(data.length, 1);
@@ -46,7 +47,8 @@ function isProtoUnknownField(value: unknown): value is ProtoUnknownField {
 	return typeof value.no === "number" && typeof value.wireType === "number" && value.data instanceof Uint8Array;
 }
 
-function protoUnknownFields(message: object): ProtoUnknownField[] {
+/** Well-formed protobuf-es `$unknown` entries on `message`; anything else on the bag is ignored. */
+export function protoUnknownFields(message: object): ProtoUnknownField[] {
 	if (!("$unknown" in message) || !Array.isArray(message.$unknown)) return [];
 	return message.$unknown.filter(isProtoUnknownField);
 }

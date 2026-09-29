@@ -180,7 +180,7 @@ The experiments favored **Qwen3-1.7B** for extraction precision, but the shipped
 currently run under `onnxruntime-node`: its RotaryEmbedding cache updates are unsupported. The
 runtime rejects this choice before loading the model rather than failing during inference.
 
-Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local memory model.
+Of the runnable options, `lfm2-1.2b` loads fastest and is a solid all-rounder; nothing selects it automatically.
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
 **Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (ONNX-disabled as described above),

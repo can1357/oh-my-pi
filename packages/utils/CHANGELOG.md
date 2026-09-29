@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `normalizePremiumRequests` (also still exported from `@oh-my-pi/pi-tui`).
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

@@ -12,7 +12,6 @@
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
  *   - `status` — prints the locally-stored gateway token and bind hint.
  */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -33,7 +32,7 @@ import {
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import {
@@ -41,6 +40,7 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
 } from "../session/auth-broker-config";
+import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthGatewayAction = "serve" | "token" | "status" | "check";
 
@@ -73,28 +73,6 @@ function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
 }
 
-async function readToken(): Promise<string | null> {
-	try {
-		const raw = await fs.readFile(getTokenFilePath(), "utf8");
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
-	}
-}
-
-async function writeToken(token: string): Promise<void> {
-	const file = getTokenFilePath();
-	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await fs.writeFile(file, token, { mode: 0o600 });
-	try {
-		await fs.chmod(file, 0o600);
-	} catch {
-		// Best-effort (e.g. Windows).
-	}
-}
-
 /**
  * Atomically create the token file, refusing to clobber an existing one.
  * Returns `true` on success, `false` when the file already existed (so the
@@ -118,21 +96,17 @@ async function createTokenExclusive(token: string): Promise<boolean> {
 	return true;
 }
 
-function generateToken(): string {
-	return crypto.randomBytes(32).toString("base64url");
-}
-
 async function ensureToken(): Promise<string> {
-	const existing = await readToken();
+	const existing = await readTokenFile(getTokenFilePath());
 	if (existing) return existing;
 	const token = generateToken();
 	if (await createTokenExclusive(token)) return token;
 	// Another concurrent invocation won the create race; read what they wrote.
-	const fromRace = await readToken();
+	const fromRace = await readTokenFile(getTokenFilePath());
 	if (fromRace) return fromRace;
 	// File existed-then-disappeared between EEXIST and read; last resort, write
 	// our generated token unconditionally so callers don't see an empty string.
-	await writeToken(token);
+	await writeTokenFile(getTokenFilePath(), token);
 	return token;
 }
 
@@ -402,7 +376,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	if (flags.regenerate) {
 		const next = generateToken();
-		await writeToken(next);
+		await writeTokenFile(getTokenFilePath(), next);
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ token: next, path: getTokenFilePath() })}\n`);
 		} else {
@@ -419,7 +393,7 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 }
 
 async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
-	const token = await readToken();
+	const token = await readTokenFile(getTokenFilePath());
 	const brokerConfig = await resolveAuthBrokerConfig();
 	const tokenFile = getTokenFilePath();
 	if (!brokerConfig) {

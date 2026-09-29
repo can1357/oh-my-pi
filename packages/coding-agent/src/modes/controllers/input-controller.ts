@@ -295,8 +295,10 @@ export class InputController {
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
 	// Bare command word held for a confirming second Enter (`input.bareSlashCommands`
-	// outside an empty session). Any other submission disarms it.
-	#armedBareCommand: string | undefined;
+	// outside an empty session), bound to the session it was armed in. Any other
+	// submission disarms it; a session switch invalidates it, so a word armed in
+	// one session can never run on a single Enter in another.
+	#armedBareCommand: { text: string; sessionId: string } | undefined;
 	/** Main-editor destination: images become pending attachments. */
 	readonly #editorImageSink: ImagePasteSink = {
 		attach: (image, unsupportedMessage, sourcePath) =>
@@ -932,8 +934,9 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			const submittedText = text;
-			const armedBareCommand = this.#armedBareCommand;
+			const armed = this.#armedBareCommand;
 			this.#armedBareCommand = undefined;
+			const armedBareCommand = armed?.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
@@ -1029,7 +1032,7 @@ export class InputController {
 
 			const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
 			if (bareSlashCommand?.confirm) {
-				this.#armedBareCommand = text;
+				this.#armedBareCommand = { text, sessionId: this.ctx.sessionManager.getSessionId() };
 				this.ctx.editor.setText(text);
 				this.ctx.showStatus(
 					`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,

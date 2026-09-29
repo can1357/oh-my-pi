@@ -47,8 +47,10 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	// Mirrors the real contract: a pending submission is recorded as a local
 	// submission until its canonical user `message_start` lands.
 	const locallySubmittedUserSignatures = new Set<string>();
+	const sessionManager = { sessionId: "session-a", getSessionId: () => sessionManager.sessionId };
 	const ctx = {
 		editor,
+		sessionManager,
 		session: {
 			messages,
 			maybeStartTitleGeneration: vi.fn(),
@@ -102,6 +104,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		showStatus: ctx.showStatus,
 		prompt,
 		shutdown,
+		sessionManager,
 	};
 }
 
@@ -400,6 +403,24 @@ describe("input controller — bare slash commands opt-in", () => {
 			expect(ctx.handleHotkeysCommand).not.toHaveBeenCalled();
 			expect(shutdown).not.toHaveBeenCalled();
 			expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Enter again to run /exit"));
+		});
+
+		it("requires a fresh confirmation after switching sessions", async () => {
+			await enable();
+			const { ctx, editor, shutdown, onInputCallback, showStatus, sessionManager } = makeCtx(false, history);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.("exit");
+			// Resume/new/fork swap the session without an editor submission.
+			sessionManager.sessionId = "session-b";
+			await editor.onSubmit?.("exit");
+
+			expect(shutdown).not.toHaveBeenCalled();
+			expect(onInputCallback).not.toHaveBeenCalled();
+			expect(showStatus).toHaveBeenCalledTimes(2);
+
+			await editor.onSubmit?.("exit");
+			expect(shutdown).toHaveBeenCalledTimes(1);
 		});
 	});
 
