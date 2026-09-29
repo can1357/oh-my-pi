@@ -389,21 +389,21 @@ function sanitizeErrorText(message: string | undefined): string {
  * segment (mirroring terminal rendering), and expands tabs — so raw
  * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
  * web content) can't corrupt the framed block layout with cursor-moving
- * control characters or tab-stop width mismatches. Trailing line terminators
- * end the last real row instead of yielding phantom blank rows.
+ * control characters or tab-stop width mismatches. A final line terminator
+ * ends the last real row instead of yielding a phantom blank row.
  */
 export function sanitizeDisplayLines(text: string): string[] {
 	const lines = text.split(/\r?\n/).map(line => {
 		const idx = line.lastIndexOf("\r");
 		return replaceTabs(sanitizeText(idx < 0 ? line : line.slice(idx + 1)));
 	});
-	// A trailing line terminator ends the last real row; the empty element the
-	// split yields past it belongs to the terminator, not to the text. Drop the
-	// empties trailing terminators produce so the display keeps the text's own
-	// line structure (interior blank lines are kept).
-	if (/(?:\r\n|\r|\n)$/u.test(text)) {
-		while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-	}
+	// A final `\n`/`\r\n` line terminator ends the last real row; the split
+	// yields exactly one empty element past it that belongs to the terminator,
+	// not to the text. Drop that one artifact — real trailing blank rows
+	// survive ("foo\n\n" holds one row plus one real blank line). A trailing
+	// lone `\r` is a progress overwrite, not a line terminator: its final
+	// segment is a real row (`50%\r` overwrites the row to empty).
+	if (/(?:\r\n|\n)$/u.test(text)) lines.pop();
 	return lines;
 }
 
