@@ -35,6 +35,7 @@ type FakeEditor = {
 	onSubmit?: (text: string) => Promise<void>;
 	setText(text: string): void;
 	getText(): string;
+	textRevision: number;
 	getExpandedText(): string;
 	setCollapsedText(text: string): void;
 	composerChips(): unknown[];
@@ -123,6 +124,7 @@ async function createContext() {
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
 	const session = {
+		messages: [],
 		isStreaming: false,
 		isCompacting: false,
 		isGeneratingHandoff: false,
@@ -151,6 +153,7 @@ async function createContext() {
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
+			this.textRevision++;
 		},
 		getText() {
 			return editorText;
@@ -160,6 +163,7 @@ async function createContext() {
 		},
 		setCollapsedText(text: string) {
 			editorText = text;
+			this.textRevision++;
 		},
 		composerChips() {
 			return [];
@@ -176,11 +180,13 @@ async function createContext() {
 		addToHistory: vi.fn(),
 		pasteText(text: string) {
 			editorText += text;
+			this.textRevision++;
 		},
 		setActionKeys,
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
 		spaceHold: new SpaceHoldGesture(() => {}),
+		textRevision: 0,
 		pendingImages: [],
 		pendingImageLinks: [],
 		clearDraft(historyText?: string) {
@@ -1625,6 +1631,7 @@ describe("Ctrl+S prompt stash", () => {
 				},
 			);
 
+			editor.setText(""); // Enter removes submitted text before calling onSubmit.
 			await editor.onSubmit?.(command);
 			expect(editor.getText()).toBe("");
 			expect(editor.pendingImages).toEqual([]);
@@ -1646,6 +1653,7 @@ describe("Ctrl+S prompt stash", () => {
 		customHandlers.get("ctrl+s")?.();
 		editor.setText("/plan try this");
 		ctx.handlePlanModeCommand = vi.fn(async () => true);
+		editor.setText(""); // Enter removes submitted text before calling onSubmit.
 		await editor.onSubmit?.("/plan try this");
 		expect(editor.getText()).toBe("");
 		// Simulate the pending submission's preflight failure: it never called
@@ -1738,6 +1746,136 @@ describe("Ctrl+S prompt stash", () => {
 		expect(editor.getText()).toBe("=>\n1. first\n2. second");
 		accept?.();
 		expect(editor.getText()).toBe("draft [Image #1]\n\n=> second");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
+	});
+
+	it("drops an accepted first queued entry and its images from a no-stash recovery preview", async () => {
+		const { ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+		const image: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///first.png"];
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		Object.assign(ctx.session, {
+			followUp: vi.fn(async () => {
+				throw new Error("queue failed");
+			}),
+		});
+
+		await controller.handleQueueCommand("1. first [Image #1]\n2. second");
+		expect(editor.getText()).toBe("=>\n1. first [Image #1]\n2. second");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///first.png"]);
+		accept?.();
+		expect(editor.getText()).toBe("=> second");
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
+	});
+
+	for (const [label, submittedText] of [
+		["Enter", "=>\n1. first [Image #1]\n2. second"],
+		["detached Ctrl+Enter", "/queue 1. first [Image #1]\n2. second"],
+	] as const) {
+		it(`${label} preserves a newer image draft while a pending first queue entry awaits acceptance`, async () => {
+			const { ctx, editor } = await createContext();
+			const controller = new InputController(ctx);
+			controller.setupEditorSubmitHandler();
+			ctx.handleQueueCommand = (text, input) => controller.handleQueueCommand(text, input);
+			const firstImage: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+			const newerImage: ImageContent = { type: "image", data: "bmV3ZXI=", mimeType: "image/jpeg" };
+			let accept: (() => void) | undefined;
+			ctx.startPendingSubmission = vi.fn(
+				(input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+					accept = input.onAccepted;
+					return { ...input, cancelled: false, started: false };
+				},
+			);
+			ctx.onInputCallback = vi.fn();
+			const secondStarted = Promise.withResolvers<void>();
+			const failSecond = Promise.withResolvers<void>();
+			const followUp = vi.fn(async (text: string) => {
+				if (text === "second") {
+					secondStarted.resolve();
+					await failSecond.promise;
+					throw new Error("queue failed");
+				}
+			});
+			Object.assign(ctx.session, { followUp });
+			editor.pendingImages = [firstImage];
+			editor.pendingImageLinks = ["file:///first.png"];
+			editor.imageLinks = editor.pendingImageLinks;
+			editor.setText(submittedText);
+			// The real editor clears submitted Enter text before calling onSubmit;
+			// Ctrl+Enter detaches text and images inside handleFollowUp.
+			let submitting: Promise<void> | undefined;
+			if (label === "Enter") {
+				editor.setText("");
+				submitting = editor.onSubmit?.(submittedText);
+			} else {
+				submitting = controller.handleFollowUp();
+			}
+			if (!submitting) throw new Error("submission handler missing");
+			await secondStarted.promise;
+			editor.pendingImages = [newerImage];
+			editor.pendingImageLinks = ["file:///newer.jpg"];
+			editor.imageLinks = editor.pendingImageLinks;
+			editor.setText("newer [Image #1]");
+			failSecond.resolve();
+			await submitting;
+
+			// If pending first fails preflight, it and its own image must still
+			// be retriable; neither image marker may refer to the other image.
+			expect(accept).toBeDefined();
+			expect(followUp).toHaveBeenCalledWith("second", undefined);
+			expect(editor.getText()).toBe("=>\n1. first [Image #2]\n2. second\n\nnewer [Image #1]");
+			expect(editor.pendingImages).toEqual([newerImage, firstImage]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.jpg", "file:///first.png"]);
+
+			accept?.();
+			expect(editor.getText()).toBe("newer [Image #1]\n\n=> second");
+			expect(editor.pendingImages).toEqual([newerImage]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.jpg"]);
+			expect(editor.imageLinks).toEqual(["file:///newer.jpg"]);
+		});
+	}
+
+	it("does not replace a re-edited queue recovery draft when delayed acceptance arrives", async () => {
+		const { ctx, editor, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///stash.png"];
+		editor.setText("draft [Image #1]");
+		customHandlers.get("ctrl+s")?.();
+		let accept: (() => void) | undefined;
+		ctx.startPendingSubmission = vi.fn((input: Parameters<InteractiveModeContext["startPendingSubmission"]>[0]) => {
+			accept = input.onAccepted;
+			return { ...input, cancelled: false, started: false };
+		});
+		ctx.onInputCallback = vi.fn();
+		Object.assign(ctx.session, {
+			followUp: vi.fn(async () => {
+				throw new Error("queue failed");
+			}),
+		});
+
+		await controller.handleQueueCommand("1. first\n2. second");
+		const recoveryDraft = editor.getText();
+		expect(recoveryDraft).toBe("=>\n1. first\n2. second");
+		// Re-editing to identical text must still be treated as a new user draft.
+		editor.setText(recoveryDraft);
+		accept?.();
+		expect(editor.getText()).toBe(recoveryDraft);
+
+		customHandlers.get("ctrl+s")?.();
+		expect(editor.getText()).toBe("draft [Image #1]");
 		expect(editor.pendingImages).toEqual([image]);
 		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
 	});

@@ -373,9 +373,14 @@ function migrateKeybindingNames(rawConfig: unknown): {
 	}
 
 	// Retire both persisted observe names without keeping a runtime action.
-	// Explicit Hub chords come first; old remaps are appended once per chord.
+	// Keep the Hub default when only the old observer was customized; an
+	// explicitly configured Hub binding still replaces its default.
 	if (config.observeSessions !== undefined || config["app.session.observe"] !== undefined) {
 		const keys = new Set<KeyId>();
+		if (config["app.agents.hub"] === undefined) {
+			const defaults = KEYBINDINGS["app.agents.hub"].defaultKeys;
+			for (const key of Array.isArray(defaults) ? defaults : [defaults]) keys.add(key);
+		}
 		for (const name of ["app.agents.hub", "app.session.observe", "observeSessions"] as const) {
 			const binding = config[name];
 			if (typeof binding === "string") keys.add(binding);
