@@ -35,7 +35,8 @@ import {
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
-	resultLimit?: number;
+	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263). */
+	resultLimit?: number | { reached: number; suggestion?: number | null };
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
@@ -313,7 +314,11 @@ export class OutputMetaBuilder {
 			this.matchLimit(limits.matchLimit);
 		}
 		if (limits.resultLimit !== undefined) {
-			this.resultLimit(limits.resultLimit);
+			if (typeof limits.resultLimit === "number") {
+				this.resultLimit(limits.resultLimit);
+			} else {
+				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion);
+			}
 		}
 		if (limits.headLimit !== undefined) {
 			this.headLimit(limits.headLimit);
@@ -324,10 +329,14 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add result limit notice. No-op if reached <= 0. */
-	resultLimit(reached: number, suggestion = reached * 2): this {
+	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. */
+	resultLimit(reached: number, suggestion?: number | null): this {
 		if (reached <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, resultLimit: { reached, suggestion } };
+		const resolved = suggestion === null ? undefined : (suggestion ?? reached * 2);
+		this.#meta.limits = {
+			...this.#meta.limits,
+			resultLimit: { reached, ...(resolved !== undefined ? { suggestion: resolved } : {}) },
+		};
 		return this;
 	}
 
@@ -506,18 +515,27 @@ async function spillLargeResultToArtifact(
 	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
 	if (existingMeta?.pagedSource) return result;
 
-	// Measure total text content
+	// Measure total text content. `totalLength` is the UTF-16 length of the "\n"-joined text.
 	const textParts: string[] = [];
+	let totalLength = -1;
 	for (const block of result.content) {
 		if (block.type === "text" && block.text) {
 			textParts.push(block.text);
+			totalLength += block.text.length + 1;
 		}
 	}
 	if (textParts.length === 0) return result;
 
+	// UTF-8 takes 1–3 bytes per UTF-16 code unit (a surrogate pair is 4 bytes for 2 units), so
+	// the length alone settles short and long results. In between, per-part byte lengths sum
+	// to the joined length: the "\n" joiner keeps lone surrogates from pairing across parts.
+	if (totalLength * 3 <= threshold) return result;
+	if (totalLength <= threshold) {
+		let totalBytes = textParts.length - 1;
+		for (const part of textParts) totalBytes += Buffer.byteLength(part, "utf-8");
+		if (totalBytes <= threshold) return result;
+	}
 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
-	const totalBytes = Buffer.byteLength(fullText, "utf-8");
-	if (totalBytes <= threshold) return result;
 
 	// Save the full output as an artifact so the elided bytes stay recoverable.
 	// In a persistent session this hits `Bun.write`, which can throw (disk full,

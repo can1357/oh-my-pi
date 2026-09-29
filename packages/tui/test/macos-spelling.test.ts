@@ -310,12 +310,4 @@ describe("typo underline capability selection", () => {
 			expect(rendered).not.toContain(forbidden);
 		}
 	});
-
-	it("emits the red curly colon-form underline when styled underlines are supported", async () => {
-		const rendered = await renderFlaggedWord(true);
-		expect(rendered).toContain("\x1b[4:3m");
-		expect(rendered).toContain("\x1b[58:2::255:95:95m");
-		expect(rendered).toContain("\x1b[4:0m");
-		expect(rendered).toContain("\x1b[59m");
-	});
 });

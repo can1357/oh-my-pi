@@ -50,7 +50,7 @@ function parsedItems(parsed: unknown): Array<Record<string, unknown>> {
 
 describe("task wire schema", () => {
 	it("accepts the flat { name, agent, task } shape", () => {
-		const parsed = taskSchema({ name: "AuthLoader", agent: "scout", task: "map the auth flow", complexity: "c" });
+		const parsed = taskSchema({ name: "AuthLoader", agent: "scout", task: "map the auth flow", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.name).toBe("AuthLoader");
@@ -60,7 +60,7 @@ describe("task wire schema", () => {
 	});
 
 	it("defaults a missing agent to 'task'", () => {
-		const parsed = taskSchema({ task: "x", complexity: "c" });
+		const parsed = taskSchema({ task: "x", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect(parsed.agent).toBe("task");
@@ -71,7 +71,7 @@ describe("task wire schema", () => {
 		const parsed = taskSchema({
 			agent: "task",
 			task: "x",
-			complexity: "c",
+			solutionSpace: "c",
 			role: "Rust specialist",
 			description: "stale ui label",
 		});
@@ -85,7 +85,9 @@ describe("task wire schema", () => {
 
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x", complexity: "c" }] }));
+		const items = parsedItems(
+			batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x", solutionSpace: "c" }] }),
+		);
 		expect(items[0]?.agent).toBe("task");
 		expect(items[0]?.name).toBe("DbMigrator");
 	});
@@ -96,8 +98,8 @@ describe("task wire schema", () => {
 			batch({
 				context: "ctx",
 				tasks: [
-					{ task: "x", complexity: "c" },
-					{ agent: "reviewer", task: "y", complexity: "c" },
+					{ task: "x", solutionSpace: "c" },
+					{ agent: "reviewer", task: "y", solutionSpace: "c" },
 				],
 			}),
 		);
@@ -108,7 +110,7 @@ describe("task wire schema", () => {
 	it("deletes stale keys from batch items", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
 		const items = parsedItems(
-			batch({ context: "ctx", tasks: [{ task: "x", complexity: "c", role: "DB migration specialist" }] }),
+			batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", role: "DB migration specialist" }] }),
 		);
 		const item = items[0] ?? {};
 		expect("role" in item).toBe(false);

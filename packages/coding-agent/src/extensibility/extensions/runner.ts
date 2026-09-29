@@ -63,6 +63,9 @@ import type {
 	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	CacheWarmingAction,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
@@ -96,6 +99,21 @@ interface BeforeAgentStartCombinedResult {
 }
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+export interface ToolCallPreflight {
+	before?: (
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	) => Promise<{ block?: boolean; reason?: string } | undefined> | { block?: boolean; reason?: string } | undefined;
+	after?: (
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
+	cancel?: (toolCallId: string) => void;
+}
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -350,6 +368,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolResultEvent
 	| UserBashEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -547,6 +566,7 @@ export class ExtensionRunner {
 	 * accumulate for the session's lifetime.
 	 */
 	#emittedToolCalls = new Set<string>();
+	#loopToolCalls = new Set<string>();
 
 	/** Records that the loop already emitted `tool_call` for this dispatch. */
 	markToolCallEmitted(toolCallId: string, toolName: string): void {
@@ -562,6 +582,25 @@ export class ExtensionRunner {
 		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
 	}
 
+	/** Marks every dispatch prepared by the agent loop, independent of extension handlers. */
+	markLoopToolCall(toolCallId: string, toolName: string): void {
+		if (this.#loopToolCalls.size >= 512) {
+			const oldest = this.#loopToolCalls.values().next().value;
+			if (oldest !== undefined) this.#loopToolCalls.delete(oldest);
+		}
+		this.#loopToolCalls.add(`${toolCallId}:${toolName}`);
+	}
+
+	/** Clears a loop marker when pre-dispatch blocked execution before the wrapper ran. */
+	clearLoopToolCall(toolCallId: string, toolName: string): void {
+		this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
+	/** Consumes the marker for a loop dispatch; false means non-loop execution. */
+	consumeLoopToolCall(toolCallId: string, toolName: string): boolean {
+		return this.#loopToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
 	/**
 	 * Resolves a tool NAME to its native built-in implementation (the pre-extension-override,
 	 * unwrapped tool) plus a factory for the `AgentToolContext` that native tool expects, or
@@ -570,12 +609,38 @@ export class ExtensionRunner {
 	 * delegated native call sees the ordinary session tool context (ui, cwd, snapshot state, etc.).
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
+	#toolCallPreflight?: ToolCallPreflight;
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(
 		resolve: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined,
 	): void {
 		this.#nativeToolResolver = resolve;
+	}
+
+	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
+		this.#toolCallPreflight = preflight;
+	}
+
+	async runToolCallPreflightBefore(
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+		context?: AgentToolContext,
+	): Promise<{ block?: boolean; reason?: string } | undefined> {
+		return this.#toolCallPreflight?.before?.(toolCallId, tool, args, context);
+	}
+
+	async runToolCallPreflightAfter(
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult | undefined> {
+		return this.#toolCallPreflight?.after?.(toolCallId, result, context);
+	}
+
+	cancelToolCallPreflight(toolCallId: string): void {
+		this.#toolCallPreflight?.cancel?.(toolCallId);
 	}
 
 	/** Whether a native built-in of `name` is available to delegate to. */
@@ -902,6 +967,31 @@ export class ExtensionRunner {
 	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
 		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
+	}
+
+	/**
+	 * Asks extensions to override a prompt-cache warming decision. The last
+	 * handler returning an action wins; handler failures are reported through
+	 * the extension error listeners and leave the warmer's decision standing.
+	 */
+	async emitCacheWarmingDecision(event: CacheWarmingDecisionEvent): Promise<CacheWarmingAction> {
+		let action = event.action;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(event.type);
+			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext();
+			for (const handler of handlers) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					handlerTimeoutForEvent(event.type),
+				)) as CacheWarmingDecisionEventResult | undefined;
+				if (result?.action !== undefined) action = result.action;
+			}
+		}
+		return action;
 	}
 	/** Registers the interactive transcript gate that must settle before a tool approval is presented. */
 	setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>): () => void {

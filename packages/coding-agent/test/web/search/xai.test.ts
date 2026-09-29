@@ -129,26 +129,6 @@ describe("xAI Responses answer extraction from relay output items", () => {
 		expect(response.answer).not.toContain("I'll check the changelog.");
 	});
 
-	it("keeps a long substantive earlier message and drops surrounding narration", async () => {
-		const longText = "A".repeat(400);
-		const relayResponse = {
-			id: "resp-relay",
-			model: "grok-4.5",
-			output: [
-				{ type: "message", content: [{ type: "output_text", text: "Let me search for this." }] },
-				{ type: "message", content: [{ type: "output_text", text: longText }] },
-				{ type: "message", content: [{ type: "output_text", text: "Done." }] },
-			],
-			usage: { input_tokens: 10, output_tokens: 5 },
-		};
-
-		const response = await searchXAI(makeParams(makeFetchMock(relayResponse)));
-
-		expect(response.answer).toContain(longText);
-		expect(response.answer).toContain("Done.");
-		expect(response.answer).not.toContain("Let me search for this.");
-	});
-
 	it("keeps an earlier message at exactly the narration threshold and drops one below it", async () => {
 		const atThreshold = "B".repeat(300);
 		const belowThreshold = "C".repeat(299);

@@ -1,6 +1,6 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $env, $envExact } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
@@ -383,13 +383,13 @@ export class KeyCascade implements KeysApi {
 				});
 			}
 			if (lastChance) {
-				const switched = await this.#deps.rotate(provider, sessionId, {
+				const rotation = await this.#deps.rotate(provider, sessionId, {
 					error,
 					modelId,
 					signal,
 					apiKey: previousKey,
 				});
-				if (!switched) {
+				if (!rotation.switched) {
 					const status = AIError.status(error);
 					const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 					// Preserve no-sibling quota backoff instead of re-resolving an
@@ -397,16 +397,18 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				return this.getWithCredential(provider, sessionId, {
+				const resolved = await this.getWithCredential(provider, sessionId, {
 					baseUrl,
 					modelId,
 					signal,
 				});
+				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 			}
 			return this.getWithCredential(provider, sessionId, {
 				baseUrl,
 				modelId,
 				forceRefresh: true,
+				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 				signal,
 			});
 		};

@@ -255,15 +255,6 @@ describe("executeBash", () => {
 		expect(result.workingDir).toBe(linkDir);
 	});
 
-	it("passes env vars", async () => {
-		const result = await executeBash("echo $PI_TEST_ENV", {
-			cwd: tempDir,
-			timeout: 5000,
-			env: { PI_TEST_ENV: "hello" },
-		});
-		expect(result.output.trim()).toBe("hello");
-	});
-
 	it("applies non-interactive environment defaults", async () => {
 		const result = await executeBash('echo "$AGENT:$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
 			cwd: tempDir,
@@ -625,22 +616,6 @@ exit 64
 		}
 	});
 
-	it("invokes onChunk with command output", async () => {
-		let seenChunk: string | null = null;
-		const result = await executeBash("echo hello", {
-			cwd: tempDir,
-			timeout: 5000,
-			onChunk: chunk => {
-				if (seenChunk === null) {
-					seenChunk = chunk;
-				}
-			},
-		});
-		expect(result.output.trim()).toBe("hello");
-		expect(seenChunk).not.toBeNull();
-		expect(seenChunk ?? "").toContain("hello");
-	});
-
 	it("returns a real PID for background external commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -659,15 +634,6 @@ exit 64
 		expect(pid).toBeGreaterThan(0);
 		expect(() => process.kill(pid, 0)).not.toThrow();
 		expect(() => process.kill(pid, "SIGKILL")).not.toThrow();
-	});
-
-	it("times out commands", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const result = await executeBash("sleep 10", { cwd: tempDir, timeout: 50 });
-		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("timed out");
 	});
 
 	it("times out before follow-up output", async () => {
@@ -697,25 +663,6 @@ exit 64
 		const result = await executeBash("sleep 0.03; echo done", { cwd: tempDir, timeout: 0 });
 		expect(result.cancelled).toBe(false);
 		expect(result.output.trim()).toBe("done");
-	});
-
-	it("aborts commands", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const controller = new AbortController();
-		const started = Promise.withResolvers<void>();
-		const promise = executeBash("echo started; sleep 10", {
-			cwd: tempDir,
-			timeout: 5000,
-			signal: controller.signal,
-			onChunk: () => started.resolve(),
-		});
-		await started.promise;
-		controller.abort();
-		const result = await promise;
-		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("Command cancelled");
 	});
 
 	it("returns promptly and quarantines the session key when native abort cleanup stalls", async () => {

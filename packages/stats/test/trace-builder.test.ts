@@ -570,8 +570,10 @@ describe("buildSessionTrace", () => {
 
 	it("rejects paths outside the sessions root", async () => {
 		await writeFixture();
-		expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
-		expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(TracePathError);
+		await expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
+		await expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(
+			TracePathError,
+		);
 	});
 });
 

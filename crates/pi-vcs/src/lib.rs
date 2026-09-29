@@ -343,6 +343,8 @@ mod tests {
 
 	use super::*;
 
+	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
+	// difftastic) would otherwise replace git's patch with its own output.
 	fn run_git(root: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.current_dir(root)
@@ -420,7 +422,7 @@ mod tests {
 		fs::write(temp.path().join("staged.txt"), "staged\n").unwrap();
 		run_git(temp.path(), &["add", "staged.txt"]);
 
-		let expected = run_git(temp.path(), &["diff", "HEAD"]);
+		let expected = run_git(temp.path(), &["diff", "--no-ext-diff", "HEAD"]);
 		let actual = detect(temp.path())
 			.unwrap()
 			.unwrap()
@@ -482,8 +484,8 @@ mod tests {
 		fs::write(temp.path().join("new.txt"), "staged\nunstaged\n").unwrap();
 
 		let expected = git::join_patches(&[
-			run_git(temp.path(), &["diff"]),
-			run_git(temp.path(), &["diff", "--cached"]),
+			run_git(temp.path(), &["diff", "--no-ext-diff"]),
+			run_git(temp.path(), &["diff", "--no-ext-diff", "--cached"]),
 		]);
 		let actual = detect(temp.path())
 			.unwrap()

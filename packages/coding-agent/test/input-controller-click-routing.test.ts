@@ -39,6 +39,7 @@ function makeHarness() {
 			spaceHold: new SpaceHoldGesture(() => {}),
 		},
 		keybindings: KeybindingsManager.inMemory(),
+		settings,
 		dictationSpaceHold: () => undefined,
 		session: {
 			extensionRunner: undefined,

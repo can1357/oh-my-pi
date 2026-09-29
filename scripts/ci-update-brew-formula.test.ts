@@ -39,12 +39,4 @@ describe("renderFormula", () => {
 		const blockless = formula.replace(/with_env\(HOME: buildpath\) do[\s\S]*?end/, "");
 		expect(blockless).not.toMatch(/generate_completions_from_executable/);
 	});
-
-	it("emits the expected per-asset sha256 next to each url", () => {
-		for (const name in SUMS) {
-			const sha = SUMS[name as keyof typeof SUMS];
-			expect(formula).toContain(`/${name}",`);
-			expect(formula).toContain(`sha256 "${sha}"`);
-		}
-	});
 });

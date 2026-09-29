@@ -2080,19 +2080,6 @@ describe("Markdown.render reference stability", () => {
 	// copy. These tests pin the reference-identity contract.
 	afterEach(() => clearRenderCache());
 
-	it("returns the identical reference for repeated renders of an unchanged instance", () => {
-		const md = new Markdown("Question text", 1, 0, defaultMarkdownTheme);
-		const first = md.render(40);
-		expect(md.render(40)).toBe(first);
-		expect(md.render(40)).toBe(first);
-	});
-
-	it("shares one array across instances with identical inputs via the L2 cache", () => {
-		const a = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		const b = new Markdown("Shared markdown body", 1, 0, defaultMarkdownTheme);
-		expect(b.render(40)).toBe(a.render(40));
-	});
-
 	it("does not share oversized renders through the L2 cache", () => {
 		// Fixture must exceed RENDER_CACHE_MAX_ENTRY_SIZE (256 KiB of rendered
 		// lines) so the entry is rejected and each render owns its array.

@@ -63,7 +63,7 @@ export interface CommitRuns {
 export type CIGateDecision =
 	| { kind: "pass"; sha: string; runId: number; ancestor: boolean }
 	| { kind: "fail"; sha: string; runId: number; conclusion: string; ancestor: boolean }
-	| { kind: "wait"; sha: string; runId: number; ancestor: boolean }
+	| { kind: "pending"; sha: string; runId: number; ancestor: boolean }
 	| { kind: "none" };
 
 /**
@@ -89,7 +89,7 @@ export function decideCIGate(chain: readonly CommitRuns[]): CIGateDecision {
 		if (runs.length === 0) continue;
 		const latest = runs.reduce((a, b) => (b.databaseId > a.databaseId ? b : a));
 		const ancestor = i > 0;
-		if (latest.status !== "completed") return { kind: "wait", sha, runId: latest.databaseId, ancestor };
+		if (latest.status !== "completed") return { kind: "pending", sha, runId: latest.databaseId, ancestor };
 		if (latest.conclusion === "success") return { kind: "pass", sha, runId: latest.databaseId, ancestor };
 		return { kind: "fail", sha, runId: latest.databaseId, conclusion: latest.conclusion ?? "unknown", ancestor };
 	}
@@ -100,42 +100,43 @@ const CI_ANCESTOR_LIMIT = 30;
 
 async function listCIRuns(sha: string): Promise<CIRun[]> {
 	const out =
-		await $`gh run list --commit ${sha} --workflow CI --json databaseId,status,conclusion,event,headBranch`.text();
+		await $`gh run list --commit ${sha} --workflow ci.yml --json databaseId,status,conclusion,event,headBranch`.text();
 	return JSON.parse(out) as CIRun[];
 }
 
-/** Poll a run until it completes; fail fast on the first failed job. */
-async function waitForRun(runId: number): Promise<boolean> {
-	while (true) {
-		const out = await $`gh run view ${runId} --json status,conclusion,jobs`.quiet().text();
-		const run = JSON.parse(out) as {
-			status: string;
-			conclusion: string | null;
-			jobs: Array<{ name: string; databaseId: number; status: string; conclusion: string | null }>;
-		};
-		const failedJob = run.jobs.find(
-			j => j.status === "completed" && j.conclusion !== "success" && j.conclusion !== "skipped",
-		);
-		if (failedJob) {
-			console.error(`  CI job failed: ${failedJob.name} (job ${failedJob.databaseId}): ${failedJob.conclusion}`);
-			return false;
-		}
-		if (run.status === "completed") return run.conclusion === "success";
-		const done = run.jobs.filter(j => j.status === "completed").length;
-		console.log(`  Waiting for CI run ${runId}... (${done}/${run.jobs.length} jobs done)`);
-		await Bun.sleep(10000);
-	}
+interface CIJob {
+	name: string;
+	databaseId: number;
+	status: string;
+	conclusion: string | null;
+}
+
+/** Snapshot an in-progress run and return its first already-failed job, if any. */
+async function findFailedJob(runId: number): Promise<CIJob | undefined> {
+	const out = await $`gh run view ${runId} --json jobs`.quiet().text();
+	const { jobs } = JSON.parse(out) as { jobs: CIJob[] };
+	return jobs.find(j => j.status === "completed" && j.conclusion !== "success" && j.conclusion !== "skipped");
 }
 
 async function checkCIGreen(): Promise<void> {
 	await git(["fetch", "origin", "main"]).quiet();
 	const head = (await git(["rev-parse", "HEAD"]).text()).trim();
-	const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
-	if (head !== remote) {
-		console.error(`Error: HEAD (${head.slice(0, 8)}) != origin/main (${remote.slice(0, 8)}). Pull/push first.`);
+	// Local-only commits are fine: the release push sends them along with the
+	// release commit. Behind or diverged is not: that push would be rejected.
+	const behind = await git(["merge-base", "--is-ancestor", "origin/main", "HEAD"]).quiet().nothrow();
+	if (behind.exitCode !== 0) {
+		const remote = (await git(["rev-parse", "origin/main"]).text()).trim();
+		console.error(
+			`Error: HEAD (${head.slice(0, 8)}) is behind or diverged from origin/main (${remote.slice(0, 8)}). Pull first.`,
+		);
 		process.exit(1);
 	}
-	console.log("  HEAD matches origin/main");
+	const ahead = Number((await git(["rev-list", "--count", "origin/main..HEAD"]).text()).trim());
+	console.log(
+		ahead > 0
+			? `  HEAD is ${ahead} unpushed commit(s) ahead of origin/main (pushed with the release)`
+			: "  HEAD matches origin/main",
+	);
 
 	const shas = (await git(["rev-list", "--first-parent", "-n", String(CI_ANCESTOR_LIMIT), "HEAD"]).text())
 		.trim()
@@ -156,13 +157,24 @@ async function checkCIGreen(): Promise<void> {
 	const label = decision.ancestor
 		? `ancestor ${decision.sha.slice(0, 8)} (HEAD ${head.slice(0, 8)} has no CI run)`
 		: `HEAD ${decision.sha.slice(0, 8)}`;
-	if (decision.kind === "wait") {
-		console.log(`  CI run ${decision.runId} for ${label} in progress; waiting...`);
-		if (!(await waitForRun(decision.runId))) {
-			console.error(`Error: CI run ${decision.runId} for ${label} failed. Fix main before releasing.`);
+	if (decision.kind === "pending") {
+		// No need to wait: the release commit's own CI run re-validates HEAD (a
+		// superset of this commit) and gates every publish job on release_gate.
+		// Only fail fast on jobs that have already failed.
+		const failed = await findFailedJob(decision.runId);
+		if (failed) {
+			console.error(
+				`Error: CI run ${decision.runId} for ${label} has a failed job: ${failed.name} (job ${failed.databaseId}): ${failed.conclusion}`,
+			);
+			console.error("  Fix main before releasing, or pass --skip-ci-check to override.");
 			process.exit(1);
 		}
-	} else if (decision.kind === "fail") {
+		console.log(
+			`  CI run ${decision.runId} for ${label} still in progress, no failures so far; the release run re-validates`,
+		);
+		return;
+	}
+	if (decision.kind === "fail") {
 		console.error(`Error: CI run ${decision.runId} for ${label} concluded '${decision.conclusion}'.`);
 		console.error("  Fix main (or re-run CI) before releasing, or pass --skip-ci-check to override.");
 		process.exit(1);

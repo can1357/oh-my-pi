@@ -1,54 +1,10 @@
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { compile } from "@tailwindcss/node";
-
-/**
- * Extract Tailwind class names from source files by scanning for className attributes.
- */
-async function extractTailwindClasses(dir: string): Promise<Set<string>> {
-	const classes = new Set<string>();
-	const classPattern = /className\s*=\s*["'`]([^"'`]+)["'`]/g;
-
-	async function scanDir(currentDir: string): Promise<void> {
-		const entries = await fs.readdir(currentDir, { withFileTypes: true });
-		for (const entry of entries) {
-			const fullPath = path.join(currentDir, entry.name);
-			if (entry.isDirectory()) {
-				await scanDir(fullPath);
-			} else if (entry.isFile() && /\.(tsx|ts|jsx|js)$/.test(entry.name)) {
-				const content = await Bun.file(fullPath).text();
-				const matches = content.matchAll(classPattern);
-				for (const match of matches) {
-					for (const cls of match[1].split(/\s+/)) {
-						if (cls) classes.add(cls);
-					}
-				}
-			}
-		}
-	}
-
-	await scanDir(dir);
-	return classes;
-}
 
 // Clean dist
 await fs.rm("./dist/client", { recursive: true, force: true });
 
-// Build Tailwind CSS
-console.log("Building Tailwind CSS...");
-const sourceCss = await Bun.file("./src/client/styles.css").text();
-const candidates = await extractTailwindClasses("./src/client");
-const baseDir = path.resolve("./src/client");
-
-const compiler = await compile(sourceCss, {
-	base: baseDir,
-	onDependency: () => {},
-});
-const tailwindOutput = compiler.build([...candidates]);
-await Bun.write("./dist/client/styles.css", tailwindOutput);
-
-// Build React app
-console.log("Building React app...");
+// Bundle the React app. CSS imported from TSX modules is emitted alongside as index.css.
+console.log("Building dashboard client...");
 const result = await Bun.build({
 	entrypoints: ["./src/client/index.tsx"],
 	outdir: "./dist/client",
@@ -64,13 +20,13 @@ if (!result.success) {
 	process.exit(1);
 }
 
-// Create index.html
+// The inline script applies the persisted theme before first paint (no flash).
 const indexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Usage Statistics</title>
+    <title>omp stats</title>
     <script>
       (function () {
         try {
@@ -82,7 +38,7 @@ const indexHtml = `<!DOCTYPE html>
         } catch (e) {}
       })();
     </script>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="index.css">
 </head>
 <body>
     <div id="root"></div>

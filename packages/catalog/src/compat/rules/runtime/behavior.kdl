@@ -47,6 +47,14 @@ behavior {
 	// A bare composer-2.5 request defaults to the Fast lane server-side.
 	cursor-model-parameter model="composer-2.5" id="fast" value="false"
 
+	// Cursor's dashboard splits native Grok/Composer traffic from all other
+	// models. Substring fallbacks cover newly discovered family revisions.
+	quota-tiers provider="cursor" default="api" {
+		tier "auto" "composer-2.5"
+		fallback "auto" substring="grok"
+		fallback "auto" substring="composer"
+	}
+
 	// Exact quota bucket memberships reported by Google Gemini CLI.
 	quota-tiers provider="google-gemini-cli" {
 		tier "3-Flash" "gemini-3-flash-preview" "gemini-3-flash" "gemini-3.5-flash"
@@ -183,10 +191,15 @@ behavior {
 			glob="claude-fable-*" glob="claude-mythos-*"
 		route "openai-responses" prefix="grok-4." prefix="gpt-5" prefix="gpt-6" prefix="oswe" prefix="mai-"
 	}
-	// Command Code serves Claude models through its Anthropic-compatible
-	// Messages endpoint and every other model through chat completions.
+	// Command Code serves Claude ids through its Anthropic-compatible Messages
+	// endpoint, its ten GPT ids (the same set command-code@1.67.0 marks
+	// `spec: "responses"`) through its Responses endpoint, and every other id
+	// through chat completions.
 	api-routes provider="commandcode" default="openai-completions" {
 		route "anthropic-messages" prefix="claude-"
+		route "openai-responses" exact="gpt-5.3-codex" exact="gpt-5.4" exact="gpt-5.4-mini" exact="gpt-5.5" \
+			exact="gpt-5.6-luna" exact="gpt-5.6-sol" exact="gpt-5.6-terra" exact="gpt-6-astra" \
+			exact="gpt-6-luna" exact="gpt-6-sol"
 	}
 	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
 	// other namespace stays on chat completions.

@@ -217,9 +217,7 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
-	it("spends no usage request on a block its scopes cannot heal", async () => {
-		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
-		// every scope the strategy vouches for, so probing cannot change it.
+	it("heals a stale account-wide block without claiming to clear an absent tier row", async () => {
 		const { storage, clearedScopes, probeCount } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
 			"",
@@ -232,9 +230,79 @@ describe("claude usage-block healing", () => {
 			reserveFraction: 0.1,
 		});
 
-		expect(probeCount()).toBe(0);
-		expect(clearedScopes).toEqual([]);
-		expect(health.accounts[0]?.state).toBe("depleted");
+		expect(probeCount()).toBe(1);
+		expect(clearedScopes).toEqual([""]);
+		expect(health.accounts[0]?.state).toBe("healthy");
+		expect(await storage.keys.get("anthropic", "global-heal", { modelId: "claude-fable-5-1" })).toBe("access-1");
+	});
+
+	for (const scope of ["auth", "account-policy"]) {
+		it(`does not heal an independent ${scope} block`, async () => {
+			const { storage, probeCount, blocks } = makeHarness(
+				claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0), tierLimit("fable", 0)]),
+				scope,
+			);
+			storages.push(storage);
+			await storage.credentials.reload();
+			expect(await storage.keys.get("anthropic", "protected", { modelId: "claude-fable-5-1" })).toBe("access-2");
+			expect(blocks.has(`1:${scope}`)).toBe(true);
+			expect(probeCount()).toBe(0);
+		});
+	}
+
+	for (const limits of [
+		[sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 1), tierLimit("fable", 0)],
+		[sharedLimit("5h", "5h", 0), tierLimit("fable", 0)],
+		[sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0), tierLimit("fable", 1)],
+	]) {
+		it("retains an account-wide block without complete healthy quota evidence", async () => {
+			const { storage, blocks, clearedScopes } = makeHarness(claudeReport(limits), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+			await storage.health.model("anthropic", { modelId: "claude-fable-5-1", reserveFraction: 0.1 });
+			expect(blocks.has("1:")).toBe(true);
+			expect(clearedScopes).toEqual([]);
+		});
+	}
+
+	it("keeps a newly written block while live usage may lag the quota rejection", async () => {
+		const { storage, blocks } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0), tierLimit("fable", 0)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		await storage.limits.markReached("anthropic", "fresh", {
+			credentialId: 1,
+			modelId: "claude-opus-5-5",
+			retryAfterMs: 3_600_000,
+			providerTimed: true,
+		});
+		await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+		expect(blocks.has("1:")).toBe(true);
+	});
+
+	it("adopts external reset deletion before selecting or merging another quota failure", async () => {
+		const { storage, blocks } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0), sharedLimit("7d", "7d", 0), tierLimit("fable", 0)]),
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		await storage.limits.markReached("anthropic", "external", {
+			credentialId: 1,
+			modelId: "claude-fable-5-1",
+			retryAfterMs: 3_600_000,
+			providerTimed: true,
+		});
+		blocks.delete("1:tier:fable");
+		expect(await storage.keys.get("anthropic", "external", { modelId: "claude-fable-5-1" })).toBe("access-1");
+		await storage.limits.markReached("anthropic", "external", {
+			credentialId: 1,
+			modelId: "claude-fable-5-1",
+			retryAfterMs: 60_000,
+			providerTimed: true,
+		});
+		expect(blocks.get("1:tier:fable")).toBeLessThan(Date.now() + 120_000);
 	});
 
 	it("keeps the block when the report predates it", async () => {
@@ -255,10 +323,7 @@ describe("claude usage-block healing", () => {
 		expect(await storage.keys.get("anthropic", "s-stale", { modelId: "claude-fable-5-1" })).toBe("access-2");
 	});
 
-	it("spends no probe while an unscoped block also holds the credential", async () => {
-		// A tier block written after a global one carries the later deadline, but
-		// the global block still makes the credential unusable, so clearing the
-		// tier early buys nothing and the request must not be spent.
+	it("heals both stale account-wide and tier blocks", async () => {
 		const { storage, probeCount, blocks } = makeHarness(
 			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
 		);
@@ -271,7 +336,9 @@ describe("claude usage-block healing", () => {
 			reserveFraction: 0.1,
 		});
 
-		expect(probeCount()).toBe(0);
-		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
+		expect(probeCount()).toBe(1);
+		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("healthy");
+		expect(blocks.has("1:")).toBe(false);
+		expect(blocks.has("1:tier:fable")).toBe(false);
 	});
 });

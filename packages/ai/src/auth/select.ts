@@ -6,7 +6,13 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
-import { credentialBlockScopesForRequest, DEFAULT_BLOCK_MS, providerTypeKey, type CredentialBlocks } from "./blocks";
+import {
+	AUTH_BLOCK_SCOPE,
+	credentialBlockScopesForRequest,
+	DEFAULT_BLOCK_MS,
+	providerTypeKey,
+	type CredentialBlocks,
+} from "./blocks";
 import type { AccountPolicies } from "./policy";
 import { authCredentialEquals, type CredentialPool } from "./pool";
 import {
@@ -698,8 +704,18 @@ export class CredentialSelector {
 						refreshTarget,
 						credentialId,
 						options?.signal,
+						force ? options?.refreshReason : undefined,
 					);
-					const updated = mergeRefreshedCredential(candidate.selection.credential, refreshedCredentials);
+					const beforeRefresh = candidate.selection.credential;
+					const updated = mergeRefreshedCredential(beforeRefresh, refreshedCredentials);
+					if (credentialId !== undefined && authCredentialEquals(beforeRefresh, updated)) {
+						// The await may have allowed a peer to replace/remove this row or
+						// compact its index. Rebind by id without writing the cached result.
+						if (!this.#syncOAuthSelectionFromStore(provider, candidate.selection, credentialId)) {
+							preflightFailures.add(candidate);
+						}
+						return;
+					}
 					candidate.selection.credential = updated;
 					if (credentialId !== undefined) {
 						const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
@@ -756,7 +772,7 @@ export class CredentialSelector {
 								providerKey,
 								latestIndex,
 								Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-								blockScope,
+								AUTH_BLOCK_SCOPE,
 							);
 						}
 					}
@@ -1066,6 +1082,7 @@ export class CredentialSelector {
 					providerKey,
 					selection.index,
 					Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+					AUTH_BLOCK_SCOPE,
 				);
 			}
 		}

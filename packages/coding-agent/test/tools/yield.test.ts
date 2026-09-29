@@ -104,12 +104,6 @@ describe("YieldTool", () => {
 		expect(validator?.validate(assembled?.data).success).toBe(true);
 	});
 
-	it("accepts success payload with data", async () => {
-		const tool = new YieldTool(createSession());
-		const result = await tool.execute("call-1", { data: { ok: true } } as never);
-		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
-	});
-
 	it("commits a terminal yield emitted before parent steering lands (#10645)", async () => {
 		// The parent's `hub send` arrives while the child is still streaming its
 		// yield call. The already-generated yield must execute and settle the

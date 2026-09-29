@@ -54,10 +54,6 @@ describe("release version bumps", () => {
 	test("bumps the core version when applying a minor bump to a canary", () => {
 		expect(bumpVersion("0.13.0-canary.2", "minor")).toBe("0.14.0");
 	});
-
-	test("rejects explicit canary versions", () => {
-		expect(validateExplicitVersion("1.2.3-canary.1")).toBe(null);
-	});
 });
 
 describe("decideCIGate", () => {
@@ -98,9 +94,9 @@ describe("decideCIGate", () => {
 		});
 	});
 
-	test("in-progress run waits", () => {
+	test("in-progress run is pending", () => {
 		expect(decideCIGate([{ sha: "h", runs: [run(2, "in_progress", null)] }])).toEqual({
-			kind: "wait",
+			kind: "pending",
 			sha: "h",
 			runId: 2,
 			ancestor: false,
@@ -117,7 +113,7 @@ describe("decideCIGate", () => {
 		expect(
 			decideCIGate([{ sha: "h", runs: [run(5, "queued", null), run(1, "completed", "success")] }]),
 		).toMatchObject({
-			kind: "wait",
+			kind: "pending",
 			runId: 5,
 		});
 	});

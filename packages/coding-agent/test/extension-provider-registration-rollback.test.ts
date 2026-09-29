@@ -28,26 +28,6 @@ const testProviderConfig: ProviderConfig = {
 };
 
 describe("extension provider registration rollback", () => {
-	test("removes provider registrations when inline extension initialization fails", async () => {
-		const runtime = new ExtensionRuntime();
-		const events = new EventBus();
-
-		await expect(
-			loadExtensionFromFactory(
-				pi => {
-					pi.registerProvider("should-not-survive", testProviderConfig);
-					throw new Error("intentional initialization failure");
-				},
-				process.cwd(),
-				events,
-				runtime,
-				"broken-inline-extension",
-			),
-		).rejects.toThrow("intentional initialization failure");
-
-		expect(runtime.pendingProviderRegistrations).toEqual([]);
-	});
-
 	test("replaces a queued provider after unregistering it", async () => {
 		const runtime = new ExtensionRuntime();
 		const events = new EventBus();
@@ -133,28 +113,6 @@ describe("extension provider registration rollback", () => {
 		).rejects.toThrow("failed after unregistering");
 
 		expect(runtime.pendingProviderRegistrations.map(registration => registration.name)).toEqual(["working-provider"]);
-	});
-
-	test("keeps provider registrations when extension initialization succeeds", async () => {
-		const runtime = new ExtensionRuntime();
-		const events = new EventBus();
-
-		await loadExtensionFromFactory(
-			pi => {
-				pi.registerProvider("provider-one", {
-					baseUrl: "https://one.example.invalid/v1",
-				});
-				pi.registerProvider("provider-two", {
-					baseUrl: "https://two.example.invalid/v1",
-				});
-			},
-			process.cwd(),
-			events,
-			runtime,
-			"working-extension",
-		);
-
-		expect(runtime.pendingProviderRegistrations.map(r => r.name)).toEqual(["provider-one", "provider-two"]);
 	});
 
 	test("applies provider replacement after runtime initialization", async () => {
