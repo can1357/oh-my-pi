@@ -5,6 +5,7 @@ import { taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { renderCodeCell } from "@oh-my-pi/pi-tui/render/code-cell";
 import { plainToolCard } from "@oh-my-pi/pi-tui/render/tool-card";
+import { renderVerbatimRows, VERBATIM_WRAP_MARKER } from "@oh-my-pi/pi-tui/render/output-block";
 
 // Regression: tool-call payload echoes ran through the markdown/LaTeX
 // typesetter and came out corrupted — `$(grep -c A_rows $P)` echoed as
@@ -14,6 +15,12 @@ import { plainToolCard } from "@oh-my-pi/pi-tui/render/tool-card";
 // structure. Tool-call parameters and command echoes are payloads, not prose:
 // the echo must byte-match what will be dispatched, modulo the display
 // sanitization convention (ANSI/control strip, tab expansion).
+//
+// Overflow contract (every byte recoverable): verbatim sections soft-wrap
+// across rows marked with VERBATIM_WRAP_MARKER when `expanded`, and clip to a
+// byte-prefix with a visible `…` marker when collapsed. Task brief/context go
+// through markdown in literal-math mode instead: structure typesets, but
+// `$…$`/`$$…$$` spans, `\(...\)` BRE groups and their bytes stay literal.
 
 const PAYLOAD_LINES = [
 	"pid=$$",
@@ -46,6 +53,23 @@ function frameRowsRaw(theme: Theme, rendered: readonly string[]): string[] {
 // right pad-to-width trimmed); lockstep behavior matters for every assertion.
 function frameBodyRows(theme: Theme, card: { render(width: number): readonly string[] }, width: number): string[] {
 	return frameRowsRaw(theme, card.render(width)).map(row => row.trimEnd());
+}
+
+/**
+ * Concatenate one source line's echo rows minus their soft-wrap markers and
+ * ANSI styling: the recovered source bytes. The frame's pad-to-width (like a
+ * source trailing space it is indistinguishable from on the final row) is
+ * trimmed off that final row only — every earlier row is exactly frame-width
+ * and keeps its bytes, cut trailing spaces included.
+ */
+function recoverBytes(rows: readonly string[]): string {
+	return rows
+		.map((rawRow, index) => {
+			const row = Bun.stripANSI(rawRow);
+			const unmarked = row.startsWith(VERBATIM_WRAP_MARKER) ? row.slice(VERBATIM_WRAP_MARKER.length) : row;
+			return index === rows.length - 1 ? unmarked.trimEnd() : unmarked;
+		})
+		.join("");
 }
 
 describe("tool-call payload echoes render byte-verbatim", () => {
@@ -138,55 +162,162 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 		expect(rows).not.toContain("now");
 	});
 
-	// Payload echo sections must not re-flow: a 204-char source line at width
-	// 80 is ONE clipped row — wrapped (76/76/52) its breaks read as payload
-	// newlines. This covers every renderCodeCell source echo (eval `code` arg,
-	// read file content, read-tool-group preview).
-	it("keeps one code-cell source row per source line (read/eval payload echo)", () => {
-		const rendered = renderCodeCell({ code: LONG_SOURCE, width: 80, status: "complete", title: "Cell" }, theme);
-		const rows = frameRowsRaw(theme, rendered).map(row => row.trimEnd());
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toBe("x".repeat(76));
+	// Every byte of an overflowing payload row must be recoverable: expanded
+	// shows the full source across rows marked with VERBATIM_WRAP_MARKER (a soft
+	// wrap can then never read as a payload newline); collapsed clips to a
+	// byte-prefix with a visible `…` marker so the cut is never silent. This
+	// covers every renderCodeCell source echo (eval `code` arg, read file
+	// content, read-tool-group preview).
+	it("shows every byte of a long code-cell source line across marked rows (read/eval payload echo)", () => {
+		const expanded = frameRowsRaw(
+			theme,
+			renderCodeCell({ code: LONG_SOURCE, width: 80, status: "complete", title: "Cell", expanded: true }, theme),
+		);
+		expect(expanded.length).toBeGreaterThan(1);
+		for (const row of expanded.slice(1)) expect(row.startsWith(VERBATIM_WRAP_MARKER)).toBe(true);
+		expect(recoverBytes(expanded)).toBe(LONG_SOURCE);
+
+		const collapsed = frameRowsRaw(
+			theme,
+			renderCodeCell({ code: LONG_SOURCE, width: 80, status: "complete", title: "Cell" }, theme),
+		);
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]!.endsWith("…")).toBe(true);
+		expect(LONG_SOURCE.startsWith(collapsed[0]!.slice(0, -1))).toBe(true);
 	});
 
-	it("keeps one file-content echo row per source line (write call card)", () => {
-		const card = writeToolRenderer.renderCall(
+	it("shows every byte of a long file-content echo row across marked rows (write call card)", () => {
+		const expandedCard = writeToolRenderer.renderCall(
 			{ path: "probe.txt", content: LONG_SOURCE },
-			{ expanded: false, isPartial: false },
+			{ expanded: true, isPartial: false },
 			theme,
 		);
-		expect(card).toBeDefined();
-		const rows = frameBodyRows(theme, card!, 80);
-		// One source row (line-number gutter chrome + clipped source) plus the
+		expect(expandedCard).toBeDefined();
+		const expanded = frameRowsRaw(theme, expandedCard!.render(80));
+		// Source rows (line-number gutter chrome + marked continuations) plus the
 		// streaming liveness cue row.
-		expect(rows).toHaveLength(2);
-		expect(rows[0]).toBe(`  1 ${"x".repeat(72)}`);
-		expect(rows[1]).toContain("(streaming)");
-	});
+		expect(expanded[expanded.length - 1]).toContain("(streaming)");
+		const recovered = recoverBytes(expanded.slice(0, -1));
+		expect(recovered.startsWith("  1 ")).toBe(true);
+		expect(recovered.slice(4)).toBe(LONG_SOURCE);
 
-	it("keeps one file-content echo row per source line (write result card)", () => {
-		const card = writeToolRenderer.renderResult(
-			{ content: [{ type: "text", text: "Wrote 1 line" }] },
+		const collapsedCard = writeToolRenderer.renderCall(
+			{ path: "probe.txt", content: LONG_SOURCE },
 			{ expanded: false, isPartial: false },
 			theme,
-			{ path: "probe.txt", content: LONG_SOURCE },
 		);
-		const rows = frameBodyRows(theme, card, 80);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toBe(`  1 ${"x".repeat(72)}`);
+		const collapsed = frameRowsRaw(theme, collapsedCard!.render(80));
+		expect(collapsed).toHaveLength(2);
+		expect(collapsed[0]!.endsWith("…")).toBe(true);
+		expect(`  1 ${LONG_SOURCE}`.startsWith(collapsed[0]!.slice(0, -1))).toBe(true);
+		expect(collapsed[1]).toContain("(streaming)");
+	});
+
+	it("shows every byte of a long file-content echo row across marked rows (write result card)", () => {
+		const expanded = frameRowsRaw(
+			theme,
+			writeToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "Wrote 1 line" }] },
+					{ expanded: true, isPartial: false },
+					theme,
+					{ path: "probe.txt", content: LONG_SOURCE },
+				)
+				.render(80),
+		);
+		expect(expanded.length).toBeGreaterThan(1);
+		for (const row of expanded.slice(1)) expect(row.startsWith(VERBATIM_WRAP_MARKER)).toBe(true);
+		expect(recoverBytes(expanded).slice(4)).toBe(LONG_SOURCE);
+
+		const collapsed = frameRowsRaw(
+			theme,
+			writeToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "Wrote 1 line" }] },
+					{ expanded: false, isPartial: false },
+					theme,
+					{ path: "probe.txt", content: LONG_SOURCE },
+				)
+				.render(80),
+		);
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]!.endsWith("…")).toBe(true);
+		expect(`  1 ${LONG_SOURCE}`.startsWith(collapsed[0]!.slice(0, -1))).toBe(true);
 	});
 
 	// `verbatim` must not silently no-op on the plain card variant (exported
-	// for payload-echoing surfaces like the MCP and default tool cards).
-	it("forwards verbatim through the plain card variant (no re-wrap, no right-trim)", () => {
-		const card = plainToolCard(
+	// for payload-echoing surfaces like the MCP and default tool cards), and it
+	// must honor the same recoverable-overflow contract as the framed variant.
+	it("keeps plain-card verbatim rows full-byte recoverable (no re-wrap, no right-trim)", () => {
+		const yLine = LONG_SOURCE.replaceAll("x", "y");
+		const build = (expanded: boolean) =>
+			plainToolCard(
+				theme,
+				() => ({ sections: [{ content: [yLine, "trailing ws: y  "], verbatim: true, expanded }] }),
+				{ paddingX: 0, paddingY: 0 },
+			);
+
+		const expandedRows = Bun.stripANSI(build(true).render(80).join("\n")).split("\n");
+		expect(expandedRows.length).toBeGreaterThan(1);
+		for (const row of expandedRows.slice(1, -1)) expect(row.startsWith(VERBATIM_WRAP_MARKER)).toBe(true);
+		expect(recoverBytes(expandedRows.slice(0, -1))).toBe(yLine);
+		expect(expandedRows[expandedRows.length - 1]).toBe("trailing ws: y  ".padEnd(80));
+
+		const collapsedRows = Bun.stripANSI(build(false).render(80).join("\n")).split("\n");
+		expect(collapsedRows).toHaveLength(2);
+		expect(collapsedRows[0]!.trimEnd().endsWith("…")).toBe(true);
+		expect(yLine.startsWith(collapsedRows[0]!.trimEnd().slice(0, -1))).toBe(true);
+		expect(collapsedRows[1]).toBe("trailing ws: y  ".padEnd(80));
+	});
+
+	// Verbatim chunk cuts land on grapheme/ANSI boundaries: no row may hold half
+	// a wide grapheme or a torn escape sequence, and the byte-prefix property
+	// must survive both.
+	it("cuts verbatim chunks on grapheme and ANSI boundaries", () => {
+		const wide = "界".repeat(50); // 100 columns: one wide grapheme per cell pair
+		const wideRows = renderVerbatimRows(wide, 80, theme, true);
+		expect(recoverBytes(wideRows)).toBe(wide);
+		for (const row of wideRows) {
+			const stripped = Bun.stripANSI(row);
+			const body = stripped.startsWith(VERBATIM_WRAP_MARKER) ? stripped.slice(VERBATIM_WRAP_MARKER.length) : stripped;
+			expect(/^(?:界)*$/u.test(body)).toBe(true);
+		}
+
+		const ansiSource = `${"a".repeat(10)}\x1b[31m${"b".repeat(90)}`;
+		const ansiRows = renderVerbatimRows(ansiSource, 80, theme, true);
+		expect(ansiRows.length).toBeGreaterThan(1);
+		for (const row of ansiRows) {
+			// Every ESC survives as a complete SGR run — never a torn `\x1b[`.
+			expect(row.replaceAll(/\x1b\[[0-9;]*m/g, "")).not.toContain("\x1b");
+		}
+		expect(recoverBytes(ansiRows)).toBe(Bun.stripANSI(ansiSource));
+	});
+
+	// Reviewer smoke (blocking comment on `output-block.ts:154`): this exact
+	// command at width 80 used to lose its `… ; echo EXIT_MARKER=$?` tail behind
+	// a marker-less clip even when `expanded: true`. Expanded must now recover
+	// every byte across marked continuation rows; collapsed clips with a visible
+	// `…` so the cut is announced and the tail is one expand away.
+	const SMOKE_COMMAND = "cd packages/coding-agent && bun test … 2>&1 | grep -E 'fail|error' ; echo EXIT_MARKER=$?";
+
+	it("makes the reviewer smoke command fully recoverable at width 80 (expanded) and marked when collapsed", () => {
+		const expanded = frameRowsRaw(
 			theme,
-			() => ({ sections: [{ content: [LONG_SOURCE.replaceAll("x", "y"), "trailing ws: y  "], verbatim: true }] }),
-			{ paddingX: 0, paddingY: 0 },
+			bashToolRenderer.renderCall({ command: SMOKE_COMMAND }, { expanded: true, isPartial: false }, theme).render(80),
 		);
-		const rows = Bun.stripANSI(card.render(80).join("\n")).split("\n");
-		expect(rows).toHaveLength(2);
-		expect(rows[0]).toBe("y".repeat(80));
-		expect(rows[1]).toBe("trailing ws: y  ".padEnd(80));
+		expect(expanded.length).toBeGreaterThan(1);
+		for (const row of expanded.slice(1)) expect(row.startsWith(VERBATIM_WRAP_MARKER)).toBe(true);
+		// Row 0 carries the dim `$ ` prompt prefix chrome; the command bytes trail it.
+		expect(recoverBytes(expanded).slice(2)).toBe(SMOKE_COMMAND);
+
+		const collapsed = frameRowsRaw(
+			theme,
+			bashToolRenderer
+				.renderCall({ command: SMOKE_COMMAND }, { expanded: false, isPartial: false }, theme)
+				.render(80),
+		);
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]!.endsWith("…")).toBe(true);
+		expect(collapsed[0]!.startsWith("$ cd packages/coding-agent && bun test")).toBe(true);
 	});
 });
