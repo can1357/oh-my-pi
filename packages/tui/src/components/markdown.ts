@@ -43,6 +43,11 @@ function normalizeOsc8Terminators(text: string): string {
 	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
 }
 
+/** `text` with tabs expanded: the render's first normalization step, which renderMarkdownHead repeats. */
+function expandTabs(text: string): string {
+	return text.includes("\t") ? replaceTabs(text) : text;
+}
+
 /** The longest suffix of `text` a future append could still complete into a
  *  full `\x1b]8;[^\x07\x1b]*\x1b\\` match: the last `\x1b]8;` plus clean
  *  body (or that plus the pending ST-ESC `\x1b`), or a strict prefix of the
@@ -1284,6 +1289,18 @@ function firstProbeSize(text: string, offset: number): number {
 }
 
 /**
+ * Size of the next probe window after the one of `size` at `offset` gave no
+ * usable cut (no boundary, or a prefix with too few rows): at least double,
+ * and at least one character past the next blank line that reaches the
+ * window's edge or lies past it, since only such a blank line can end a later
+ * boundary. With no blank line left, it is the rest of the text.
+ */
+function nextProbeSize(text: string, offset: number, size: number): number {
+	const nextBlank = text.indexOf("\n\n", offset + size - 2);
+	return nextBlank === -1 ? text.length - offset : Math.max(2 * size, nextBlank + 3 - offset);
+}
+
+/**
  * End of the last stable block boundary ({@link stableBlockBoundary}) in the
  * window `text.slice(offset, offset + size)`, or 0 when it holds none, from a
  * throwaway block-only lex of the window.
@@ -1303,6 +1320,63 @@ function lexDocument(text: string): TokensList {
 	// window offsets would address the wrong characters — lex those in one pass.
 	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return markdownParser.lexer(text);
 	return lexWindowed(text);
+}
+
+// A `[label]:` anywhere in the text, for renderMarkdownHead only. A reference
+// definition registers for the whole document, including one nested in a
+// quote or list item where the line-anchored HAS_REF_DEF misses it, so a
+// prefix rendered alone could leave a reference above the cut unresolved.
+// Over-matching only costs the cut.
+const REF_DEF_ANYWHERE = /\[(?:\\.|[^\]\\\n])+\]:/;
+
+/** Lines of `text` from `start` on, not counting trailing blank lines. */
+function countLinesFrom(text: string, start: number): number {
+	let last = text.length - 1;
+	while (last >= start && /\s/.test(text[last])) last--;
+	if (last < start) return 0;
+	let lines = 1;
+	for (let nl = text.indexOf("\n", start); nl !== -1 && nl < last; nl = text.indexOf("\n", nl + 1)) lines++;
+	return lines;
+}
+
+/** The leading rendered rows of a Markdown document and the source lines past them. */
+export interface MarkdownHead {
+	/** Leading rows; each equals the same row of a full render. */
+	lines: readonly string[];
+	/** Source lines after the rendered rows' source, trailing blank lines excluded; 0 when the whole document was rendered. */
+	linesAfter: number;
+}
+
+/**
+ * Render the leading rows of a Markdown document: more than `minRows` rows,
+ * or the whole document when it is shorter. The document is cut only at a
+ * stable top-level block boundary, so every returned row equals the same row
+ * of a full render. Documents under two probe windows, and documents that
+ * can't be cut (a reference definition anywhere, a CR), render whole.
+ */
+export function renderMarkdownHead(text: string, width: number, theme: MarkdownTheme, minRows: number): MarkdownHead {
+	// The text a final-mode `Markdown` lexes: the constructor normalizes OSC 8
+	// terminators, then render expands tabs and repairs an orphan closing fence.
+	const normalized = repairOrphanClosingFence(expandTabs(normalizeOsc8Terminators(text)));
+	if (normalized.length >= 2 * LEX_WINDOW_BYTES && !normalized.includes("\r") && !REF_DEF_ANYWHERE.test(normalized)) {
+		for (
+			let size = firstProbeSize(normalized, 0);
+			size < normalized.length;
+			size = nextProbeSize(normalized, 0, size)
+		) {
+			const end = probeBoundary(normalized, 0, size);
+			if (end === 0) continue;
+			const head = normalized.slice(0, end);
+			// Rendering `head` repairs it again on its own. That fires only when the
+			// repair's line scan pairs a fence the lexer doesn't see (one inside an
+			// HTML block, say) with a partner past the cut; then only a whole render
+			// matches.
+			if (repairOrphanClosingFence(head) !== head) break;
+			const lines = new Markdown(head, 0, 0, theme).render(width);
+			if (lines.length > minRows) return { lines, linesAfter: countLinesFrom(normalized, end) };
+		}
+	}
+	return { lines: new Markdown(text, 0, 0, theme).render(width), linesAfter: 0 };
 }
 
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
@@ -2297,7 +2371,8 @@ export class Markdown implements Component {
 		// returns without ever reading these, so streaming frames skip the
 		// whole-document tab scan/copy (the delta-only replaceTabs inside the
 		// branch is the only tab work a streamed frame pays).
-		const tabbed = this.#text.includes("\t") ? replaceTabs(this.#text) : this.#text;
+		const tabbed = expandTabs(this.#text);
+		// renderMarkdownHead probes and cuts this same final-mode text.
 		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
 		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
 			// repairOrphanClosingFence deleted bytes this frame (orphan fence

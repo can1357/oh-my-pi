@@ -15,6 +15,7 @@
 
 - Fixed long Markdown messages sometimes showing raw display math, a visible HTML comment, or a code block split in two
 - Fixed streamed Markdown keeping raw `$$` math or an unresolved reference link after the message finished, when a display-math block contained blank lines or a link definition sat inside a quote or list
+- Fixed long Markdown files and skills being slow to appear in read previews: a collapsed preview now renders only the start of the document, so its hidden-line count counts source lines past that start rather than rendered rows
 
 ## [18.4.3] - 2026-09-28
 

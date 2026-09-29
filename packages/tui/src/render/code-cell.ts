@@ -2,7 +2,7 @@
  * Render a code or markdown cell with optional output section.
  */
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { Markdown } from "../components/markdown";
+import { Markdown, renderMarkdownHead } from "../components/markdown";
 import { styledSpans } from "../native/spans";
 import { code, md, span } from "../native/describe";
 import type { NativeNode } from "../native/node";
@@ -323,11 +323,24 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 
 	// Markdown component manages its own wrapping at the same inner width as
 	// `renderOutputBlock`, so collapsed row caps are applied after final wrapping.
+	// A collapsed preview renders only a block-boundary prefix of the document;
+	// its footer then counts the prefix rows it hides plus the source lines
+	// after the cut, since the rows past the cut were never rendered.
 	const innerWidth = Math.max(20, outputBlockContentWidth(width));
-	const allLines = content.trim() ? new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth) : [];
+	let allLines: readonly string[] = [];
+	let linesAfterCut = 0;
+	if (content.trim()) {
+		if (expanded) {
+			allLines = new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth);
+		} else {
+			const head = renderMarkdownHead(content, innerWidth, getMarkdownTheme(), contentMaxLines);
+			allLines = head.lines;
+			linesAfterCut = head.linesAfter;
+		}
+	}
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);
-	const hiddenContentLines = allLines.length - maxContentLines;
+	const hiddenContentLines = allLines.length - maxContentLines + linesAfterCut;
 	if (hiddenContentLines > 0) {
 		const hint = formatExpandHint(theme, expanded, hiddenContentLines > 0);
 		const moreLine = `${formatMoreItems(hiddenContentLines, "line")}${hint ? ` ${hint}` : ""}`;
