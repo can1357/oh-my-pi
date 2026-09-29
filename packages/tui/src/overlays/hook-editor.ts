@@ -7,6 +7,9 @@
  *   (Ctrl+Q / Ctrl+Enter) submits, bordered popup
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
+import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "../index";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
@@ -26,6 +29,22 @@ export interface HookEditorOptions {
 	externalEditor?: (text: string) => Promise<string | null>;
 	/** When true, use prompt-style keybindings with the legacy ask prompt chrome. */
 	promptStyle?: boolean;
+	/** Allow clipboard images to be attached to this prompt. */
+	acceptImages?: boolean;
+	/** Images already represented by markers in the prefilled text. */
+	images?: readonly ImageContent[];
+	/**
+	 * With `acceptImages`, called for an empty bracketed paste, which is how terminals that own
+	 * the paste key send an image-only clipboard (#3601). Same signature as
+	 * `CustomEditor.onPasteImage`; the host calls `beginPaste` before its first await.
+	 */
+	onPasteImage?: () => Promise<boolean>;
+	/**
+	 * With `acceptImages`, called for each path of a bracketed paste made only of image paths.
+	 * Same signature as `CustomEditor.onPasteImagePath`; calls are not awaited in turn, so images
+	 * attach as they finish loading and are renumbered in text order on submit.
+	 */
+	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/**
 	 * Max rows the inner Editor may occupy. When omitted, the editor is
 	 * bounded to the current terminal height minus the component's chrome
@@ -39,11 +58,15 @@ export interface HookEditorOptions {
 export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
-	#onSubmitCallback: (value: string) => void;
+	#onSubmitCallback: (value: string, images?: ImageContent[]) => void;
 	#onCancelCallback: () => void;
 	#tui: TUI;
 	#promptStyle: boolean;
+	#acceptImages: boolean;
+	#images: ImageContent[];
 	#externalEditor: HookEditorOptions["externalEditor"];
+	#onPasteImage: HookEditorOptions["onPasteImage"];
+	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
 	#submitQueued = false;
@@ -57,7 +80,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		tui: TUI,
 		title: string,
 		prefill: string | undefined,
-		onSubmit: (value: string) => void,
+		onSubmit: (value: string, images?: ImageContent[]) => void,
 		onCancel: () => void,
 		options?: HookEditorOptions,
 	) {
@@ -71,7 +94,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
 		this.#promptStyle = options?.promptStyle ?? false;
+		this.#acceptImages = options?.acceptImages ?? false;
+		this.#images = this.#acceptImages ? [...(options?.images ?? [])] : [];
 		this.#externalEditor = options?.externalEditor;
+		this.#onPasteImage = options?.onPasteImage;
+		this.#onPasteImagePath = options?.onPasteImagePath;
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
@@ -80,6 +107,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#editor.setPromptGutter("> ");
 			this.#editor.disableSubmit = true;
 		}
+		// Image markers delete as a unit, like the main editor's attachment tokens.
+		if (options?.acceptImages) this.#editor.atomicTokenPattern = PLACEHOLDER_REGEX;
 		// Bound the editor so long content scrolls instead of pushing the
 		// submit hint off-screen. Caller may override via options.maxHeight.
 		const termRows = this.#tui.terminal?.rows ?? process.stdout.rows ?? 40;
@@ -158,7 +187,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		const paste = this.#pasteHandler.process(keyData);
 		if (paste.handled) {
 			if (paste.pasteContent === undefined) return;
-			this.pasteText(paste.pasteContent);
+			// Hosts reserve ordered delivery synchronously inside these callbacks, so input
+			// that followed the paste in this chunk (e.g. Enter) still waits for the image.
+			const content = paste.pasteContent;
+			const acceptsImages = this.acceptsImages;
+			if (acceptsImages && content.length === 0 && this.#onPasteImage) {
+				void this.#onPasteImage();
+			} else {
+				const imagePaths = acceptsImages ? extractImagePastePathsFromText(content) : undefined;
+				if (imagePaths && this.#onPasteImagePath) {
+					for (const path of imagePaths) void this.#onPasteImagePath(path);
+				} else {
+					this.pasteText(content);
+				}
+			}
 			if (paste.remaining.length > 0) this.handleInput(paste.remaining);
 			return;
 		}
@@ -175,10 +217,34 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#submitQueued = true;
 			return;
 		}
-		const text = this.#editor.getExpandedText();
+		let text = this.#editor.getExpandedText();
 		if (requireText && text.trim().length === 0) return;
+		let images: ImageContent[] | undefined;
+		if (this.#images.length > 0) {
+			// Path pastes attach as they finish loading; submit numbers images in text order.
+			const compacted = compactImageMarkers(text, this.#images.length, { byAppearance: true });
+			if (compacted) {
+				text = compacted.text;
+				images = compacted.keep.map(index => this.#images[index]);
+			} else {
+				images = this.#images;
+			}
+		}
 		this.dispose();
-		this.#onSubmitCallback(text);
+		if (images?.length) this.#onSubmitCallback(text, images);
+		else this.#onSubmitCallback(text);
+	}
+
+	/** Whether this prompt opted into clipboard image attachments. */
+	get acceptsImages(): boolean {
+		return this.#acceptImages && !this.#disposed;
+	}
+
+	/** Attach an image; returns its `[Image #N, WxH]` marker for the caller to deliver. */
+	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
+		if (!this.acceptsImages) return undefined;
+		this.#images.push(image);
+		return formatVisionMarker("image", this.#images.length, dims);
 	}
 
 	/** Reserve ordered clipboard delivery. Completion accepts nonempty text once, or releases on undefined. */
