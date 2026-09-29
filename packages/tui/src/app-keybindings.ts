@@ -45,6 +45,8 @@ interface AppKeybindings {
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.clipboard.copyCodeBlock": true;
+	"app.clipboard.copyCodeBlockPrev": true;
 	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -176,6 +178,16 @@ export const KEYBINDINGS = {
 	"app.clipboard.copyPrompt": {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
+	},
+	"app.clipboard.copyCodeBlock": {
+		// Alt+Shift+<letter> is the established copy family (copyLine, copyPrompt);
+		// Alt+Y stays with tui.editor.yankPop, whose chord is muscle-memory.
+		defaultKeys: "alt+shift+y",
+		description: "Copy newest code block (repeat for older)",
+	},
+	"app.clipboard.copyCodeBlockPrev": {
+		defaultKeys: "ctrl+alt+y",
+		description: "Copy next newer code block",
 	},
 	"app.session.new": {
 		defaultKeys: [],
