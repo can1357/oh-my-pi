@@ -6895,8 +6895,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleMemoryCommand(text);
 	}
 
+	#syncMicCursor(state: SttState, target?: DictationTarget): void {
+		if (state === "recording") {
+			const activeTarget = target ?? (this.ui.getFocusedTextEditor() as DictationTarget | null) ?? this.editor;
+			this.#micCursor?.dispose();
+			this.#micCursor = new MicCursor(this.ui, activeTarget);
+			this.ui.requestRender();
+			return;
+		}
+		if (state === "transcribing") {
+			this.#micCursor?.showTranscribing();
+			this.ui.requestRender();
+			return;
+		}
+		this.#micCursor?.dispose();
+		this.#micCursor = undefined;
+		this.ui.requestRender();
+	}
+
 	async handleSTTToggle(): Promise<void> {
-		await this.#readySTTController()?.toggle(this.editor, this.#dictationCallbacks(this.editor));
+		const controller = this.#readySTTController();
+		if (!controller) return;
+		if (controller.state === "idle" && !this.ui.getFocusedTextEditor()) {
+			return;
+		}
+		await controller.toggle(() => this.ui.getFocusedTextEditor(), this.editor, {
+			showWarning: (msg: string) => this.showWarning(msg),
+			showStatus: (msg: string) => this.showStatus(msg),
+			submitEditor: editor => this.ui.submitFocusedTextEditor(editor),
+			subscribeFocus: (listener: () => void) => {
+				return this.ui.addFocusListener(() => {
+					if (controller.state === "recording") {
+						this.#syncMicCursor("recording");
+					}
+					listener();
+				});
+			},
+			onStateChange: (state: SttState) => {
+				if (state === "recording") {
+					vocalizer.duck();
+				}
+				if (state !== "recording") {
+					vocalizer.unduck();
+				}
+				this.#syncMicCursor(state);
+			},
+		});
 	}
 
 	dictationSpaceHold(target: DictationTarget): SpaceHoldHandler {
@@ -6933,19 +6977,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
 			onStateChange: (state: SttState) => {
-				// Duck assistant speech while the user is talking (push-to-talk); restore after.
-				if (state === "recording") vocalizer.duck();
-				else vocalizer.unduck();
 				if (state === "recording") {
-					this.#micCursor?.dispose();
-					this.#micCursor = new MicCursor(this.ui, target);
-				} else if (state === "transcribing") {
-					this.#micCursor?.showTranscribing();
-				} else {
-					this.#micCursor?.dispose();
-					this.#micCursor = undefined;
+					vocalizer.duck();
 				}
-				this.ui.requestRender();
+				if (state !== "recording") {
+					vocalizer.unduck();
+				}
+				this.#syncMicCursor(state, target);
 			},
 		};
 	}

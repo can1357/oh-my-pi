@@ -49,6 +49,8 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
+Bind `app.stt.toggle` to a chord to dictate into the focused text editor, including the composer, `ask` Other/note prompts, the extension editor, and Editor-based overlays. Recording continues across dialog changes; the transcript goes to the field focused when recording stops, or to the composer draft with a status message if no text field has focus. `stt.submitTrigger` applies to the receiving field; `never` leaves the text for review. Holding Space works only in the composer.
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.

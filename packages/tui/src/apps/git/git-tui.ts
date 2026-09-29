@@ -26,6 +26,7 @@
 
 import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
 import { SplitPane } from "../../components/layout/split-pane";
+import type { Editor } from "../../components/editor";
 import { Stack } from "../../components/layout/stack";
 import { matchesKey } from "../../keys";
 import { ProcessTerminal } from "../../terminal";
@@ -853,6 +854,16 @@ class GitTuiComponent implements Component {
 
 	quit(): void {
 		this.#done.resolve();
+	}
+
+	getFocusedTextEditor(): Editor | null {
+		if (this.#focus !== "sidebar") return null;
+		return this.#sidebar.getFocusedTextEditor();
+	}
+
+	submitFocusedTextEditor(): void {
+		if (this.#focus !== "sidebar") return;
+		this.#sidebar.submitFocusedTextEditor();
 	}
 }
 

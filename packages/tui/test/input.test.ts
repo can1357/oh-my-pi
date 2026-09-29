@@ -361,4 +361,34 @@ describe("Input component", () => {
 		input.pasteText("sk-line1\nsk-line2\r\nsk-line3");
 		expect(input.getValue()).toBe("sk-line1sk-line2sk-line3");
 	});
+
+	it("renders cursorOverride mic icon when cursor is in the middle of text", () => {
+		const input = new Input();
+		input.focused = true;
+		input.setValue("hello world");
+		// Move cursor to middle: index 5
+		input.handleInput("\x01"); // Ctrl+A (home)
+		for (let i = 0; i < 5; i++) input.handleInput("\x1b[C"); // Right arrow
+		input.cursorOverride = "\x1b[35m🎤\x1b[0m";
+		const line = input.render(80)[0];
+		expect(line).toContain("🎤");
+		expect(line).toContain("hello");
+		expect(line).toContain("world");
+	});
+
+	it("renders cursorOverride mic icon when input is empty", () => {
+		const input = new Input();
+		input.focused = true;
+		input.setValue("");
+		input.cursorOverride = "\x1b[35m🎤\x1b[0m";
+		const line = input.render(80)[0];
+		expect(line).toContain("🎤");
+	});
+
+	it("supports insertText, getText, and getExpandedText conforming to text component surface", () => {
+		const input = setupAtEnd("prefix-");
+		input.insertText("inserted\nvalue");
+		expect(input.getText()).toBe("prefix-insertedvalue");
+		expect(input.getExpandedText()).toBe("prefix-insertedvalue");
+	});
 });

@@ -123,7 +123,7 @@ describe("STTController preflight", () => {
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 		const options = makeOptions();
-		await controller.toggle(editor, options);
+		await controller.toggle(() => editor, editor, options);
 
 		expect(controller.state).toBe("recording");
 		expect(isCached).toHaveBeenCalledWith("whisper-base");
@@ -159,16 +159,16 @@ describe("STTController preflight", () => {
 
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
-		await controller.toggle(editor, makeOptions());
+		await controller.toggle(() => editor, editor, makeOptions());
 		expect(controller.state).toBe("recording");
 		expect(isCached).toHaveBeenCalledTimes(1);
 		expect(isCached).toHaveBeenLastCalledWith("whisper-base");
 
 		// Switch the role model, then stop and re-start the gesture.
 		settings.setModelRole("dictation", "local/whisper-large-v3-turbo");
-		await controller.toggle(editor, makeOptions()); // recording -> idle
+		await controller.toggle(() => editor, editor, makeOptions()); // recording -> idle
 		expect(controller.state).toBe("idle");
-		await controller.toggle(editor, makeOptions()); // idle -> recording
+		await controller.toggle(() => editor, editor, makeOptions()); // idle -> recording
 
 		expect(controller.state).toBe("recording");
 		// Preflight ran exactly once for the new model rather than short-circuiting.
@@ -176,8 +176,8 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenLastCalledWith("whisper-large-v3-turbo");
 		expect(asrClient.sttClient.startStream).toHaveBeenLastCalledWith("whisper-large-v3-turbo", expect.anything());
 
-		await controller.toggle(editor, makeOptions()); // recording -> idle
-		await controller.toggle(editor, makeOptions()); // same model -> recording
+		await controller.toggle(() => editor, editor, makeOptions()); // recording -> idle
+		await controller.toggle(() => editor, editor, makeOptions()); // same model -> recording
 		expect(isCached).toHaveBeenCalledTimes(2);
 	});
 
@@ -193,7 +193,8 @@ describe("STTController preflight", () => {
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: emptyRegistry });
 
-		await controller.toggle(makeEditor(), makeOptions());
+		const editor = makeEditor();
+		await controller.toggle(() => editor, editor, makeOptions());
 
 		expect(isCached).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3");
 		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3", expect.anything());
@@ -213,7 +214,7 @@ describe("STTController preflight", () => {
 			},
 			{ settings, registry },
 		);
-		await controller.toggle(editor, options);
+		await controller.toggle(() => editor, editor, options);
 
 		onAudio?.(new Error("Microphone permission denied"), new Float32Array());
 
