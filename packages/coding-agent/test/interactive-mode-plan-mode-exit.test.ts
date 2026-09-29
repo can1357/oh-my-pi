@@ -81,6 +81,7 @@ describe("InteractiveMode plan mode exit", () => {
 		mode.editor.setText("saved draft");
 		mode.editor.handleInput("\x13");
 		mode.editor.setText("/plan exit");
+		mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 
 		await mode.editor.onSubmit?.("/plan exit");
 

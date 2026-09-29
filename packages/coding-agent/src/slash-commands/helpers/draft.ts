@@ -51,10 +51,15 @@ export async function runWithDetachedDraft(
 	options?: { restoreText?: boolean },
 ): Promise<boolean> {
 	const { editor } = runtime.ctx;
-	if (!runtime.draftDetached || editor.getText() === command.text) editor.clearDraft();
+	// Detached submissions may have the same text as a newer draft.
+	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const submitted = await run();
 		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
+		if (submitted !== true && runtime.draftDetached && hasAttachments) {
+			restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+			return false;
+		}
 		if (submitted !== false) return submitted === true;
 		if (runtime.input?.onAccepted && !editor.getText() && editor.pendingImages.length === 0 && !runtime.draftDetached)
 			editor.setText(command.text);
