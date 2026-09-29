@@ -130,17 +130,12 @@ export class HistoryStorage {
 	// not by user input. `#searchSubstring` builds one LIKE term per token, so it prepares its
 	// statement per call instead of growing a key per token count ever searched.
 	#stmts = new Map<string, Statement>();
-	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
-	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
-	// prompt from another session), so every memo is dropped on any write: ours in `#insertBatch`,
-	// or another connection's commit, seen through `PRAGMA data_version`. A change that commits
-	// nothing — a bare `git init` run by another process — stays invisible until the next write.
-	// `cwd` needs only the physical spelling; the repository root is resolved on demand, `repo` only.
-	#physicalByStored = new Map<string, string>();
-	#rootByPhysical = new Map<string, string>();
-	#dirsByTarget = new Map<string, string[]>();
-	/** `PRAGMA data_version` last observed; it moves only for commits by another connection. */
-	#dataVersion = 0;
+	// Directory scopes resolve every stored `cwd` spelling on every read and memoize nothing: a
+	// nested `git init`, a moved worktree or a retargeted symlink commits nothing to `history.db`,
+	// so neither our own writes nor another connection's commit can signal it, and a memo would
+	// keep serving the old topology — handing one project another project's prompts. The cost is
+	// linear in the number of distinct stored directories, never in the number of rows, and
+	// `global` and `session` never reach it.
 
 	private constructor(db: Database) {
 		this.#db = db;
@@ -181,8 +176,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 	session_id = excluded.session_id,
 	use_count = history.use_count + 1
 		`);
-		// A fresh connection's version is a baseline, not a delta.
-		this.#dataVersion = this.#readDataVersion();
 	}
 
 	/** Opens the process-wide prompt history database, quarantining a corrupt store once. */
@@ -226,9 +219,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
-		this.#physicalByStored.clear();
-		this.#rootByPhysical.clear();
-		this.#dirsByTarget.clear();
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -500,26 +490,28 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * Stored directories a scope reads: the ones denoting `target` itself (`cwd`), or every
 	 * one belonging to the repository rooted at `target` (`repo`).
 	 *
-	 * `cwd` holds the raw submission directory, so neither a plain equality nor a path prefix
-	 * works: a subdirectory or a linked worktree shares only its primary root with the
-	 * repository, and the same directory can be stored under two spellings (a symlinked
-	 * checkout keeps its symlink spelling, since `setProjectDir` resolves lexically). Each read
-	 * therefore filters the stored set, comparing normalized spellings on both sides — off the
-	 * memo described above, which the next write rebuilds.
+	 * `cwd` holds the raw submission directory, so a plain equality is not enough: a subdirectory
+	 * or a linked worktree shares only its primary root with the repository, and the same
+	 * directory can be stored under two spellings (a symlinked checkout keeps its symlink
+	 * spelling, since `setProjectDir` resolves lexically). Each read therefore filters the stored
+	 * set, comparing normalized spellings on both sides.
+	 *
+	 * `repo` also reaches out-of-tree linked worktrees, which share only a primary root with the
+	 * target, so it compares roots — one VCS resolution per stored directory, per read. That is
+	 * the price of never serving a topology that moved without a write, and it is linear in the
+	 * number of distinct stored directories, not in the number of rows.
 	 */
 	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
 		if (!target) return [];
-		this.#dropMemosIfExternallyChanged();
 		const normalized = normalizePathForComparison(target);
-		const cacheKey = `${kind}\u0000${normalized}`;
-		const cached = this.#dirsByTarget.get(cacheKey);
-		if (cached) return cached;
-		const dirs = this.#storedDirs().filter(dir => {
-			const physical = this.#physicalOf(dir);
-			return kind === "cwd" ? physical === normalized : this.#rootOf(physical) === normalized;
-		});
-		this.#dirsByTarget.set(cacheKey, dirs);
-		return dirs;
+		const dirs = this.#storedDirs();
+		if (kind === "cwd") return dirs.filter(dir => normalizePathForComparison(dir) === normalized);
+		// A directory is the primary root of a repository or belongs to none, so a target that is
+		// not one — a bare subdirectory, or a linked worktree — can never be matched by a root.
+		if (normalizePathForComparison(primaryRootOrCwd(normalized)) !== normalized) return [];
+		return dirs.filter(
+			dir => normalizePathForComparison(primaryRootOrCwd(normalizePathForComparison(dir))) === normalized,
+		);
 	}
 
 	#storedDirs(): string[] {
@@ -528,53 +520,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 				cwd: string;
 			}>
 		).map(row => row.cwd);
-	}
-
-	/** Current `PRAGMA data_version`, which another connection's commit alone moves. */
-	#readDataVersion(): number {
-		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
-		return row?.data_version ?? 0;
-	}
-
-	/**
-	 * Drop every scope memo when another process committed to the shared database.
-	 *
-	 * `PRAGMA data_version` moves only for foreign commits, so this complements — never replaces
-	 * — the unconditional clear in `#insertBatch`, which covers our own writes. All three memos
-	 * go: a commit by another process is the only signal that both the stored set and the tree it
-	 * was resolved against may have moved, and one rebuild per foreign commit — measured 1-4 ms
-	 * for 73 stored directories against ~0.4 ms memoized — is cheaper than serving a scope that
-	 * another process just changed.
-	 */
-	#dropMemosIfExternallyChanged(): void {
-		const version = this.#readDataVersion();
-		if (version === this.#dataVersion) return;
-		this.#dataVersion = version;
-		this.#physicalByStored.clear();
-		this.#rootByPhysical.clear();
-		this.#dirsByTarget.clear();
-	}
-
-	/** Normalized physical spelling of a stored directory, memoized until the next write. */
-	#physicalOf(dir: string): string {
-		const cached = this.#physicalByStored.get(dir);
-		if (cached !== undefined) return cached;
-		const physical = normalizePathForComparison(dir);
-		this.#physicalByStored.set(dir, physical);
-		return physical;
-	}
-
-	/**
-	 * Normalized primary root of a physical directory, memoized until the next write. Resolved
-	 * on demand — `cwd` compares physical spellings alone — and keyed by the physical path so
-	 * two spellings of one directory share a single repository lookup.
-	 */
-	#rootOf(physical: string): string {
-		const cached = this.#rootByPhysical.get(physical);
-		if (cached !== undefined) return cached;
-		const root = normalizePathForComparison(primaryRootOrCwd(physical));
-		this.#rootByPhysical.set(physical, root);
-		return root;
 	}
 
 	#prepare(sql: string): Statement {

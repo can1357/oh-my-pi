@@ -243,6 +243,53 @@ describe("HistoryStorage scope filtering", () => {
 		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
 	});
 
+	it("re-resolves repository membership for a repository created after the last write", async () => {
+		const dir = tempDir!;
+		const outer = dir.join("outer");
+		const inner = path.join(outer, "inner");
+		fs.mkdirSync(inner, { recursive: true });
+		runGit(outer, "init", "--quiet");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("avant", inner, "s1");
+
+		// Warm every fact this process could hold for `inner` and for the outer repository.
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual(["avant"]);
+		expect(promptsOf(storage, { kind: "repo", value: inner })).toEqual([]);
+		expect(promptsOf(storage, { kind: "cwd", value: inner })).toEqual(["avant"]);
+
+		// A repository appears under the outer one and nothing is written afterwards — not by
+		// this process, and no other connection commits either. Prompts submitted from `inner`
+		// belong to `inner` now; serving them under `outer` would hand one project another
+		// project's prompts.
+		runGit(inner, "init", "--quiet");
+
+		expect(promptsOf(storage, { kind: "repo", value: outer })).toEqual([]);
+		expect(promptsOf(storage, { kind: "repo", value: inner })).toEqual(["avant"]);
+		expect(storage.search("avant", 100, { kind: "repo", value: outer })).toEqual([]);
+		expect(storage.search("avant", 100, { kind: "repo", value: inner }).map(e => e.prompt)).toEqual(["avant"]);
+	});
+
+	it("does not pin a stored directory to a symlink that was retargeted", async () => {
+		const dir = tempDir!;
+		const one = dir.join("one");
+		const two = dir.join("two");
+		fs.mkdirSync(one, { recursive: true });
+		fs.mkdirSync(two, { recursive: true });
+		const link = dir.join("link");
+		fs.symlinkSync(one, link, "dir");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("via_link", link, "s1");
+		expect(promptsOf(storage, { kind: "cwd", value: one })).toEqual(["via_link"]);
+
+		// The link now names another project: the row filed under the old spelling must follow
+		// the directory, not the string that was stored.
+		fs.unlinkSync(link);
+		fs.symlinkSync(two, link, "dir");
+
+		expect(promptsOf(storage, { kind: "cwd", value: one })).toEqual([]);
+		expect(promptsOf(storage, { kind: "cwd", value: two })).toEqual(["via_link"]);
+	});
+
 	it("sees a row committed by another connection without a local write", async () => {
 		const dir = tempDir!;
 		const fixtures = createFixtures(dir.path());

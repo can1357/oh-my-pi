@@ -9,7 +9,6 @@
 ### Fixed
 
 - Fixed `computer.window(74)` matching every open window and `computer.window({ id: 74 })` matching none; a numeric id now resolves the same window as `"74"` ([#13649](https://github.com/can1357/oh-my-pi/pull/13649) by [@will-bogusz](https://github.com/will-bogusz))
-- Prompt history reads are no longer always global: `Up` and `Ctrl+R` can be scoped to the current conversation, folder or repository, so a project's prompts stop appearing in another once a scope is configured ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Collab guests no longer run or recall host-only commands: a command the guest gates refuse is neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`) ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 ## [18.4.3] - 2026-09-28

@@ -314,6 +314,7 @@ import {
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgGitEnabled,
+	cfgHistoryScope,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
 	cfgMagicKeywordsEnabled,
@@ -350,8 +351,6 @@ import {
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
 } from "./settings";
-import { cfgHistoryScope } from "./settings";
-
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
