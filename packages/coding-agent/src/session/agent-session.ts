@@ -5178,14 +5178,15 @@ export class AgentSession implements SettingsScope {
 		// dead-letter rather than enqueue a follow-up into a disposing session.
 		this.#unregisterAsyncDeliverySink?.();
 		this.#unregisterAsyncDeliverySink = undefined;
-		const manager = this.#ownedAsyncJobManager;
-		// Dead-letter record before cancelling: teardown is about to cancel
-		// these jobs and their completions can never be delivered, so name them
-		// in the transcript — a revived agent reads what was lost instead of
-		// confabulating job state (#11564). Best-effort: teardown proceeds even
-		// if the entry cannot be recorded.
-		if (manager) {
-			const deadLettered = manager.getAllJobs().filter(job => job.status === "running");
+		// Dead-letter record before cancelling: teardown is about to cancel this
+		// agent's running jobs and their completions can never be delivered, so
+		// name them in the transcript — a revived agent reads what was lost
+		// instead of confabulating job state (#11564). Mirrors
+		// #cancelOwnAsyncJobs' owner-scoped cancel set: subagent sessions hold no
+		// owned manager, their jobs live in the inherited one. Best-effort:
+		// teardown proceeds even if the entry cannot be recorded.
+		if (this.#agentId) {
+			const deadLettered = this.#asyncJobManager?.getRunningJobs({ ownerId: this.#agentId }) ?? [];
 			if (deadLettered.length > 0) {
 				const lines = deadLettered.map(
 					job =>
@@ -5211,6 +5212,7 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 		}
+		const manager = this.#ownedAsyncJobManager;
 		// The shutdown reason is reserved for the top-level session that OWNS the
 		// manager — the genuine process/handled-shutdown path — so the task
 		// executor parks (rather than tombstones) interrupted subagents. A

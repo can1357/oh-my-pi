@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed parking or disposing a subagent with running background jobs silently dead-lettering them: dispose now records the cancelled owner-scoped jobs (id, label) in the transcript, so a revived agent reads what was lost instead of confabulating job state ([#11564](https://github.com/can1357/oh-my-pi/issues/11564))
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
 
 ## [18.4.3] - 2026-09-28
@@ -28,15 +29,6 @@
 - Reduced CPU and allocations for in-memory reads (URLs, notebooks, converted documents), tool-result spill checks, write read-projection guards, and hashline prefix stripping ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed
-
-- Fixed parking/disposing a subagent with running background jobs silently dead-lettering them: dispose now records the cancelled owned jobs (id, label) in the transcript, so a revived agent reads what was lost instead of confabulating job state ([#11564](https://github.com/can1357/oh-my-pi/issues/11564))
-- Fixed the jevify magic-keyword notice still teaching the removed `judge()` handle/wait API — agents following its example failed on the first judge cell; the workflow and examples now use `judge_batch()` with `drain()` across cells ([#13588](https://github.com/can1357/oh-my-pi/issues/13588))
-- Fixed `/tree` navigating past saved Ask results instead of reopening their questions when an optional preview was saved as `null` ([#13570](https://github.com/can1357/oh-my-pi/issues/13570)).
-- Fixed legacy `createGrepTool()` failing to search a file when a `glob` filter is also supplied ([#13571](https://github.com/can1357/oh-my-pi/issues/13571)).
-- Fixed ongoing Claude tasks stopping instead of automatically redeeming eligible saved resets when usage polling is throttled or earlier failures exhausted the retry budget; concurrent tasks now share confirmed resets without spending again
-- Fixed user-tagged `^model` agents from the main session being unavailable to nested subagents.
-- Fixed SDK requests using an `ApiKeyResolver` from `createApiKeyResolver` failing with a drained account's multi-hour quota error instead of briefly waiting for a healthy sibling credential whose block expires within seconds ([#13270](https://github.com/can1357/oh-my-pi/issues/13270))
-- Fixed headless subagents losing an assignment during a session transition and then entering yield reminders without ever receiving it ([#13538](https://github.com/can1357/oh-my-pi/issues/13538)).
 
 - Fixed alt+p and `/switch` model picker latency by avoiding unnecessary catalog rebuilds
 - Fixed `--tools` with an unknown name printing a stack trace and listing only the tools left after filtering; it now prints a clean error naming unknown tools, built-in tools unavailable in the session, and the built-in and registered tools ([#13623](https://github.com/can1357/oh-my-pi/pull/13623) by [@H4vC](https://github.com/H4vC))
