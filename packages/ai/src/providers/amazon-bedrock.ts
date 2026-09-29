@@ -483,8 +483,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
 				inferenceConfig: {
 					maxTokens: options.maxTokens,
-					temperature: options.temperature,
-					topP: options.topP,
+					...(model.compat.supportsSamplingParams && { temperature: options.temperature, topP: options.topP }),
 				},
 				toolConfig,
 				guardrailConfig: buildGuardrailConfig(options),

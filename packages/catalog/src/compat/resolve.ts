@@ -83,6 +83,11 @@ class IdentityFacts {
 		return this.is("kimi") && this.family("k2.7-code", "k3");
 	}
 
+	/** OpenAI o-series and GPT-5+ reject `temperature`/`top_p` on every host (#5606). */
+	get openaiRejectsSampling(): boolean {
+		return this.is("openai") && (this.family("o-series") || this.revGte("5"));
+	}
+
 	/** Adaptive-thinking Claude generation floor (Opus ≥ min; Sonnet/Fable/Mythos ≥ 5). */
 	anthropicAdaptiveGenAtLeast(opusMin: string): boolean {
 		if (!this.is("anthropic")) return false;
@@ -481,7 +486,7 @@ function detectOpenAICompat(
 		// API-conditional: this completions-only Copilot exclusion cannot be a
 		// provider rule without changing Copilot Responses rows.
 		supportsReasoningParams: provider !== "github-copilot",
-		supportsSamplingParams: !(facts.is("openai") && (facts.family("o-series") || facts.revGte("5"))),
+		supportsSamplingParams: !facts.openaiRejectsSampling,
 		supportsPenaltyAndStopParams: !(isGrok && reasoningCapable),
 		reasoningEffortMap: {},
 		supportsUsageInStreaming: !isCerebrasHost,
@@ -732,7 +737,7 @@ function resolveOpenAIResponsesPolicy(
 		thinkingLoopGuard: undefined,
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
-		supportsSamplingParams: !(facts.is("openai") && (facts.family("o-series") || facts.revGte("5"))),
+		supportsSamplingParams: !facts.openaiRejectsSampling,
 		supportsPenaltyAndStopParams: !isXaiHost,
 		thinkingFormat,
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
@@ -890,7 +895,11 @@ function resolveAnthropicPolicy(
 }
 
 const BEDROCK_REASONING_STREAM_IDLE_TIMEOUT_MS = 600_000;
-function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: ResolvedAxes): ResolvedBedrockCompat {
+function resolveBedrockPolicy(
+	spec: ModelSpec<"bedrock-converse-stream">,
+	facts: IdentityFacts,
+	axes: ResolvedAxes,
+): ResolvedBedrockCompat {
 	// Prompt-cache checkpoint tables are rule-owned (class/family/revision
 	// rules under `on "amazon-bedrock"`); the baseline is the conservative
 	// no-checkpoint shape.
@@ -899,6 +908,7 @@ function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: 
 		supportsLongPromptCacheRetention: false,
 		promptCacheMinimumTokens: 0,
 		promptCacheMaximumCheckpoints: 0,
+		supportsSamplingParams: !facts.openaiRejectsSampling && !facts.anthropicAdaptiveGenAtLeast("4.7"),
 	};
 	// Reasoning capability is a mechanism gate; adaptive-lineage duration is rule-owned.
 	compat.streamIdleTimeoutMs = compatReasoning(spec, axes) ? BEDROCK_REASONING_STREAM_IDLE_TIMEOUT_MS : undefined;
@@ -1275,7 +1285,7 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 	} else if (specUsesApi(spec, "anthropic-messages")) {
 		compat = resolveAnthropicPolicy(spec, facts, axes);
 	} else if (specUsesApi(spec, "bedrock-converse-stream")) {
-		compat = resolveBedrockPolicy(spec, axes);
+		compat = resolveBedrockPolicy(spec, facts, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
 	} else if (

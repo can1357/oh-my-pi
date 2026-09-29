@@ -682,6 +682,12 @@ export interface BedrockCompat {
 	 */
 	promptCacheMaximumCheckpoints?: number;
 	/**
+	 * Whether Converse accepts `inferenceConfig.temperature`/`topP`. Claude
+	 * Opus 4.7+/Sonnet 5+, OpenAI GPT-5+ and Grok 4.6+ reject them with a 400.
+	 * Default: true.
+	 */
+	supportsSamplingParams?: boolean;
+	/**
 	 * Stream-watchdog idle-timeout fallback in ms; 0 disables the idle watchdog.
 	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
@@ -697,6 +703,7 @@ export interface ResolvedBedrockCompat {
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
+	supportsSamplingParams: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to

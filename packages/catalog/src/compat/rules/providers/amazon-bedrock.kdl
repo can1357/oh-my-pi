@@ -31,6 +31,8 @@ provider "amazon-bedrock" {
 			revision ">=4.6" {
 				thinking-mode "effort"
 				thinking-efforts "low" "medium" "high" "xhigh"
+				// Converse 400s on inferenceConfig temperature/topP (#13730).
+				supports-sampling-params #false
 			}
 		}
 	}
