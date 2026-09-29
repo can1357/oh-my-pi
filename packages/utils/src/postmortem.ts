@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
-import { restoreTerminalStderr } from "./stderr-guard";
+import { queueStderrBehindTerminal, restoreTerminalStderr } from "./stderr-guard";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -523,10 +523,14 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 		const cleanup = runCleanup(reason);
 		restoreTerminalStderr();
 		// A revoked terminal can make stream writes raise another fatal error. Use
-		// the descriptor directly so failure stays synchronous and contained.
-		try {
-			fs.writeSync(2, output);
-		} catch {}
+		// the descriptor directly so failure stays synchronous and contained. A
+		// terminal left holding output its reader has not taken yet gets the
+		// report queued behind that output instead, so the report lands after it.
+		if (!queueStderrBehindTerminal(output)) {
+			try {
+				fs.writeSync(2, output);
+			} catch {}
+		}
 		logger.error(logMessage, { err });
 		await cleanup;
 	} finally {

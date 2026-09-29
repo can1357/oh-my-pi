@@ -185,3 +185,29 @@ export function restoreTerminalStderr(): void {
 export function isTerminalStderrSuppressed(): boolean {
 	return savedStderrFd !== null;
 }
+
+/**
+ * Queues text behind output a stopped terminal could not deliver yet (its
+ * reader stalled) and returns true, or returns false once nothing is pending.
+ */
+let terminalHandoffWriter: ((text: string) => boolean) | null = null;
+
+/**
+ * Set by the terminal while it holds output a stalled reader has not taken
+ * yet; cleared (null) once that output drains or another terminal takes over.
+ */
+export function setTerminalHandoffWriter(writer: ((text: string) => boolean) | null): void {
+	terminalHandoffWriter = writer;
+}
+
+/**
+ * Queue `text` meant for stderr behind output a stopped terminal still holds,
+ * when stderr is that terminal: the text then reaches the terminal after that
+ * output, or not at all if the terminal does not read again before exit.
+ * Returns false when nothing is pending or stderr goes elsewhere; the caller
+ * then writes to stderr itself.
+ */
+export function queueStderrBehindTerminal(text: string): boolean {
+	if (!terminalHandoffWriter || !stderrSharesStdoutTerminal()) return false;
+	return terminalHandoffWriter(text);
+}

@@ -4,7 +4,11 @@ import { TtyWriter } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
+import {
+	restoreTerminalStderr,
+	setTerminalHandoffWriter,
+	suppressTerminalStderr,
+} from "@oh-my-pi/pi-utils/stderr-guard";
 import { TSP_VERSION } from "@oh-my-pi/pi-wire";
 import {
 	encodeBundledGlyphRegistrations,
@@ -315,6 +319,49 @@ export function writeThroughActiveTerminal(data: string): boolean {
 	return true;
 }
 
+/**
+ * The output pump a stopped terminal left holding bytes its reader has not
+ * taken yet (a stalled PTY), and the terminal it belongs to. The pump keeps
+ * running, and whatever this process writes to the terminal afterwards - the
+ * resume hint, the exit-time restore, a fatal report - queues behind those
+ * bytes: it reaches the terminal after them once the reader resumes, or is
+ * lost with them if the process exits first. A direct write would land ahead
+ * of them, and their late alternate-screen exit would then erase it.
+ */
+let terminalHandoff: { pump: OutputPump; owner: ProcessTerminal } | undefined;
+
+function holdTerminalHandoff(pump: OutputPump, owner: ProcessTerminal): void {
+	releaseTerminalHandoff();
+	terminalHandoff = { pump, owner };
+	setTerminalHandoffWriter(writeBehindTerminalHandoff);
+}
+
+/** Stop the held pump: joined once drained, else left to exit when its queue drains. */
+function releaseTerminalHandoff(): void {
+	const held = terminalHandoff;
+	if (!held) return;
+	terminalHandoff = undefined;
+	setTerminalHandoffWriter(null);
+	held.pump.stop(0);
+}
+
+/**
+ * Queue `text` behind the held pump's undelivered bytes, then wait up to
+ * {@link STOP_DRAIN_MS} for the terminal to take them. Returns false when no
+ * such bytes are pending; the caller then writes directly.
+ */
+function writeBehindTerminalHandoff(text: string): boolean {
+	const pump = terminalHandoff?.pump;
+	if (!pump) return false;
+	if (pump.dead || pump.pending() === 0) {
+		releaseTerminalHandoff();
+		return false;
+	}
+	pump.write(text.isWellFormed() ? text : text.toWellFormed());
+	if (pump.flushSync(STOP_DRAIN_MS)) releaseTerminalHandoff();
+	return true;
+}
+
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
 let stdoutErrorListenerInstalled = false;
 
@@ -432,25 +479,27 @@ export function emergencyTerminalRestore(): void {
 		} else if (terminalEverStarted && !isTerminalHeadless()) {
 			// Blind restore only if we know a terminal was started but lost track of it
 			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
-			process.stdout.write(
+			const restore =
 				"\x1b[?2026l" + // End synchronized output
-					"\x1b[?7h" + // Restore autowrap
-					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
-					"\x1b[?2004l" + // Disable bracketed paste
-					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
-					"\x1b[?2048l" + // Disable in-band resize notifications
-					"\x1b[?5522l" + // Disable enhanced paste notifications
-					"\x1b[<u" + // Pop kitty keyboard protocol
-					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-					// Leave the alternate screen only when a fullscreen overlay
-					// actually holds it — on Windows, DECRST 1049 on the main
-					// buffer homes the cursor (unconditional CursorRestoreState
-					// with no prior save), corrupting the shell handoff on exit.
-					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
-					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
-					"\x1b[?25h", // Show cursor
-			);
+				"\x1b[?7h" + // Restore autowrap
+				"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
+				"\x1b[?2004l" + // Disable bracketed paste
+				"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
+				"\x1b[?2048l" + // Disable in-band resize notifications
+				"\x1b[?5522l" + // Disable enhanced paste notifications
+				"\x1b[<u" + // Pop kitty keyboard protocol
+				"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+				"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+				// Leave the alternate screen only when a fullscreen overlay
+				// actually holds it — on Windows, DECRST 1049 on the main
+				// buffer homes the cursor (unconditional CursorRestoreState
+				// with no prior save), corrupting the shell handoff on exit.
+				(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+				"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
+				"\x1b[?25h"; // Show cursor
+			// Behind what a stopped terminal still holds (see terminalHandoff): a
+			// direct write would wait out a stalled reader and land ahead of it.
+			if (!writeBehindTerminalHandoff(restore)) process.stdout.write(restore);
 			altScreenActive = false;
 			if (process.stdin.setRawMode) {
 				process.stdin.setRawMode(false);
@@ -1051,6 +1100,9 @@ export class ProcessTerminal implements Terminal {
 		// Register for emergency cleanup
 		activeTerminal = this;
 		terminalEverStarted = true;
+		// This terminal owns the output from here on: a pump an earlier stop left
+		// holding output exits once it drains, as a detached writer always has.
+		releaseTerminalHandoff();
 		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
 		// prebuilt natives module without the export falls back to direct writes.
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
@@ -2301,12 +2353,17 @@ export class ProcessTerminal implements Terminal {
 		this.#disarmStdoutStallWatchdog();
 		this.#resizeHandler = undefined;
 		// Flush the restore sequences enqueued above (bounded — a stalled PTY
-		// must not wedge exit), then retire the pump. Later writes (emergency
-		// restore's showCursor) fall back to direct stdout writes.
-		if (this.#outputPump) {
-			this.#outputPump.stop(1000);
+		// must not wedge exit), then retire the pump. A pump still inside the
+		// write the settle found it blocked in is not waited on again. One that
+		// still holds bytes keeps running for the handoff (see terminalHandoff):
+		// later writes queue behind them instead of racing them to the terminal.
+		const pump = this.#outputPump;
+		if (pump) {
+			const stalled = this.#stalledBacklog !== undefined && pump.pending() === this.#stalledBacklog;
 			this.#outputPump = undefined;
 			this.#stalledBacklog = undefined;
+			if (this.#dead || pump.dead || (!stalled && pump.flushSync(STOP_DRAIN_MS))) pump.stop(STOP_DRAIN_MS);
+			else holdTerminalHandoff(pump, this);
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -2422,6 +2479,8 @@ export class ProcessTerminal implements Terminal {
 			this.#trackStdoutBacklog(pending);
 			return;
 		}
+		// Stopped with output still undelivered: queue behind it (see terminalHandoff).
+		if (terminalHandoff?.owner === this && writeBehindTerminalHandoff(text)) return;
 		// A console-sharing child process may have flipped the console codepage
 		// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 		// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
