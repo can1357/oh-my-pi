@@ -57,6 +57,17 @@
 ### Removed
 
 - Removed the setup wizard's "Web search" tab; the providers scene is now sign-in only, and web search is chosen through the `web` model role like other kind roles.
+### Breaking Changes
+
+- Replaced the `app.session.observe` keybinding action with `app.agents.hub`; saved observer shortcuts migrate automatically, and API consumers must use the new action ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
+### Added
+
+- Added the `app.editor.stash` shortcut and editor draft snapshot APIs to preserve text, cursor state, pastes, and attachments when swapping drafts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
+### Changed
+
+- Ctrl+S now stashes a prompt instead of opening Agent Hub; Alt+A still opens Hub, including after migrating saved observer shortcuts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.4.2] - 2026-09-28
 

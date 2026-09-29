@@ -64,15 +64,16 @@ async function runWithDetachedModeDraft(
 	run: () => Promise<ModeCommandResult>,
 ): Promise<boolean> {
 	const { editor } = runtime.ctx;
-	// Clear the submitted command before the handler can accept its prompt.
-	// A new draft typed while an input hook awaited must not be detached.
-	if (!runtime.draftDetached || editor.getText() === command.text) editor.clearDraft();
+	// The submitter already detached this text; a newer draft can have the
+	// identical spelling, so comparing strings must never clear it.
+	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const outcome = await run();
 		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
-		if (outcome === false && runtime.draftDetached) {
-			// Newer typing may already sit in the editor; merge both text and
-			// submitted attachments without replacing the later draft.
+		// A detached command that started no turn still owns its submitted
+		// attachments, even if the handler consumed a mode toggle or menu choice.
+		// Keep text-only rejection semantics unchanged for drafts without images.
+		if (outcome !== true && runtime.draftDetached && hasAttachments) {
 			restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
 			return false;
 		}

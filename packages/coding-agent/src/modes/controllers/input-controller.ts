@@ -1827,7 +1827,7 @@ export class InputController {
 			images,
 			imageLinks,
 			detachedText: input?.text,
-			onAccepted: input?.onAccepted,
+			...(input ? { onAccepted: input.onAccepted } : {}),
 		});
 	}
 
@@ -1858,10 +1858,16 @@ export class InputController {
 				? images.map(() => undefined)
 				: undefined;
 		let firstAccepted = false;
-		let failedQueueText: string | undefined;
-		let failedQueueAfterAcceptance: string | undefined;
-		const awaitingStash = this.#stashedDraft;
-		const restoreOnAccepted = options.onAccepted ?? this.#restoreOnAccepted();
+		let failedQueueRecovery:
+			| {
+					textRevision: number;
+					images: ImageContent[];
+					newerDraft?: ComposerDraftSnapshot;
+					afterAcceptance?: string;
+			  }
+			| undefined;
+		const restoreOnAccepted = "onAccepted" in options ? options.onAccepted : this.#restoreOnAccepted();
+		const awaitingStash = restoreOnAccepted ? this.#stashedDraft : undefined;
 		const formatQueueText = (remaining: string[]) =>
 			remaining.length === 1
 				? `=> ${remaining[0]}`
@@ -1875,19 +1881,22 @@ export class InputController {
 		};
 		const acceptedFirst = () => {
 			firstAccepted = true;
+			const recovery = failedQueueRecovery;
+			// Only replace the preview if the composer has not changed since recovery;
+			// textRevision catches edits that happen to reproduce the same text.
 			if (
-				awaitingStash &&
-				this.#stashedDraft === awaitingStash &&
-				failedQueueText &&
-				this.ctx.editor.getText() === failedQueueText &&
-				(this.ctx.editor.pendingImages.length === 0 ||
-					(this.ctx.editor.pendingImages.length === images?.length &&
-						this.ctx.editor.pendingImages.every((image, index) => image === images?.[index])))
+				recovery &&
+				(!awaitingStash || this.#stashedDraft === awaitingStash) &&
+				this.ctx.editor.textRevision === recovery.textRevision &&
+				this.ctx.editor.pendingImages.length === recovery.images.length &&
+				this.ctx.editor.pendingImages.every((image, index) => image === recovery.images[index])
 			) {
-				// Restore the rich stash without discarding the unsent entry.
+				// The first entry has been accepted: remove it and its attachments
+				// from the recovery preview before restoring any parked rich draft.
 				this.ctx.editor.clearDraft();
+				if (recovery.newerDraft) this.ctx.editor.restoreComposerDraft(recovery.newerDraft);
 				restoreOnAccepted?.();
-				if (failedQueueAfterAcceptance) appendQueueText(failedQueueAfterAcceptance);
+				if (recovery.afterAcceptance) appendQueueText(recovery.afterAcceptance);
 			} else {
 				restoreOnAccepted?.();
 			}
@@ -1970,14 +1979,15 @@ export class InputController {
 				const toRestore = pendingFirst ? [messages[0] ?? "", ...remaining] : remaining;
 				if (toRestore.length > 0) {
 					const restored = formatQueueText(toRestore);
-					// Until the first message is accepted, retain it with the failed entries.
-					if (pendingFirst && !this.ctx.editor.getText() && this.ctx.editor.pendingImages.length === 0) {
-						failedQueueText = restored;
-						failedQueueAfterAcceptance = remaining.length > 0 ? formatQueueText(remaining) : undefined;
-					}
+					// Until the first message is accepted, show it with the failed
+					// entries so an aborted pending turn cannot strand its draft.
+					const cleanPendingRecovery =
+						pendingFirst && !this.ctx.editor.getText() && this.ctx.editor.pendingImages.length === 0;
+					const newerDraft =
+						pendingFirst && !cleanPendingRecovery ? this.ctx.editor.captureComposerDraft() : undefined;
 					if (awaitingStash && firstAccepted) {
 						appendQueueText(restored);
-					} else if (options.detachedText !== undefined) {
+					} else if (options.detachedText !== undefined || newerDraft) {
 						restoreDetachedDraft(
 							this.ctx.editor,
 							restored,
@@ -1987,10 +1997,18 @@ export class InputController {
 					} else {
 						this.ctx.editor.setText(restored);
 					}
-					if (pendingFirst && images && failedQueueText === restored && options.detachedText === undefined) {
+					if (cleanPendingRecovery && images && options.detachedText === undefined) {
 						this.ctx.editor.pendingImages = [...images];
 						this.ctx.editor.pendingImageLinks = imageLinks ? [...imageLinks] : images.map(() => undefined);
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+					}
+					if (pendingFirst) {
+						failedQueueRecovery = {
+							textRevision: this.ctx.editor.textRevision,
+							images: [...this.ctx.editor.pendingImages],
+							newerDraft,
+							afterAcceptance: remaining.length > 0 ? formatQueueText(remaining) : undefined,
+						};
 					}
 				}
 			}
@@ -2034,7 +2052,10 @@ export class InputController {
 		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
 			try {
 				const input = await this.#runInputHandlers(text, images, imageLinks);
-				if (!input) return;
+				if (!input) {
+					restoreOnAccepted?.();
+					return;
+				}
 				({ text, images, imageLinks } = input);
 			} catch (error) {
 				restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);

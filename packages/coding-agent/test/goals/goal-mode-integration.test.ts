@@ -213,6 +213,7 @@ describe("InteractiveMode goal mode integration", () => {
 			harness.mode.editor.setText("saved [Image #1]");
 			harness.mode.editor.handleInput("\x13");
 			harness.mode.editor.setText(command);
+			harness.mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 			await harness.mode.editor.onSubmit?.(command);
 			expect(harness.mode.goalModeEnabled).toBe(enabled);
 			expect(harness.mode.editor.getText()).toBe("saved [Image #1]");
@@ -228,6 +229,7 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.mode.editor.setText("saved draft");
 		harness.mode.editor.handleInput("\x13");
 		harness.mode.editor.setText("/goal set");
+		harness.mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 
 		await harness.mode.editor.onSubmit?.("/goal set");
 
@@ -241,6 +243,7 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.mode.editor.setText("saved draft");
 		harness.mode.editor.handleInput("\x13");
 		harness.mode.editor.setText("/goal another objective");
+		harness.mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 
 		await harness.mode.editor.onSubmit?.("/goal another objective");
 		expect(harness.mode.editor.getText()).toBe("/goal another objective");
@@ -640,6 +643,7 @@ describe("InteractiveMode goal mode integration", () => {
 
 		const waiter = await armInputWaiter(harness.mode);
 		harness.mode.editor.setText("/goal ship the release");
+		harness.mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 		await harness.mode.editor.onSubmit?.("/goal ship the release");
 		await waiter.inputPromise;
 		expect(waiter.getResolvedInput()?.text).toBe("ship the release");
