@@ -27,6 +27,7 @@ from .protocol import (
     BashResult,
     FastModeResult,
     BranchMessage,
+    CacheWarmingMode,
     BranchResult,
     CancellationResult,
     CompactionResult,
@@ -74,6 +75,7 @@ from .protocol import (
     assistant_text,
     parse_agent_messages,
     parse_bash_result,
+    parse_cache_warming_mode,
     parse_fast_mode_result,
     parse_branch_messages,
     parse_branch_result,
@@ -1003,6 +1005,10 @@ class RpcClient:
 
     def set_auto_retry(self, enabled: bool) -> None:
         self._request("set_auto_retry", enabled=enabled)
+
+    def set_cache_warming(self, mode: CacheWarmingMode) -> CacheWarmingMode:
+        """Override cache warming for this session only, never writing config.yml; returns the effective mode."""
+        return parse_cache_warming_mode(self._request("set_cache_warming", mode=mode))
 
     def abort_retry(self) -> None:
         self._request("abort_retry")
