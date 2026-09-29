@@ -1,6 +1,9 @@
 import { type Component, Container, type HistoryBatch } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
+import { col } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { isNativeSettled, settleNative } from "../native/settle";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -198,6 +201,10 @@ export class TranscriptContainer extends Container {
 	 */
 	#frameRows = new Map<TranscriptEntry, readonly string[]>();
 	#frameRowsWidth = 0;
+	/** Block list handed to the native frame provider, reused while the children are unchanged. */
+	#nativeBlocks: readonly Component[] = [];
+	#nativeNode: NativeNode | undefined;
+
 	constructor() {
 		super();
 		this.#trackedChildren = this.#trackChildren(this.children);
@@ -771,6 +778,37 @@ export class TranscriptContainer extends Container {
 			if (rows.length >= cap) break;
 		}
 		return rows.length > cap ? rows.slice(rows.length - cap) : rows;
+	}
+
+	/**
+	 * The transcript's blocks for a native (TSP) surface, one component per
+	 * `main` child in transcript order; ids follow component identity, so
+	 * inserts, removals (rewind, displacement) and reorders become targeted ops.
+	 * Finalized blocks are settled as a hint; they stay editable, so a later
+	 * expansion, late result or reaction still reaches them wherever they sit.
+	 * No retirement happens on this path: the whole transcript is one document.
+	 * Returns the same array while the block list is unchanged.
+	 */
+	nativeBlocks(): readonly Component[] {
+		this.#syncEntries();
+		const children = this.children;
+		for (const child of children) {
+			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+		}
+		const previous = this.#nativeBlocks;
+		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
+			return previous;
+		}
+		this.#nativeBlocks = children.slice();
+		this.#nativeNode = undefined;
+		return this.#nativeBlocks;
+	}
+
+	/** Embedded as a child (transcript viewers): a stack of the {@link nativeBlocks}. */
+	override describe(): NativeNode {
+		const blocks = this.nativeBlocks();
+		this.#nativeNode ??= col(blocks, { role: "omp.transcript" });
+		return this.#nativeNode;
 	}
 
 	/** Full semantic render used by exports and non-terminal commands. */

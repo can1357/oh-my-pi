@@ -11,7 +11,15 @@ export interface ReactEnableResult {
 /** Error message shared by React helpers when their required hook is absent. */
 export const REACT_HOOK_REQUIRED_MESSAGE = "React DevTools hook not installed — call tab.reactEnable() first";
 
-const REACT_HOOK_INIT_SOURCE = `(() => {
+/** Result shape every page-side React helper returns before `requireReactHookResult` unwraps it. */
+export interface ReactPageEnvelope<T> {
+	missingHook?: boolean;
+	notFound?: boolean;
+	value?: T;
+}
+
+/** Page expression installing the minimal React DevTools hook; safe to run at document start or on a live page. */
+export const REACT_HOOK_INIT_SOURCE = `(() => {
 	const existing = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
 	if (existing && existing.__ompReact) return true;
 	const renderers = new Map();
@@ -164,7 +172,8 @@ const REACT_HOOK_INIT_SOURCE = `(() => {
 	return true;
 })()`;
 
-const REACT_ENABLE_READ_SOURCE = `(() => {
+/** Page expression reporting whether the hook is installed and the first renderer's React version (`ReactEnableResult`). */
+export const REACT_ENABLE_READ_SOURCE = `(() => {
 	const hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
 	if (!hook || !hook.__ompReact) return { installed: false };
 	let reactVersion;
@@ -177,20 +186,41 @@ const REACT_ENABLE_READ_SOURCE = `(() => {
 	return { installed: true, reactVersion };
 })()`;
 
+/** Backend-neutral page access used by the React and Web Vitals helpers. */
+export interface ReactPageHost {
+	/** Evaluate an expression source in the main frame's page world, awaiting a returned promise. */
+	evaluate(source: string, signal?: AbortSignal): Promise<unknown>;
+	/** Register an expression source to run at document start of every future document. */
+	addInitSource(source: string, signal?: AbortSignal): Promise<void>;
+	/** Reload the current document and wait for its load event. */
+	reload(signal?: AbortSignal): Promise<void>;
+}
+
+/** `ReactPageHost` over a Puppeteer page's main frame. */
+export function puppeteerReactHost(page: Page): ReactPageHost {
+	return {
+		evaluate: (source, signal) => untilAborted(signal, () => page.mainFrame().mainRealm().evaluate(source)),
+		async addInitSource(source, signal) {
+			await untilAborted(signal, () => page.evaluateOnNewDocument(source));
+		},
+		async reload(signal) {
+			await untilAborted(signal, () => page.reload({ waitUntil: "load" }));
+		},
+	};
+}
+
 /** Enable the minimal React DevTools hook before reloading the current page. */
-export async function enableReact(page: Page, signal?: AbortSignal): Promise<ReactEnableResult> {
-	await untilAborted(signal, () => page.evaluateOnNewDocument(REACT_HOOK_INIT_SOURCE));
-	await untilAborted(signal, () => page.mainFrame().mainRealm().evaluate(REACT_HOOK_INIT_SOURCE));
-	await untilAborted(signal, () => page.reload({ waitUntil: "load" }));
-	const result = (await untilAborted(signal, () =>
-		page.mainFrame().mainRealm().evaluate(REACT_ENABLE_READ_SOURCE),
-	)) as ReactEnableResult;
+export async function enableReact(host: ReactPageHost, signal?: AbortSignal): Promise<ReactEnableResult> {
+	await host.addInitSource(REACT_HOOK_INIT_SOURCE, signal);
+	await host.evaluate(REACT_HOOK_INIT_SOURCE, signal);
+	await host.reload(signal);
+	const result = (await host.evaluate(REACT_ENABLE_READ_SOURCE, signal)) as ReactEnableResult;
 	if (!result.installed) throw new ToolError("Unable to install the React DevTools hook in this document");
 	return result;
 }
 
 /** Unwrap a page-side React helper result or throw the shared missing-hook error. */
-export function requireReactHookResult<T>(result: { missingHook?: boolean; value?: T }): T {
+export function requireReactHookResult<T>(result: ReactPageEnvelope<T>): T {
 	if (result.missingHook || result.value === undefined) throw new ToolError(REACT_HOOK_REQUIRED_MESSAGE);
 	return result.value;
 }

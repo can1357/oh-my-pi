@@ -16,8 +16,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { VERSION_STAMP_MAGIC, VERSION_STAMP_SIZE } from "../packages/natives/native/version-sentinel.js";
 
-export { VERSION_STAMP_MAGIC, VERSION_STAMP_SIZE };
-
 const repoRoot = path.join(import.meta.dir, "..");
 const magicBytes = Buffer.from(VERSION_STAMP_MAGIC, "latin1");
 /** Longest version that fits while keeping at least one NUL terminator. */
@@ -33,7 +31,7 @@ export async function nativesPackageVersion(): Promise<string> {
 }
 
 /** True for thin or fat Mach-O images (either byte order). */
-export function isMachO(bytes: Uint8Array): boolean {
+function isMachO(bytes: Uint8Array): boolean {
 	if (bytes.length < 4) return false;
 	const magic = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, false);
 	return (

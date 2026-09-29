@@ -382,7 +382,7 @@ export function buildAggregatedToolCallResult(
 
 /**
  * Return type for `tool_result` handlers.
- * Allows handlers to modify tool results.
+ * Allows handlers to modify tool results and attach passive context.
  */
 export interface ToolResultEventResult {
 	/** Replacement content array (text and images) */
@@ -391,6 +391,16 @@ export interface ToolResultEventResult {
 	details?: unknown;
 	/** Override isError flag */
 	isError?: boolean;
+	/**
+	 * Trusted handler-authored instructions for the next provider request,
+	 * delivered like `ToolCallEventResult.additionalContext` but outside the tool
+	 * result. Unlike `tool_call` context it is also delivered when the call
+	 * failed: the handler sees the outcome (`event.isError`) and decides, which is
+	 * how failure-specific guidance reaches the model. Distinct non-blank values from
+	 * every handler are preserved in registration order (repeats are dropped) and precede the call's
+	 * `tool_call` context. Dropped only when the loop skips the call.
+	 */
+	additionalContext?: string;
 }
 
 /** Return type for `session_before_switch` handlers */

@@ -551,7 +551,7 @@ export interface ChatCompletionChunk {
 	/** Moderation results, present on the moderation chunk when requested. */
 	moderation?: ChatCompletionChunkModeration | null;
 	/** Processing type actually used for serving the request. */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/** Deprecated by OpenAI: backend configuration fingerprint, pairs with `seed`. */
 	system_fingerprint?: string;
 	/** Only with `stream_options: {"include_usage": true}`; null except on the last chunk. */
@@ -819,7 +819,7 @@ export interface ChatCompletionCreateParamsBase {
 	/** Deprecated by OpenAI (Beta): best-effort deterministic sampling seed. */
 	seed?: number | null;
 	/** Processing type used for serving the request. */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/** Up to 4 sequences where the API will stop generating further tokens. */
 	stop?: string | null | Array<string>;
 	/** Whether to store the output for model distillation or evals. */

@@ -4,6 +4,9 @@ import { type SelectItem, SelectList } from "../../components/select-list";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from "../../theme/theme";
+import { col, span, text } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 const GLYPH_PRESETS = ["nerd", "unicode", "ascii"] as const satisfies readonly SymbolPreset[];
@@ -34,6 +37,7 @@ class GlyphSceneController implements SetupSceneController {
 	#previewRequest = 0;
 	#committing = false;
 	#step: WizardStep | undefined;
+	#native = new Memo();
 
 	readonly #host: SetupSceneHost;
 
@@ -53,6 +57,7 @@ class GlyphSceneController implements SetupSceneController {
 	}
 
 	invalidate(): void {
+		this.#native.clear();
 		if (this.#step) this.#step.invalidate();
 		else this.#selectList.invalidate();
 	}
@@ -90,6 +95,16 @@ class GlyphSceneController implements SetupSceneController {
 		}
 		this.#step.setMaxHeight(maxLines);
 		return this.#step.render(width);
+	}
+
+	/** Hint line over the preset list; the list (sample glyphs as item detail) describes itself. */
+	describe(): NativeNode {
+		return this.#native.get([this.#selectList], () =>
+			col(
+				[text([span("If a row shows boxes, tofu, or misaligned icons, pick another.", "muted")]), this.#selectList],
+				{ gap: "sm", role: "omp.setup.glyph" },
+			),
+		);
 	}
 
 	async #commit(preset: SymbolPreset): Promise<void> {

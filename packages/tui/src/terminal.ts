@@ -5,6 +5,7 @@ import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
+import { TSP_VERSION } from "@oh-my-pi/pi-wire";
 import {
 	encodeBundledGlyphRegistrations,
 	encodeGlyphCoverageQuery,
@@ -14,6 +15,7 @@ import {
 	parseGlyphProtocolReply,
 } from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
+import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
 	isInsideTerminalMultiplexer,
@@ -486,6 +488,12 @@ export type PrivateModeReportHandler = (mode: number, supported: boolean, confir
  * glossary, so a host can safely repaint — or switch to the nerd preset.
  */
 export type GlyphProtocolReportHandler = (supported: boolean) => void;
+/**
+ * Outcome of the Tern Surface Protocol `hello` probe: the terminal's reply,
+ * or null when it answered the DA1 sentinel first (no TSP) or the probe was
+ * skipped (`PI_TUI_NATIVE=0`, multiplexers).
+ */
+export type TspHelloHandler = (hello: TspHello | null) => void;
 
 /**
  * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
@@ -654,6 +662,23 @@ export interface Terminal {
 	 * pi-tui versions keep working.
 	 */
 	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
+	/**
+	 * Register a callback fired once the Tern Surface Protocol `hello` probe
+	 * resolves (see {@link TspHelloHandler}); a resolved outcome is replayed to
+	 * late subscribers. TSP events arriving afterwards are delivered through
+	 * `onInput` as complete `ESC _ tsp;e;… ESC \` strings. Optional so custom
+	 * Terminals built against older pi-tui versions keep working.
+	 */
+	onTspHello?(callback: TspHelloHandler): void;
+	/** True while the `hello` probe awaits its reply or DA1 sentinel. */
+	readonly tspProbePending?: boolean;
+	/**
+	 * The environment names a Tern Surface Protocol terminal
+	 * (`TERM_PROGRAM=tern`) and the `hello` probe will run: the TUI takes input
+	 * at start and opens its surface before the reply, which then confirms or
+	 * revokes it.
+	 */
+	readonly tspExpected?: boolean;
 }
 
 /**
@@ -676,7 +701,8 @@ type Da1SentinelOwner =
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
-	| { kind: "glyphProtocol"; phase: "support" | "confirm" };
+	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
+	| { kind: "tsp" };
 
 let nextOsc99ProbeId = 1;
 
@@ -813,6 +839,10 @@ export class ProcessTerminal implements Terminal {
 	#glyphProtocolReplyBuffer = "";
 	#glyphProtocolResult: boolean | undefined;
 	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
+	#tspPending = false;
+	#tspResult: TspHello | null | undefined;
+	#tspCallbacks: TspHelloHandler[] = [];
+	#tspReplyBuffer = "";
 	#privateCsiResponseBuffer = "";
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
@@ -922,6 +952,26 @@ export class ProcessTerminal implements Terminal {
 		// The handshake runs from enableInput(), which can precede the host's
 		// subscription during startup; replay so the outcome is never missed.
 		if (this.#glyphProtocolResult !== undefined) callback(this.#glyphProtocolResult);
+	}
+
+	onTspHello(callback: TspHelloHandler): void {
+		this.#tspCallbacks.push(callback);
+		if (this.#tspResult !== undefined) callback(this.#tspResult);
+	}
+
+	get tspProbePending(): boolean {
+		return this.#tspPending;
+	}
+
+	get tspExpected(): boolean {
+		// A multiplexer started from Tern can leave `TERM_PROGRAM=tern` behind
+		// while swallowing APC, even when `PI_TUI_NATIVE=1` forces the probe.
+		return (
+			$env.TERM_PROGRAM?.toLowerCase() === "tern" &&
+			!isInsideTerminalMultiplexer($env) &&
+			!isTerminalHeadless() &&
+			this.#shouldQueryTspSupport()
+		);
 	}
 
 	start(
@@ -1065,6 +1115,10 @@ export class ProcessTerminal implements Terminal {
 		// triggers the bundled icon registration so the nerd symbol preset renders
 		// without a patched font installed.
 		this.#queryGlyphProtocolSupport();
+
+		// Tern Surface Protocol `hello`, same DA1 sentinel FIFO. A reply switches
+		// the TUI to describing its UI instead of painting rows.
+		this.#queryTspSupport();
 
 		// Subscribe to Mode 2031 appearance change notifications.
 		// When the terminal reports a change, we re-query OSC 11 to get the
@@ -1210,7 +1264,8 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
-				this.#glyphProtocolReplyBuffer.length === 0
+				this.#glyphProtocolReplyBuffer.length === 0 &&
+				this.#tspReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
 					this.#inputHandler(sequence);
@@ -1376,6 +1431,11 @@ export class ProcessTerminal implements Terminal {
 						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
 						break;
 					}
+					case "tsp": {
+						// DA1 before any `tsp;r` reply: the terminal doesn't speak TSP.
+						this.#resolveTspSupport(null);
+						break;
+					}
 				}
 				return;
 			}
@@ -1456,6 +1516,22 @@ export class ProcessTerminal implements Terminal {
 					const [, meta, payload] = osc99Match;
 					this.#osc99ResponseBuffer = "";
 					this.#handleOsc99CapabilityResponse(meta!, payload!);
+					return;
+				}
+			}
+
+			// Tern Surface Protocol APC (`ESC _ tsp ; … ESC \`): the hello reply
+			// resolves the probe; events go to the input handler whole, where the
+			// TUI routes them to the native backend before key matching.
+			if (this.#tspReplyBuffer || sequence.startsWith(TSP_PREFIX)) {
+				if (this.#tspReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#tspReplyBuffer = "";
+				} else {
+					this.#tspReplyBuffer += sequence;
+					if (!this.#tspReplyBuffer.endsWith("\x1b\\")) return;
+					const message = this.#tspReplyBuffer;
+					this.#tspReplyBuffer = "";
+					this.#handleTspMessage(message);
 					return;
 				}
 			}
@@ -1666,6 +1742,54 @@ export class ProcessTerminal implements Terminal {
 		// ignored the reply gate or a stray acknowledgement: keep it out of input.
 		if ((reply.verb === "r" || reply.verb === "c") && reply.status !== 0) {
 			logger.warn("Glyph Protocol: registration rejected", reply);
+		}
+	}
+
+	#shouldQueryTspSupport(): boolean {
+		const override = $env.PI_TUI_NATIVE;
+		if (override === "0") return false;
+		if (override === "1") return true;
+		// Multiplexers swallow APC, so the reply could never arrive.
+		if (isInsideTerminalMultiplexer($env)) return false;
+		return !isBunTestRuntime();
+	}
+
+	#queryTspSupport(): void {
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		if (this.#dead) return;
+		if (!this.#shouldQueryTspSupport()) {
+			this.#tspResult = null;
+			for (const cb of this.#tspCallbacks) cb(null);
+			return;
+		}
+		this.#tspPending = true;
+		this.#da1SentinelOwners.push({ kind: "tsp" });
+		this.#safeWrite(`${encodeTspHelloQuery()}\x1b[c`);
+	}
+
+	#handleTspMessage(sequence: string): void {
+		const message = parseTspMessage(sequence);
+		if (message?.verb === "r") {
+			if (message.reply.r === "hello") this.#resolveTspSupport(message.reply);
+			return;
+		}
+		this.#inputHandler?.(sequence);
+	}
+
+	#resolveTspSupport(hello: TspHello | null): void {
+		if (!this.#tspPending) return;
+		this.#tspPending = false;
+		const result = hello !== null && hello.v === TSP_VERSION ? hello : null;
+		if (hello !== null && result === null) logger.warn("TSP: unsupported protocol version", { v: hello.v });
+		this.#tspResult = result;
+		for (const cb of this.#tspCallbacks) {
+			try {
+				cb(result);
+			} catch (error) {
+				logger.warn("TSP: hello subscriber failed", { error: String(error) });
+			}
 		}
 	}
 
@@ -2017,6 +2141,10 @@ export class ProcessTerminal implements Terminal {
 		this.#glyphProtocolReplyBuffer = "";
 		this.#glyphProtocolCallbacks = [];
 		setTerminalGlyphProtocol(false);
+		this.#tspPending = false;
+		this.#tspResult = undefined;
+		this.#tspReplyBuffer = "";
+		this.#tspCallbacks = [];
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#da1SentinelOwners.length = 0;

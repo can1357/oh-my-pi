@@ -3,6 +3,7 @@ import { type ScrollRangeAnchor, ScrollView } from "../components/scroll-view";
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { truncateToWidth } from "../utils";
 import { theme } from "../theme/theme";
+import { sameItems } from "../native/memo";
 import {
 	composeOutlineColumn,
 	type ComposedColumn,
@@ -71,14 +72,6 @@ export interface TranscriptOutlineComposition {
 interface BrowserLayout {
 	bodyTop: number;
 	bodyHeight: number;
-}
-
-function sameLines(left: readonly string[], right: readonly string[]): boolean {
-	if (left.length !== right.length) return false;
-	for (let index = 0; index < left.length; index++) {
-		if (left[index] !== right[index]) return false;
-	}
-	return true;
 }
 
 /** Nearest visible target, preferring the preceding item just like the legacy selectors. */
@@ -250,7 +243,7 @@ export class TranscriptBrowser implements Component {
 		for (const line of frame.footer) output.push(this.#chromeLine(line, frameWidth));
 		output.push(...border);
 		const cached = this.#cachedLines;
-		if (cached && sameLines(cached, output)) return cached;
+		if (cached && sameItems(cached, output)) return cached;
 		this.#cachedLines = output;
 		return output;
 	}

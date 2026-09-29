@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -442,6 +443,89 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("My Custom Note");
+	});
+
+	it("drops note images together with the note when that option is deselected", async () => {
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose?", multi: true, options: [{ label: "Option A" }] }],
+			{
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+				onImagePrompt: vi.fn().mockResolvedValue({ text: "[Image #1]", images: [image] }),
+			},
+		);
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(SPACE);
+		component.handleInput(SPACE);
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+
+		const submitted = onSubmit.mock.calls[0][0].results[0];
+		expect(submitted).toMatchObject({
+			note: undefined,
+			selectedOptions: [],
+		});
+		expect(submitted.noteImages).toBeUndefined();
+	});
+
+	it("drops note images with a note on Other when no custom answer was given", async () => {
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose?", multi: true, options: [{ label: "Option A" }] }],
+			{
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+				onImagePrompt: vi.fn().mockResolvedValue({ text: "[Image #1]", images: [image] }),
+			},
+		);
+
+		component.handleInput(DOWN); // Other
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+
+		const submitted = onSubmit.mock.calls[0][0].results[0];
+		expect(submitted.note).toBeUndefined();
+		expect(submitted.noteImages).toBeUndefined();
+	});
+
+	it("returns note images and supplies them again when re-editing the same row", async () => {
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const onImagePrompt = vi
+			.fn()
+			.mockResolvedValueOnce({ text: "[Image #1]", images: [image] })
+			.mockResolvedValueOnce({ text: "Updated [Image #1]", images: [image] });
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent([{ id: "q1", question: "Choose?", options: [{ label: "Option A" }] }], {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+			onImagePrompt,
+		});
+
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(ENTER);
+
+		expect(onImagePrompt.mock.calls[1][1]).toEqual({ text: "[Image #1]", images: [image] });
+		expect(onSubmit.mock.calls[0][0].results[0]).toMatchObject({
+			note: "Updated [Image #1]",
+			noteImages: [image],
+		});
 	});
 
 	it("note prefill is empty when editing a different row after noting another option", async () => {
@@ -1546,6 +1630,63 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBeUndefined();
+	});
+
+	it("returns images pasted into the custom answer and supplies them again when it is edited", async () => {
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const onImagePrompt = vi
+			.fn()
+			.mockResolvedValueOnce({ text: "see [Image #1]", images: [image] })
+			.mockResolvedValueOnce({ text: "see [Image #1] again", images: [image] });
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn(), onImagePrompt },
+		);
+
+		component.handleInput(DOWN); // Other
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(ENTER);
+
+		expect(onImagePrompt.mock.calls[1][1]).toEqual({ text: "see [Image #1]", images: [image] });
+		expect(onSubmit.mock.calls[0][0].results[0]).toMatchObject({
+			customInput: "see [Image #1] again",
+			customInputImages: [image],
+		});
+	});
+
+	it("drops custom-answer images when the custom answer is cleared", async () => {
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const onImagePrompt = vi
+			.fn()
+			.mockResolvedValueOnce({ text: "[Image #1]", images: [image] })
+			.mockResolvedValueOnce({ text: "" });
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn(), onImagePrompt },
+		);
+
+		component.handleInput(DOWN); // Other
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+
+		const submitted = onSubmit.mock.calls[0][0].results[0];
+		expect(submitted.customInput).toBeUndefined();
+		expect(submitted.customInputImages).toBeUndefined();
 	});
 
 	it("normalizes malformed questions so render and submit do not crash", () => {

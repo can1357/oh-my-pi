@@ -8,6 +8,9 @@ import { renderComposerShapePreview } from "../../overlays/composer-shape-previe
 import { getComposerShapeOptions } from "../../overlays/composer-shape-registry";
 import { editorKey } from "../../chrome/keybinding-hints";
 import { getSelectListTheme, theme } from "../../theme/theme";
+import { ansi, col, span, text } from "../../native/describe";
+import type { DescribeContext, NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 class ComposerSceneController implements SetupSceneController {
@@ -19,6 +22,7 @@ class ComposerSceneController implements SetupSceneController {
 	#currentShape: ComposerShape = "band";
 	#committing = false;
 	#step: WizardStep | undefined;
+	#native = new Memo();
 
 	readonly #host: SetupSceneHost;
 
@@ -52,6 +56,7 @@ class ComposerSceneController implements SetupSceneController {
 	}
 
 	invalidate(): void {
+		this.#native.clear();
 		if (this.#step) this.#step.invalidate();
 		else this.#selectList.invalidate();
 	}
@@ -104,6 +109,30 @@ class ComposerSceneController implements SetupSceneController {
 		}
 		this.#step.setMaxHeight(maxLines);
 		return this.#step.render(width);
+	}
+
+	/**
+	 * Intro, the shape list, and the live preview. The preview is omp's own
+	 * composer chrome for the highlighted shape — exactly what the classic
+	 * renderer paints — so it travels as `ansi` rendered at the surface width.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		const confirm = editorKey("tui.select.confirm");
+		return this.#native.get([this.#currentShape, cx.cols, confirm], () =>
+			col(
+				[
+					text([span(`Select a layout; live preview updates below. Press ${confirm} to confirm.`, "muted")]),
+					this.#selectList,
+					col([
+						text([span("Preview:", "muted")]),
+						ansi(renderComposerShapePreview(this.#currentShape, cx.cols, this.#host.ctx.statusLine).join("\n"), {
+							cols: cx.cols,
+						}),
+					]),
+				],
+				{ gap: "sm", role: "omp.setup.composer" },
+			),
+		);
 	}
 
 	async #commit(shape: ComposerShape): Promise<void> {

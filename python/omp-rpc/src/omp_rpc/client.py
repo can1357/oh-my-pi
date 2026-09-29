@@ -44,7 +44,10 @@ from .protocol import (
     ModelInfo,
     OpenSessionResult,
     PromptResultEvent,
+    QueuedMessageQueue,
+    QueueUpdateEvent,
     ReadyEvent,
+    RemoveQueuedMessageResult,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
@@ -80,6 +83,7 @@ from .protocol import (
     parse_model_info,
     parse_notification,
     parse_open_session_result,
+    parse_remove_queued_message_result,
     parse_session_state,
     parse_session_stats,
     parse_thinking_level_cycle_result,
@@ -113,6 +117,7 @@ RetryFallbackSucceededListener = Callable[[RetryFallbackSucceededEvent], None]
 TtsrTriggeredListener = Callable[[TtsrTriggeredEvent], None]
 TodoReminderListener = Callable[[TodoReminderEvent], None]
 TodoAutoClearListener = Callable[[TodoAutoClearEvent], None]
+QueueUpdateListener = Callable[[QueueUpdateEvent], None]
 ProtocolErrorListener = Callable[["RpcProtocolError"], None]
 ListenerErrorListener = Callable[["ListenerErrorEvent"], None]
 TListener = TypeVar("TListener")
@@ -823,6 +828,9 @@ class RpcClient:
     def on_todo_auto_clear(self, listener: TodoAutoClearListener) -> Callable[[], None]:
         return self._add_typed_event_listener("todo_auto_clear", listener)
 
+    def on_queue_update(self, listener: QueueUpdateListener) -> Callable[[], None]:
+        return self._add_typed_event_listener("queue_update", listener)
+
     def on_ui_request(self, listener: UiRequestListener) -> Callable[[], None]:
         self._ui_request_listeners.append(listener)
         return lambda: self._remove_listener(self._ui_request_listeners, listener)
@@ -1236,6 +1244,14 @@ class RpcClient:
             "follow_up",
             message=message,
             images=list(images) if images is not None else None,
+        )
+
+    def remove_queued_message(
+        self, message: str, queue: QueuedMessageQueue
+    ) -> RemoveQueuedMessageResult:
+        """Remove one queued prompt; inspect the returned result's ``removed`` flag."""
+        return parse_remove_queued_message_result(
+            self._request("remove_queued_message", message=message, queue=queue)
         )
 
     def abort(self) -> None:
