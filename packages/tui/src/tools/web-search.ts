@@ -66,8 +66,13 @@ export interface SearchRenderDetails {
 }
 
 /** Render a web search failure as a framed error panel, matching the success layout. */
-function renderSearchErrorPanel(message: string, providerLabel: string | undefined, theme: Theme): Component {
-	const header = renderStatusLine({ icon: "error", title: "Web Search", description: providerLabel }, theme);
+function renderSearchErrorPanel(
+	message: string,
+	providerLabel: string | undefined,
+	theme: Theme,
+	title = "Web Search",
+): Component {
+	const header = renderStatusLine({ icon: "error", title, description: providerLabel }, theme);
 	const body = theme.fg("error", `Error: ${replaceTabs(message)}`);
 	return framedToolCard(theme, () => ({
 		header,
@@ -84,6 +89,7 @@ export function renderSearchResult(
 	args?: {
 		query?: string;
 		maxAnswerLines?: number;
+		title?: string;
 	},
 ): Component {
 	const details = result.details;
@@ -93,7 +99,7 @@ export function renderSearchResult(
 		const errorProvider = details.response?.provider;
 		const errorProviderLabel =
 			errorProvider && errorProvider !== "none" ? getSearchProviderLabel(errorProvider) : undefined;
-		return renderSearchErrorPanel(details.error, errorProviderLabel, theme);
+		return renderSearchErrorPanel(details.error, errorProviderLabel, theme, args?.title);
 	}
 
 	const rawText = result.content?.find(block => block.type === "text")?.text?.trim() ?? "";
@@ -120,17 +126,18 @@ export function renderSearchResult(
 			? truncateToWidth(searchQueries[0], 80)
 			: undefined;
 	const success = sourceCount > 0;
+	const title = args?.title ?? "Web Search";
 	const header = renderStatusLine(
 		success
 			? {
 					iconOverride: theme.styledSymbol("tool.webSearch", "accent"),
-					title: "Web Search",
+					title,
 					description: providerLabel,
 					meta: [formatCount("source", sourceCount)],
 				}
 			: {
 					icon: "warning",
-					title: "Web Search",
+					title,
 					description: providerLabel,
 					meta: [formatCount("source", sourceCount)],
 				},
@@ -237,12 +244,12 @@ export function renderSearchResult(
 
 /** Render web search call (query preview) */
 export function renderSearchCall(
-	args: { query?: string; [key: string]: unknown },
+	args: { query?: string; title?: string; [key: string]: unknown },
 	_options: RenderResultOptions,
 	theme: Theme,
 ): Component {
 	const query = truncateToWidth(args.query ?? "", 80);
-	const text = renderStatusLine({ icon: "pending", title: "Web Search", description: query }, theme);
+	const text = renderStatusLine({ icon: "pending", title: args.title ?? "Web Search", description: query }, theme);
 	return new Text(text, 0, 0);
 }
 
@@ -357,5 +364,18 @@ export const webSearchToolRenderer = {
 	): NativeToolView | undefined {
 		return searchResultMemo.get(result, [args?.query ?? ""], () => describeSearchResult(result, args));
 	},
+	mergeCallAndResult: true,
+} satisfies ToolRenderer<{ query?: string; title?: string; [key: string]: unknown }, SearchRenderDetails>;
+
+/** Same search rendering, X-branded. */
+export const xSearchToolRenderer = {
+	renderCall: (args: { query?: string; [key: string]: unknown }, options: RenderResultOptions, theme: Theme) =>
+		renderSearchCall({ ...args, title: "X Search" }, options, theme),
+	renderResult: (
+		result: { content: Array<{ type: string; text?: string }>; details?: SearchRenderDetails },
+		options: RenderResultOptions,
+		theme: Theme,
+		args?: { query?: string; maxAnswerLines?: number },
+	) => renderSearchResult(result, options, theme, { ...args, title: "X Search" }),
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<{ query?: string; [key: string]: unknown }, SearchRenderDetails>;

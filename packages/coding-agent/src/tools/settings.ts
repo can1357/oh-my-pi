@@ -738,6 +738,28 @@ export const cfgWebSearchEnabled = register({
 	},
 });
 
+export const cfgXSearchEnabled = register({
+	id: "x_search.enabled",
+	type: "enum",
+	values: ["auto", "on", "off"] as const,
+	default: "auto",
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "X Search",
+		description: "Enable the x_search tool for live X/Twitter posts via xAI",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Enable when an xAI credential (SuperGrok OAuth or API key) is configured",
+			},
+			{ value: "on", label: "On", description: "Always enable" },
+			{ value: "off", label: "Off", description: "Disable the x_search tool" },
+		],
+	},
+});
+
 export const cfgSecurityEnabled = register({
 	id: "security.enabled",
 	type: "boolean",
@@ -989,6 +1011,7 @@ export const cfgBuiltinToolGates = combine({
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,
 	webSearch: cfgWebSearchEnabled,
+	xSearch: cfgXSearchEnabled,
 });
 
 /** Settings that add or remove the built-in tools they gate (`AgentSession.reconcileBuiltinTools`). */

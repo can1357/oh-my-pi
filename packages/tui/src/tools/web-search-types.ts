@@ -96,4 +96,10 @@ export interface SearchResponse {
 	requestId?: string;
 	/** Authentication mode used by the provider (e.g. oauth, api-key) */
 	authMode?: string;
+	/**
+	 * True when the response is an answer without live-search evidence — e.g.
+	 * xAI `x_search` returned text but zero citations while narrowing filters
+	 * were active, meaning the model synthesized from training data.
+	 */
+	degraded?: boolean;
 }

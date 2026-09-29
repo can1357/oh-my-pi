@@ -72,6 +72,13 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 		accepts: model => modelKind(model) === "image",
 	},
 	web: { tag: "WEB", name: "Web search", color: "success", section: "kind", accepts: acceptsWeb },
+	xsearch: {
+		tag: "XSEARCH",
+		name: "X search",
+		color: "success",
+		section: "kind",
+		accepts: model => model.webSearch === "xai",
+	},
 	speech: {
 		tag: "SPEECH",
 		name: "Speech",

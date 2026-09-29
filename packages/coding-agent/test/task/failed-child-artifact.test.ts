@@ -44,7 +44,30 @@ describe("failed child evidence", () => {
 	it("hands the parent the finished child's exit status and readable artifact when the merge throws", async () => {
 		using tempDir = TempDir.createSync("@omp-failed-child-");
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
-		const git = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: tempDir.path(), stdout: "ignore" });
+		// Scrub host git config: a global/system core.fsmonitor, hooksPath, or
+		// credential helper on the runner can spawn a daemon or block these
+		// calls forever — the child git must see the same env hygiene the
+		// in-process vcs wrapper applies (GIT_TERMINAL_PROMPT, askpass, locks).
+		const GIT_ENV: Record<string, string> = {
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_ASKPASS: "true",
+			GIT_EDITOR: "true",
+			GIT_OPTIONAL_LOCKS: "0",
+		};
+		const git = (...args: string[]) => {
+			const proc = Bun.spawnSync(["git", ...args], {
+				cwd: tempDir.path(),
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "pipe",
+				env: { ...process.env, ...GIT_ENV },
+			});
+			if (proc.exitCode !== 0) {
+				throw new Error(`git ${args.join(" ")} failed: ${proc.stderr.toString().trim()}`);
+			}
+		};
 		git("init", "-q");
 		await fs.writeFile(path.join(tempDir.path(), "README.md"), "seed\n");
 		git("add", "README.md");

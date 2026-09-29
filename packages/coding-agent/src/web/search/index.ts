@@ -7,7 +7,7 @@
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AuthStorage, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
@@ -28,6 +28,7 @@ import {
 	getSearchProvider,
 	type SearchProvider,
 } from "./provider";
+import type { XSearchOptions } from "./providers/base";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -125,6 +126,12 @@ interface ExecuteSearchOptions {
 	/** The session's active model; `web/hosted` searches through it. */
 	sessionModel?: Model<Api>;
 	signal?: AbortSignal;
+	fetch?: FetchImpl;
+	/** x_search run: extra tool options for the xAI provider + xsearch role. */
+	xSearch?: {
+		systemPrompt: string;
+		options: XSearchOptions;
+	};
 }
 
 function isHostedPlaceholder(model: Model<Api>): boolean {
@@ -152,13 +159,14 @@ function expandHostedCandidate(
 	return models.map(model => ({ ...candidate, model }));
 }
 
-/** Execute web search */
-async function executeSearch(
+/** Execute a search through the role chain — web providers or the xAI x_search tool. */
+export async function executeSearch(
 	_toolCallId: string,
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const { authStorage, sessionId, signal } = options;
+	const xSearch = options.xSearch;
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
 	const pool = roleCandidatePool("web", settings, modelRegistry);
 	const candidates = params.model
@@ -168,7 +176,7 @@ async function executeSearch(
 					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
 					: [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain(xSearch ? "xsearch" : "web", settings, pool);
 	const expanded = candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool));
 
 	const parsedQuery = parseSearchQuery(params.query);
@@ -201,11 +209,22 @@ async function executeSearch(
 		lastProvider = candidateMeta;
 		try {
 			const model = candidate.model;
-			if (isHostedPlaceholder(model)) {
+			if (xSearch) {
+				// Only xAI-grounded models can back x_search; anything else in a
+				// shared pool is a non-candidate, not a provider failure.
+				if (model.webSearch !== "xai") {
+					if (!candidate.explicit) continue;
+					throw new SearchProviderError(
+						"xai",
+						`Model ${model.provider}/${model.id} does not support x_search. Select an xAI model.`,
+						400,
+					);
+				}
+				provider = await getGroundedSearchProvider("xai");
+			} else if (isHostedPlaceholder(model)) {
 				if (!candidate.explicit) continue;
 				throw new Error("The session model has no web search grounding.");
-			}
-			if (modelKind(model) === "search") {
+			} else if (modelKind(model) === "search") {
 				provider = await getSearchProvider(model.id);
 			} else if (model.webSearch) {
 				provider = await getGroundedSearchProvider(model.webSearch);
@@ -231,12 +250,13 @@ async function executeSearch(
 				parsedQuery,
 				limit: params.limit,
 				recency: params.recency,
-				systemPrompt: webSearchSystemPrompt,
+				systemPrompt: xSearch?.systemPrompt ?? webSearchSystemPrompt,
 				maxOutputTokens: params.max_tokens,
 				numSearchResults: params.num_search_results,
 				temperature: params.temperature,
 				signal,
 				timeoutMs,
+				fetch: options.fetch,
 				authStorage,
 				model,
 				thinkingLevel: candidate.thinkingLevel,
@@ -244,6 +264,7 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
+				xSearch: xSearch?.options,
 			});
 
 			// A host that silently drops the hosted search tool still answers from the
@@ -262,7 +283,12 @@ async function executeSearch(
 			// would wipe out every result. Citations/answer text stay untouched.
 			let finalResponse = response;
 			const constraintNotes: string[] = [];
-			if (parsedQuery.hasConstraints && response.sources.length > 0) {
+			if (xSearch && response.degraded) {
+				constraintNotes.push(
+					"x_search returned no citations despite the active filters; the answer may be model knowledge rather than live X posts",
+				);
+			}
+			if (!xSearch && parsedQuery.hasConstraints && response.sources.length > 0) {
 				const filtered = applyQueryConstraints(response.sources, parsedQuery);
 				if (filtered.sources.length !== response.sources.length) {
 					finalResponse = { ...response, sources: filtered.sources };
@@ -296,8 +322,10 @@ async function executeSearch(
 
 	if (availableProviderCount === 0 && failures.length === 0) {
 		const message = params.model
-			? `No web search model matches selector "${params.model}".`
-			: "No web search model configured.";
+			? `No ${xSearch ? "x_search" : "web search"} model matches selector "${params.model}".`
+			: xSearch
+				? "No x_search model configured. Set modelRoles.xsearch to an xAI model, or configure xAI OAuth / XAI_API_KEY."
+				: "No web search model configured.";
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
 			details: { response: { provider: "none", sources: [] }, error: message },
@@ -307,9 +335,11 @@ async function executeSearch(
 	const lastFailure = failures[failures.length - 1];
 	const baseMessage = lastFailure
 		? formatSearchProviderFailure(lastFailure.error, lastFailure.provider)
-		: `Unknown error from ${lastProvider?.label ?? "web search provider"}`;
+		: `Unknown error from ${lastProvider?.label ?? (xSearch ? "x_search" : "web search provider")}`;
 	const message =
-		failures.length > 1 ? `All web search providers failed: ${formatSearchProviderFailures(failures)}` : baseMessage;
+		failures.length > 1
+			? `All ${xSearch ? "x_search" : "web search"} providers failed: ${formatSearchProviderFailures(failures)}`
+			: baseMessage;
 
 	return {
 		content: [{ type: "text" as const, text: `Error: ${message}` }],
@@ -335,6 +365,8 @@ export async function runSearchQuery(
 		sessionId?: string;
 		sessionModel?: Model<Api>;
 		signal?: AbortSignal;
+		fetch?: FetchImpl;
+		xSearch?: { systemPrompt: string; options: XSearchOptions };
 	} = {},
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const createdAuthStorage = options.authStorage || options.modelRegistry ? undefined : await discoverAuthStorage();
@@ -349,6 +381,8 @@ export async function runSearchQuery(
 			sessionId: options.sessionId,
 			sessionModel: options.sessionModel,
 			signal: options.signal,
+			fetch: options.fetch,
+			xSearch: options.xSearch,
 		});
 	} finally {
 		createdAuthStorage?.close();
