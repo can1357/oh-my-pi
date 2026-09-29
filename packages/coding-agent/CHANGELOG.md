@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added accessible collapse controls to the HTML export’s session tree for folding branches with visible descendants ([#7761](https://github.com/can1357/oh-my-pi/pull/7761) by [@ParadaCarleton](https://github.com/ParadaCarleton)).
+
 ### Fixed
 
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
