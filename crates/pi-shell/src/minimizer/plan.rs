@@ -128,6 +128,46 @@ fn classify(command: &str, program: &Program) -> CommandPlan {
 	classify_pipeline(&and_or.first).unwrap_or(CommandPlan::Unsupported)
 }
 
+/// Trim the bytes bash uses to separate words (unquoted space, tab, and
+/// newline) from a verbatim segment slice — and only where the whitespace is
+/// unescaped.
+///
+/// `str::trim` is Unicode-aware and eats bytes bash keeps as word content
+/// (`echo a\rb` is one word `a\rb`; NBSP and other Unicode whitespace are
+/// word bytes too), while a plain `trim_matches([' ', '\t', '\n'])` eats
+/// escaped blanks and the newline of a `\`+newline continuation, leaving a
+/// dangling `\` that no longer re-parses and silently drops the chain out of
+/// segmentation. Whitespace preceded by an odd number of backslashes is
+/// escaped word content: stop there and keep everything before it, so the
+/// trim can never strip past an escape and merge two words back together.
+fn trim_word_separators(text: &str) -> &str {
+	const fn is_separator(byte: u8) -> bool {
+		matches!(byte, b' ' | b'\t' | b'\n')
+	}
+	// The whitespace byte at `at` is escaped when an odd number of
+	// backslashes immediately precede it (`\ ` is a blank byte inside a word;
+	// `\\ ` is a word-ending separator).
+	fn is_escaped(text: &str, at: usize) -> bool {
+		text[..at]
+			.bytes()
+			.rev()
+			.take_while(|&byte| byte == b'\\')
+			.count()
+			% 2 == 1
+	}
+
+	let bytes = text.as_bytes();
+	let mut start = 0;
+	while start < bytes.len() && is_separator(bytes[start]) && !is_escaped(text, start) {
+		start += 1;
+	}
+	let mut end = bytes.len();
+	while end > start && is_separator(bytes[end - 1]) && !is_escaped(text, end - 1) {
+		end -= 1;
+	}
+	&text[start..end]
+}
+
 fn classify_chain(command: &str, program: &Program) -> Option<CommandPlan> {
 	let items: Vec<&CompoundListItem> = program
 		.complete_commands
@@ -159,7 +199,7 @@ fn classify_chain(command: &str, program: &Program) -> Option<CommandPlan> {
 
 		loop {
 			let &(span_start, span_end) = spans.get(segments.len())?;
-			let source = command[span_start..span_end].trim();
+			let source = trim_word_separators(&command[span_start..span_end]);
 			let (segment_command, program) = simple_segment(pipeline, source)?;
 
 			let suppress_errexit = additional
@@ -464,11 +504,14 @@ fn verbatim_segment_spans(command: &str) -> Option<Vec<(usize, usize)>> {
 	// else means the scan and the parser disagree about the separators.
 	while spans
 		.last()
-		.is_some_and(|&(s, e)| command[s..e].trim().is_empty())
+		.is_some_and(|&(s, e)| trim_word_separators(&command[s..e]).is_empty())
 	{
 		spans.pop();
 	}
-	if spans.iter().any(|&(s, e)| command[s..e].trim().is_empty()) {
+	if spans
+		.iter()
+		.any(|&(s, e)| trim_word_separators(&command[s..e]).is_empty())
+	{
 		return None;
 	}
 	Some(spans)
@@ -755,6 +798,39 @@ mod tests {
 			chain_of(analyze("echo ${greeting:-a&&b} && echo done")).expect("expected Chain");
 		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
 		assert_eq!(texts, vec!["echo ${greeting:-a&&b}", "echo done"]);
+	}
+
+	#[test]
+	fn slice_boundaries_keep_non_separator_word_bytes() {
+		// bash delimits words only at unquoted blanks (space/tab) and newlines:
+		// `\r`, NBSP, and other Unicode whitespace are ordinary word bytes.
+		// Slicing must not eat them at segment boundaries (CRLF-authored
+		// chains hit this at every line boundary), or the re-run segment is a
+		// different command than the one typed.
+		let segments = chain_of(analyze("echo a\r && echo b")).expect("expected Chain");
+		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
+		assert_eq!(texts, vec!["echo a\r", "echo b"]);
+		let segments = chain_of(analyze("echo a && \u{a0}echo b")).expect("expected Chain");
+		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
+		assert_eq!(texts, vec!["echo a", "\u{a0}echo b"]);
+	}
+
+	#[test]
+	fn escaped_boundary_whitespace_stays_in_its_segment() {
+		// Escaped blanks and `\`+newline continuations at a boundary are word
+		// bytes, not separator gap: stripping them leaves a dangling `\` that
+		// fails to re-parse and silently drops the chain out of segmentation.
+		let segments = chain_of(analyze(r"echo a\ && echo b")).expect("expected Chain");
+		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
+		assert_eq!(texts, vec!["echo a\\ ", "echo b"]);
+		let segments = chain_of(analyze("echo a \\\n&& echo b")).expect("expected Chain");
+		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
+		assert_eq!(texts, vec!["echo a \\\n", "echo b"]);
+		// The same at the very end of the command: a trailing escaped blank
+		// must survive the boundary trim.
+		let segments = chain_of(analyze("echo a && echo b \\ ")).expect("expected Chain");
+		let texts: Vec<&str> = segments.iter().map(|s| s.command.as_str()).collect();
+		assert_eq!(texts, vec!["echo a", "echo b \\ "]);
 	}
 
 	#[test]
