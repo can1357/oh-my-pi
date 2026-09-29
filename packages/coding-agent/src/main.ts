@@ -1833,7 +1833,11 @@ export async function runRootCommand(
 		// extended-context window caps, so it must receive the finalized settings.
 		const modelRegistry = logger.time(
 			"modelRegistry:init",
-			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
+			() =>
+				new ModelRegistry(authStorage, undefined, {
+					settings: settingsInstance,
+					extraModelsPath: parsedArgs.modelsConfig,
+				}),
 		);
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
