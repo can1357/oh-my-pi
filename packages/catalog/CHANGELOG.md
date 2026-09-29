@@ -5,6 +5,13 @@
 ### Added
 
 - Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
+- Added `compat.bedrockMessagesApi` for `anthropic-messages` models: detected from a Bedrock `/anthropic` base URL under any provider id, it drops tool `strict`, fits `metadata.user_id` to Bedrock's pattern, and enables on-demand compaction; set it in `models.yml` to opt a proxy or an `ANTHROPIC_BASE_URL` reroute in, or `false` to opt out ([#13311](https://github.com/can1357/oh-my-pi/pull/13311)).
+
+### Fixed
+
+- Fixed on-demand compaction staying off for Claude models on the `amazon-bedrock` and `bedrock-mantle` providers when they use Bedrock's `/anthropic` routes ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
+- Fixed Claude models on Bedrock's `/anthropic` routes resolving `compat.disableStrictTools: false`, although those routes reject the tool `strict` field ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
+- Fixed Bedrock's FIPS (`bedrock-runtime-fips`) and AWS PrivateLink (`vpce-….vpce.amazonaws.com`) hostnames, and Mantle's documented `/v1` OpenAI base, not being recognized as Bedrock routes, which left them without native compaction and the `/anthropic` request fixes ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
 
 ## [18.4.3] - 2026-09-28
 

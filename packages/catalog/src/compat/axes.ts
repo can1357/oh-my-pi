@@ -190,6 +190,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
