@@ -71,7 +71,7 @@ describe("task renderer: streaming call preview", () => {
 		};
 
 		// The task text is the brief handed to the subagent; it renders
-		// byte-verbatim in full regardless of the expanded toggle.
+		// in full (literal-math markdown) regardless of the expanded toggle.
 		const collapsed = render(args, false);
 		expect(collapsed).toContain("Step 1");
 		expect(collapsed).toContain("Step 6");
