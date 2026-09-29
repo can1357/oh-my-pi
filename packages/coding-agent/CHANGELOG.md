@@ -8,6 +8,12 @@
 - Submitting exactly `exit`, `quit`, or `q` (any case, no leading `/`, nothing else in the input) in a session with no messages now quits; turn off with `input.bareExitOnEmptySession` ([#13755](https://github.com/can1357/oh-my-pi/pull/13755) by [@H4vC](https://github.com/H4vC))
 - Extensions can now rewrite finalized assistant-message text through the awaited `assistant_message` hook before it reaches context, history, and `message_end` ([#13769](https://github.com/can1357/oh-my-pi/pull/13769) by [@NaC-L](https://github.com/nac-l))
 - Added `additionalContext` to extension and hook `tool_result` results, so success- and failure-specific post-tool guidance reaches the model through the trusted developer channel instead of altering tool output ([#13267](https://github.com/can1357/oh-my-pi/pull/13267) by [@andrebrait](https://github.com/andrebrait)).
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+- Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged. A subscription replaced on the same artifact path waits for the previous sink to close before its capture opens, and a fresh capture truncates the file instead of overwriting it in place.
+- Added live progress monitoring for supervised services through Bash's `progress` option and `proc://<name>/progress`: attach or retune `wake`/`ambient` delivery, detach with `off`, and inspect watchers through `proc://`. Running background jobs with existing progress channels can also switch between `wake` and `ambient` through `proc://<job-id>/progress`; jobs reject `off` and cannot gain a channel after launch.
+- Added Bash `async: "auto"`: potentially slow finite commands stay inline for `bash.asyncAuto.inlineGraceMs`, then promote the same process without restarting. Short deadlines stay inline; at the job cap auto completes inline with a notice while `async: true` errors. Finite async commands can request `wake` or `ambient` progress after backgrounding.
+- Backgrounded Bash and Eval results now name the command or cell in the notice (`Backgrounded as job bg_5 (uv run verify.py); …`), keeping parallel results attributable even when they return out of order.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines (bounded by rows and bytes) behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red that stay visible even while tool activity is hidden.
 
 ### Fixed
 
@@ -32,6 +38,15 @@
 - Added native HUD and UI elements (status, tool cards, usage heatmap) for TSP terminals
 - Added support for native-only session info and job dashboard views in TSP terminals
 - Inside a Tern pane, the browser tool opens tabs as browser picture-in-pictures over omp's pane and drives their native web view (trusted input, ARIA snapshots, screenshots, PDF, dialogs, downloads, cookies, console, fetch/XHR routes and HAR, recording); it falls back to Chromium when no Tern window can host them. Opt out with `browser.tern`, `PI_BROWSER_TERN=0` or `app.tern: false`; `app.tern: true` requires it
+- Fixed daemon broker idle shutdown closing newly accepted clients before authentication under load; unauthenticated sockets now close after the client authentication timeout.
+- Fixed supervised image tunnels rejecting a published URL when the child exits between the startup log read and exit check; each tunnel child now uses a private temporary log directory.
+- Fixed a failed progress preview delivery leaving its mirrored output artifact unfinalized.
+- Service monitors are released at every conversation boundary, including same-id `/clear`; retained service completion survives a session switch or exit, but not reset or a new session.
+- Failed asynchronous Bash results no longer repeat output already shown through progress updates.
+- Completed asynchronous jobs now show their terminal result text in the TUI, including failures.
+- Supervised service completions now include a neutral diagnostic when a process exits with a nonzero code without a reported termination reason.
+- Clarified agent guidance for waits interrupted by background completions: account for the completion notice, then retry only if still blocked on results that will not be pushed ([#9373](https://github.com/can1357/oh-my-pi/pull/9373) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Fixed a supervised process's progress arriving out of order after its monitor was retuned between `wake` and `ambient`: output sampled before the switch now stays ahead of later output instead of landing behind it — or on a later turn — when the process completes.
 
 ## [18.4.3] - 2026-09-28
 
