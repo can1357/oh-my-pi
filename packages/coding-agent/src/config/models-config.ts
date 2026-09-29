@@ -2,6 +2,7 @@
  * Custom model/provider config file handle and validation.
  */
 
+import { isImageGenerationApi } from "@oh-my-pi/pi-ai/images";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { ConfigFile } from "./config-file";
@@ -34,6 +35,17 @@ export interface ProviderValidationConfig {
 	requestMetadata?: Record<string, string>;
 	modelOverrides?: Record<string, { api?: Api; kind?: ModelKind }>;
 	models: ProviderValidationModel[];
+}
+
+/**
+ * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
+ * transport serves `chat`, plus `image` when `generate_image` runs it (hosted
+ * Responses image tool, Gemini image models).
+ */
+function servedKinds(api: Api): readonly ModelKind[] {
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return [runnerKind];
+	return isImageGenerationApi(api) ? ["chat", "image"] : ["chat"];
 }
 
 export function validateProviderConfiguration(
@@ -86,17 +98,16 @@ export function validateProviderConfiguration(
 		throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
 	}
 
-	// Runners dispatch on `api`, so an explicit `kind` must be the kind its api serves
-	// (chat for chat transports). An omitted `kind` follows the api. `local-inference`
-	// hosts several kinds, so it accepts any `kind`.
+	// Runners dispatch on `api`, so an explicit `kind` must be one its api serves. An
+	// omitted `kind` follows the api. `local-inference` hosts several kinds, so it
+	// accepts any `kind`.
 	const checkKind = (subject: string, kind: ModelKind, api: Api) => {
 		if (api === "local-inference") return;
-		const apiKind = runnerApiKind(api) ?? "chat";
-		if (kind !== apiKind) {
-			throw new Error(
-				`Provider ${providerName}, ${subject}: kind "${kind}" does not match api "${api}", which serves kind "${apiKind}".`,
-			);
-		}
+		const served = servedKinds(api);
+		if (served.includes(kind)) return;
+		throw new Error(
+			`Provider ${providerName}, ${subject}: kind "${kind}" does not match api "${api}", which serves kind ${served.map(k => `"${k}"`).join(" or ")}.`,
+		);
 	};
 	for (const modelDef of models) {
 		if (!hasProviderApi && !modelDef.api) {

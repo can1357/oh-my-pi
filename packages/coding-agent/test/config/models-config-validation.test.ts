@@ -120,10 +120,20 @@ describe("model kind must match its api", () => {
 		expect(validate({ models: [{ id: "img", api: "openai-images", kind: "image" }] })).not.toThrow();
 	});
 
+	test("chat transports that generate_image runs also serve image", () => {
+		expect(validate({ models: [{ id: "gpt-image-2", api: "openai-responses", kind: "image" }] })).not.toThrow();
+		expect(
+			validate({ models: [{ id: "gemini-3-pro-image", api: "google-generative-ai", kind: "image" }] }),
+		).not.toThrow();
+		expect(validate({ models: [{ id: "voice", api: "openai-responses", kind: "tts" }] })).toThrow(
+			/model voice: kind "tts" does not match api "openai-responses", which serves kind "chat" or "image"/,
+		);
+	});
+
 	test("checks an override kind against the api it resolves to", () => {
 		const provider = { api: "openai-responses" as const, models: [] };
-		expect(validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "image" } } })).toThrow(
-			/modelOverrides\.gpt-image-2: kind "image" does not match api "openai-responses"/,
+		expect(validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "tts" } } })).toThrow(
+			/modelOverrides\.gpt-image-2: kind "tts" does not match api "openai-responses"/,
 		);
 		expect(
 			validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "image", api: "openai-images" } } }),
