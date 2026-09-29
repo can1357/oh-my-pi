@@ -222,15 +222,32 @@ fn is_shell_state_mutating_program(program: &str) -> bool {
 /// them first, by removal rather than by a space: a continuation inside a
 /// word must keep it joined (`ali\<newline>as` names `alias`, not `ali as`).
 /// What remains can still hide the mutator behind a split word or a
-/// redirection; those stay opaque below.
+/// redirection; those stay opaque below. A bare redirection operator
+/// (`> out`, `2> err.txt`) is followed by its operand — a pathname or
+/// here-document delimiter, never a command word — so consume that operand
+/// before continuing the utility scan: `command > /dev/null exec` invokes
+/// `exec` just like `command >/dev/null exec`.
 fn command_wrapper_invokes_mutator(segment: &plan::ChainSegment) -> bool {
 	let flattened = segment.command.replace("\\\n", "");
-	for word in flattened.split_whitespace() {
+	let mut words = flattened.split_whitespace();
+	while let Some(word) = words.next() {
 		if is_shell_state_mutating_program(word) {
 			return true;
 		}
 		if is_split_word_fragment(word) {
 			return true;
+		}
+		if is_bare_redirect_operator(word) {
+			// The operand is a separate word here. A missing operand, one
+			// that is itself operator-shaped, or a split fragment means the
+			// scan cannot tell where the redirection ends and the utility
+			// begins — stay opaque.
+			match words.next() {
+				Some(operand) if !is_redirect_word(operand) && !is_split_word_fragment(operand) => {
+					continue;
+				},
+				_ => return true,
+			}
 		}
 		if is_redirect_word(word) {
 			continue;
@@ -261,6 +278,23 @@ fn is_redirect_word(word: &str) -> bool {
 		|| word
 			.trim_start_matches(|c: char| c.is_ascii_digit())
 			.starts_with(['<', '>'])
+}
+
+/// True for a redirection operator whose operand is a separate word (`> out`,
+/// `>> log`, `2> err.txt`, `&> both`, `<<- EOF`): pure `[fd]` / `[<>]`
+/// punctuation — optionally `&`-prefixed or `<<-`-suffixed — with no attached
+/// word. The word after it is that operand (a pathname or here-document
+/// delimiter), never the wrapper's utility, so the utility scan must step over
+/// it. Attached forms must not consume a second word: `>out` carries its
+/// operand in the same word, `2>&1` an fd word, `>&-` / `2>&-` a `-`.
+fn is_bare_redirect_operator(word: &str) -> bool {
+	let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+	let rest = rest.strip_prefix('&').unwrap_or(rest);
+	let angles_end = rest
+		.find(|c: char| c != '<' && c != '>')
+		.unwrap_or(rest.len());
+	let (angles, tail) = rest.split_at(angles_end);
+	!angles.is_empty() && matches!(tail, "" | "&" | "|" | "-") && (tail != "-" || angles == "<<")
 }
 
 /// True for a leading `KEY=value` environment assignment (a prefix that does
@@ -884,6 +918,46 @@ strip_lines_matching = [".*"]
 			mode_for("echo ok && command git status && git diff", &cfg),
 			MinimizerMode::SegmentedChain,
 		);
+	}
+
+	#[test]
+	fn separated_redirect_operand_cannot_hide_shell_mutators() {
+		// Regression: the word after a bare redirection operator is the
+		// redirection's operand (a pathname or here-document delimiter), not
+		// the wrapper's utility — `command > /dev/null exec` invokes `exec`
+		// just like `command >/dev/null exec`. bash redirects the trailing
+		// `printf`'s stdout to /dev/null (only `ok` shows), but a scan that
+		// mistakes `/dev/null` for the utility finds no mutator and lets the
+		// segmented runner capture and return `hidden`.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		assert_eq!(
+			mode_for("echo ok && command > /dev/null exec && printf hidden", &cfg),
+			MinimizerMode::None,
+		);
+		// fd-prefixed operator with a separated operand: `err.txt` is the
+		// target, `exec` still rewires the shell's fds.
+		assert_eq!(
+			mode_for("echo ok && command 2> err.txt exec && printf hidden", &cfg),
+			MinimizerMode::None,
+		);
+		// A hidden `alias` behind a separated operand mutates later words just
+		// as the attached spellings pinned above do.
+		assert_eq!(
+			mode_for("echo ok && command > out alias git=foo && git status", &cfg),
+			MinimizerMode::None,
+		);
+		// The previously-covered attached spelling stays fixed as well.
+		assert_eq!(mode_for("echo ok && command >out exec", &cfg), MinimizerMode::None,);
+		// Positive control: a separated target with a real utility may still
+		// segment — opacity is not blanket for `> word`.
+		assert_eq!(
+			mode_for("echo ok && command > /dev/null git status", &cfg),
+			MinimizerMode::SegmentedChain,
+		);
+		// The operand of a bare operator is a pathname even when it is spelled
+		// like a mutator: `command > exec` truncates a file named `exec`, it
+		// does not invoke the builtin.
+		assert_eq!(mode_for("echo ok && command > exec", &cfg), MinimizerMode::SegmentedChain,);
 	}
 
 	#[test]
