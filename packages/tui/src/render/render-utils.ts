@@ -879,6 +879,7 @@ function defaultHomeDir(): string {
 
 interface HomePattern {
 	leading: RegExp;
+	/** Whole URIs (group-less) or a delimited home (`boundary`, `candidate`). */
 	embedded: RegExp;
 }
 
@@ -909,11 +910,21 @@ function homePatternFor(homeDir: string, windowsStyle: boolean): HomePattern {
 				})
 				.join("[\\\\/]");
 		}
+		// Home must start a path token: `./home`, `~/home`, `foo//home`, and
+		// `@/home` are relative or remote spellings, not the local home. `:` and
+		// `;` separate PATH entries, `path:line` suffixes, and HTML entities;
+		// `>` ends markup tags and shell redirections.
+		const preceding = "(^|[\\s\"'\\x60([{=,:;>])";
+		const trailing =
+			"(?=$|[\\\\/\\s\"'\\x60)\\]},;:<>]|\\x1b|&(?:quot|apos|gt);|[\"'\\x60()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+		const flags = windowsStyle ? "i" : "";
 		pattern = {
-			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, windowsStyle ? "i" : ""),
+			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, flags),
+			// URIs, including `file:`, are consumed whole: their text doubles as a
+			// link target, so any rewrite would change where the link opens.
 			embedded: new RegExp(
-				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
-				windowsStyle ? "gi" : "g",
+				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|${preceding}(${escapedHome})${trailing}`,
+				`${flags}gu`,
 			),
 		};
 		if (homePatternCache.size >= 16) homePatternCache.clear();
@@ -938,7 +949,13 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten embedded home paths; normalize Windows separators unless the caller preserves native error text. */
+/**
+ * Replace home-directory paths embedded in display text without matching a
+ * longer path component or a relative spelling such as `./home`. Windows-style
+ * homes are matched case-insensitively. URIs, including `file:` URIs, are
+ * preserved verbatim so link targets never change. Windows
+ * separators are normalized unless the caller preserves native error text.
+ */
 export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSeparators = false): string {
 	const resolvedHome = homeDir ?? defaultHomeDir();
 	if (!resolvedHome || resolvedHome.length <= 1) return text;
