@@ -61,6 +61,19 @@ provider "amazon-bedrock" {
 	models "moonshot.kimi-k2-thinking" {
 		thinking-requires-effort #true
 	}
+	// residue: the inference-profile prefixes leave the K3 rows in the
+	// "unknown" class, so an exact selector is the only match. K3 reasons via
+	// OpenAI-style reasoning_effort (low/high/max, default max), matching
+	// Moonshot's official API and every other provider's K3 entry. Verified
+	// live via Converse on global.moonshotai.kimi-k3: identical prompt yields
+	// ~1K output tokens at "high" vs ~2.4K at "max" (invalid values are
+	// accepted silently and behave like the max default).
+	models "*.moonshotai.kimi-k3" {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "max"
+		thinking-default-level "max"
+		thinking-requires-effort #true
+	}
 	// The Qwen rows arrive with maxTokens copied from the upstream context
 	// window (262000 on a 262144 window), so a request that does not set an
 	// output budget of its own asks Bedrock for more than the model accepts
