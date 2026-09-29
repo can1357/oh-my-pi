@@ -10,6 +10,9 @@ import {
 import { mathBlockAt, mathSpanAt, mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { latexToBlock } from "../latex-block";
 import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
+import { plainText } from "../native/spans";
+import { md } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import type { Component } from "../tui";
@@ -1817,6 +1820,7 @@ export class Markdown implements Component {
 	// B+ capture plumbing: #renderContentLines records the last rendered paragraph row.
 	#lastTailCapture?: { kind: "paragraph"; open: boolean; rowInput: string; rowRaw: string };
 	#ignoreTight = false;
+	#native?: { text: string; stream: boolean; node: NativeNode };
 	setIgnoreTight(ignore: boolean): this {
 		this.#ignoreTight = ignore;
 		this.invalidate();
@@ -1911,6 +1915,23 @@ export class Markdown implements Component {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
 		this.#cachedLines = undefined;
+	}
+
+	/**
+	 * The unrendered source as an `md` node, `stream` while the streaming
+	 * (transient) cache is on. Append-only growth yields a fresh node of the
+	 * same kind and key whose text extends the previous one, which the
+	 * reconciler sends as `text append`.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const stream = this.#transientRenderCache;
+		const cached = this.#native;
+		if (cached?.text === this.#text && cached.stream === stream) return cached.node;
+		// Sources are model text; OSC 8 / SGR bytes a caller spliced in are the terminal's to style, not ours.
+		const source = this.#text.includes("\x1b") ? plainText(this.#text) : this.#text;
+		const described = md(source, stream ? { stream: true } : undefined);
+		this.#native = { text: this.#text, stream, node: described };
+		return described;
 	}
 
 	/**

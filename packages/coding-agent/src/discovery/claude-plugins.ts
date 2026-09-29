@@ -238,6 +238,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						level: root.scope,
 						includeSelf: true,
 						origin: root.origin,
+						pluginName: root.plugin,
 					}),
 				),
 			);

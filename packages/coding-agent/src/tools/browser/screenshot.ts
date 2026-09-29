@@ -175,6 +175,36 @@ export async function captureScreenshotBuffer(
 	);
 }
 
+/** Page function (self-contained): draw numbered outlines for `payload.targets` under a root tagged with `payload.token`. */
+export function installAnnotationOverlayInPage(payload: {
+	token: string;
+	targets: ScreenshotAnnotationTarget[];
+}): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	const root = doc.createElement("div");
+	root.setAttribute("data-omp-screenshot-annotations", payload.token);
+	root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
+	for (const target of payload.targets) {
+		const outline = doc.createElement("div");
+		outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
+		const label = doc.createElement("span");
+		label.textContent = `[${target.id}]`;
+		label.style.cssText =
+			"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
+		outline.appendChild(label);
+		root.appendChild(outline);
+	}
+	doc.documentElement.appendChild(root);
+}
+
+/** Page function (self-contained): remove the overlay installed with `token`. */
+export function removeAnnotationOverlayInPage(token: string): void {
+	const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
+	const doc = pageGlobal.document;
+	doc.querySelector(`[data-omp-screenshot-annotations="${token}"]`)?.remove();
+}
+
 /** Install numbered annotation overlays and return an abort-aware cleanup function. */
 export async function installScreenshotAnnotations(
 	page: Page,
@@ -182,37 +212,9 @@ export async function installScreenshotAnnotations(
 	signal: AbortSignal | undefined,
 ): Promise<() => Promise<void>> {
 	const token = `omp-screenshot-${crypto.randomUUID()}`;
-	await untilAborted(signal, () =>
-		page.evaluate(
-			(payload: { token: string; targets: ScreenshotAnnotationTarget[] }) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				const root = doc.createElement("div");
-				root.setAttribute("data-omp-screenshot-annotations", payload.token);
-				root.style.cssText = "position:absolute;left:0;top:0;z-index:2147483647;pointer-events:none";
-				for (const target of payload.targets) {
-					const outline = doc.createElement("div");
-					outline.style.cssText = `position:absolute;left:${target.x}px;top:${target.y}px;width:${target.width}px;height:${target.height}px;box-sizing:border-box;border:2px solid #ff2bd6;background:rgba(255,43,214,.08)`;
-					const label = doc.createElement("span");
-					label.textContent = `[${target.id}]`;
-					label.style.cssText =
-						"position:absolute;left:-2px;top:-20px;padding:1px 4px;border:1px solid #111;border-radius:3px;background:#ffeb3b;color:#111;font:700 13px/16px ui-monospace,monospace;white-space:nowrap";
-					outline.appendChild(label);
-					root.appendChild(outline);
-				}
-				doc.documentElement.appendChild(root);
-			},
-			{ token, targets: [...targets] },
-		),
-	);
+	await untilAborted(signal, () => page.evaluate(installAnnotationOverlayInPage, { token, targets: [...targets] }));
 	return async () => {
-		await page
-			.evaluate((marker: string) => {
-				const pageGlobal = globalThis as unknown as { document: AnnotationDocument };
-				const doc = pageGlobal.document;
-				doc.querySelector(`[data-omp-screenshot-annotations="${marker}"]`)?.remove();
-			}, token)
-			.catch(() => undefined);
+		await page.evaluate(removeAnnotationOverlayInPage, token).catch(() => undefined);
 	};
 }
 

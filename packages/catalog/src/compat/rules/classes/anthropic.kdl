@@ -7,11 +7,11 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
-	// On-demand compaction (compact-2026-09-04) is available on the Claude
-	// API and Vertex, not Amazon Bedrock or unverified gateway deployments.
+	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
+	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
 	// effective URLs are checked at request time.
-	on "anthropic" "google-vertex" {
+	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
 		family "fable" {
 			revision ">=5" {
 				supports-server-compaction #true
@@ -68,6 +68,10 @@ class "anthropic" {
 	family "sonnet" {
 		revision ">=5.5 <6" {
 			supports-forced-tool-choice #false
+			// `thinking: {type: "disabled"}` is a 400; `between_tools` is the
+			// lowest thinking setting.
+			// https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#turn-off-up-front-thinking
+			supports-between-tools-thinking #true
 			// Signed thinking is bound to the exact preceding conversation.
 			thinking-prefix-binding #true
 		}

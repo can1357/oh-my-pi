@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -36,6 +37,8 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
 // OS UI font, which has no nerd-font PUA coverage.
 const DEFAULT_TERMINAL_TITLE = "π";
+/** The native tab title without a session name. */
+const NATIVE_TERMINAL_TITLE = "omp";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 /**
  * Emit a raw title escape sequence. While the TUI owns stdout its frames are
@@ -651,7 +654,17 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
-	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
+	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
+	emitTerminalTitle();
+}
+
+/**
+ * The branch's pull request number for the native tab title, which carries it
+ * after the session name (a TSP terminal has no status strip to show it in).
+ */
+export function setTerminalTitlePullRequest(pr: number | undefined): void {
+	terminalTitleRuntime.pullRequest = pr;
 	emitTerminalTitle();
 }
 
@@ -705,6 +718,12 @@ const TITLE_ATTENTION_SEPARATOR = "!";
 
 const terminalTitleRuntime: {
 	label: string | undefined;
+	/** The session's own name, without the cwd fallback `label` uses. */
+	sessionName: string | undefined;
+	/** The branch's pull request, shown in the native title only. */
+	pullRequest: number | undefined;
+	/** Unsubscribes the native-rendering watch taken by `initTerminalTitleState()`. */
+	unwatchNative: (() => void) | undefined;
 	state: TerminalTitleState;
 	frame: number;
 	enabled: boolean;
@@ -729,6 +748,9 @@ const terminalTitleRuntime: {
 	nativeTitleFailed: boolean;
 } = {
 	label: undefined,
+	sessionName: undefined,
+	pullRequest: undefined,
+	unwatchNative: undefined,
 	state: "idle",
 	frame: 0,
 	enabled: true,
@@ -774,27 +796,41 @@ export function buildTerminalTitleWithState(
 	return label ? `${DEFAULT_TERMINAL_TITLE} ${separator} ${label}` : `${DEFAULT_TERMINAL_TITLE} ${separator}`;
 }
 
+/**
+ * The tab title while a TSP terminal renders: the session name (`omp` before
+ * there is one) and the branch's pull request. The terminal shows run state
+ * itself, so there is no brand or state separator.
+ */
+export function buildNativeTerminalTitle(sessionName: string | undefined, pullRequest: number | undefined): string {
+	const name = sessionName ?? NATIVE_TERMINAL_TITLE;
+	return pullRequest === undefined ? name : `${name} · #${pullRequest}`;
+}
+
 function emitTerminalTitle(): void {
 	// The teardown latch lives at the sink (`writeTerminalTitle`), so every path
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
+	const native = isNativeRendering();
 	const next =
 		terminalTitleRuntime.extensionOverride ??
-		buildTerminalTitleWithState(
-			terminalTitleRuntime.label,
-			terminalTitleRuntime.state,
-			terminalTitleRuntime.frame,
-			terminalTitleRuntime.enabled,
-			process.platform,
-			terminalTitleRuntime.style,
-			$env as NodeJS.ProcessEnv,
-			terminalTitleRuntime.nativeTitleFailed,
-		);
+		(native
+			? buildNativeTerminalTitle(terminalTitleRuntime.sessionName, terminalTitleRuntime.pullRequest)
+			: buildTerminalTitleWithState(
+					terminalTitleRuntime.label,
+					terminalTitleRuntime.state,
+					terminalTitleRuntime.frame,
+					terminalTitleRuntime.enabled,
+					process.platform,
+					terminalTitleRuntime.style,
+					$env as NodeJS.ProcessEnv,
+					terminalTitleRuntime.nativeTitleFailed,
+				));
 	// The composed working title is the only write that can fail into an
 	// animated OSC frame: on native failure it re-pins static (`:`), while a
 	// direct `setTerminalTitle` preserves its caller's title verbatim.
 	const recomposeStaticOnFailure =
+		!native &&
 		terminalTitleRuntime.extensionOverride === undefined &&
 		terminalTitleRuntime.state === "working" &&
 		terminalTitleRuntime.enabled &&
@@ -809,6 +845,7 @@ function stopTerminalTitleSpinner(): void {
 
 function startTerminalTitleSpinner(): void {
 	if (
+		isNativeRendering() ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
@@ -889,6 +926,13 @@ export function initTerminalTitleState(): void {
 	// Releasing the latch alone would leave a stopped timer behind a `working`
 	// state — a frozen spinner frame. Mirror the enable path and re-arm.
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+	// A TSP terminal takes the plain native title while it renders; the
+	// classic `π > label` (and its spinner) comes back when it stops.
+	terminalTitleRuntime.unwatchNative ??= onNativeRenderingChange(native => {
+		if (native) stopTerminalTitleSpinner();
+		else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+		emitTerminalTitle();
+	});
 }
 
 /**
@@ -900,6 +944,8 @@ export function initTerminalTitleState(): void {
  */
 export function disposeTerminalTitleState(): void {
 	terminalTitleRuntime.disposed = true;
+	terminalTitleRuntime.unwatchNative?.();
+	terminalTitleRuntime.unwatchNative = undefined;
 	// `popTerminalTitle()` hands the terminal back to the shell, so the runtime no
 	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
 	// cleared below) must not swallow the first write after the latch releases.
