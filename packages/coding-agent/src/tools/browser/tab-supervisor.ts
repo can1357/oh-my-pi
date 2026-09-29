@@ -15,8 +15,9 @@ import { expandPath } from "../path-utils";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
-import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
+import { CmuxTab } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
+import { runInProcessTab } from "./in-process-run";
 import { DEFAULT_VIEWPORT } from "./launch";
 import { closeCdpTarget, forgetSharedTarget, recordSharedTarget, type SharedTargetScope } from "./orphan-registry";
 import {
@@ -26,6 +27,7 @@ import {
 	holdBrowser,
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
+	type TernBrowserHandle,
 } from "./registry";
 import type {
 	ReadyInfo,
@@ -40,6 +42,7 @@ import type {
 } from "./tab-protocol";
 
 import { cfgBrowserScreenshotDir } from "./settings";
+import { TernTab } from "./tern/tern-tab";
 
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -67,7 +70,7 @@ export interface PendingRun {
 	 * facade proxies unwind promptly instead of blocking to the run's
 	 * timeout. `pending.reject` still fires first so the awaiting caller
 	 * sees the tab-close error immediately; `closeAc` propagates the
-	 * cancellation into the still-running `runCmuxCode` body (issue #4499).
+	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
 }
@@ -120,7 +123,14 @@ export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 	cmuxAttachedSurface?: string;
 }
 
-export type TabSession = WorkerTabSession | CmuxTabSession;
+/** A tab shown as a Tern browser picture-in-picture over omp's pane. */
+export interface TernTabSession extends TabSessionBase<TernBrowserHandle> {
+	backend: "tern";
+	/** The PiP's driver. */
+	ternTab: TernTab;
+}
+
+export type TabSession = WorkerTabSession | CmuxTabSession | TernTabSession;
 
 export interface AcquireTabOptions {
 	url?: string;
@@ -369,10 +379,15 @@ async function acquireTabImpl(
 					existing.persist = opts.persist;
 				}
 				const reuseSteps: string[] = [];
-				if (opts.viewport && browser.kind.kind !== "cmux") {
+				if (opts.viewport && browser.kind.kind !== "cmux" && browser.kind.kind !== "tern") {
 					const dsf = opts.viewport.deviceScaleFactor;
 					reuseSteps.push(
 						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)} });`,
+					);
+				}
+				if (opts.viewport && existing.backend === "tern") {
+					reuseSteps.push(
+						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
 				if (opts.url) {
@@ -402,9 +417,10 @@ async function acquireTabImpl(
 		}
 	}
 
-	if ("client" in browser) {
+	if ("client" in browser || "tern" in browser) {
 		try {
-			const result = await acquireCmuxTab(name, browser, opts);
+			const result =
+				"client" in browser ? await acquireCmuxTab(name, browser, opts) : await acquireTernTab(name, browser, opts);
 			if (tempHold) await releaseBrowser(browser, { kill: false });
 			return result;
 		} catch (error) {
@@ -596,6 +612,59 @@ async function acquireCmuxTab(
 	}
 }
 
+/**
+ * Open a Tern browser PiP over omp's pane and configure it before its first
+ * real navigation. The PiP closes again when anything after `open` fails.
+ */
+async function acquireTernTab(
+	name: string,
+	browser: TernBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<AcquireTabResult> {
+	const ternTab = await TernTab.open(browser.tern, {
+		name,
+		pane: browser.kind.pane,
+		url: opts.url,
+		waitUntil: opts.waitUntil,
+		viewport: opts.viewport ?? DEFAULT_VIEWPORT,
+		timeoutMs: opts.timeoutMs,
+		signal: opts.signal,
+		dialogs: opts.dialogs,
+		allowedDomains: opts.allowedDomains,
+		initScripts: opts.initScripts,
+		downloadsPath: opts.downloadsPath,
+		userAgent: opts.userAgent,
+		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+	});
+	try {
+		const info = await ternTab.readyInfo();
+		if (opts.signal?.aborted) throw new ToolAbortError("Browser tab open aborted");
+		holdBrowser(browser);
+		const tab: TernTabSession = {
+			name,
+			browser,
+			targetId: String(ternTab.block),
+			backend: "tern",
+			ternTab,
+			state: "alive",
+			info,
+			pending: new Map(),
+			dialogPolicy: opts.dialogs,
+			allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
+			kindTag: browser.kind.kind,
+			ownerSessionId: opts.ownerSessionId,
+			persist: opts.persist ?? false,
+			lastActivityAt: Date.now(),
+			frozen: false,
+		};
+		tabs.set(name, tab);
+		return { tab, created: true };
+	} catch (error) {
+		await ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
+		throw error;
+	}
+}
+
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	return await runInTabWithSnapshot(
 		name,
@@ -641,11 +710,11 @@ async function runInTabWithSnapshot(
 	//      rejection would fire `unhandledRejection` and the CLI's
 	//      top-level handler would tear the whole session down, killing
 	//      every other tab and subagent sharing the process (issue #4499).
-	// The cmux branch also composes `closeAc.signal` into the run's abort
-	// signal so `wait(...)`, cmux socket calls, and the facade proxies
-	// unwind promptly when the tab is closed — otherwise a `wait(60_000)`
-	// with no in-flight socket request would keep `runCmuxCode` blocked
-	// until timeout even after the tab is gone.
+	// The in-process (cmux, Tern) branch also composes `closeAc.signal` into
+	// the run's abort signal so `wait(...)`, backend socket calls, and the
+	// facade proxies unwind promptly when the tab is closed — otherwise a
+	// `wait(60_000)` with no in-flight socket request would keep
+	// `runInProcessTab` blocked until timeout even after the tab is gone.
 	const closeAc = new AbortController();
 	const pending: PendingRun = {
 		resolve,
@@ -691,15 +760,15 @@ async function runInTabWithSnapshot(
 		const notAlive = new ToolError(`Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`);
 		return await Promise.race([promise, Promise.reject(notAlive)]);
 	}
-	if (tab.backend === "cmux") {
+	if (tab.backend === "cmux" || tab.backend === "tern") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;
 		try {
-			// `runCmuxCode.then(resolve, reject)` publishes the run's real
+			// `runInProcessTab.then(resolve, reject)` publishes the run's real
 			// outcome to `promise`, but `releaseTab` may have already
 			// rejected it — `Promise.withResolvers` settles on the first
 			// call and later resolve/reject are no-ops, so the tab-close
 			// error still wins the race.
-			runCmuxCode(tab.cmuxTab, {
+			runInProcessTab(tab.backend === "cmux" ? tab.cmuxTab : tab.ternTab, {
 				code: opts.code,
 				timeoutMs: opts.timeoutMs,
 				signal: runSignal,
@@ -712,6 +781,10 @@ async function runInTabWithSnapshot(
 			// Completion is use too: a run outlasting the idle timeout must
 			// not look stale to the sweep right after it finishes.
 			tab.lastActivityAt = Date.now();
+			// Tern pages report url/title through the tab itself (no worker `ready`).
+			if (tab.backend === "tern") {
+				tab.info = { ...tab.info, url: tab.ternTab.url(), title: tab.ternTab.lastTitle };
+			}
 		}
 	}
 	const abort = (): void => {
@@ -835,10 +908,10 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			} catch {}
 		}
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(closeError);
-		// Propagate the closure into the cmux run's abort signal so
-		// `wait(...)`, in-flight cmux socket calls, and the facade proxies
+		// Propagate the closure into the in-process run's abort signal so
+		// `wait(...)`, in-flight backend socket calls, and the facade proxies
 		// unwind promptly. Firing this BEFORE `pending.reject` means
-		// `runCmuxCode` finishes with `ToolAbortError` and its `.then(reject)`
+		// `runInProcessTab` finishes with `ToolAbortError` and its `.then(reject)`
 		// is a no-op — `promise` still settles with the tab-close error via
 		// the `reject` call below. Without it, a run that isn't currently
 		// making a socket request (e.g. `await wait(60_000)`) would keep
@@ -849,6 +922,34 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	tab.pending.clear();
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TAB_CLOSE_TIMEOUT_MS;
+	if (tab.backend === "tern") {
+		let closeError: unknown;
+		if (wasAlive) {
+			try {
+				await waitForTabCleanup(
+					tab,
+					timeoutMs,
+					`Tern browser block ${tab.targetId} (close)`,
+					tab.ternTab.close({ timeoutMs }),
+				);
+			} catch (err) {
+				closeError = err;
+			}
+		}
+		try {
+			await releaseBrowser(tab.browser, {
+				kill: opts.kill ?? false,
+				timeoutMs,
+				resource: `tab ${JSON.stringify(name)}`,
+			});
+		} catch (error) {
+			closeError ??= error;
+		} finally {
+			tabs.delete(name);
+		}
+		if (closeError) throw closeError;
+		return true;
+	}
 	if (tab.backend === "cmux") {
 		let closeError: unknown;
 		if (wasAlive && tab.cmuxOwnsSurface) {
@@ -971,6 +1072,15 @@ export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptio
  */
 function isSettleManaged(tab: TabSession): boolean {
 	return tab.backend === "worker" && tab.kindTag === "headless" && tab.state === "alive" && !tab.persist;
+}
+
+/**
+ * Tabs idle-close may reap: every settle-managed tab plus OMP-opened Tern
+ * PiPs (live, visible pages never frozen, but closed when abandoned like
+ * headless tabs), minus `persist` opt-outs.
+ */
+function isIdleManaged(tab: TabSession): boolean {
+	return isSettleManaged(tab) || (tab.backend === "tern" && tab.state === "alive" && !tab.persist);
 }
 
 /**
@@ -1116,7 +1226,7 @@ export async function freezeTabsForOwner(ownerId: string): Promise<number> {
 export function isIdleCloseCandidate(tab: TabSession, ownerId: string, nowMs: number, idleMs: number): boolean {
 	return (
 		tab.ownerSessionId === ownerId &&
-		isSettleManaged(tab) &&
+		isIdleManaged(tab) &&
 		tab.pending.size === 0 &&
 		nowMs - tab.lastActivityAt >= idleMs
 	);
@@ -1195,7 +1305,7 @@ export function earliestIdleCloseInMs(ownerId: string, idleMs: number, nowMs: nu
 	if (!ownerId || !(idleMs > 0)) return undefined;
 	let earliest: number | undefined;
 	for (const tab of tabs.values()) {
-		if (tab.ownerSessionId !== ownerId || !isSettleManaged(tab)) continue;
+		if (tab.ownerSessionId !== ownerId || !isIdleManaged(tab)) continue;
 		const remaining = idleMs - (nowMs - tab.lastActivityAt);
 		if (remaining <= 0) return 0;
 		earliest = earliest === undefined ? remaining : Math.min(earliest, remaining);
@@ -1463,7 +1573,9 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 	for (const pending of tab.pending.values()) pending.reject(error);
 	tab.pending.clear();
-	if (tab.backend === "cmux") {
+	if (tab.backend === "cmux" || tab.backend === "tern") {
+		if (tab.backend === "tern")
+			await tab.ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
 		await releaseBrowser(tab.browser, { kill: false });
 		tabs.delete(name);
 		return;
@@ -1492,7 +1604,7 @@ async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string
  * outlive their creating process and thus need cross-process orphan reaping).
  */
 function sharedScopeOf(browser: BrowserHandle): SharedTargetScope | undefined {
-	if ("client" in browser) return undefined;
+	if (!("browser" in browser)) return undefined;
 	if (browser.kind.kind !== "headless" || !browser.sharedDaemon) return undefined;
 	return { projectDir: browser.sharedDaemon.projectDir, daemonName: browser.sharedDaemon.name };
 }

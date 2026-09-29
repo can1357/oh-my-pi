@@ -1,3 +1,6 @@
+import { compactText, rowsText, styledSpans } from "../native/spans";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 
@@ -37,6 +40,7 @@ export class Section implements Component {
 	readonly #options: SectionOptions;
 	#cache: { width: number; epoch: number; child: readonly string[]; lines: readonly string[] } | undefined;
 	#disposed = false;
+	#native: { title: string; node: NativeNode } | undefined;
 
 	constructor(options: SectionOptions) {
 		this.#options = options;
@@ -51,6 +55,18 @@ export class Section implements Component {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		if (isComponent(this.#options.body)) this.#options.body.dispose?.();
+	}
+
+	/** A `section` headed by the styled title; the rule is the terminal's. */
+	describe(_cx: DescribeContext): NativeNode {
+		const options = this.#options;
+		const rawTitle = singleLine(options.title);
+		const title = options.titleStyle?.(rawTitle) ?? rawTitle;
+		if (this.#native?.title === title) return this.#native.node;
+		const body = isComponent(options.body) ? options.body : rowsText(options.body);
+		const described = node("section", { head: compactText(styledSpans(title)) }, [body]);
+		this.#native = { title, node: described };
+		return described;
 	}
 
 	render(width: number): readonly string[] {
