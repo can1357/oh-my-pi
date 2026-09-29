@@ -3,6 +3,7 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
@@ -84,7 +85,7 @@ interface SurfaceSplit {
 	 * id so a partial pass reproduces the on-screen live/text split without a
 	 * full, correctly-ordered walk.
 	 */
-	suppressedIds: Set<number>;
+	readonly suppressedIds: Set<number>;
 }
 
 function newSurfaceSplit(): SurfaceSplit {
@@ -96,7 +97,7 @@ function resetSurfaceSplit(split: SurfaceSplit): void {
 	split.onTerminal = 0;
 	split.planned = 0;
 	split.lastTotal = 0;
-	split.suppressedIds = new Set();
+	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
 }
 
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
@@ -283,8 +284,8 @@ export class ImageBudget {
 	 */
 	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
-		this.#passSuppression.clear();
-		this.#passIndex.clear();
+		if (this.#passSuppression.size > 0) this.#passSuppression.clear();
+		if (this.#passIndex.size > 0) this.#passIndex.clear();
 		this.#stablePass = stable;
 		this.#surface = altScreen ? "alt" : "screen";
 		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
@@ -295,7 +296,7 @@ export class ImageBudget {
 		// first. Note that leaving alt mode is not the same as unstacking a
 		// fullscreen overlay: the flush must exclude one that is still stacked
 		// from the pass itself, which is that caller's job, not this line's.
-		if (!altScreen) this.#liveIds.alt.clear();
+		if (!altScreen && this.#liveIds.alt.size > 0) this.#liveIds.alt.clear();
 		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
 
@@ -348,7 +349,10 @@ export class ImageBudget {
 		// [0, onTerminal) is what this surface currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
-		split.suppressedIds = new Set(this.#passIds.slice(0, split.onTerminal));
+		const suppressedIds = split.suppressedIds;
+		if (suppressedIds.size > 0) suppressedIds.clear();
+		const suppressedCount = Math.min(total, split.onTerminal);
+		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
 		return retry;
 	}
 
@@ -361,7 +365,12 @@ export class ImageBudget {
 	 * the next pass on the *other* surface knows what it may not destroy.
 	 */
 	limitResidentImages(): void {
-		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => this.#passShowsLive(id)));
+		const liveIds = this.#liveIds[this.#surface];
+		if (liveIds.size > 0) liveIds.clear();
+		for (let i = 0; i < this.#passIds.length; i++) {
+			const id = this.#passIds[i];
+			if (this.#passShowsLive(id)) liveIds.add(id);
+		}
 		const transmitted = this.#transmitted[this.#surface];
 		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
 		for (const id of transmitted) {
@@ -765,6 +774,13 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		// Only Kitty images with a budget id transmit their data separately from
+		// the placement; a pending re-transmit (after a purge or history clear)
+		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
+		// itself and never register a transmit, so gating their cache on it would
+		// re-encode the full image on every render pass.
+		const imageId = this.#imageId;
+		const transmitsSeparately = imageProtocol === ImageProtocol.Kitty && imageId != null;
 
 		if (
 			this.#cachedLines &&
@@ -774,7 +790,7 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true)
 		) {
 			return this.#cachedLines;
 		}
@@ -787,7 +803,7 @@ export class Image implements Component {
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,

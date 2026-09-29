@@ -139,6 +139,10 @@ features = [
   "update-control",
 ]
 
+# `cp`'s copy-on-write clones (`pi_iso::cow`).
+[target."cfg(any(unix, windows))".dependencies.pi-iso]
+workspace = true
+
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"
 features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "sync"]

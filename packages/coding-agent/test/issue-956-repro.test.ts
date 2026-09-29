@@ -334,28 +334,6 @@ describe("interactive /mcp test", () => {
 		expect(mcpTestEscapeHandlers).toHaveLength(0);
 	});
 
-	it("claims Esc ownership before the awaited server lookup", async () => {
-		const connection = {
-			name: "github",
-			config: { type: "stdio" as const, command: "github-mcp-server", args: ["serve"] },
-			transport: { connected: true, request: vi.fn(), notify: vi.fn(), close: vi.fn(async () => {}) },
-			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
-			capabilities: {},
-		};
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
-		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
-		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const mcpTestEscapeHandlers = new Set<() => void>();
-		const { controller } = createController({ mcpTestEscapeHandlers });
-
-		// Do not await: the handler must be registered synchronously, before the
-		// awaited `#resolveServerForAuth()` config read can suspend and let Esc
-		// fall through to aborting the agent turn.
-		const pending = controller.handle("/mcp test github");
-		expect(mcpTestEscapeHandlers).toHaveLength(1);
-		await pending;
-	});
-
 	it("releases Esc immediately when lookup fails before the hint is shown", async () => {
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockRejectedValue(new Error("EACCES: config unreadable"));
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer");

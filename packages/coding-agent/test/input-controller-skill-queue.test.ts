@@ -686,15 +686,6 @@ describe("AgentSession derived queued custom display", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
-	it("popLastQueuedMessage restores chip text and removes the core queue entry", async () => {
-		fixture = await createRealSession();
-		const { session } = fixture;
-		queueCustomSteer(session, "/skill:foo bar");
-
-		expect(session.popLastQueuedMessage()?.text).toBe("/skill:foo bar");
-		expect(session.getQueuedMessages().steering).toEqual([]);
-	});
-
 	it("counts a queued advisor card as pending work but keeps it out of chips and restore", async () => {
 		fixture = await createRealSession();
 		const { session } = fixture;

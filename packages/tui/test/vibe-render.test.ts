@@ -205,4 +205,29 @@ describe("vibe tool renderers", () => {
 			expect(line.length).toBeLessThanOrEqual(width);
 		}
 	});
+
+	it("reports killed sessions left off the wall as a header count, with or without live screens", () => {
+		const renderer = createVibeToolRenderer("list");
+		const render = (details: VibeToolDetails) =>
+			renderLines(
+				renderer.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: false },
+					uiTheme,
+					{},
+				) as { render(width: number): readonly string[] },
+			);
+
+		const withLive = render({
+			op: "list",
+			screens: [makeScreen({ id: "Live" })],
+			hiddenKilled: ["GoneA", "GoneB", "GoneC"],
+		});
+		expect(withLive[0]).toContain("3 killed hidden");
+		expect(withLive.join("\n")).not.toContain("GoneA");
+
+		const onlyKilled = render({ op: "list", screens: [], hiddenKilled: ["A", "B"] });
+		expect(onlyKilled.join("\n")).toContain("no live sessions");
+		expect(onlyKilled.join("\n")).toContain("2 killed hidden");
+	});
 });

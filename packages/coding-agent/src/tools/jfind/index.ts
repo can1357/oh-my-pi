@@ -12,12 +12,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
-import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../../judgment";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
 import { formatPathRelativeToCwd, normalizePathLikeInput, resolveSearchResultPath } from "../path-utils";
 import { toolResult } from "../tool-result";
-import { runCascade } from "./cascade";
+import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
@@ -33,6 +33,9 @@ export type FindToolInput = typeof findSchema.infer;
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
+
+/** Wall-clock budget for one `find` call; a stalled judge fails instead of blocking the turn. */
+const FIND_TIMEOUT_MS = 20_000;
 
 /**
  * Resolve `find.enabled` for a session: `auto` enables `find` only when the
@@ -86,19 +89,31 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			settings: this.session.settings,
 			registry,
 			sessionId: this.session.getSessionId?.() ?? undefined,
-			onUsage: journalJudgmentUsage(this.session.sessionManager, "find"),
+			purpose: "find",
+			onUsage: journalJudgmentUsage(this.session.sessionManager),
+			telemetry: this.session.getTelemetry?.(),
+			cache: sharedJudgmentCache(),
 		});
 		const started = performance.now();
-		const result = await runCascade({
-			root,
-			filesystem,
-			query,
-			extraKeywords: params.grep_keywords,
-			judge,
-			includeHidden: false,
-			signal,
-			onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
-		});
+		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		let result: CascadeResult;
+		try {
+			result = await runCascade({
+				root,
+				filesystem,
+				query,
+				extraKeywords: params.grep_keywords,
+				judge,
+				includeHidden: false,
+				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+			});
+		} catch (error) {
+			if (timeout.aborted && !signal?.aborted) {
+				throw new ToolError(`find timed out after ${formatDuration(FIND_TIMEOUT_MS)}`);
+			}
+			throw error;
+		}
 		const elapsedMs = performance.now() - started;
 		const { stats, threshold, keywords } = result;
 		// Cascade paths are root-relative; the model and renderer want paths

@@ -342,7 +342,6 @@ describe("session header on the Anthropic transport", () => {
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
 	});
 });
-
 describe("usage fetch carries attribution headers", () => {
 	it("sends User-Agent and a stable x-opencode-session on usage polls", async () => {
 		const seen: Array<Record<string, string>> = [];

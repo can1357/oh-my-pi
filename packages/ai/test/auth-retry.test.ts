@@ -184,20 +184,39 @@ describe("withAuth", () => {
 		]);
 	});
 
-	it("does not exhaust every sibling on pure 401 auth failures", async () => {
+	it("rotates through every distinct sibling on pure 401 auth failures until one succeeds", async () => {
 		const keys: string[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
 		const pool = ["k0", "k1", "k2", "k3"];
+		let resolveIndex = 0;
+
+		const result = await withAuth(
+			ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
+			},
+			async key => {
+				keys.push(key);
+				if (key === "k3") return "success";
+				throw authError();
+			},
+		);
+
+		expect(result).toBe("success");
+		expect(keys).toEqual(pool);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true, true]);
+	});
+
+	it("stops 401 rotation once the resolver cycles back to an attempted sibling", async () => {
+		const keys: string[] = [];
+		const pool = ["k0", "k1", "k2"];
 		let resolveIndex = 0;
 		let lastError: unknown;
 		let caught: unknown;
 
 		try {
 			await withAuth(
-				ctx => {
-					contexts.push(ctx);
-					return ctx.error === undefined ? pool[0] : pool[++resolveIndex];
-				},
+				ctx => (ctx.error === undefined ? pool[0] : pool[++resolveIndex % pool.length]),
 				async key => {
 					keys.push(key);
 					lastError = authError();
@@ -209,8 +228,7 @@ describe("withAuth", () => {
 		}
 
 		expect(caught).toBe(lastError);
-		expect(keys).toEqual(["k0", "k1", "k2"]);
-		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true]);
+		expect(keys).toEqual(pool);
 	});
 
 	it("continues quota rotation when a refreshed 401 retry becomes a usage limit", async () => {
@@ -535,7 +553,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					storage.calls.push("rotate");
-					return tokens.rotated !== undefined;
+					return { switched: tokens.rotated !== undefined };
 				},
 			},
 		};
@@ -620,7 +638,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					calls.push("rotate");
-					return true;
+					return { switched: true };
 				},
 			},
 		};
@@ -658,13 +676,11 @@ describe("withOAuthAccess", () => {
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
 	});
 
-	it("does not exhaust every OAuth sibling on pure 401 auth failures", async () => {
+	it("rotates through every distinct OAuth sibling on pure 401 auth failures", async () => {
 		const attempts: string[] = [];
 		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
 		const rotated = [access("sibling-1", { credentialId: 2 }), access("sibling-2", { credentialId: 3 })];
 		let rotateIndex = 0;
-		let lastError: unknown;
-		let caught: unknown;
 		const storage: OAuthAccessSource = {
 			oauth: {
 				async access(_provider, _sessionId, options) {
@@ -678,26 +694,24 @@ describe("withOAuthAccess", () => {
 				async rotate() {
 					calls.push("rotate");
 					rotateIndex += 1;
-					return true;
+					return { switched: true };
 				},
 			},
 		};
 
-		try {
-			await withOAuthAccess(storage, "prov", async a => {
-				attempts.push(a.accessToken);
-				lastError = authError();
-				throw lastError;
-			});
-		} catch (error) {
-			caught = error;
-		}
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "sibling-2") return "success";
+			throw authError();
+		});
 
-		expect(caught).toBe(lastError);
-		expect(attempts).toEqual(["stale", "fresh", "sibling-1"]);
+		expect(result).toBe("success");
+		expect(attempts).toEqual(["stale", "fresh", "sibling-1", "sibling-2"]);
 		expect(calls).toEqual([
 			{ forceRefresh: undefined },
 			{ forceRefresh: true },
+			"rotate",
+			{ forceRefresh: undefined },
 			"rotate",
 			{ forceRefresh: undefined },
 		]);
@@ -753,7 +767,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate(_provider, _sessionId, options) {
 					rotationTargets.push({ apiKey: options?.apiKey, credentialId: options?.credentialId });
-					return true;
+					return { switched: true };
 				},
 			},
 		};
@@ -785,7 +799,7 @@ describe("withOAuthAccess", () => {
 			limits: {
 				async rotate() {
 					rotateCalls += 1;
-					return true;
+					return { switched: true };
 				},
 			},
 		};

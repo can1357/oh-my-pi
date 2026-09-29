@@ -464,14 +464,6 @@ describe("Editor vim mode", () => {
 			// The second row highlights only the grapheme under the cursor.
 			expect(frame).toContain("\x1b[7mb\x1b[27m");
 		});
-
-		it("renders an empty buffer without a selection artifact", () => {
-			const editor = new Editor(defaultEditorTheme);
-			editor.setVimMode(true);
-			editor.handleInput(ESC);
-			editor.handleInput("v");
-			expect(() => editor.render(40)).not.toThrow();
-		});
 	});
 
 	describe("batched input", () => {

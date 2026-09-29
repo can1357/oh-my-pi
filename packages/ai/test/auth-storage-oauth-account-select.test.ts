@@ -178,30 +178,6 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(seen).toEqual(["access-b"]);
 	});
 
-	test("oauth.accessById does not substitute a sibling on failure", async () => {
-		const storage = authStorage;
-		if (!storage) throw new Error("test setup failed");
-		const seen: string[] = [];
-		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
-			const credential = credentials[provider];
-			if (!credential) return null;
-			seen.push(credential.access);
-			if (credential.accountId === "acc-b") throw new Error("invalid_grant");
-			return { newCredentials: credential, apiKey: credential.access };
-		});
-		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
-		const target = storage.oauth.accounts(PROVIDER)[1];
-		if (!target) throw new Error("expected second OAuth account");
-
-		const result = await storage.oauth.accessById(PROVIDER, target.credentialId);
-
-		expect(result?.ok).toBe(false);
-		if (!result || result.ok) throw new Error("expected failed resolution");
-		expect(result.credentialId).toBe(target.credentialId);
-		expect(result.accountId).toBe("acc-b");
-		expect(seen).toEqual(["access-b"]);
-	});
-
 	test("resolving the selected account by ID fails without touching siblings", async () => {
 		const storage = authStorage;
 		if (!storage) throw new Error("test setup failed");

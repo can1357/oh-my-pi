@@ -21,8 +21,9 @@
  * active column when a strip is open), Left/Right slide between branch
  * variants at a fork and jump between user turns elsewhere, `f` opens a
  * filter (typing narrows the current path to matching items; Esc leaves the
- * filter with the selection kept), Enter rewinds to the outlined item, Esc
- * cancels.
+ * filter with the selection kept), Enter rewinds to the outlined item, A loads
+ * earlier turns without changing selection (stepping above the oldest replayed
+ * turn loads them too), Esc cancels.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -36,7 +37,7 @@ import {
 	truncateToWidth,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
@@ -116,6 +117,10 @@ export class RewindSelectorComponent implements Component {
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
 
+	/** Whole branch; the selector may currently replay only its tail. */
+	#entries: TranscriptEntry[];
+	/** True while older history is still unreplayed. */
+	#truncated = false;
 	/** Filter query while the filter prompt is open; undefined shows the full transcript. */
 	#filter: string | undefined;
 	/** Main transcript rows from the last frame; the filter matches what is on screen. */
@@ -127,8 +132,10 @@ export class RewindSelectorComponent implements Component {
 		entries: TranscriptEntry[],
 		private readonly deps: RewindSelectorDeps,
 	) {
-		this.#builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(this.#builder, entries);
+		this.#entries = entries;
+		const tail = recentTranscriptEntries(entries);
+		this.#truncated = tail.length < entries.length;
+		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
 		this.#browser = new TranscriptBrowser({
 			getHeight: () => this.deps.ui.terminal?.rows || process.stdout.rows || 40,
@@ -142,7 +149,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#newBuilder(): ChatTranscriptBuilder {
-		return new ChatTranscriptBuilder({
+		const builder = new ChatTranscriptBuilder({
 			ui: this.deps.ui,
 			getTool: this.deps.getTool,
 			isBuiltInTool: this.deps.isBuiltInTool,
@@ -153,6 +160,30 @@ export class RewindSelectorComponent implements Component {
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
+		builder.setExpanded(this.#expanded);
+		return builder;
+	}
+
+	/** Build a transcript for `entries` and adopt its targets. */
+	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
+		const builder = this.#newBuilder();
+		this.#targets = appendOutlineEntries(builder, entries);
+		return builder;
+	}
+
+	/** Replay the whole branch, keeping the main outline on the same turn. */
+	#loadFullHistory(): void {
+		if (!this.#truncated) return;
+		const selectedId = this.#targets[this.#selected]?.turnId;
+		const previous = this.#builder;
+		this.#builder = this.#replay(this.#entries);
+		previous.dispose();
+		this.#truncated = false;
+		this.#mainVisible = undefined;
+		this.#mainRows = [];
+		const restored = selectedId ? this.#targets.findIndex(target => target.turnId === selectedId) : -1;
+		this.#selected = restored >= 0 ? restored : Math.max(0, this.#targets.length - 1);
+		this.deps.requestRender();
 	}
 
 	invalidate(): void {
@@ -186,7 +217,6 @@ export class RewindSelectorComponent implements Component {
 		for (const sibling of this.deps.siblingPaths(target.turnId)) {
 			if (sibling.entries.length === 0) continue;
 			const builder = this.#newBuilder();
-			builder.setExpanded(this.#expanded);
 			const targets = appendOutlineEntries(builder, sibling.entries);
 			const firstUser = sibling.entries.find(isUserTurnEntry);
 			const label = (firstUser && userTurnLabel(firstUser)) || sibling.rootId;
@@ -257,6 +287,8 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "f")) {
+			// The filter must search the whole branch, not just the startup tail.
+			this.#loadFullHistory();
 			this.#filter = "";
 			this.#activeVariant = 0;
 			this.#siblingSelected = 0;
@@ -289,6 +321,10 @@ export class RewindSelectorComponent implements Component {
 			} else if (this.#activeVariant === 0) {
 				this.#move(1, target => target.isUserTurn);
 			}
+			return;
+		}
+		if (data === "a" || data === "A") {
+			this.#loadFullHistory();
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
@@ -384,15 +420,19 @@ export class RewindSelectorComponent implements Component {
 
 	/**
 	 * Visible main-path target indices whose rendered text contains every
-	 * whitespace-separated query word as a whole word (case-insensitive: `ls`
-	 * matches `ls -la` but not `tools`); all visible targets for an empty query.
+	 * whitespace-separated Latin query word as a whole word (case-insensitive:
+	 * `ls` matches `ls -la` but not `tools`). Other scripts match substrings so
+	 * a Chinese query can find text inside a sentence without spaces.
+	 * All visible targets match an empty query.
 	 * Matching the rendered rows keeps results honest: collapsed tool output
 	 * only matches once Ctrl+O expands it.
 	 */
 	#filterMatches(): number[] {
 		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-		const patterns = words.map(
-			word => new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u"),
+		const patterns = words.map(word =>
+			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
+				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
+				: new RegExp(RegExp.escape(word), "u"),
 		);
 		const matches: number[] = [];
 		for (let index = 0; index < this.#targets.length; index++) {
@@ -432,7 +472,10 @@ export class RewindSelectorComponent implements Component {
 		this.#move(delta, () => true);
 	}
 
-	/** Step the main selection by `delta` to the nearest visible target passing `accept`. */
+	/**
+	 * Step the main selection by `delta` to the nearest visible target passing
+	 * `accept`; stepping above the replayed tail loads the earlier history first.
+	 */
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
@@ -445,6 +488,10 @@ export class RewindSelectorComponent implements Component {
 				return;
 			}
 			index += delta;
+		}
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#move(delta, accept);
 		}
 	}
 
@@ -492,7 +539,7 @@ export class RewindSelectorComponent implements Component {
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const leftRight = formatKeyHints(["left", "right"]);
 		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
-		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
+		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
 		return {
 			header: [this.#header()],
 			body: {

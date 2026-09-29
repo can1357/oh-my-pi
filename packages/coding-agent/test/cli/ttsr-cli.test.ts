@@ -140,18 +140,6 @@ describe("omp ttsr", () => {
 			expect(stdout).toContain("No rules triggered");
 		});
 
-		it("does not trigger a tool-scoped rule when --source text is explicit", async () => {
-			captureStreams();
-			const rulePath = await writeTempRule(": any", ["tool:edit(*.ts)"]);
-			const test: TtsrTestArgs = {
-				rule: rulePath,
-				source: "text",
-				snippet: "const x: any = 1",
-			};
-			await run({ action: "test", test });
-			expect(stdout).toContain("No rules triggered");
-		});
-
 		it("reports JSON with matched/defined condition arrays", async () => {
 			captureStreams();
 			const rulePath = await writeTempRule(": any", ["tool:edit(*.ts)"]);

@@ -684,7 +684,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
-	/** Custom rendering for tool call display */
+	/**
+	 * Custom rendering for tool call display.
+	 *
+	 * At runtime `options` also answers the {@link Theme} API, so renderers
+	 * ported from upstream pi — declared `renderCall(args, theme, context)` —
+	 * keep styling correctly.
+	 */
 	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
 
 	/** Custom rendering for tool result display */
@@ -1485,6 +1491,11 @@ export interface ExtensionAPI {
 
 	/**
 	 * Send a custom message to the session.
+	 *
+	 * With the default delivery (no `deliverAs`), an idle `display: true` message renders in the
+	 * transcript immediately, even with `triggerTurn: false`, without starting a turn. This does
+	 * not apply to `deliverAs: "nextTurn"` or `deliverAs: "aside"`, which keep the semantics
+	 * described below (`nextTurn` stays hidden until consumed; `aside` starts a turn when idle).
 	 *
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules

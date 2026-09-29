@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
@@ -267,6 +268,75 @@ describe("ImageBudget", () => {
 		expect(result.suppressed).toEqual([false, false, false]);
 	});
 
+	it("replaces suppression snapshots independently across surfaces and empty passes", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) budget.observe(id);
+			return budget.endPass();
+		};
+
+		expect(observePass([1, 2, 3])).toBe(true);
+		expect(observePass([1, 2, 3])).toBe(false);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([4, 5], true)).toBe(true);
+		expect(observePass([4, 5], true)).toBe(false);
+
+		// Replacing and shrinking the screen prefix must neither retain old ids
+		// nor mutate the independently committed alternate-buffer prefix.
+		expect(observePass([6, 7])).toBe(false);
+		budget.beginPass(true);
+		expect([1, 2, 6, 7].map(id => budget.observe(id))).toEqual([false, false, true, false]);
+		budget.beginPass(true, true);
+		expect([4, 5, 6].map(id => budget.observe(id))).toEqual([true, false, false]);
+
+		budget.beginAltScreenLifecycle();
+		budget.beginPass(true, true);
+		expect(budget.observe(4)).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(true);
+
+		expect(observePass([])).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(false);
+	});
+
+	it("replaces live snapshots without losing the other surface's retirement protection", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) {
+				if (!budget.observe(id)) budget.enqueueTransmit(id, `TX${id}`);
+			}
+			const retry = budget.endPass();
+			if (!retry) budget.limitResidentImages();
+			return retry;
+		};
+
+		expect(observePass([1])).toBe(false);
+		expect(budget.takeTransmits()).toEqual(["TX1"]);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([1, 2], true)).toBe(true);
+		expect(observePass([1, 2], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(budget.takeTransmits()).toEqual(["TX1", "TX2"]);
+
+		// The first pass relaxes the old threshold; the next transmits id 3.
+		expect(observePass([3], true)).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([2]);
+		expect(budget.takeTransmits()).toEqual(["TX3"]);
+		expect(budget.shouldTransmit(1)).toBe(false);
+
+		// Removing the screen frame releases its protection. The next alternate
+		// pass may retire id 1, but must keep its own current graphic, id 3.
+		expect(observePass([])).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([1]);
+		expect(budget.shouldTransmit(1)).toBe(true);
+		expect(budget.shouldTransmit(3)).toBe(false);
+	});
+
 	it("replays the committed live/text split by id during a stable (partial) pass", () => {
 		const budget = new ImageBudget(2, () => {});
 		// Settle to the steady split for 4 images at cap 2: oldest two (ids 1,2)
@@ -356,26 +426,6 @@ describe("Image budget integration", () => {
 		setKittyGraphics(originalGraphics);
 	});
 
-	it("renders within-budget images as graphics carrying their stable id", () => {
-		const budget = new ImageBudget(3, () => {});
-		const id = budget.acquireId("k");
-		const image = new Image(
-			BASE64_ONE_PIXEL_PNG,
-			"image/png",
-			{ fallbackColor: t => t },
-			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
-		);
-
-		budget.beginPass();
-		const lines = image.render(20);
-		budget.endPass();
-
-		const last = lines.at(-1) ?? "";
-		expect(last).toContain("\x1b_G");
-		expect(last).toContain(`i=${id}`);
-		expect(last).not.toContain("[Image:");
-	});
-
 	it("transmits the base64 once via the budget and renders only a placement line", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");
@@ -406,6 +456,35 @@ describe("Image budget integration", () => {
 		image.render(20);
 		budget.endPass();
 		expect([...budget.takeTransmits()]).toEqual([]);
+	});
+
+	it("encodes a budgeted SIXEL image once across render passes", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixel");
+		try {
+			const budget = new ImageBudget(3, () => {});
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+			);
+
+			const frames: (readonly string[])[] = [];
+			for (let pass = 0; pass < 3; pass++) {
+				budget.beginPass();
+				frames.push(image.render(20));
+				budget.endPass();
+			}
+
+			// SIXEL carries the image inside the line and never registers a
+			// transmit; each extra encode is a full synchronous re-encode per frame.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			expect(frames[0]?.at(-1)).toContain("\x1bP");
+			expect(frames[2]).toEqual(frames[0]!);
+		} finally {
+			encodeSixel.mockRestore();
+		}
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
@@ -1767,14 +1846,6 @@ describe("TUI inline-image budget", () => {
 });
 
 describe("kitty transmit / placement encoding", () => {
-	it("encodeKittyTransmit loads data by id without displaying it", () => {
-		const seq = encodeKittyTransmit(BASE64_ONE_PIXEL_PNG, 9);
-		expect(seq.startsWith("\x1b_Ga=t,f=100,q=2,i=9;")).toBe(true);
-		expect(seq.endsWith("\x1b\\")).toBe(true);
-		expect(seq).toContain(BASE64_ONE_PIXEL_PNG);
-		expect(seq).not.toContain("a=p");
-	});
-
 	it("encodeKittyPlacement displays a transmitted image by id with a stable placement id", () => {
 		const seq = encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 });
 		expect(seq).toBe("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\");

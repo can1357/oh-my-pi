@@ -63,12 +63,12 @@ const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 /**
  * `@` file lists are narrowed in place (`setFilter(liveToken)`) while a fresh
  * search runs, so a slow walk never leaves entries that contradict the typed
- * token on screen. An emptied list means the refresh is still pending.
+ * token on screen. An emptied list means the refresh is still pending; the
+ * popup stays open but renders nothing until results arrive.
  */
 const AT_FILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	...AUTOCOMPLETE_SELECT_LIST_LAYOUT,
 	filterItems: (items, token) => items.filter(item => atCompletionMatches(token, item.value)),
-	noMatchText: "Searching…",
 };
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -580,6 +580,8 @@ export class Editor implements Component, Focusable {
 	#wrapCache = new Map<string, WrapEntry>();
 	#wrapCacheWidth = -1;
 	#wrapCacheEpoch = -1;
+	/** Last `#getPromptGutter` result, keyed by (gutter string, clamped gutter width). */
+	#promptGutterCache: { source: string; firstLine: string; continuation: string; width: number } | undefined;
 	#paddingXOverride: number | undefined;
 	#maxHeight?: number;
 	#scrollOffset: number = 0;
@@ -1075,11 +1077,16 @@ export class Editor implements Component, Focusable {
 		if (!gutter) return undefined;
 		const gutterWidth = this.#getPromptGutterWidth(width, paddingX);
 		if (gutterWidth === 0) return undefined;
-		return {
+		const cached = this.#promptGutterCache;
+		if (cached !== undefined && cached.source === gutter && cached.width === gutterWidth) return cached;
+		const next = {
+			source: gutter,
 			firstLine: sliceByColumn(gutter, 0, gutterWidth, true),
 			continuation: padding(gutterWidth),
 			width: gutterWidth,
 		};
+		this.#promptGutterCache = next;
+		return next;
 	}
 
 	#getContentWidth(width: number, paddingX: number): number {
@@ -1532,15 +1539,15 @@ export class Editor implements Component, Focusable {
 		if (bottomRow !== undefined) result.push(bottomRow);
 
 		// Add autocomplete list if active
-		if (this.#autocompleteState && this.#autocompleteList) {
+		const autocompleteList = this.#visibleAutocompleteList();
+		if (autocompleteList) {
 			// Clamp the dropdown to the terminal viewport: the editor rows already
 			// rendered above plus a small reserve must stay visible.
 			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
-			this.#autocompleteList.setMaxVisible(
+			autocompleteList.setMaxVisible(
 				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
 			);
-			const autocompleteResult = this.#autocompleteList.render(width);
-			result.push(...autocompleteResult);
+			result.push(...autocompleteList.render(width));
 		}
 
 		return result;
@@ -1644,10 +1651,13 @@ export class Editor implements Component, Focusable {
 
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
-			// Escape - cancel autocomplete
+			// Escape - cancel autocomplete. A hidden popup (empty narrowed `@` list) is
+			// dropped too, so its pending refresh cannot pop up afterward, but the key
+			// falls through: the user never saw anything to dismiss.
 			if (kb.matchesCanonical(canonical, "tui.select.cancel")) {
+				const visible = this.isShowingAutocomplete();
 				this.#cancelAutocomplete(true);
-				return;
+				if (visible) return;
 			}
 			// Right arrow at end of line accepts the selection like Tab (fish-style).
 			// Mid-line, right arrow keeps its cursor-movement role and falls through.
@@ -1682,9 +1692,16 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.select.pageUp") ||
 					kb.matchesCanonical(canonical, "tui.select.pageDown")
 				) {
-					this.#autocompleteList.handleInput(data);
-					this.onAutocompleteUpdate?.();
-					return;
+					// An `@` popup whose narrowing filter matched nothing holds no candidate;
+					// let the key fall through instead of swallowing it.
+					if (!this.#autocompleteList.getSelectedItem()) {
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+					} else {
+						this.#autocompleteList.handleInput(data);
+						this.onAutocompleteUpdate?.();
+						return;
+					}
 				}
 
 				// If Tab was pressed, always apply the selection
@@ -1699,7 +1716,14 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 						return;
 					}
-					if (selected && this.#autocompleteProvider) {
+					if (!selected) {
+						// An `@` popup whose narrowing filter matched nothing stays open with no
+						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// popup and fall through so Tab keeps its normal completion role and a right
+						// arrow at end of line moves the cursor.
+						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+					} else if (this.#autocompleteProvider) {
 						const shouldChainAutocomplete =
 							this.#isSlashCommandNameAutocompleteSelection() || isDirectoryCompletionValue(selected.value);
 						const result = this.#autocompleteProvider.applyCompletion(
@@ -1725,7 +1749,8 @@ export class Editor implements Component, Focusable {
 							queueMicrotask(() => void this.#tryTriggerAutocomplete());
 						}
 					}
-					return;
+					// Only an accepted candidate consumes the key; an empty list falls through.
+					if (selected) return;
 				}
 
 				// If Enter was pressed on a submitted slash command (not an absolute-path
@@ -4224,8 +4249,19 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/**
+	 * Whether an autocomplete popup is on screen. An `@` list narrowed to no match
+	 * while its refresh is pending stays open internally but is hidden, so it does
+	 * not claim keys (Escape, Vim mode switches) meant for the editor or app.
+	 */
 	isShowingAutocomplete(): boolean {
-		return this.#autocompleteState !== null;
+		return this.#visibleAutocompleteList() !== undefined;
+	}
+
+	/** The open autocomplete list, unless it has no candidate to show. */
+	#visibleAutocompleteList(): SelectList | undefined {
+		if (this.#autocompleteState === null) return undefined;
+		return this.#autocompleteList?.getSelectedItem() ? this.#autocompleteList : undefined;
 	}
 
 	async #updateAutocomplete(): Promise<void> {

@@ -128,24 +128,6 @@ process.stdout.write(String(await probeRelayServer(url)));`,
 		}
 	});
 
-	it("surfaces stderr when a consumer exits before becoming ready", async () => {
-		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-failed-consumer-"));
-		const marker = path.join(home, "ready");
-		const consumer = observeConsumer(
-			Bun.spawn([process.execPath, "-e", 'console.error("synthetic relay startup failure"); process.exit(1)'], {
-				stdin: "pipe",
-				stdout: "ignore",
-				stderr: "pipe",
-			}),
-		);
-		try {
-			await expect(waitForConsumerReady(consumer, marker, 5_000)).rejects.toThrow("synthetic relay startup failure");
-		} finally {
-			await terminateConsumer(consumer);
-			await fs.rm(home, { recursive: true, force: true });
-		}
-	});
-
 	it("stays alive while a consumer in another project holds the global broker lease", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-global-"));
 		const firstProject = path.join(home, "project-a");

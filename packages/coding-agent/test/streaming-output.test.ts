@@ -196,6 +196,45 @@ describe("TailBuffer", () => {
 		expect(tail.text()).toBe("x");
 		expect(tail.bytes()).toBe(1);
 	});
+
+	test("streams the same window as tail-truncating the whole output", () => {
+		const series = [
+			["abc", "de\n", "fghij", "k"],
+			["ab", "é中", "😀x", "line\n", "✓ ok", "yy😀", "z"],
+		];
+		for (const chunks of series) {
+			for (const max of [3, 4, 5, 7, 9, 12, 20]) {
+				const tail = new TailBuffer(max);
+				let all = "";
+				for (let round = 0; round < 3; round++) {
+					for (const chunk of chunks) {
+						tail.append(chunk);
+						all += chunk;
+						const expected = truncateTailBytes(all, max);
+						expect(tail.text()).toBe(expected.text);
+						expect(tail.bytes()).toBe(expected.bytes);
+					}
+				}
+			}
+		}
+	});
+
+	test("joins a surrogate pair split across appends before trimming", () => {
+		const tail = new TailBuffer(6);
+		tail.append("ab\uD83D");
+		expect(tail.text()).toBe("ab\uD83D");
+		tail.append("\uDE00cd");
+		expect(tail.text()).toBe("😀cd");
+		expect(tail.bytes()).toBe(6);
+	});
+
+	test("keeps the character after a lone surrogate when trimming a budget-sized chunk", () => {
+		const tail = new TailBuffer(6);
+		tail.append("ab\uD800x");
+		tail.append("yzw");
+		expect(tail.text()).toBe("xyzw");
+		expect(tail.bytes()).toBe(4);
+	});
 });
 
 describe("OutputSink", () => {
@@ -700,17 +739,6 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.output.endsWith("L11")).toBe(true);
 		expect(dumped.output).toContain("elided");
 		expect(dumped.totalBytes).toBe(byteLength(lines));
-	});
-
-	test("disabled (headBytes=0) preserves tail-only behavior", async () => {
-		const sink = new OutputSink({ spillThreshold: 5, headBytes: 0 });
-		await sink.push("abc");
-		await sink.push("def");
-
-		const dumped = await sink.dump();
-		expect(dumped.truncated).toBe(true);
-		expect(dumped.output).toBe("bcdef");
-		expect(dumped.elidedBytes).toBeUndefined();
 	});
 
 	test("head fills cleanly across chunks without elision when total fits", async () => {

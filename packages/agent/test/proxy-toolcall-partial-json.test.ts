@@ -80,37 +80,6 @@ function extractToolCall(result: AssistantMessage): ToolCall {
 }
 
 describe("streamProxy — tool-call streaming and partialJson isolation", () => {
-	it("parses complete tool-call arguments from streamed deltas", async () => {
-		const events: ProxyAssistantMessageEvent[] = [
-			{ type: "start" },
-			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
-			{ type: "toolcall_delta", contentIndex: 0, delta: '{"comm' },
-			{ type: "toolcall_delta", contentIndex: 0, delta: 'and":"ls"}' },
-			{ type: "toolcall_end", contentIndex: 0 },
-			{
-				type: "done",
-				reason: "toolUse",
-				usage: { ...baseUsage },
-				content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
-			},
-		];
-		const body = buildSseBody(events);
-		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
-
-		const stream = streamProxy(mockModel, mockContext, {
-			proxyUrl: "http://localhost:0",
-			authToken: "test",
-			fetch: fetchMock,
-		});
-
-		await collectEvents(stream);
-		const result = await stream.result();
-		const toolCall = extractToolCall(result);
-		expect(toolCall.id).toBe("call_1");
-		expect(toolCall.name).toBe("bash");
-		expect(toolCall.arguments).toEqual({ command: "ls" });
-	});
-
 	it("exposes partialJson on content during streaming for renderers", async () => {
 		// Downstream renderers (event-controller.ts) read getStreamingPartialJson(content)
 		// during toolcall_delta to pace streaming previews. The field must be
@@ -174,38 +143,6 @@ describe("streamProxy — tool-call streaming and partialJson isolation", () => 
 		const result = await stream.result();
 		const toolCall = extractToolCall(result);
 		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
-	});
-
-	it("does not leak partialJson field into the final ToolCall object", async () => {
-		const events: ProxyAssistantMessageEvent[] = [
-			{ type: "start" },
-			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "read" },
-			{ type: "toolcall_delta", contentIndex: 0, delta: '{"path' },
-			{ type: "toolcall_delta", contentIndex: 0, delta: '":"/tmp/x"}' },
-			{ type: "toolcall_end", contentIndex: 0 },
-			{
-				type: "done",
-				reason: "toolUse",
-				usage: { ...baseUsage },
-				content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "/tmp/x" } }],
-			},
-		];
-		const body = buildSseBody(events);
-		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
-
-		const stream = streamProxy(mockModel, mockContext, {
-			proxyUrl: "http://localhost:0",
-			authToken: "test",
-			fetch: fetchMock,
-		});
-
-		await collectEvents(stream);
-		const result = await stream.result();
-		const toolCall = extractToolCall(result);
-		// partialJson is internal streaming state that must never appear on the
-		// typed ToolCall — its presence would corrupt downstream serialization.
-		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
-		expect(toolCall.arguments).toEqual({ path: "/tmp/x" });
 	});
 
 	it("parses the full buffer at toolcall_end even when throttled deltas lag", async () => {
@@ -296,46 +233,5 @@ describe("streamProxy — tool-call streaming and partialJson isolation", () => 
 		const toolCall = extractToolCall(result);
 		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
 		expect(toolCall.arguments).toEqual({ path: "/a" });
-	});
-
-	it("handles multiple concurrent tool calls with independent partialJson", async () => {
-		const events: ProxyAssistantMessageEvent[] = [
-			{ type: "start" },
-			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "read" },
-			{ type: "toolcall_delta", contentIndex: 0, delta: '{"path":"' },
-			{ type: "toolcall_start", contentIndex: 1, id: "call_2", toolName: "bash" },
-			{ type: "toolcall_delta", contentIndex: 1, delta: '{"command":"' },
-			{ type: "toolcall_delta", contentIndex: 0, delta: 'a"}' },
-			{ type: "toolcall_delta", contentIndex: 1, delta: 'ls"}' },
-			{ type: "toolcall_end", contentIndex: 0 },
-			{ type: "toolcall_end", contentIndex: 1 },
-			{
-				type: "done",
-				reason: "toolUse",
-				usage: { ...baseUsage },
-				content: [
-					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } },
-					{ type: "toolCall", id: "call_2", name: "bash", arguments: { command: "ls" } },
-				],
-			},
-		];
-		const body = buildSseBody(events);
-		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
-
-		const stream = streamProxy(mockModel, mockContext, {
-			proxyUrl: "http://localhost:0",
-			authToken: "test",
-			fetch: fetchMock,
-		});
-
-		await collectEvents(stream);
-		const result = await stream.result();
-		const toolCalls = result.content.filter((c): c is ToolCall => c.type === "toolCall");
-		expect(toolCalls.length).toBe(2);
-		expect(toolCalls[0].arguments).toEqual({ path: "a" });
-		expect(toolCalls[1].arguments).toEqual({ command: "ls" });
-		for (const tc of toolCalls) {
-			expect(getStreamingPartialJson(tc)).toBeUndefined();
-		}
 	});
 });

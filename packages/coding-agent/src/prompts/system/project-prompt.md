@@ -1,5 +1,4 @@
-PROJECT
-
+<project-context>
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
@@ -47,6 +46,10 @@ Additional workspace directories. This CURRENT workspace state supersedes worksp
 {{/each}}
 </workspace-roots>
 {{/if}}
+{{#if activeRepoContext}}
+{{activeRepoContext}}
+{{/if}}
+</project-context>
 
 <critical>
 - Each response MUST advance the task; completion only stopping condition.

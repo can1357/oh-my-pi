@@ -17,12 +17,21 @@ export interface ImageGenerationRequest {
 export interface GeneratedImage {
 	data: string;
 	mimeType: string;
+	/** Output dimensions (`WIDTHxHEIGHT`) the provider reports for this image, which may differ from the request. */
+	size?: string;
+	/** Rendering quality the provider reports for this image. */
+	quality?: string;
 }
 
 export interface ImageGenerationResult {
 	images: GeneratedImage[];
 	text?: string;
 	usage: Usage;
+	/**
+	 * Image model the provider reports having run. Hosted backends may substitute their own model for the
+	 * selected catalog entry (the ChatGPT/Codex backend does), so callers should prefer this over the catalog id.
+	 */
+	model?: string;
 }
 
 export interface ImageGenerationOptions {

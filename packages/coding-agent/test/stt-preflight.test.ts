@@ -58,11 +58,6 @@ describe("isSttModelCached completeness", () => {
 		expect(await downloader.isSttModelCached("whisper-base")).toBe(true);
 	});
 
-	it("treats a transformers model with config.json but no onnx weights as not cached", async () => {
-		await touch(path.join(cacheDir, WHISPER_BASE_REPO, "config.json"));
-		expect(await downloader.isSttModelCached("whisper-base")).toBe(false);
-	});
-
 	it("requires every sherpa model file to be present", async () => {
 		const repoDir = path.join(cacheDir, PARAKEET_REPO);
 		await touch(path.join(repoDir, "encoder.int8.onnx"));

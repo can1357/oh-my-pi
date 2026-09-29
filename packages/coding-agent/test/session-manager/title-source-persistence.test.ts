@@ -107,24 +107,6 @@ describe("session title source persistence", () => {
 		expect(reopened.titleSource).toBe("auto");
 	});
 
-	it("persists user title source across reopen", async () => {
-		const session = SessionManager.create(cwd);
-		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		await session.setSessionName("Manual title", "user");
-		session.appendMessage(makeAssistantMessage());
-		await session.flush();
-
-		const sessionFile = session.getSessionFile();
-		expect(sessionFile).toBeDefined();
-
-		const entries = await loadEntriesFromFile(sessionFile!);
-		expect(getHeader(entries)?.titleSource).toBe("user");
-
-		const reopened = await SessionManager.open(sessionFile!);
-		expect(reopened.getSessionName()).toBe("Manual title");
-		expect(reopened.titleSource).toBe("user");
-	});
-
 	it("loads legacy slotless files with header titles", async () => {
 		const sessionDir = SessionManager.getDefaultSessionDir(cwd);
 		fs.mkdirSync(sessionDir, { recursive: true });

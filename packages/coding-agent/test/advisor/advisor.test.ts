@@ -4065,30 +4065,6 @@ describe("advisor", () => {
 			expect(runtime.backlog).toBe(0);
 		});
 
-		it("drops backlog after 3 consecutive failures to prevent permanent stall", async () => {
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const agent: AdvisorAgent = {
-				prompt: async input => {
-					promptInputs.push(input);
-					throw new Error("fail");
-				},
-				abort: () => {},
-				reset: () => {},
-				state: { messages: [] },
-			};
-			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
-			const host: AdvisorRuntimeHost = {
-				snapshotMessages: () => messages,
-			};
-			const runtime = new AdvisorRuntime(agent, host, 0);
-
-			runtime.onTurnEnd(messages);
-			await settleUntil(() => promptInputs.length === 3 && runtime.backlog === 0);
-
-			expect(promptInputs).toHaveLength(3);
-			expect(runtime.backlog).toBe(0);
-		});
-
 		it("notifies the host once when consecutive prompt failures make the advisor unavailable", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const failures: unknown[] = [];

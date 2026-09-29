@@ -890,14 +890,21 @@ export function attach<E extends object>(error: E, id: number): E {
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
 export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
-	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite">;
+	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
-/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
+/**
+ * Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235).
+ *
+ * Prefers `contextTokens` when the provider reports it: providers that run
+ * several model calls per turn (Cursor's server-side tool loop) report
+ * `input`/`cacheRead` summed across those calls, which can exceed the window
+ * many times over while the conversation itself stays small.
+ */
 export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	const usage = message.usage;
 	if (!contextWindow || !usage) return false;
-	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 	return inputTokens > contextWindow;
 }
 

@@ -114,12 +114,13 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 			promptEntered.resolve();
 			if (options?.hangPrompt) {
 				await hangingPrompt.promise;
-				return;
+				return true;
 			}
 			const message = assistantStopMessage("submitting");
 			messages.push(message);
 			emit({ type: "message_end", message } as AgentSessionEvent);
 			emitTerminalYield({ report: text });
+			return true;
 		},
 		waitForIdle: async () => {},
 		isAdvisorActive: () => false,
