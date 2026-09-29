@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [18.4.3] - 2026-09-28
+
 ### Added
 
 - Added Command Code usage limits (5-hour, weekly, and credit balance) to /usage and the status line ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
-
-## [18.4.3] - 2026-09-28
 
 ### Changed
 
