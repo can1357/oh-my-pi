@@ -64,20 +64,6 @@ declare module "*.generated.js" {
 // axe-core's minified browser build, imported as text by the browser a11y audit
 // (coding-agent src/tools/browser/a11y/audit.ts) and evaluated inside the page.
 
-declare module "mathjax" {
-	interface MathJaxAdaptor {
-		serializeXML(node: unknown): string;
-	}
-
-	interface MathJaxRuntime {
-		init(config: Record<string, unknown>): Promise<void>;
-		startup: { adaptor: MathJaxAdaptor };
-		tex2svgPromise(tex: string, options: { display: boolean }): Promise<unknown>;
-	}
-
-	const MathJax: MathJaxRuntime;
-	export default MathJax;
-}
 declare module "axe-core/axe.min.js" {
 	const content: string;
 	export default content;

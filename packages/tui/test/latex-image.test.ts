@@ -1,14 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { latexImage } from "../src/chat/latex-image";
-import { latexSpans } from "../src/chat/latex-spans";
 import { assistantText } from "../src/overlays/copy-targets";
 import { ImageProtocol, TERMINAL } from "../src/terminal-capabilities";
 import { initTheme } from "../src/theme";
-
-const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
-const originalProtocol = TERMINAL.imageProtocol;
 
 function assistant(text: string): AssistantMessage {
 	return {
@@ -34,38 +30,28 @@ beforeAll(async () => {
 	await initTheme();
 });
 
-afterAll(() => {
-	terminal.imageProtocol = originalProtocol;
-});
-
 describe("LaTeX image rendering", () => {
-	it("extracts math while ignoring code spans and fences", () => {
-		expect(latexSpans("$x^2$ and `$ignored$`\n\n```latex\n$also_ignored$\n```\n\n$$\\frac{a}{b}$$")).toEqual([
-			{ tex: "x^2", display: false },
-			{ tex: "\\frac{a}{b}", display: true },
-		]);
-	});
-
-	it("renders MathJax SVG as a PNG image", async () => {
-		const image = await latexImage("\\frac{a}{b}", true);
+	it("rasterizes a display expression with the requested foreground", async () => {
+		const image = await latexImage("x+y=1", "#123456");
 		const metadata = await new Bun.Image(Buffer.from(image.data, "base64")).metadata();
 		expect(image.mimeType).toBe("image/png");
 		expect(metadata.width).toBeGreaterThan(0);
 		expect(metadata.height).toBeGreaterThan(0);
 	});
 
-	it("adds an image render without replacing the original LaTeX text", async () => {
-		terminal.imageProtocol = ImageProtocol.Iterm2;
-		const source = "Formula: $$\\frac{a}{b}$$";
-		let resolveUpdate: (() => void) | undefined;
-		const updated = new Promise<void>(resolve => {
-			resolveUpdate = resolve;
-		});
+	it("keeps inline math in text and renders only standalone display math as an image", async () => {
+		const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
+		Object.defineProperty(TERMINAL, "imageProtocol", { value: ImageProtocol.Iterm2 });
+		const source = "Let $x$ satisfy $x+y=1$.\n\n$$\\frac{a}{b}$$";
+		const updated = Promise.withResolvers<void>();
 		const message = assistant(source);
-		const component = new AssistantMessageComponent(message, false, () => resolveUpdate?.());
-		await updated;
+		const component = new AssistantMessageComponent(message, false, () => updated.resolve());
+		component.render(80);
+		await updated.promise;
 		const rendered = component.render(80).join("\n");
-		expect(rendered).toContain("\x1b]1337;File=inline=1");
+		expect(Bun.stripANSI(rendered)).toContain("Let x satisfy x+y=1.");
+		expect(rendered.match(/\x1b]1337;File=inline=1/g)).toHaveLength(1);
 		expect(assistantText(message)).toBe(source);
+		Object.defineProperty(TERMINAL, "imageProtocol", protocol);
 	});
 });
