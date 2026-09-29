@@ -105,6 +105,51 @@ describe("tool-call payload echoes render byte-verbatim", () => {
 		expect(rows.join("\n")).not.toContain(SUBSCRIPT_R);
 	});
 
+	// The brief is markdown prose again (owner decision): structure typesets,
+	// but the payload-mutation paths are gone in literal-math mode — no
+	// mathSpanAt consumption, no latexToUnicode, no BRE-group conversion, no
+	// `_r` subscripts, no escape smartening.
+	it("typesets brief markdown structure while math-shaped bytes stay literal", () => {
+		const brief = [
+			"## Goal",
+			"Keep pid=$$ and run: $(grep -c A_rows $P) verbatim, A_rows included.",
+			'grep "\\(A_rows\\)" $P',
+			"",
+			"- item one",
+		].join("\n");
+		const card = taskToolRenderer.renderCall({ name: "Echo", task: brief }, { expanded: false, isPartial: false }, theme);
+		const rows = frameBodyRows(theme, card, 500);
+		const joined = rows.join("\n");
+		expect(rows).toContain("Keep pid=$$ and run: $(grep -c A_rows $P) verbatim, A_rows included.");
+		expect(rows).toContain('grep "\\(A_rows\\)" $P');
+		expect(joined).toContain("pid=$$");
+		expect(joined).toContain("$(grep -c A_rows $P)");
+		expect(joined).not.toContain(SUBSCRIPT_R);
+		// `## Goal` typesets as a heading — its marker bytes are consumed on
+		// purpose, while the payload bytes above survive untouched. (The agent
+		// row's raw first-line preview keeps the marker by design.)
+		expect(rows).toContain("Goal");
+		expect(rows).not.toContain("## Goal");
+		// Lists typeset too.
+		expect(joined).toContain("item one");
+	});
+
+	// Reviewer smoke (blocking comment on the brief renderer): a long
+	// single-line brief paragraph used to disappear behind a marker-less clip —
+	// `END_OF_PARAGRAPH` was unreachable at width 80 in both expanded states.
+	// Prose wraps now (soft wraps in prose are normal and unambiguous): every
+	// byte shows across rows instead of being cut.
+	it("wraps long brief paragraphs fully instead of clipping (reviewer brief smoke)", () => {
+		const brief = `## Goal\nInvestigate why ${"the session persistence layer ".repeat(6)}keeps the JSONL append atomic. END_OF_PARAGRAPH\n\n- Read the store.`;
+		for (const expanded of [false, true]) {
+			const card = taskToolRenderer.renderCall({ name: "Echo", task: brief }, { expanded, isPartial: false }, theme);
+			const joined = frameBodyRows(theme, card, 80).join("\n");
+			expect(joined).toContain("JSONL append");
+			expect(joined).toContain("END_OF_PARAGRAPH");
+			expect(joined).toContain("Read the store.");
+		}
+	});
+
 	// If the frame prose-wraps echo rows, a long command line breaks into
 	// several rows at width-dependent points indistinguishable from real
 	// newlines — the echo misrepresents the command's line structure.
