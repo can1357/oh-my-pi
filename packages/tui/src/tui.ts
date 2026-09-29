@@ -191,11 +191,11 @@ export interface TerminalFrameProvider {
 /** How the stop-time history flush writes un-retired rows; what a provider's beginHistoryFlush receives. */
 export interface HistoryFlushOptions {
 	/**
-	 * Write at most this many of the newest un-retired rows; the older eligible
-	 * blocks retire without being written anywhere. Pass a cap only when the
-	 * process is exiting and either another copy survives (a saved session file,
-	 * which `omp --resume` restores) or a fast exit matters more than scrollback
-	 * (a disconnect, a signal or fatal-error restore).
+	 * Write at most this many of the newest un-retired rows, as whole blocks; the
+	 * older eligible blocks retire without being written anywhere. Pass a cap
+	 * only when the process is exiting and either another copy survives (a saved
+	 * session file, which `omp --resume` restores) or a fast exit matters more
+	 * than scrollback (a disconnect, a signal restore).
 	 */
 	maxRows?: number;
 }
@@ -954,6 +954,7 @@ export class TUI extends Container {
 	#hasEverRendered = false;
 	#stopped = false;
 	#cancelPostmortemRestore?: () => void;
+	#exitFlushProvider: (() => HistoryFlushOptions) | undefined;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
@@ -1299,6 +1300,18 @@ export class TUI extends Container {
 		this.#inlineMouseProvider = provider;
 	}
 
+	/**
+	 * How the transcript flushes when postmortem stops a still-running TUI for a
+	 * fatal error, or for `postmortem.quit()` without a prior stop (an owner's
+	 * teardown-failure escape hatch). Read at that moment: return `{ maxRows }`
+	 * only while another copy of the transcript survives, such as a saved
+	 * session file. Without a provider that restore flushes in full; a signal's
+	 * restore is always capped.
+	 */
+	setExitFlushProvider(provider: (() => HistoryFlushOptions) | undefined): void {
+		this.#exitFlushProvider = provider;
+	}
+
 	/** Transition mouse reporting, emitting only the sequences a change needs. */
 	#setMouseTracking(state: MouseTrackingState): void {
 		if (state === this.#mouseTracking) return;
@@ -1447,13 +1460,20 @@ export class TUI extends Container {
 		);
 		if (this.#stopped) return;
 		this.#cancelPostmortemRestore?.();
-		// Always capped. Postmortem runs this synchronously on any exit that finds
-		// the TUI still running: a signal, a fatal error, or `postmortem.quit()`
-		// without a prior stop (the teardown-failure escape hatch). A full flush
-		// there would delay teardown and the fatal report. For an unsaved session
-		// the rows the cap skips are lost.
-		this.#cancelPostmortemRestore = postmortem.register("tui-restore", () =>
-			this.stop({ maxRows: EXIT_FLUSH_MAX_ROWS }),
+		// Postmortem runs this synchronously on any exit that finds the TUI still
+		// running. A signal caps it: after SIGHUP the terminal is gone, and
+		// SIGTERM/SIGINT want the process gone before postmortem's deadline or a
+		// kill. A fatal error or `postmortem.quit()` without a prior stop (the
+		// teardown-failure escape hatch) flushes as the exit flush provider says,
+		// in full without one: scrollback may be the only copy of what led there.
+		this.#cancelPostmortemRestore = postmortem.register("tui-restore", reason =>
+			this.stop(
+				reason === postmortem.Reason.SIGHUP ||
+					reason === postmortem.Reason.SIGTERM ||
+					reason === postmortem.Reason.SIGINT
+					? { maxRows: EXIT_FLUSH_MAX_ROWS }
+					: (this.#exitFlushProvider?.() ?? {}),
+			),
 		);
 		for (const listener of this.#startListeners) {
 			try {

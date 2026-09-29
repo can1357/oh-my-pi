@@ -20,10 +20,13 @@ import {
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { EXIT_FLUSH_MAX_ROWS } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, postmortem, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
@@ -527,6 +530,65 @@ describe("Composer prepaint", () => {
 				// One stop, capped exactly when the session is saved.
 				expect(stop.mock.calls.map(([flush]) => flush?.maxRows !== undefined)).toEqual([saved]);
 			} finally {
+				lease.dispose();
+				await testSession.cleanup();
+				vi.restoreAllMocks();
+			}
+		}
+	});
+
+	it("flushes a fatal-error or failed-teardown restore as a quit would, and caps a hangup's", async () => {
+		// Postmortem restores the terminal when the process ends with the TUI still
+		// running. Only a saved session's file keeps the rows a cap skips; after a
+		// hangup no terminal is left to show them.
+		const blocks = 1_100; // one row and one blank each: 2,200 rows, over the cap
+		const capped = EXIT_FLUSH_MAX_ROWS / 2;
+		const cases = [
+			{ saved: false, reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: blocks },
+			// `postmortem.quit()` after a failed teardown, which finds the TUI running.
+			{ saved: false, reason: postmortem.Reason.MANUAL, kept: blocks },
+			{ saved: true, reason: postmortem.Reason.UNCAUGHT_EXCEPTION, kept: capped },
+			{ saved: false, reason: postmortem.Reason.SIGHUP, kept: capped },
+		];
+		for (const { saved, reason, kept } of cases) {
+			const callbacks = new Map<string, (reason: postmortem.Reason) => void | Promise<void>>();
+			vi.spyOn(postmortem, "register").mockImplementation((id, callback) => {
+				callbacks.set(id, callback);
+				return () => {
+					callbacks.delete(id);
+				};
+			});
+			const terminal = new VirtualTerminal(40, 10, 10_000);
+			const composer = new Composer({ preferences: config, terminal });
+			// An animating welcome intro holds retirement, flush included.
+			composer.start({ playWelcomeIntro: false });
+			const lease = new ComposerLease(composer);
+			const testSession = await createTestSession({ inMemory: !saved });
+			if (saved) await testSession.session.sessionManager.ensureOnDisk();
+			const mode = new InteractiveMode(
+				testSession.session,
+				"test",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				lease.composer,
+			);
+			lease.adopt();
+			const transcript = new TranscriptContainer();
+			for (let i = 0; i < blocks; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+			lease.composer.setRuntimeChildren([transcript]);
+			try {
+				await callbacks.get("tui-restore")!(reason);
+				await terminal.flush();
+				const rows = terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => row.startsWith("row-"));
+				expect(rows).toEqual(Array.from({ length: kept }, (_, i) => `row-${blocks - kept + i}`));
+			} finally {
+				mode.stop();
 				lease.dispose();
 				await testSession.cleanup();
 				vi.restoreAllMocks();

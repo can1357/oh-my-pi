@@ -24,16 +24,22 @@ Each normal frame:
 Graceful shutdown switches the provider to Flush policy and synchronously drains
 every currently eligible finalized prefix before terminal handoff. A capped stop
 (`TUI.stop({ maxRows: EXIT_FLUSH_MAX_ROWS })`, 2,000 rows) hands native
-scrollback only the newest `maxRows` un-retired rows; the older eligible blocks
-retire without being written anywhere. Interactive quit and restart cap only a
-saved session, whose file `omp --resume` restores; an unsaved session
-(`--no-session`, or one not yet written to disk) keeps the full flush, because
-scrollback is its only copy. A terminal disconnect is always capped, because the
-terminal is usually gone. So is postmortem's `tui-restore`, which runs
-synchronously on any exit that finds the TUI still running (a signal, a fatal
-error, or the `postmortem.quit(130)` escape hatch after a failed teardown): a
-full flush there would delay teardown and the fatal report. An unsaved session
-loses the skipped rows on those paths. A handoff stop that resumes with
+scrollback only the newest whole blocks that fit in `maxRows` rows, never part
+of a block, since a direct-placement image's last row draws over the rows its
+block reserved above it; a newest block taller than the cap is written whole.
+The older eligible blocks retire without being written anywhere. Interactive
+quit and restart cap only a saved session, whose file `omp --resume` restores;
+an unsaved session (`--no-session`, or one not yet written to disk) keeps the
+full flush, because scrollback is its only copy. A terminal disconnect is
+always capped, because the terminal is usually gone. Postmortem's
+`tui-restore` runs synchronously on any exit that finds the TUI still running.
+On a signal it is capped: after SIGHUP the terminal is gone, and SIGTERM or
+SIGINT must end the process before postmortem's deadline or a kill, so an
+unsaved session loses the skipped rows there. On a fatal error, or the
+`postmortem.quit(130)` escape hatch after a failed teardown, it flushes as the
+owner's `TUI.setExitFlushProvider()` says, and in full without one;
+InteractiveMode's provider applies the same saved-session condition as quit.
+A handoff stop that resumes with
 `start()` (`TUI.stop({ resuming: true })`: suspend, external editors) keeps the
 full flush, except while a fullscreen overlay holds the screen: it resumes into
 that overlay, so it flushes nothing, commits nothing, and pressure retires the
@@ -66,7 +72,7 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 - **settled** — finalized but still live: it re-renders at the current width every frame (so resizes reflow it) until capacity pressure retires it;
 - **committed** — acknowledged by the terminal writer and released from render caches.
 
-Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, in batches capped by a per-frame render budget (the remainder is offered on later frames), stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width, maxRows?)` takes the whole eligible prefix during graceful shutdown; with `maxRows` it emits only the prefix's newest `maxRows` rows (its trailing blank included), measuring back from the prefix end so the older blocks never render, apart from the frontier head, and acknowledging it still retires the whole prefix. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
+Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, in batches capped by a per-frame render budget (the remainder is offered on later frames), stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. `peekFlushBatch(width, maxRows?)` takes the whole eligible prefix during graceful shutdown; with `maxRows` it emits only the prefix's newest whole blocks that fit in `maxRows` rows (trailing blank included; a newest block taller than the cap is emitted whole), never part of a block, measuring back from the prefix end so the older blocks never render, apart from the frontier head and the one block measured to find it does not fit, and acknowledging it still retires the whole prefix. While the screen has room nothing retires during ordinary operation, so a submitted message is visible immediately and recent blocks keep reflowing on resize.
 
 The composer opens each frame with `beginFrame(frame)` before offering history. Until that frame's `renderViewport(width, rows, frame)` returns, every full-allocation measurement of a live block (retirement peek, `liveRowCount`, viewport layout) renders the block once and replays those rows; `renderViewport` closes the frame, so no measurement outlives the synchronous composition that took it. Allocation-constrained viewport renders are never shared.
 
@@ -139,4 +145,4 @@ Inline image data and purge commands are emitted before row placements. Active i
 
 ## Shutdown
 
-Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`, passing `{ maxRows: EXIT_FLUSH_MAX_ROWS }` only when the session is saved (the condition the resume hint uses). TUI exits any alternate buffer, asks the provider to Flush eligible finalized history (a capped stop writes only its newest `maxRows` rows; for a saved session `omp --resume` restores the older messages), ends the flush with `endHistoryFlush()`, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.
+Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`, passing `{ maxRows: EXIT_FLUSH_MAX_ROWS }` only when the session is saved (the condition the resume hint uses). TUI exits any alternate buffer, asks the provider to Flush eligible finalized history (a capped stop writes only its newest whole blocks within `maxRows` rows; for a saved session `omp --resume` restores the older messages), ends the flush with `endHistoryFlush()`, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.

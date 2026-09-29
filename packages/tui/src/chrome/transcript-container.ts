@@ -93,8 +93,14 @@ interface TranscriptEntry {
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
-	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; maxRows: number | undefined }
+	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; dropped: number | undefined }
 	| { batch: HistoryBatch; kind: "replay" };
+
+/** Where a capped shutdown flush starts, and the older block it measured and left out, if any. */
+interface FlushTail {
+	start: number;
+	dropped: number | undefined;
+}
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
 interface AppendBatch {
@@ -126,14 +132,6 @@ function blockMode(component: Component): TranscriptBlockMode {
 	return (component as Component & Partial<AppendOnlyTranscriptBlock>).transcriptBlockMode === "appendOnly"
 		? "appendOnly"
 		: "mutable";
-}
-
-/**
- * The newest `maxRows` rows of a capped flush batch, or every row when uncapped.
- * A recomposed offer must slice exactly as its first pass did.
- */
-function newestRows(rows: readonly string[], maxRows: number | undefined): readonly string[] {
-	return maxRows !== undefined && rows.length > maxRows ? rows.slice(rows.length - maxRows) : rows;
 }
 
 function isPlainBlank(line: string): boolean {
@@ -579,9 +577,11 @@ export class TranscriptContainer extends Container {
 
 	/**
 	 * Offers the currently eligible prefix for shutdown. With `maxRows`, the
-	 * batch holds only that prefix's newest `maxRows` rows (its trailing blank
-	 * included); acknowledging it still retires the whole prefix, and the older
-	 * blocks it skipped never render, apart from the frontier head.
+	 * batch holds only that prefix's newest whole blocks that fit in `maxRows`
+	 * rows, trailing blank included, and never part of a block (see
+	 * #flushTail); acknowledging it still retires the whole prefix, and the
+	 * older blocks it skipped never render, apart from the frontier head and the
+	 * one block measured to find it does not fit.
 	 */
 	peekFlushBatch(width: number, maxRows?: number): HistoryBatch | undefined {
 		return this.#peekBatch(width, 0, "flush", maxRows);
@@ -599,10 +599,12 @@ export class TranscriptContainer extends Container {
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
 			rows = after.slice(before.length);
 		} else if (offered.kind === "commit") {
-			// #peekBatch measured the frontier head before the cap chose `start`;
-			// measure it again so an image-budget retry counts the images the first pass did.
+			// A capped #peekBatch measured the frontier head and the block the cap
+			// left out, neither of them in the batch; measure them again so an
+			// image-budget retry counts the images the first pass did.
 			if (offered.start > this.#frontier) this.#measuredRows(this.#entries[this.#frontier]!, width);
-			rows = newestRows(this.#renderRange(offered.start, offered.end, width, true).rows, offered.maxRows);
+			if (offered.dropped !== undefined) this.#measuredRows(this.#entries[offered.dropped]!, width);
+			rows = this.#renderRange(offered.start, offered.end, width, true).rows;
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -704,26 +706,35 @@ export class TranscriptContainer extends Container {
 		}
 		this.#pinnedFrontier = undefined;
 		pushLoopPhase("ui.transcript-retire");
-		let start: number;
+		let tail: FlushTail;
 		let retirement: { rows: readonly string[]; end: number };
 		try {
 			// Shutdown hands over the whole eligible prefix, or under a cap its
-			// newest rows; a live frame stops at the budget and offers the rest
-			// on the next frames.
-			start = maxRows === undefined ? this.#frontier : this.#flushTailStart(end, width, maxRows);
-			retirement = this.#renderRange(start, end, width, true, policy === "flush" ? undefined : RETIREMENT_BUDGET_MS);
+			// newest whole blocks; a live frame stops at the budget and offers the
+			// rest on the next frames.
+			tail =
+				maxRows === undefined
+					? { start: this.#frontier, dropped: undefined }
+					: this.#flushTail(end, width, maxRows);
+			retirement = this.#renderRange(
+				tail.start,
+				end,
+				width,
+				true,
+				policy === "flush" ? undefined : RETIREMENT_BUDGET_MS,
+			);
 		} finally {
 			popLoopPhase();
 		}
-		if (start > this.#frontier) {
-			logger.debug("Capped history flush skipped older blocks", { skippedBlocks: start - this.#frontier });
+		if (tail.start > this.#frontier) {
+			logger.debug("Capped history flush skipped older blocks", { skippedBlocks: tail.start - this.#frontier });
 		}
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: newestRows(retirement.rows, maxRows),
+			rows: retirement.rows,
 			kind: "append",
 		};
-		this.#offered = { batch, start, end: retirement.end, maxRows, kind: "commit" };
+		this.#offered = { batch, start: tail.start, end: retirement.end, dropped: tail.dropped, kind: "commit" };
 		return batch;
 	}
 
@@ -979,20 +990,30 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
-	 * First block of a capped flush of `[frontier, end)`: measure back from `end`
-	 * until the covered rows, with the trailing blank the range gains once it has
-	 * any row, reach `maxRows`. The blocks before it retire unrendered, apart from
-	 * the frontier head, which #peekBatch has already measured; the walk stops
-	 * above it.
+	 * Where a capped flush of `[frontier, end)` starts: at the oldest block from
+	 * which every block through `end`, each with the blank after it, fits in
+	 * `maxRows` rows. The batch never starts inside a block, because a block's
+	 * rows may depend on the rows above them: a direct-placement image draws from
+	 * its last row, moving the cursor up over the rows it reserved, and cut off
+	 * from them it would paint over whatever precedes the batch. The newest
+	 * non-empty block stays whole even when it alone passes `maxRows`: dropping
+	 * it would leave scrollback without the last message. The walk measures
+	 * newest-first and stops at the first block that does not fit (`dropped`), or
+	 * before it once no block could, so older blocks never render, apart from
+	 * the frontier head #peekBatch has already measured.
 	 */
-	#flushTailStart(end: number, width: number, maxRows: number): number {
+	#flushTail(end: number, width: number, maxRows: number): FlushTail {
 		let rows = 0;
-		for (let index = end - 1; index > this.#frontier; index--) {
-			const height = this.#measuredRows(this.#entries[index]!, width).length;
-			if (height > 0) rows += height + (rows > 0 ? 1 : 0);
-			if (rows > 0 && rows + 1 >= maxRows) return index;
+		for (let index = end - 1; index >= this.#frontier; index--) {
+			// A non-empty block adds its rows and one blank: the separator after
+			// it, or the trailing blank.
+			if (rows > 0 && rows + 2 > maxRows) return { start: index + 1, dropped: undefined };
+			const height = this.#liveBlockRows(this.#entries[index]!, index, width).length;
+			if (height === 0) continue;
+			if (rows > 0 && rows + height + 1 > maxRows) return { start: index + 1, dropped: index };
+			rows += height + 1;
 		}
-		return this.#frontier;
+		return { start: this.#frontier, dropped: undefined };
 	}
 
 	/**

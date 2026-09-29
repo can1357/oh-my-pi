@@ -19,6 +19,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	HistoryFlushOptions,
 	LoaderMessageColorFn,
 	OverlayHandle,
 	SlashCommand,
@@ -1659,6 +1660,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
+		// A fatal error or a quit after a failed teardown restores the terminal
+		// through postmortem; it flushes on the same condition as stop().
+		this.ui.setExitFlushProvider(() => this.#exitFlush());
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
@@ -6499,10 +6503,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setCfgApprovalHost(null);
 		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
-			// Cap the exit flush only when the session file keeps what the cap
-			// skips (the resume hint's condition); otherwise native scrollback is
-			// the transcript's only copy, so it gets the full flush.
-			this.ui.stop(this.#resumableSessionId() === undefined ? undefined : { maxRows: EXIT_FLUSH_MAX_ROWS });
+			this.ui.stop(this.#exitFlush());
 			this.#ownsStartedUi = false;
 		}
 		this.isInitialized = false;
@@ -6616,6 +6617,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
+	}
+
+	/**
+	 * How the transcript flushes when this session hands the terminal back at
+	 * exit: capped only when the session file keeps what the cap skips (the
+	 * resume hint's condition); otherwise native scrollback is the transcript's
+	 * only copy, so it gets the full flush.
+	 */
+	#exitFlush(): HistoryFlushOptions {
+		return this.#resumableSessionId() === undefined ? {} : { maxRows: EXIT_FLUSH_MAX_ROWS };
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */

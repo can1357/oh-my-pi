@@ -572,6 +572,49 @@ describe("Image budget integration", () => {
 		expect(olderLines.join("")).not.toContain("\x1b_G");
 		expect(newerLines.at(-1) ?? "").toContain("\x1b_G");
 	});
+
+	it("never starts a capped exit flush inside a direct-placement image block", () => {
+		// A direct placement (Kitty without Unicode placeholders, iTerm2, SIXEL)
+		// draws from its block's last row, moving the cursor up over the rows the
+		// block reserved. A batch holding that row without all of them would paint
+		// the image over whatever scrollback precedes the batch.
+		const build = () => {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Text("before", 0, 0));
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: t => t },
+					{ maxWidthCells: 4, maxHeightCells: 4 },
+					{ widthPx: 40, heightPx: 40 },
+				),
+			);
+			for (let i = 0; i < 3; i++) transcript.addChild(new Text(`after-${i}`, 0, 0));
+			return transcript;
+		};
+		const full = build().peekFlushBatch(20)!.rows;
+		// The three newest blocks and their blanks take 6 rows and the 4-row image
+		// block 5 more, so caps of 8-10 end inside the image block and 11 fits it.
+		for (const maxRows of [8, 9, 10, 11]) {
+			const rows = build().peekFlushBatch(20, maxRows)!.rows;
+			expect(rows.length).toBeLessThanOrEqual(maxRows);
+			expect(rows).toEqual(full.slice(full.length - rows.length));
+			for (const [index, row] of rows.entries()) {
+				const up = /\x1b\[(\d+)A/.exec(row);
+				if (up === null) continue;
+				const reserved = Number(up[1]);
+				expect(rows.slice(Math.max(0, index - reserved), index)).toEqual(Array(reserved).fill("\x1b[0m"));
+			}
+		}
+		// With room for the whole block, the image is written with its reserved rows.
+		expect(build().peekFlushBatch(20, 11)!.rows.slice(0, 4)).toEqual([
+			"\x1b[0m",
+			"\x1b[0m",
+			"\x1b[0m",
+			expect.stringContaining("\x1b[3A"),
+		]);
+	});
 });
 
 describe("Image budget + Unicode placeholders", () => {
@@ -1504,6 +1547,59 @@ describe("TUI inline-image budget", () => {
 			expect(blockRows.every(row => row !== "")).toBe(true);
 			expect(capped.states.every(state => state === "committed")).toBe(true);
 			expect(full.states.every(state => state === "committed")).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps every image a capped stop writes live when the block the cap leaves out holds one", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		const renderScheduler = {
+			now: () => 0,
+			scheduleImmediate: (callback: () => void) => callback(),
+			scheduleRender: (callback: () => void) => {
+				callback();
+				return { cancel() {} };
+			},
+		};
+		const term = new VirtualTerminal(40, 10, 1_000);
+		const composer = new Composer({
+			terminal: term,
+			tuiOptions: { renderScheduler },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+		composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
+		// Eight one-row images and their blanks fill 16 of 18 rows, so the cap
+		// measures the older two-row image, finds it does not fit, and leaves it
+		// out. Nine images passed the default cap of 8 in that first pass, and its
+		// retry must count the left-out one again: otherwise it demotes the oldest
+		// image it writes instead.
+		transcript.addChild(new Text("head", 0, 0));
+		for (let i = 0; i < 9; i++) {
+			// Block 1 is the two-row image the cap leaves out.
+			const rows = i === 0 ? 2 : 1;
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: text => text },
+					{ maxWidthCells: 1, maxHeightCells: rows, budget: composer.ui.imageBudget, imageKey: `image-${i}` },
+					{ widthPx: 10, heightPx: 10 * rows },
+				),
+			);
+		}
+		try {
+			composer.ui.stop({ maxRows: 18 });
+			await term.flush();
+			const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+			const written = rows.slice(0, rows.indexOf("editor"));
+			expect(written).toHaveLength(16);
+			expect(written.filter((_, row) => row % 2 === 0).every(row => row.includes(KITTY_PLACEHOLDER))).toBe(true);
+			expect(written.some(row => row.includes("[Image:"))).toBe(false);
 		} finally {
 			setKittyGraphics(originalGraphics);
 		}

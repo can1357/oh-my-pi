@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit. `TUI.stop({ maxRows })` writes only the newest `maxRows` rows to scrollback (omp passes `EXIT_FLUSH_MAX_ROWS`, 2,000), as do a terminal disconnect and a signal or fatal-error restore; the older rows are not written anywhere, so pass a cap only when another copy survives, such as a saved session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed quitting a session with a long un-retired transcript (for example after a fullscreen overlay held the screen) rendering the whole history before exit. `TUI.stop({ maxRows })` writes only the newest whole blocks within `maxRows` rows to scrollback (omp passes `EXIT_FLUSH_MAX_ROWS`, 2,000), as do a terminal disconnect and a signal restore, and a fatal-error restore when `TUI.setExitFlushProvider()` says so; the older rows are not written anywhere, so pass a cap only when another copy survives, such as a saved session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed finished messages moving into terminal scrollback immediately, instead of staying live until the screen fills, after returning from a suspend or an external editor ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed opening the external editor or suspending from a fullscreen view, such as `/annotate`, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 

@@ -694,23 +694,30 @@ describe("TranscriptContainer", () => {
 		expect(transcript.peekFlushBatch(80)?.rows).toEqual(["tail", ""]);
 	});
 
-	it("an exit flush emits the newest rows of the full flush and retires every eligible block", () => {
+	it("an exit flush emits the newest whole blocks that fit the cap and retires every eligible block", () => {
 		const build = () => {
 			const transcript = new TranscriptContainer();
 			for (let i = 0; i < 60; i++) transcript.addChild(new Block([`b${i}r0`, `b${i}r1`, `b${i}r2`], true));
 			return transcript;
 		};
 		const full = build().peekFlushBatch(40)!.rows;
-		for (const maxRows of [1, 7, 10, 179, full.length, full.length + 50]) {
+		// Each block takes 3 rows and a blank; a block that would pass the cap is left out whole.
+		for (const [maxRows, kept] of [
+			[7, 1],
+			[10, 2],
+			[179, 44],
+			[full.length, 60],
+			[full.length + 50, 60],
+		]) {
 			const transcript = build();
 			const batch = transcript.peekFlushBatch(40, maxRows)!;
-			expect(batch.rows).toEqual(full.length > maxRows ? full.slice(-maxRows) : full);
+			expect(batch.rows).toEqual(full.slice(full.length - kept * 4));
 			transcript.acknowledgeFinalizedBatch(batch.id);
 			expect(transcript.blockStates().every(state => state === "committed")).toBe(true);
 		}
 	});
 
-	it("an exit flush never renders the blocks older than the rows it emits, even when re-rendered", () => {
+	it("an exit flush renders no block older than the first that does not fit, even when re-rendered", () => {
 		const transcript = new TranscriptContainer();
 		const blocks = Array.from({ length: 60 }, (_, i) => new CountingBlock([`b${i}r0`, `b${i}r1`, `b${i}r2`]));
 		for (const block of blocks) transcript.addChild(block);
@@ -718,21 +725,19 @@ describe("TranscriptContainer", () => {
 		const before = blocks.map(block => block.renders);
 		// The image-budget retry re-renders the outstanding offer.
 		expect(transcript.rerenderOfferedBatch(40)!.rows).toEqual(first.rows);
-		// 3-row blocks plus separators and the trailing blank: the newest 10 rows lie in blocks 57-59.
-		// Block 0 is the frontier head, which #peekBatch measures before any policy.
+		// 3-row blocks plus separators and the trailing blank: blocks 58-59 fill 8 of the 10
+		// rows, and block 57 is measured to find it does not fit. Block 0 is the frontier head,
+		// which #peekBatch measures before any policy.
 		expect(blocks.slice(1, 57).every(block => block.renders === 0)).toBe(true);
 		expect(blocks.slice(1, 57).map(block => block.renders)).toEqual(before.slice(1, 57));
 	});
 
-	it("an exit flush keeps a block taller than the cap to its newest rows", () => {
+	it("an exit flush writes a newest block taller than the cap whole, without older blocks", () => {
 		const transcript = new TranscriptContainer();
-		transcript.addChild(
-			new Block(
-				Array.from({ length: 30 }, (_, i) => `tall${i}`),
-				true,
-			),
-		);
-		expect(transcript.peekFlushBatch(40, 5)!.rows).toEqual(["tall26", "tall27", "tall28", "tall29", ""]);
+		transcript.addChild(new Block(["older"], true));
+		const tall = Array.from({ length: 30 }, (_, i) => `tall${i}`);
+		transcript.addChild(new Block(tall, true));
+		expect(transcript.peekFlushBatch(40, 5)!.rows).toEqual([...tall, ""]);
 	});
 
 	it("an exit flush renders no block older than its tail when the tail ends exactly on the cap", () => {
@@ -751,8 +756,8 @@ describe("TranscriptContainer", () => {
 		transcript.addChild(new Block(["b0", "b1", "b2"], true));
 		transcript.addChild(new Block(["streaming"], false));
 		transcript.addChild(new Block(["after0", "after1", "after2", "after3"], true));
-		const batch = transcript.peekFlushBatch(40, 3)!;
-		expect(batch.rows).toEqual(["b1", "b2", ""]);
+		const batch = transcript.peekFlushBatch(40, 4)!;
+		expect(batch.rows).toEqual(["b0", "b1", "b2", ""]);
 		transcript.acknowledgeFinalizedBatch(batch.id);
 		expect(transcript.blockStates()).toEqual(["committed", "committed", "active", "settled"]);
 	});
