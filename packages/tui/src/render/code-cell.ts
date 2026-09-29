@@ -201,18 +201,11 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 	const outputLines = renderCellOutput(output, expanded, outputMaxLines, theme);
 
 	// The source section echoes a tool payload (eval `code` arg, read/write
-<<<<<<< HEAD
-	// file content): one source line per row, never re-flowed or right-trimmed.
-	// The Output section below is execution output and keeps its typesetting.
-	const sections: Array<{ label?: string; lines: readonly string[]; verbatim?: boolean }> = [
-		{ lines: displayCodeLines, verbatim: true },
-=======
 	// file content): one source line per logical row, never re-flowed or
 	// right-trimmed, with `expanded`/`…` recoverable overflow. The Output
 	// section below is execution output and keeps its typesetting.
 	const sections: Array<{ label?: string; lines: readonly string[]; verbatim?: boolean; expanded?: boolean }> = [
-		{ lines: codeLines, verbatim: true, expanded },
->>>>>>> a0b065baf1 (fix(tui): make verbatim payload echoes full-byte recoverable)
+		{ lines: displayCodeLines, verbatim: true, expanded },
 	];
 	if (outputLines.length > 0) {
 		sections.push({ label: theme.fg("toolTitle", "Output"), lines: outputLines });
