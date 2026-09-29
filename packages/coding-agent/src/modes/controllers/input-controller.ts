@@ -936,7 +936,8 @@ export class InputController {
 			const submittedText = text;
 			const armed = this.#armedBareCommand;
 			this.#armedBareCommand = undefined;
-			const armedBareCommand = armed?.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
+			const armedBareCommand =
+				armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
