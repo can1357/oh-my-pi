@@ -15,7 +15,7 @@ export interface OutputBlockOptions {
 	header?: string;
 	headerMeta?: string;
 	state?: State;
-	sections?: Array<{ label?: string; lines: readonly string[]; separator?: boolean }>;
+	sections?: Array<{ label?: string; lines: readonly string[]; separator?: boolean; verbatim?: boolean }>;
 	width: number;
 	applyBg?: boolean;
 	contentPaddingLeft?: number;
@@ -146,7 +146,13 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 				rows.push({ kind: "sixel", raw: line });
 				continue;
 			}
-			const wrappedLines = wrapTextWithAnsi(line.trimEnd(), contentWidth);
+			// Verbatim sections echo raw tool payloads (commands, briefs): one
+			// source line is one row — never re-wrapped or right-trimmed, so a
+			// wrap-induced break can't read as a payload newline. Overflow clips
+			// to a byte-prefix of the line (Ellipsis.Omit) to keep the frame intact.
+			const wrappedLines = section.verbatim
+				? [truncateToWidth(line, contentWidth, "")]
+				: wrapTextWithAnsi(line.trimEnd(), contentWidth);
 			for (const wrappedLine of wrappedLines) {
 				const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
 				rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}` });
@@ -257,6 +263,7 @@ export class CachedOutputBlock {
 			for (const s of options.sections) {
 				h.optional(s.label);
 				h.bool(s.separator ?? false);
+				h.bool(s.verbatim ?? false);
 				for (const line of s.lines) {
 					h.str(line);
 				}

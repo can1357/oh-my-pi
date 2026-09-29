@@ -11,13 +11,12 @@ import type { ToolRenderer } from "./renderer";
  */
 import * as path from "node:path";
 import { Container, type Component } from "../tui";
-import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
 import { visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "./renderer";
 import { formatAgentStatRun, renderAgentTreeRow } from "./agent-tree";
-import { getMarkdownTheme, type Theme } from "../theme/theme";
+import { type Theme } from "../theme/theme";
 import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice, stripTrailingNotice } from "./output-meta";
 import {
 	capPreviewLines,
@@ -32,6 +31,7 @@ import {
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	sanitizeDisplayLines,
 	shortenPath,
 	type ToolUIStatus,
 	TRUNCATE_LENGTHS,
@@ -529,16 +529,11 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 }
 
 /** One renderable frame section: optional label, body rows, leading divider. */
-type TaskRenderSection = { label?: string; content: readonly string[]; separator?: boolean };
+type TaskRenderSection = { label?: string; content: readonly string[]; separator?: boolean; verbatim?: boolean };
 type AssignmentSectionRenderer = (width: number) => TaskRenderSection;
 
-// Default output-block layout is: left border + one-cell content inset + right
-// border. Render markdown at that inner width so the output block does not need
-// to rewrap already-rendered assignment lines.
-const ASSIGNMENT_FRAME_INSET = 3;
-
 /**
- * Build the assignment section (the markdown brief handed to the subagent).
+ * Build the assignment section (the brief handed to the subagent).
  * Rendered in both the streaming call preview and the result frame so the
  * brief stays visible for the whole task lifecycle — not just until the first
  * progress snapshot replaces the call view.
@@ -552,9 +547,9 @@ function createAssignmentSectionRenderer(
 	// here too. The repair is idempotent on already-clean text.
 	const assignment = sanitizeText(
 		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
-	if (!assignment) return undefined;
-	return createMarkdownSectionRenderer(assignment, theme);
+	);
+	if (!assignment.trim()) return undefined;
+	return createVerbatimSectionRenderer(assignment, theme);
 }
 
 /**
@@ -568,16 +563,23 @@ function createContextSectionRenderer(
 ): AssignmentSectionRenderer | undefined {
 	const context = sanitizeText(
 		repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : ""),
-	).trim();
-	if (!context) return undefined;
-	return createMarkdownSectionRenderer(context, theme);
+	);
+	if (!context.trim()) return undefined;
+	return createVerbatimSectionRenderer(context, theme);
 }
 
-function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSectionRenderer {
-	const markdown = new Markdown(text, 0, 0, getMarkdownTheme(), {
-		color: line => theme.fg("muted", line),
-	});
-	return width => ({ content: markdown.render(Math.max(1, width - ASSIGNMENT_FRAME_INSET)) });
+/**
+ * Build a section that echoes a raw tool-call payload (the brief handed to the
+ * subagent, the shared batch context) byte-verbatim. Payloads are not
+ * markdown: the typesetter mutates them (a `$$` shell-PID pair opens a math
+ * span that eats `$…$` sigils and turns `A_rows` into `Aᵣows`; prose wrap
+ * re-flows lines), so the echo renders sanitized display lines with the
+ * payload's own line structure intact. `verbatim` keeps the frame from
+ * re-wrapping the rows at its width.
+ */
+function createVerbatimSectionRenderer(text: string, theme: Theme): AssignmentSectionRenderer {
+	const lines = sanitizeDisplayLines(text).map(line => theme.fg("muted", line));
+	return () => ({ content: lines, verbatim: true });
 }
 
 /**
