@@ -22,7 +22,8 @@
  * variants at a fork and jump between user turns elsewhere, `f` opens a
  * filter (typing narrows the current path to matching items; Esc leaves the
  * filter with the selection kept), Enter rewinds to the outlined item, A loads
- * earlier turns without changing selection, Esc cancels.
+ * earlier turns without changing selection (stepping above the oldest replayed
+ * turn loads them too), Esc cancels.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -471,7 +472,10 @@ export class RewindSelectorComponent implements Component {
 		this.#move(delta, () => true);
 	}
 
-	/** Step the main selection by `delta` to the nearest visible target passing `accept`. */
+	/**
+	 * Step the main selection by `delta` to the nearest visible target passing
+	 * `accept`; stepping above the replayed tail loads the earlier history first.
+	 */
 	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
 		let index = this.#selected + delta;
 		while (index >= 0 && index < this.#targets.length) {
@@ -484,6 +488,10 @@ export class RewindSelectorComponent implements Component {
 				return;
 			}
 			index += delta;
+		}
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#move(delta, accept);
 		}
 	}
 

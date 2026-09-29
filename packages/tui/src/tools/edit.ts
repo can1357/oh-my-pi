@@ -239,16 +239,14 @@ function decodePartialJsonStringFragment(fragment: string): string {
 	}
 }
 
-function extractPartialJsonString(partialJson: string | undefined, key: string): string | undefined {
-	if (!partialJson) return undefined;
-	const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)`, "u");
-	const match = pattern.exec(partialJson);
-	if (!match) return undefined;
-	return decodePartialJsonStringFragment(match[1]);
-}
+// `"path": "<possibly unterminated string>` in a raw streamed args buffer.
+const PARTIAL_JSON_PATH_RE = /"path"\s*:\s*"((?:\\.|[^"\\])*)/u;
 
 function getPartialJsonEditPath(args: EditRenderArgs): string | undefined {
-	return filePathFromEditEntry(extractPartialJsonString(args.__partialJson, "path"));
+	const partialJson = args.__partialJson;
+	if (!partialJson) return undefined;
+	const match = PARTIAL_JSON_PATH_RE.exec(partialJson);
+	return match ? decodePartialJsonStringFragment(match[1]!) : undefined;
 }
 
 /** Count distinct file paths in an edits array. */
@@ -427,8 +425,33 @@ function hasEditCallPayload(args: EditRenderArgs, renderContext: EditRenderConte
 	return false;
 }
 
+/**
+ * Head-window preview of streamed replacement text. Only the displayed head is
+ * sanitized and split; the hidden-line count comes from a raw newline scan.
+ * That matches sanitizing the whole text because, on ESC-free input,
+ * `sanitizeText` only deletes individual code units and never a `\n`: the
+ * cut sits on a `\n`, so it cannot split a surrogate pair. The one non-local
+ * rule — a lone surrogate anywhere drops every U+FFFD — is replayed on the
+ * head. ESC-bearing text (ANSI stripping can span lines) takes the full path.
+ */
 function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string): string {
-	const previewLines = cappedHeadLines(sanitizeText(text).split("\n"), CALL_TEXT_PREVIEW_LINES);
+	let previewLines: { lines: readonly string[]; hidden: number };
+	let headEnd = -1;
+	if (!text.includes("\x1b")) {
+		for (let newlines = 0; newlines < CALL_TEXT_PREVIEW_LINES; newlines++) {
+			headEnd = text.indexOf("\n", headEnd + 1);
+			if (headEnd === -1) break;
+		}
+	}
+	if (headEnd === -1) {
+		previewLines = cappedHeadLines(sanitizeText(text).split("\n"), CALL_TEXT_PREVIEW_LINES);
+	} else {
+		let head = sanitizeText(text.slice(0, headEnd));
+		if (head.includes("\ufffd") && !text.isWellFormed()) head = head.replaceAll("\ufffd", "");
+		let hidden = 1;
+		for (let i = text.indexOf("\n", headEnd + 1); i !== -1; i = text.indexOf("\n", i + 1)) hidden++;
+		previewLines = { lines: head.split("\n"), hidden };
+	}
 	let preview = "\n\n";
 	for (const line of previewLines.lines) {
 		preview += `${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(line), CALL_TEXT_PREVIEW_WIDTH))}\n`;
@@ -751,17 +774,30 @@ interface EditCallFacts {
  * fields tolerate a small lag) or when the payload shrinks (rewind). The
  * final frame (`isPartial === false`) always recomputes. This turns the
  * per-frame O(n) stringify+parse+scan into O(n^2/K) total per call.
+ *
+ * The reveal hands over a fresh args object on every frame, so the gate
+ * keys on the streamed raw payload (`__partialJson`) rather than on args
+ * identity: a frame reuses the facts only when its payload extends, byte for
+ * byte, the payload the facts were derived from, and every direct field the
+ * facts read (path, file_path, rename, op, edits) is unchanged. Final args
+ * carry no `__partialJson`, so the completed call always derives exact facts.
  */
 const EDIT_FACTS_MIN_GROWTH = 512;
-let lastFactsCache:
-	| {
-			editArgs: EditRenderArgs;
-			isPartial: boolean;
-			editMode: EditMode | undefined;
-			length: number;
-			facts: EditCallFacts;
-	  }
-	| undefined;
+interface EditFactsCacheEntry {
+	editArgs: EditRenderArgs;
+	isPartial: boolean;
+	editMode: EditMode | undefined;
+	length: number;
+	/** Streamed raw payload the facts were derived from; set only for streamed `input` payloads. */
+	streamedPayload: string | undefined;
+	filePath: unknown;
+	path: unknown;
+	rename: unknown;
+	op: Operation | undefined;
+	edits: EditRenderEntry[] | undefined;
+	facts: EditCallFacts;
+}
+let lastFactsCache: EditFactsCacheEntry | undefined;
 
 function editFactsInputLength(editArgs: EditRenderArgs): number {
 	const input = editArgs.input ?? editArgs._input;
@@ -772,27 +808,72 @@ function editFactsInputLength(editArgs: EditRenderArgs): number {
 	return Array.isArray(editArgs.edits) ? editArgs.edits.length : 0;
 }
 
+/**
+ * Raw streamed payload of a mid-stream `input` edit, or undefined when the
+ * args are final (no `__partialJson`) or carry no `input` string — only the
+ * `input` payloads pay the expensive whole-payload inspect per frame.
+ */
+function streamedInputPayload(editArgs: EditRenderArgs): string | undefined {
+	if (typeof (editArgs.input ?? editArgs._input) !== "string") return undefined;
+	const payload = editArgs.__partialJson;
+	return typeof payload === "string" ? payload : undefined;
+}
+
+/**
+ * Whether a fresh streamed frame continues the payload `cached` was derived
+ * from within the growth gate. Exact: the cached payload must be a verbatim
+ * prefix of the new one, so a rewind or another call's payload never reuses.
+ */
+function continuesCachedPayload(cached: EditFactsCacheEntry, editArgs: EditRenderArgs): boolean {
+	const base = cached.streamedPayload;
+	if (base === undefined) return false;
+	const payload = streamedInputPayload(editArgs);
+	if (payload === undefined || payload.length < base.length) return false;
+	if (payload.length - base.length >= EDIT_FACTS_MIN_GROWTH) return false;
+	if (
+		editArgs.file_path !== cached.filePath ||
+		editArgs.path !== cached.path ||
+		editArgs.rename !== cached.rename ||
+		editArgs.op !== cached.op ||
+		editArgs.edits !== cached.edits
+	) {
+		return false;
+	}
+	return payload.startsWith(base);
+}
+
 function resolveEditCallFacts(
 	editArgs: EditRenderArgs,
 	isPartial: boolean,
 	editMode: EditMode | undefined,
 ): EditCallFacts {
 	const cached = lastFactsCache;
-	if (
-		cached !== undefined &&
-		cached.editArgs === editArgs &&
-		cached.isPartial === isPartial &&
-		cached.editMode === editMode
-	) {
-		const length = editFactsInputLength(editArgs);
-		// Same args object, still growing gradually: reuse. A rewind
-		// (shorter), a jump past the gate, or the final frame recomputes.
-		if (isPartial && length >= cached.length && length - cached.length < EDIT_FACTS_MIN_GROWTH) {
+	if (cached !== undefined && isPartial && cached.isPartial && cached.editMode === editMode) {
+		if (cached.editArgs === editArgs) {
+			const length = editFactsInputLength(editArgs);
+			// Same args object, still growing gradually: reuse. A rewind
+			// (shorter), a jump past the gate, or the final frame recomputes.
+			if (length >= cached.length && length - cached.length < EDIT_FACTS_MIN_GROWTH) {
+				return cached.facts;
+			}
+		} else if (continuesCachedPayload(cached, editArgs)) {
 			return cached.facts;
 		}
 	}
 	const facts = resolveEditCallFactsUncached(editArgs, isPartial, editMode);
-	lastFactsCache = { editArgs, isPartial, editMode, length: editFactsInputLength(editArgs), facts };
+	lastFactsCache = {
+		editArgs,
+		isPartial,
+		editMode,
+		length: editFactsInputLength(editArgs),
+		streamedPayload: streamedInputPayload(editArgs),
+		filePath: editArgs.file_path,
+		path: editArgs.path,
+		rename: editArgs.rename,
+		op: editArgs.op,
+		edits: editArgs.edits,
+		facts,
+	};
 	return facts;
 }
 

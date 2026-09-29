@@ -285,6 +285,14 @@ export class ToolExecutionComponent extends Container {
 	// so a terminal resize re-shapes image-bearing results to rescale them without
 	// forcing the common image-free result to re-shape on every resize tick.
 	#renderedImageCount = 0;
+	// `stateBgKey|themeEpoch` of the tint last handed to #contentText. Re-tinting
+	// drops its wrap cache, so a rebuild whose tint is unchanged skips it and the
+	// inner Text re-wraps only when the reformatted card text actually differs.
+	#contentTextBgKey: string | undefined;
+	// Memoized #getTextOutput(), keyed by every input it reads: the result
+	// (versioned by #resultVersion), #showImages, and the image protocol.
+	#textOutput = "";
+	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
 	#ui: ToolExecutionUi;
@@ -1200,8 +1208,7 @@ export class ToolExecutionComponent extends Container {
 			// Generic fallback (no custom/built-in renderer). WidthAwareText
 			// reformats at render time so output fills the actual terminal width
 			// instead of a fixed column cap.
-			this.#contentText.setCustomBgFn(stateBgFn);
-			this.#contentText.invalidate();
+			this.#refreshContentText(stateBgKey, stateBgFn);
 		}
 
 		// Handle images (same for both custom and built-in)
@@ -1339,6 +1346,8 @@ export class ToolExecutionComponent extends Container {
 
 	#getTextOutput(): string {
 		if (!this.#result) return "";
+		const key = `${this.#resultVersion}|${this.#showImages}|${TERMINAL.imageProtocol ?? "-"}`;
+		if (key === this.#textOutputKey) return this.#textOutput;
 
 		const textBlocks = this.#result.content.filter(c => c.type === "text");
 		const imageBlocks = this.#getAllImageBlocks();
@@ -1360,7 +1369,19 @@ export class ToolExecutionComponent extends Container {
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;
 		}
 
+		this.#textOutputKey = key;
+		this.#textOutput = output;
 		return output;
+	}
+
+	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */
+	#refreshContentText(stateBgKey: string, stateBgFn: (text: string) => string): void {
+		const bgKey = `${stateBgKey}|${getThemeEpoch()}`;
+		if (bgKey !== this.#contentTextBgKey) {
+			this.#contentTextBgKey = bgKey;
+			this.#contentText.setCustomBgFn(stateBgFn);
+		}
+		this.#contentText.reformat();
 	}
 
 	/**
@@ -1406,8 +1427,7 @@ export class ToolExecutionComponent extends Container {
 	 */
 	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
 		if (!this.#usesContentBox) {
-			this.#contentText.setCustomBgFn(stateBgFn);
-			this.#contentText.invalidate();
+			this.#refreshContentText("toolPendingBg", stateBgFn);
 			return;
 		}
 		for (const box of this.#multiFileBoxes) {

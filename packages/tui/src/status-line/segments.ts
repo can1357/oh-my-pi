@@ -9,7 +9,6 @@ import {
 	getProjectDir,
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
-	relativePathWithinRoot,
 } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
@@ -70,14 +69,6 @@ function leadingGlyph(display: string): string {
 	return space === -1 ? display : display.slice(0, space);
 }
 
-function stripDisplayRoot(pwd: string): string {
-	for (const root of [path.join(os.homedir(), "Projects"), "/work"]) {
-		const relative = relativePathWithinRoot(root, pwd);
-		if (relative) return relative;
-	}
-	return pwd;
-}
-
 /**
  * Single-field usage counter (`token_in`, `token_out`, `cache_read`,
  * `cache_write`). Hidden on zero, startup-placeholder aware, icon omitted when
@@ -121,28 +112,50 @@ const NORMALIZED_SCRATCH_ROOTS: readonly string[] = (() => {
 	return [...new Set(Array.from(roots, normalizePathForComparison))];
 })();
 
-interface ProjectDirClassification {
+interface ProjectDirDisplay {
+	projectDir: string;
+	homeDir: string;
+	displayRoots: readonly string[] | undefined;
 	scratch: boolean;
-	relative: string | null;
+	displayPath: string;
 }
 
-const PROJECT_DIR_CLASSIFICATIONS = new Map<string, ProjectDirClassification>();
+let projectDirDisplay: ProjectDirDisplay | undefined;
 
-function classifyProjectDir(projectDir: string): ProjectDirClassification {
-	const cached = PROJECT_DIR_CLASSIFICATIONS.get(projectDir);
-	if (cached) return cached;
+/**
+ * Retain only the active directory: switching cwd re-resolves its aliases,
+ * while repeated paints reuse both scratch classification and root stripping.
+ * Display roots remain normalized while the home directory is unchanged.
+ */
+function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
+	const cached = projectDirDisplay;
+	if (cached?.projectDir === projectDir) return cached;
 
+	const homeDir = os.homedir();
+	let displayRoots = cached?.homeDir === homeDir ? cached.displayRoots : undefined;
 	const normalizedProjectDir = normalizePathForComparison(projectDir);
-	let classification: ProjectDirClassification = { scratch: false, relative: null };
+	let scratch = false;
+	let displayPath = projectDir;
 	for (const normalizedRoot of NORMALIZED_SCRATCH_ROOTS) {
 		const relative = relativePathWithinNormalizedRoot(normalizedRoot, normalizedProjectDir);
 		if (relative !== null) {
-			classification = { scratch: true, relative: relative || null };
+			scratch = true;
+			displayPath = relative || projectDir;
 			break;
 		}
 	}
-	PROJECT_DIR_CLASSIFICATIONS.set(projectDir, classification);
-	return classification;
+	if (!scratch) {
+		displayRoots ??= [path.join(homeDir, "Projects"), "/work"].map(normalizePathForComparison);
+		for (const root of displayRoots) {
+			const relative = relativePathWithinNormalizedRoot(root, normalizedProjectDir);
+			if (relative) {
+				displayPath = relative;
+				break;
+			}
+		}
+	}
+	projectDirDisplay = { projectDir, homeDir, displayRoots, scratch, displayPath };
+	return projectDirDisplay;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -421,16 +434,8 @@ const pathSegment: StatusLineSegment = {
 		}
 
 		const projectDir = ctx.activeRepo?.cwd ?? getProjectDir();
-		const { scratch, relative } = classifyProjectDir(projectDir);
-		let pwd = projectDir;
-
-		if (stripPrefix) {
-			if (scratch) {
-				if (relative) pwd = relative;
-			} else {
-				pwd = stripDisplayRoot(pwd);
-			}
-		}
+		const { scratch, displayPath } = getProjectDirDisplay(projectDir);
+		let pwd = stripPrefix ? displayPath : projectDir;
 		const repoSuffix = ctx.activeRepo ? ` ↳ ${ctx.activeRepo.relativeRepoRoot}` : "";
 		if (opts.abbreviate !== false) {
 			pwd = shortenPath(pwd);

@@ -773,8 +773,6 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
-	/** Inherited eval executor session id for subagents sharing parent eval state. */
-	parentEvalSessionId?: string;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -2208,8 +2206,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
-			getEvalSessionId: () =>
-				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
+			getEvalSessionId: () => session?.getEvalSessionId() ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
@@ -4313,6 +4310,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
 				}
 			},
+			// Recovery only fires on turns without tool calls and appends a new one,
+			// so streamed calls (and their speculation sessions) are never rewritten.
+			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
@@ -4543,7 +4543,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
-			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and

@@ -1464,7 +1464,6 @@ export class AgentSession implements SettingsScope {
 		};
 		this.#eval = new EvalRunner(evalHost, {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
-			parentSessionId: config.parentEvalSessionId,
 		});
 		this.#evalToolSession = config.evalToolSession;
 		const initialEvalStateContext = this.#buildEvalStateContextMessage();
@@ -2944,7 +2943,9 @@ export class AgentSession implements SettingsScope {
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			// Per-delta hot path: only allocate and chain the serialized extension emit
+			// when something listens (`#emitExtensionEvent` would return immediately).
+			if (this.#extensionRunner?.hasHandlers("message_update")) void this.#queueExtensionEvent(event);
 			return;
 		}
 		// Deliver synchronously before awaiting extension notifications. This keeps
@@ -6274,7 +6275,7 @@ export class AgentSession implements SettingsScope {
 	get sessionId(): string {
 		return this.#activeProviderSessionId();
 	}
-	getEvalSessionId(): string | null {
+	getEvalSessionId(): string {
 		return this.#eval.getSessionId();
 	}
 	getEvalKernelOwnerId(): string {

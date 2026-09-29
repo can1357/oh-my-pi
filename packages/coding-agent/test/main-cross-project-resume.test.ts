@@ -66,6 +66,7 @@ function buildArgs(resume: string, sessionDir?: string): Args {
 		fileArgs: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
+		invalidFlagValues: [],
 	};
 }
 

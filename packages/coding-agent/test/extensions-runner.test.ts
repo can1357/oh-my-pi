@@ -3084,7 +3084,7 @@ describe("ExtensionRunner", () => {
 			expect(executed).toEqual([{ command: "echo second" }]);
 		});
 
-		it("preserves additional context from every non-blocking handler in registration order", async () => {
+		it("preserves distinct additional context from every non-blocking handler in registration order", async () => {
 			const first = `
 				export default function(pi) {
 					pi.on("tool_call", async () => ({
@@ -3097,6 +3097,7 @@ describe("ExtensionRunner", () => {
 			const second = `
 				export default function(pi) {
 					pi.on("tool_call", async () => ({ additionalContext: "second context" }));
+					pi.on("tool_call", async () => ({ additionalContext: "first context" }));
 				}
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-a.ts"), first);

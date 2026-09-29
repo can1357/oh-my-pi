@@ -482,23 +482,11 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	isAvailable(authStorage: AuthStorage): boolean {
-		if (!this.#settingsAllowSearch()) return false;
-		return !!getEnvApiKey("exa") || authStorage.keys.source("exa") !== undefined;
-	}
-
 	/**
-	 * Exa ships an unauthenticated public MCP fallback, so an explicit
-	 * selection (programmatic or via `providers.webSearch: exa`) routes
-	 * through MCP even when no credential is configured. The auto chain
-	 * still uses {@link isAvailable} so an unrelated configured provider
-	 * keeps priority over the public fallback.
+	 * Available unless disabled in settings: without a credential, search runs
+	 * through Exa's unauthenticated public MCP.
 	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
-		return this.#settingsAllowSearch();
-	}
-
-	#settingsAllowSearch(): boolean {
+	isAvailable(_authStorage: AuthStorage): boolean {
 		try {
 			if (cfgExaEnabled.get(settings) === false) {
 				return false;

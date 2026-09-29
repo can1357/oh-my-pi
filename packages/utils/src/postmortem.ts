@@ -406,8 +406,14 @@ export function reportUnsettledEntry(work: Promise<unknown>, describe?: () => st
 			drained = false;
 		}, 0).unref();
 	});
-	process.once("exit", () => {
+	process.once("exit", code => {
 		if (!pending || !drained) return;
+		// A non-zero code is already a failure verdict — an explicit
+		// `process.exit(n)` (possibly on the same loop turn as a Windows
+		// mid-I/O `beforeExit`, before the clearing timer runs) or an
+		// `exitCode` the command set. Overwriting it with 1 and a second
+		// "ended before completing" line only obscures the real error.
+		if (code !== 0) return;
 		const command = describe?.();
 		const subject = command ? `\`${APP_NAME} ${command}\`` : "command";
 		const message = `${subject} ended before completing: the event loop drained while it was still pending (rerun with PI_DEBUG_STARTUP=1 to see the last phase reached)`;

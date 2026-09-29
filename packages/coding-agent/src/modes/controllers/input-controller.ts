@@ -712,7 +712,7 @@ export class InputController {
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
-		if (!cfgTuiMouse.get(settings)) return undefined;
+		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;

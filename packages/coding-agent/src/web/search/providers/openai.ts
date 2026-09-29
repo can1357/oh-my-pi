@@ -24,6 +24,11 @@ function getSearchQuery(params: SearchParams): { query: string; sites: string[] 
 	};
 }
 
+function acceptsNamedToolChoice(model: Model<Api>): boolean {
+	const compat = model.compat;
+	return !(compat && "supportsNamedToolChoice" in compat && compat.supportsNamedToolChoice === false);
+}
+
 function buildRequestBody(params: SearchParams): Record<string, unknown> {
 	const { query, sites } = getSearchQuery(params);
 	const tool: Record<string, unknown> = { type: "web_search" };
@@ -37,7 +42,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 		instructions: params.systemPrompt,
 		input: query,
 		tools: [tool],
-		tool_choice: { type: "web_search" },
+		tool_choice: acceptsNamedToolChoice(params.model) ? { type: "web_search" } : "required",
 		include: ["web_search_call.action.sources"],
 		store: false,
 	};

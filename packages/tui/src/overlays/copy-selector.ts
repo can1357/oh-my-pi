@@ -317,6 +317,11 @@ export class CopySelectorComponent implements Component {
 			}
 			index += delta;
 		}
+		// Stepping above the replayed tail continues into the earlier history.
+		if (delta < 0 && this.#truncated) {
+			this.#loadFullHistory();
+			this.#moveVertical(delta);
+		}
 	}
 
 	// ========================================================================

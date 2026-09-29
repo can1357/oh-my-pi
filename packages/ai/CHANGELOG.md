@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.4.3] - 2026-09-28
+
+### Added
+
+- Added Command Code usage limits (5-hour, weekly, and credit balance) to /usage and the status line ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
+
+### Changed
+
+- Reduced per-token CPU and allocations while streaming: the leaked-thinking scanner used for OpenAI-compatible and custom endpoints no longer allocates per character, chat-completions and Bedrock look up a delta's content block in constant time, Google, Gemini CLI, Codex, and chat-completions streams skip raw SSE line capture unless an `onSseEvent` listener is attached, and event streams drain backlogs without `Array#shift` ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+## [18.4.2] - 2026-09-28
+
+### Fixed
+
+- Fixed successful Cursor agent turns being treated as context overflows, which ran overflow compaction and showed "Compaction freed too little context to make progress" while `/context` read well under the window; overflow detection now uses the reported context size instead of input totals summed across a turn's model calls ([#13608](https://github.com/can1357/oh-my-pi/pull/13608) by [@H4vC](https://github.com/H4vC))
+- Fixed Anthropic requests with thinking enabled failing on models whose output ceiling cannot fit the minimum thinking budget; thinking is now disabled for those requests instead ([#13359](https://github.com/can1357/oh-my-pi/pull/13359) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Cursor native Grep/Glob results showing no matches or raw output, Write failing to create files, StrReplace missing edits beyond the read limit, and Read/Shell/Delete results misreporting content or metadata ([#13600](https://github.com/can1357/oh-my-pi/issues/13600)).
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
@@ -2298,28 +2316,4 @@
 
 - Fixed `google-gemini-cli` ignoring `Model.requestModelId` when serializing the request model id
 
-## [15.11.5] - 2026-06-12
-
-### Added
-
-- Added `AuthStorage.listUsageHistory` to retrieve historical usage snapshots with optional `provider` and `sinceMs` filtering
-- Added durable usage-history persistence in the sqlite auth store so successful usage reports are recorded as time-series snapshots of limit utilization for later trend inspection
-- Added `AuthStorage.redeemResetCredit` to redeem stored OpenAI Codex saved rate-limit reset credits for a target account by `credentialId`, `accountId`, or `email`
-- Added `listCodexResetCredits` and `consumeCodexResetCredit` exports for OpenAI Codex saved reset-credit listing and redemption
-- Added `resetCredits` with `availableCount` to `UsageReport` so OpenAI Codex usage data now exposes redeemable rate-limit resets
-- Added `openai-codex-reset` exports via package barrel for out-of-band tooling usage
-- Added a one-shot request-debug target that writes the next provider HTTP request JSON to an explicit path.
-
-### Changed
-
-- Changed `AuthStorage.redeemResetCredit` to invalidate cached usage data after a successful redemption so the next usage report reflects the reset immediately
-
-### Fixed
-
-- Fixed temporary credential block state so redeemed reset credits immediately make the affected account selectable again after `redeemResetCredit` succeeds
-- Fixed one-shot request-debug path handling so an explicit request log target is consumed after the next request and no longer affects subsequent calls
-- Fixed explicit request-debug path mode to create missing parent directories before writing request logs
-- Fixed explicit request-debug mode to overwrite existing `.res.log` files for the requested path instead of failing when they already exist
-- Fixed OpenAI Responses `previous_response_id` chaining on Zero Data Retention orgs: the in-provider retry classifier missed the ZDR-specific 400 ("Previous response cannot be used for this organization due to Zero Data Retention"), so chained turns kept failing every other request after a brief recovery — the chain was reset but not disabled, so the next successful full-replay turn re-armed it. The ZDR phrasing is now classified categorically: one strike disables chaining for the session (skipping the three-strike circuit breaker) and the in-call retry drops `store: true`/`previous_response_id` and replays the full transcript instead ([#2341](https://github.com/can1357/oh-my-pi/issues/2341)).
-
-Older entries are archived in [packages/ai/CHANGELOG.md@dfbf3cc34eeb](https://github.com/can1357/oh-my-pi/blob/dfbf3cc34eeb5653580f51bfbcae558a9840f697/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@689a3418cb45](https://github.com/can1357/oh-my-pi/blob/689a3418cb45d54a459cde2e1abf3f66f50e47a4/packages/ai/CHANGELOG.md).
