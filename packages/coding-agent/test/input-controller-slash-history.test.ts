@@ -434,6 +434,30 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 		expect(shutdown).not.toHaveBeenCalled();
 		expect(onInputCallback).toHaveBeenCalledWith(expect.objectContaining({ text: "exit" }));
 	});
+
+	it("files nothing in history when a bare word quits", async () => {
+		// The word is routed to `/exit` internally, but the user typed no command and the
+		// session is quitting: filing it would surface a prompt they never sent in the Up
+		// arrow and Ctrl+R of every project under the default `global` scope.
+		for (const word of ["exit", "quit", "q", "EXIT"]) {
+			const { ctx, editor, addToHistory, shutdown } = makeCtx(false, []);
+			controllerFor(ctx);
+
+			await editor.onSubmit?.(word);
+
+			expect(shutdown).toHaveBeenCalledTimes(1);
+			expect(addToHistory).not.toHaveBeenCalled();
+		}
+	});
+
+	it("still files a slash command typed as one", async () => {
+		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/hotkeys");
+
+		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+	});
 });
 
 describe("yield queue list parsing", () => {

@@ -980,15 +980,15 @@ export class InputController {
 			// flight (pending submission, preflight, or streaming) has not reached
 			// `messages` yet, so it must not count as an empty session.
 			const bareExitWord = text.toLowerCase();
-			if (
+			const routedToBareExit =
 				text === submittedText &&
 				Object.hasOwn(BARE_EXIT_WORDS, bareExitWord) &&
 				!hasInputImages &&
 				!this.ctx.session.isStreaming &&
 				this.ctx.locallySubmittedUserSignatures.size === 0 &&
 				this.ctx.session.messages.length === 0 &&
-				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
-			) {
+				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings));
+			if (routedToBareExit) {
 				text = `/${bareExitWord}`;
 			}
 
@@ -1004,7 +1004,15 @@ export class InputController {
 				// under the context it was typed in — in the database *and* in the editor's local
 				// list, which is still the one that context seeded. Recording after dispatch put
 				// the command in the destination's list, where the next Up would recall it.
-				if (text.startsWith("/") && !shouldSkipHistory(text) && !this.#guestRefusesSlash(text)) {
+				// `routedToBareExit` is excluded on purpose: the word was a quit gesture, not a command
+				// the user typed, and filing `/exit` would surface it in the Up arrow and Ctrl+R of every
+				// project under the default `global` scope — recall of a prompt that was never sent.
+				if (
+					!routedToBareExit &&
+					text.startsWith("/") &&
+					!shouldSkipHistory(text) &&
+					!this.#guestRefusesSlash(text)
+				) {
 					this.ctx.editor.addToHistory(text);
 				}
 				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
