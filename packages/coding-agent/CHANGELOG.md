@@ -13,9 +13,8 @@
 
 ### Fixed
 
-- Fixed Cursor keepalive timeouts and GOAWAY disconnects stopping a turn whose tool calls had already finished instead of continuing it ([#13685](https://github.com/can1357/oh-my-pi/pull/13685) by [@eggpeat](https://github.com/eggpeat))
-- Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
 - Cache-warming refreshes cancelled or superseded after the provider accepted them now count toward session usage and cost instead of being dropped ([#13717](https://github.com/can1357/oh-my-pi/pull/13717))
+- Fixed Cursor keepalive timeouts and GOAWAY disconnects stopping a turn whose tool calls had already finished instead of continuing it ([#13685](https://github.com/can1357/oh-my-pi/pull/13685) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.4.4] - 2026-09-29
 
