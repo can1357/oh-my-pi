@@ -3403,6 +3403,134 @@ describe("ExtensionRunner", () => {
 			});
 		});
 
+		it("preserves additional context from every tool_result handler in registration order", async () => {
+			const first = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "first result context" }));
+					pi.on("tool_result", async () => ({ additionalContext: "   " }));
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "second result context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-context-a.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-context-b.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolResult({
+					type: "tool_result",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "false" },
+					content: [{ type: "text", text: "failed" }],
+					details: undefined,
+					isError: true,
+				}),
+			).resolves.toEqual({ additionalContext: "first result context\n\nsecond result context" });
+		});
+
+		it("keeps an earlier extension's redaction when a later one returns only repeated context", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "tool-result-redact-a.ts"),
+				`export default function(pi) {
+					pi.on("tool_result", async () => ({
+						content: [{ type: "text", text: "token [REDACTED]" }],
+						additionalContext: "use the redacted result",
+					}));
+				}`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "tool-result-redact-b.ts"),
+				`export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "use the redacted result  " }));
+				}`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolResult({
+					type: "tool_result",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "cat" },
+					content: [{ type: "text", text: "token sk-SECRET" }],
+					details: undefined,
+					isError: false,
+				}),
+			).resolves.toEqual({
+				content: [{ type: "text", text: "token [REDACTED]" }],
+				details: undefined,
+				isError: false,
+				additionalContext: "use the redacted result",
+			});
+		});
+
+		it("forwards failure-specific tool_result context through the tool context", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_result", async (event) =>
+						event.isError ? { additionalContext: "inspect the failure before retrying" } : undefined);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-failure-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const failingTool: AgentTool = {
+				name: "failing_tool",
+				label: "Failing Tool",
+				description: "Always fails",
+				parameters: Type.Object({}),
+				strict: true,
+				execute: async () => {
+					throw new Error("tool failed");
+				},
+			};
+			const delivered: string[] = [];
+			const contextWithRecorder = {
+				...(yoloContext as unknown as Record<string, unknown>),
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				new ExtensionToolWrapper(failingTool, runner).execute(
+					"tool-call-id",
+					{},
+					undefined,
+					undefined,
+					contextWithRecorder,
+				),
+			).rejects.toThrow("tool failed");
+			expect(delivered).toEqual(["inspect the failure before retrying"]);
+		});
+
 		it("forwards passive context from wrapper-dispatched calls through the tool context", async () => {
 			const extCode = `
 				export default function(pi) {

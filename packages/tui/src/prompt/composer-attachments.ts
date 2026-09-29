@@ -47,8 +47,10 @@ export function modelChipStyle(label: string, restore = "\x1b[39m\x1b[49m"): str
 /** Every glyph a skill chip may start with, across all symbol presets. */
 const SKILL_ICONS = [...new Set(Object.values(SYMBOL_PRESETS).map(m => m["icon.extensionSkill"]))];
 
-/** Skill names as they appear in chips: word characters and dashes, dots only between segments. */
-const SKILL_NAME_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+/** Skill names as they appear in chips: word characters and dashes, dots only between segments,
+ *  optionally behind one collision namespace (`<namespace>/<name>`). */
+const SKILL_NAME_SEGMENT_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+const SKILL_NAME_SOURCE = `${SKILL_NAME_SEGMENT_SOURCE}(?:/${SKILL_NAME_SEGMENT_SOURCE})?`;
 
 /** Regex source for a chip glyph; word glyphs (ASCII preset) must not continue a preceding word. */
 function glyphSource(icon: string): string {

@@ -781,7 +781,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const isPathCompletionItem = item.value.startsWith("/") || item.value.startsWith('"');
 		if (findLeadingSlashCommandStart(prefix) !== null && leadingSlashStart !== null && !isPathCompletionItem) {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
-			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
+			// A `/` past the leading one usually means an absolute path, but a
+			// namespaced skill (`skill:<ns>/<name>`) is a real command name too.
+			const isKnownCommand = this.#commands.some(cmd => commandMatchesNameOrAlias(cmd, item.value));
+			if (!slashPrefix.includes(" ") && (isKnownCommand || !slashPrefix.slice(1).includes("/"))) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);
 				// The collapsed `/skill:` namespace row completes to the namespace
 				// itself: no trailing space, so completion continues with the

@@ -2,12 +2,14 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
+import {
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -1710,10 +1712,16 @@ export class ExtensionRunner {
 		return original.some((_block, index) => isRewritten(index)) ? currentContent() : undefined;
 	}
 
+	/**
+	 * Emit `tool_result` to every subscribed extension. Returns the full
+	 * `content`/`details`/`isError` triple only when a handler modified the
+	 * result; joined `additionalContext` rides along whenever any handler set it.
+	 */
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
+		const contexts: string[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
@@ -1741,15 +1749,20 @@ export class ExtensionRunner {
 					currentEvent.isError = handlerResult.isError;
 					modified = true;
 				}
+				if (isNonBlankContext(handlerResult.additionalContext)) {
+					contexts.push(handlerResult.additionalContext);
+				}
 			}
 		}
 
-		if (!modified) return undefined;
+		const additionalContext = joinAdditionalContext(contexts);
+		if (!modified) return additionalContext === undefined ? undefined : { additionalContext };
 
 		return {
 			content: currentEvent.content,
 			details: currentEvent.details,
 			isError: currentEvent.isError,
+			...(additionalContext !== undefined ? { additionalContext } : {}),
 		};
 	}
 

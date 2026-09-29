@@ -395,15 +395,45 @@ Handlers must tolerate re-entry: a source-base retry can call the entire `before
 If a later queue drain fails, earlier originals that have not reached the
 transcript are restored ahead of newer enqueues. Generated preparation context
 is not requeued, and explicitly cleared or replaced queues are not resurrected.
+#### External input interception
+
+`input` runs once at submission ingress, before command interpretation, skill or
+prompt-template expansion, and queue insertion:
+
+| Submission | `source` |
+|---|---|
+| Main-session Enter or Ctrl+Enter | `"interactive"` |
+
+Handlers run in extension/registration order. Returned `text` and `images`
+replacements feed subsequent handlers; omitted fields preserve the current value,
+and `images: []` removes attachments. Replacement text is trimmed before dispatch.
+`handled: true` stops the remaining handlers and normal dispatch. Empty text with
+no remaining images also stops normal dispatch. Work explicitly scheduled by a
+handler through `sendUserMessage` or `sendMessage` is not discarded.
+
+This is an ingress event, not a user-role message event. Queue delivery and replay
+do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
+synthetic continuations do not automatically emit `input`. Main-session Enter's
+`.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
+input retains its chat-only routing and does not invoke main-session input hooks.
+Print and ACP input are outside this interception contract.
+
+Ctrl+Enter detaches the submitted draft before awaiting native handlers, so
+another submission cannot reuse it and ordinary later typing remains a new draft.
+Handled/empty input consumes only the detached submission. Dispatch failures
+restore its text and attachments alongside any newer draft. This does not make
+the established interactive input-handler chain cancellable by Esc.
+Builtin submission cleanup also preserves the newer draft, including `/clear`
+and `/new`. Commands retain their explicit prefill and session-transition actions.
 
 ### Tool lifecycle
 
 - `tool_call` (pre-exec, may block, revise the tool's execution `input`, or return passive `additionalContext`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike; passive context from non-blocking handlers is delivered after the batch's tool results in assistant call order, before the next provider request)
-- `tool_result` (post-exec, may patch content/details/isError)
+- `tool_result` (post-exec, may patch content/details/isError or return passive `additionalContext`; result context is delivered outside the tool output even when `event.isError` is true, so a failure-specific handler can guide the next model step)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
-`tool_result` is middleware-style: handlers run in extension order and each sees prior modifications.
+`tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
 ### Subagent lifecycle
 

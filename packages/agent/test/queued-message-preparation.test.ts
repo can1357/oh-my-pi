@@ -300,6 +300,42 @@ describe("queued message preparation", () => {
 		expect(userTexts(mock.calls[0].context.messages)).toEqual(["promoted"]);
 	});
 
+	it("single-queue replacement cancels the live claim it filtered a message out of", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		const original = createUserMessage("removed while claimed");
+		const started = Promise.withResolvers<AbortSignal>();
+		const release = Promise.withResolvers<void>();
+		let commits = 0;
+		agent.prepareQueuedMessages = async (_messages, signal) => {
+			started.resolve(signal);
+			await release.promise;
+			return {
+				commit: () => {
+					commits++;
+					return [];
+				},
+			};
+		};
+		agent.followUp(original);
+		const outcome = agent.continue().catch(error => error);
+		const signal = await started.promise;
+		// The removal path peeks (the peek prepends the claimed batch), drops the
+		// target, and installs the rest. The claim must not survive that and
+		// deliver the removed message anyway.
+		agent.replaceQueue(
+			"followUp",
+			agent.peekFollowUpQueue().filter(message => message !== original),
+		);
+		expect(signal.aborted).toBe(true);
+		release.resolve();
+		await outcome;
+
+		expect(commits).toBe(0);
+		expect(agent.peekFollowUpQueue()).toEqual([]);
+		expect(mock.calls.flatMap(call => userTexts(call.context.messages))).not.toContain("removed while claimed");
+	});
+
 	it("LIFO editor restoration removes claimed originals and preserves the rest of the batch", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model }, followUpMode: "all" });

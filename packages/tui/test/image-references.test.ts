@@ -177,6 +177,18 @@ describe("collapseSkillTokens", () => {
 		expect(collapseSkillTokens("!echo /skill:reviewer", known, () => {})).toBe("!echo /skill:reviewer");
 		expect(collapseSkillTokens("/compact /skill:reviewer", known, () => {})).toBe("/compact /skill:reviewer");
 	});
+
+	it("collapses and renders a collision-namespaced skill as one chip", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseSkillTokens(
+			"fix it /skill:superpowers/tdd now",
+			name => name === "superpowers/tdd",
+			(label, expansion) => registered.push([label, expansion]),
+		);
+		expect(out).toBe(`fix it ${skillChipLabel("superpowers/tdd")} now`);
+		expect(registered).toEqual([[skillChipLabel("superpowers/tdd"), "/skill:superpowers/tdd"]]);
+		expect(capture(out).skills).toEqual(["superpowers/tdd"]);
+	});
 });
 
 describe("collapseImageMarkers", () => {
