@@ -97,6 +97,13 @@ function createHarness(
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
 	controller.setupEditorSubmitHandler();
+	const submit = editor.onSubmit;
+	editor.onSubmit = async text => {
+		// Enter removes the submitted text before invoking its handler, but
+		// leaves images for the controller to claim.
+		editor.setText("");
+		await submit?.(text);
+	};
 	return {
 		controller,
 		editor,
@@ -150,7 +157,7 @@ describe("mode command attachments", () => {
 
 		await harness.editor.onSubmit?.("/goal blocked [Image #1]");
 
-		expect(harness.editor.getText()).toBe("");
+		expect(harness.editor.getText()).toBe("/goal blocked [Image #1]");
 		expect(harness.editor.pendingImages).toHaveLength(1);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///old.png"]);
 	});
@@ -160,7 +167,7 @@ describe("mode command attachments", () => {
 		["/vibe blocked [Image #1]", "handleVibeModeCommand"],
 		["/guided-goal blocked [Image #1]", "handleGuidedGoalCommand"],
 	] as const) {
-		it(`keeps ${command} rejected text only when a stash exists`, async () => {
+		it(`keeps ${command} and its images when rejected, without consuming an existing stash`, async () => {
 			const attemptedImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
 			for (const withStash of [false, true]) {
 				const harness = createHarness({});
@@ -176,7 +183,7 @@ describe("mode command attachments", () => {
 
 				await harness.editor.onSubmit?.(command);
 
-				expect(harness.editor.getText()).toBe(withStash ? command : "");
+				expect(harness.editor.getText()).toBe(command);
 				expect(harness.editor.pendingImages).toEqual([attemptedImage]);
 				expect(harness.editor.pendingImageLinks).toEqual(["file:///attempted.png"]);
 				if (withStash) {
@@ -190,6 +197,19 @@ describe("mode command attachments", () => {
 		});
 	}
 
+	it("consumes a rejected text-only mode command when no stash exists", async () => {
+		const harness = createHarness({});
+		harness.editor.pendingImages = [];
+		harness.editor.pendingImageLinks = [];
+		harness.editor.setText("/plan blocked");
+		harness.handlePlanModeCommand.mockResolvedValueOnce(false);
+
+		await harness.editor.onSubmit?.("/plan blocked");
+
+		expect(harness.editor.getText()).toBe("");
+		expect(harness.editor.pendingImages).toEqual([]);
+	});
+
 	for (const [command, handler] of [
 		["/goal pause", "handleGoalModeCommand"],
 		["/goal show", "handleGoalModeCommand"],
@@ -199,15 +219,53 @@ describe("mode command attachments", () => {
 		["/plan exit", "handlePlanModeCommand"],
 		["/vibe exit", "handleVibeModeCommand"],
 	] as const) {
-		it(`consumes ${command} without reviving the slash text or detached images`, async () => {
+		it(`restores ${command} and its detached image when the mode command starts no turn`, async () => {
 			const harness = createHarness({});
 			harness[handler].mockResolvedValueOnce("consumed");
 			await harness.editor.onSubmit?.(`${command} [Image #1]`);
-			expect(harness.editor.getText()).toBe("");
-			expect(harness.editor.pendingImages).toEqual([]);
-			expect(harness.editor.pendingImageLinks).toEqual([]);
+			expect(harness.editor.getText()).toBe(`${command} [Image #1]`);
+			expect(harness.editor.pendingImages).toEqual([{ type: "image", data: "b2xk", mimeType: "image/png" }]);
+			expect(harness.editor.pendingImageLinks).toEqual(["file:///old.png"]);
 		});
 	}
+	it("consumes a text-only mode toggle without reviving its command", async () => {
+		const harness = createHarness({});
+		harness.editor.pendingImages = [];
+		harness.editor.pendingImageLinks = [];
+		harness.editor.setText("/plan exit");
+		harness.handlePlanModeCommand.mockResolvedValueOnce("consumed");
+
+		await harness.editor.onSubmit?.("/plan exit");
+
+		expect(harness.editor.getText()).toBe("");
+		expect(harness.editor.pendingImages).toEqual([]);
+	});
+
+	it("returns a consumed mode command and its image beside typing added during dispatch", async () => {
+		const harness = createHarness({});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		harness.handlePlanModeCommand.mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			return "consumed";
+		});
+		const submitting = harness.editor.onSubmit?.("/plan inspect [Image #1]");
+		await entered.promise;
+		const newerImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/jpeg" };
+		harness.editor.setText("newer [Image #1]");
+		harness.editor.pendingImages = [newerImage];
+		harness.editor.pendingImageLinks = ["file:///newer.jpeg"];
+		release.resolve();
+		await submitting;
+
+		expect(harness.editor.getText()).toBe("/plan inspect [Image #2]\n\nnewer [Image #1]");
+		expect(harness.editor.pendingImages).toEqual([
+			newerImage,
+			{ type: "image", data: "b2xk", mimeType: "image/png" },
+		]);
+		expect(harness.editor.pendingImageLinks).toEqual(["file:///newer.jpeg", "file:///old.png"]);
+	});
 
 	it("detaches submitted images before awaiting input extensions", async () => {
 		const inputResult = Promise.withResolvers<{ images?: ImageContent[] }>();
@@ -227,6 +285,25 @@ describe("mode command attachments", () => {
 		expect(harness.editor.pendingImages).toEqual([laterImage]);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
+	it("keeps an identical mode draft retyped while its input hook awaited", async () => {
+		const inputResult = Promise.withResolvers<{ images?: ImageContent[]; text?: string }>();
+		const harness = createHarness(inputResult.promise);
+		const command = "/plan inspect [Image #1]";
+		const submitting = harness.editor.onSubmit?.(command);
+		if (!submitting) throw new Error("expected editor submit handler");
+		const newerImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+		harness.editor.setText(command);
+		harness.editor.pendingImages.push(newerImage);
+		harness.editor.pendingImageLinks.push("file:///newer.png");
+		inputResult.resolve({});
+		await submitting;
+
+		expect(harness.handlePlanModeCommand).toHaveBeenCalled();
+		expect(harness.editor.getText()).toBe(command);
+		expect(harness.editor.pendingImages).toEqual([newerImage]);
+		expect(harness.editor.pendingImageLinks).toEqual(["file:///newer.png"]);
+	});
+
 	it("preserves later images when an extension rewrites input into a mode command", async () => {
 		const inputResult = Promise.withResolvers<{ images?: ImageContent[]; text?: string }>();
 		const harness = createHarness(inputResult.promise);
