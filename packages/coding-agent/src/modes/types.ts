@@ -512,6 +512,8 @@ export interface InteractiveModeContext {
 	resetDisplayAfterAppearanceRefresh(): void;
 	handleDequeue(): void;
 	handleImagePaste(): Promise<boolean>;
+	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
+	handleImagePathPaste(path: string): Promise<void>;
 	/**
 	 * Queue a message for delivery only after the active agent turn would stop.
 	 * `detached` is a submission whose draft already left the editor: its attachments

@@ -3,6 +3,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
+	type Component,
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
@@ -23,7 +24,12 @@ import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import { chipLabel, compactImageMarkers, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import {
+	chipLabel,
+	compactImageMarkers,
+	formatVisionMarker,
+	shiftImageMarkers,
+} from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { expandEmoticons } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
 import { materializeImageReferenceLinks, setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
@@ -124,6 +130,24 @@ interface PasteTarget {
 	pasteText(text: string): void;
 	/** Reserve delivery before an async clipboard read; undefined releases it without text. */
 	beginPaste?(): (text: string | undefined) => boolean;
+	/** The prompt accepts pasted images (the ask dialog's answer and note editors). */
+	acceptsImages?: boolean;
+	/** Attach an image; returns the marker to deliver as pasted text. */
+	attachImage?(image: ImageContent, dims?: { width: number; height: number }): string | undefined;
+}
+
+/** Where a pasted image lands: the main editor's attachments, or a prompt that opted into images. */
+interface ImagePasteSink {
+	attach(image: ImageContent, unsupportedMessage: string, sourcePath?: string): Promise<boolean>;
+	pasteText(text: string): void;
+	/** Main editor only; without it a video path lands as text. */
+	attachVideo?(path: string): Promise<void>;
+}
+
+/** One paste into an image-accepting prompt; `finish` delivers what it collected, in order. */
+interface PromptImagePaste {
+	sink: ImagePasteSink;
+	finish(): void;
 }
 
 function hasPasteText(value: unknown): value is PasteTarget {
@@ -269,6 +293,16 @@ export class InputController {
 	// Visible-chip signature from the last editor change; a difference escapes the
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
+	/** Main-editor destination: images become pending attachments. */
+	readonly #editorImageSink: ImagePasteSink = {
+		attach: (image, unsupportedMessage, sourcePath) =>
+			this.#normalizeAndInsertPastedImage(image, unsupportedMessage, sourcePath),
+		pasteText: text => {
+			this.ctx.editor.pasteText(text);
+			this.ctx.ui.requestRender();
+		},
+		attachVideo: path => this.#insertPendingVideoPreview(path),
+	};
 
 	#abortStreamingTurn(): void {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -838,16 +872,8 @@ export class InputController {
 				target.pasteText(text);
 				this.ctx.ui.requestRender();
 			},
-			pasteImage: async image => {
-				// Images can only land in the main editor — when a modal Input is
-				// focused, refuse rather than dump the binary blob in a hidden buffer.
-				const focused = this.ctx.ui.getFocused();
-				if (focused && focused !== this.ctx.editor && hasPasteText(focused)) {
-					this.ctx.showStatus("Image paste is not supported in this prompt");
-					return;
-				}
-				await this.#normalizeAndInsertPastedImage(image, `Unsupported pasted image format: ${image.mimeType}`);
-			},
+			pasteImage: image =>
+				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
 			showStatus: message => this.ctx.showStatus(message),
 		});
 		this.ctx.ui.addInputListener(data => (this.#enhancedPaste?.handleInput(data) ? { consume: true } : undefined));
@@ -1954,10 +1980,7 @@ export class InputController {
 		const kind = source?.kind ?? "image";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		const expansion = dims
-			? `[${kind === "video" ? "Video" : "Image"} #${imageNum}, ${dims.width}x${dims.height}]`
-			: `[${kind === "video" ? "Video" : "Image"} #${imageNum}]`;
-		this.ctx.editor.insertAtom(chipLabel(kind, imageNum), expansion);
+		this.ctx.editor.insertAtom(chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims));
 		this.ctx.ui.requestRender();
 	}
 
@@ -1971,6 +1994,27 @@ export class InputController {
 			// Unknown/corrupt header — fall back to a bare label.
 		}
 		return undefined;
+	}
+
+	/**
+	 * Attach a pasted image to an image-accepting prompt, prepared like a main-editor attachment.
+	 * Returns the marker, or undefined when the image is unsupported or focus moved meanwhile.
+	 */
+	async #attachPromptImage(
+		target: Component & PasteTarget,
+		image: ImageContent,
+		unsupportedMessage: string,
+		sourcePath?: string,
+	): Promise<string | undefined> {
+		if (!target.attachImage) return undefined;
+		const prepared = await this.#preparePastedImage(image, unsupportedMessage, sourcePath);
+		if (!prepared) return undefined;
+		const dims = await this.#imageDimensions(prepared.image);
+		if (this.ctx.ui.getFocused() !== target) return undefined;
+		const attachment = prepared.source
+			? tagImageAttachmentSource(prepared.image, prepared.source.path, prepared.source.kind)
+			: prepared.image;
+		return target.attachImage(attachment, dims);
 	}
 
 	async #normalizePastedImage(image: ImageContent, unsupportedMessage: string): Promise<ImageContent | null> {
@@ -1994,19 +2038,31 @@ export class InputController {
 		return imageData;
 	}
 
+	/**
+	 * Normalize a pasted image. Every attachment gets a file so tools can read, copy, or upload it:
+	 * file-pasted images keep their original path; clipboard bitmaps are committed to the session
+	 * and referenced by a relocation-safe `local://` URL. The reference reaches the model via the
+	 * attachment source notice (see `renderAttachmentSourceNotice`).
+	 */
+	async #preparePastedImage(
+		image: ImageContent,
+		unsupportedMessage: string,
+		sourcePath?: string,
+	): Promise<{ image: ImageContent; source: ImageAttachmentSource | undefined } | null> {
+		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
+		if (!normalized) return null;
+		const path = sourcePath ?? (await this.#persistPastedImage(image));
+		return { image: normalized, source: path ? { path, kind: "image" } : undefined };
+	}
+
 	async #normalizeAndInsertPastedImage(
 		image: ImageContent,
 		unsupportedMessage: string,
 		sourcePath?: string,
 	): Promise<boolean> {
-		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
-		if (!normalized) return false;
-		// Every attachment gets a file so tools can read, copy, or upload it: file-pasted
-		// images keep their original path; clipboard bitmaps are committed to the session
-		// and referenced by a relocation-safe `local://` URL. The reference reaches the
-		// model via the hidden companion message (see AgentSession's attachment source notices).
-		const filePath = sourcePath ?? (await this.#persistPastedImage(image));
-		await this.#insertPendingImage(normalized, filePath ? { path: filePath, kind: "image" } : undefined);
+		const prepared = await this.#preparePastedImage(image, unsupportedMessage, sourcePath);
+		if (!prepared) return false;
+		await this.#insertPendingImage(prepared.image, prepared.source);
 		return true;
 	}
 
@@ -2080,13 +2136,63 @@ export class InputController {
 		}
 	}
 
-	async #tryPasteClipboardImage(): Promise<boolean> {
+	/**
+	 * Route an image paste to the focused destination. A focused prompt that did not opt into
+	 * images refuses, so the image never lands in the hidden main editor (#6057).
+	 */
+	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
+		const focused = this.ctx.ui.getFocused();
+		if (!focused || focused === this.ctx.editor || !hasPasteText(focused)) {
+			await paste(this.#editorImageSink);
+			return;
+		}
+		if (!focused.acceptsImages) {
+			this.ctx.showStatus("Image paste is not supported in this prompt");
+			return;
+		}
+		const promptPaste = this.#beginPromptImagePaste(focused);
+		try {
+			await paste(promptPaste.sink);
+		} finally {
+			promptPaste.finish();
+		}
+	}
+
+	/**
+	 * Start one paste into an image-accepting prompt. Reserves the prompt's slot before the first
+	 * await so a following Enter waits; `finish` delivers the collected text once.
+	 */
+	#beginPromptImagePaste(target: Component & PasteTarget): PromptImagePaste {
+		const finishPaste = target.beginPaste?.();
+		const pasted: string[] = [];
+		return {
+			sink: {
+				attach: async (image, unsupportedMessage, sourcePath) => {
+					const marker = await this.#attachPromptImage(target, image, unsupportedMessage, sourcePath);
+					if (marker === undefined) return false;
+					pasted.push(marker);
+					return true;
+				},
+				pasteText: text => {
+					pasted.push(text);
+				},
+			},
+			finish: () => {
+				const text = pasted.join(" ");
+				if (finishPaste) finishPaste(text || undefined);
+				else if (text && this.ctx.ui.getFocused() === target) target.pasteText(text);
+				this.ctx.ui.requestRender();
+			},
+		};
+	}
+
+	async #tryPasteClipboardImage(sink: ImagePasteSink): Promise<boolean> {
 		const env = process.env;
 		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
 		try {
 			const image = await this.clipboard.readImage();
 			if (!image) return false;
-			await this.#normalizeAndInsertPastedImage(
+			await sink.attach(
 				{ type: "image", data: image.data.toBase64(), mimeType: image.mimeType },
 				`Unsupported clipboard image format: ${image.mimeType}`,
 			);
@@ -2096,10 +2202,20 @@ export class InputController {
 		}
 	}
 
-	async handleImagePathPaste(path: string): Promise<void> {
+	handleImagePathPaste(path: string): Promise<void> {
+		return this.#pasteImageIntoFocus(sink => this.#pasteImagePath(path, sink));
+	}
+
+	async #pasteImagePath(path: string, sink: ImagePasteSink): Promise<void> {
 		try {
 			if (isVideoPath(path)) {
-				await this.#insertPendingVideoPreview(path);
+				if (sink.attachVideo) {
+					await sink.attachVideo(path);
+					return;
+				}
+				// Image-only prompts keep the path as text, like other unattachable pastes.
+				sink.pasteText(path);
+				this.ctx.showStatus("Video paste is not supported in this prompt");
 				return;
 			}
 			const image = await loadImageInput({
@@ -2110,21 +2226,19 @@ export class InputController {
 			if (!image) {
 				// Path resolved but is not a readable image (e.g. a zero-byte or
 				// locked transient screenshot file). Prefer the clipboard bytes.
-				if (await this.#tryPasteClipboardImage()) return;
-				this.ctx.editor.pasteText(path);
-				this.ctx.ui.requestRender();
+				if (await this.#tryPasteClipboardImage(sink)) return;
+				sink.pasteText(path);
 				this.ctx.showStatus("Pasted path is not a supported image");
 				return;
 			}
-			await this.#normalizeAndInsertPastedImage(
+			await sink.attach(
 				{ type: "image", data: image.data, mimeType: image.mimeType },
 				`Unsupported pasted image format: ${image.mimeType}`,
 				image.resolvedPath,
 			);
 		} catch (error) {
 			if (error instanceof ImageInputTooLargeError) {
-				this.ctx.editor.pasteText(path);
-				this.ctx.ui.requestRender();
+				sink.pasteText(path);
 				this.ctx.showStatus(error.message);
 				return;
 			}
@@ -2132,7 +2246,7 @@ export class InputController {
 				// #2375: the bracketed paste forwarded by a local terminal carries a
 				// path on the *local* filesystem. The bytes may still be on the
 				// clipboard (Win+Shift+S), so try those before giving up.
-				if (await this.#tryPasteClipboardImage()) return;
+				if (await this.#tryPasteClipboardImage(sink)) return;
 				// Over SSH the clipboard lives on the remote host, so the path is
 				// genuinely unreachable; pasting it as text would look like the
 				// image was attached when nothing was sent. Surface an SSH-aware
@@ -2156,24 +2270,29 @@ export class InputController {
 				);
 				return;
 			}
-			if (await this.#tryPasteClipboardImage()) return;
-			this.ctx.editor.pasteText(path);
-			this.ctx.ui.requestRender();
+			if (await this.#tryPasteClipboardImage(sink)) return;
+			sink.pasteText(path);
 			this.ctx.showStatus("Failed to read pasted image path");
 		}
 	}
 
 	async handleImagePaste(): Promise<boolean> {
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
+		let promptPaste: PromptImagePaste | undefined;
 		try {
 			// When a modal paste-capable prompt (login/API-key Input) owns focus,
 			// only clipboard text may land there. Image payloads must not mutate
 			// the hidden main editor — mirror the enhanced-paste `pasteImage`
 			// behavior and surface the unsupported-status instead (#6057).
+			// A prompt that opted into images gets the main editor's full image flow
+			// instead, delivered through one reservation.
 			const focusedNow = this.ctx.ui.getFocused();
 			const promptTarget =
 				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
-			finishPaste = promptTarget?.beginPaste?.();
+			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
+			else finishPaste = promptTarget?.beginPaste?.();
+			const textOnlyPrompt = promptTarget !== null && promptPaste === undefined;
+			const sink = promptPaste?.sink ?? this.#editorImageSink;
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
 			// file-icon bitmap on the pasteboard. `arboard::get_image()`
@@ -2188,18 +2307,18 @@ export class InputController {
 			// (Finder selections, certain screenshot tools) where
 			// `arboard::get_image()` returns `ContentNotAvailable` and
 			// `pbpaste` is empty. Every image-shaped path routes through
-			// {@link handleImagePathPaste}, matching the bracketed-paste
+			// {@link #pasteImagePath}, matching the bracketed-paste
 			// handler in `CustomEditor.handleInput`; multi-image Finder
 			// selections must not silently drop after the first attach.
 			// `readMacFileUrls` returns an empty list off Darwin, so on every
 			// other platform this is a no-op and the bitmap read below still
 			// runs first.
-			const fileUrls = promptTarget ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
+			const fileUrls = textOnlyPrompt ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
 			let attachedFromFileUrls = false;
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
 				if (!candidate) continue;
-				await this.handleImagePathPaste(candidate);
+				await this.#pasteImagePath(candidate, sink);
 				attachedFromFileUrls = true;
 			}
 			if (attachedFromFileUrls) return true;
@@ -2219,11 +2338,11 @@ export class InputController {
 			);
 			const image = await this.clipboard.readImage();
 			if (image) {
-				if (promptTarget) {
+				if (textOnlyPrompt) {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return false;
 				}
-				return await this.#normalizeAndInsertPastedImage(
+				return await sink.attach(
 					{
 						type: "image",
 						data: image.data.toBase64(),
@@ -2243,14 +2362,14 @@ export class InputController {
 				return false;
 			}
 			// #3506: when the clipboard text is an explicit image file path,
-			// route through {@link handleImagePathPaste} so the image is
+			// route through {@link #pasteImagePath} so the image is
 			// loaded and attached instead of pasting the path as literal
 			// text. Covers terminals that paste the Finder file path as
 			// plain text rather than as a `public.file-url` (most macOS
 			// terminals do this for image clipboards).
-			const imagePath = promptTarget ? null : extractImagePathFromText(text);
+			const imagePath = textOnlyPrompt ? null : extractImagePathFromText(text);
 			if (imagePath) {
-				await this.handleImagePathPaste(imagePath);
+				await this.#pasteImagePath(imagePath, sink);
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.
@@ -2259,9 +2378,10 @@ export class InputController {
 				const accepted = finishPaste(text);
 				finishPaste = undefined;
 				if (!accepted) return false;
+			} else if (promptTarget && !promptPaste) {
+				promptTarget.pasteText(text);
 			} else {
-				const target = promptTarget ?? this.ctx.editor;
-				target.pasteText(text);
+				sink.pasteText(text);
 			}
 			this.ctx.ui.requestRender();
 			return true;
@@ -2269,6 +2389,7 @@ export class InputController {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
 		} finally {
+			promptPaste?.finish();
 			finishPaste?.(undefined);
 		}
 	}

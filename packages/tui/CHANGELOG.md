@@ -6,6 +6,7 @@
 
 - Added Tern Surface Protocol (TSP) integration for native terminal rendering
 - Redesigned transcript, chat, dashboard, and picker UI components for native wire representation
+- `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 
 ## [18.4.3] - 2026-09-28
 ### Added
