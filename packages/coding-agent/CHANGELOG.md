@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `web_search` now accepts an optional `model` selector for per-query search backend selection; omitting it keeps the configured `web` role chain ([#11926](https://github.com/can1357/oh-my-pi/pull/11926) by [@cyriusweng](https://github.com/cyriusweng)).
+
 ### Fixed
 
 - Fixed hosted OpenAI web search on hosts that accept only string tool_choice values, such as Command Code ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
