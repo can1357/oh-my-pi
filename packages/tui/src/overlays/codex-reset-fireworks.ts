@@ -8,6 +8,7 @@ import {
 	visibleWidth,
 } from "../index";
 import { type ThemeColor, theme } from "../theme/theme";
+import { formatKeyHint } from "../app-keybindings";
 
 const FRAME_INTERVAL_MS = 85;
 const FRAME_COUNT = 34;
@@ -176,12 +177,13 @@ function drawBanner(
 	const innerWidth = panelWidth - 2;
 	const titleText =
 		event.kind === "unscheduled-weekly-reset" ? " O P E N A I   R E S E T " : " S A V E D   R E S E T ";
+	const esc = formatKeyHint("escape");
 	const subtitleText =
 		event.kind === "unscheduled-weekly-reset"
-			? "Weekly usage cleared early · ESC to return"
+			? `Weekly usage cleared early · ${esc} to return`
 			: event.added === 1
-				? `New reset banked · ${event.available} available · ESC to return`
-				: `${event.added} resets banked · ${event.available} available · ESC to return`;
+				? `New reset banked · ${event.available} available · ${esc} to return`
+				: `${event.added} resets banked · ${event.available} available · ${esc} to return`;
 	const title = truncateToWidth(titleText, innerWidth, "");
 	const subtitle = truncateToWidth(subtitleText, innerWidth, "");
 	const titleOffset = Math.floor((innerWidth - visibleWidth(title)) / 2);

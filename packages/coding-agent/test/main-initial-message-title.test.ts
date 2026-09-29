@@ -34,6 +34,9 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 				JSON.stringify("implement X"),
 			].join(" ");
 			const proc = Bun.spawn(["timeout", "25s", "script", "-q", "-e", "-c", command, "/dev/null"], {
+			// The child cold-starts and transpiles the CLI graph; loaded CI runners need far more than an idle
+			// boot. `timeout` stays below the test budget so a hung interactive session is killed and cleaned up.
+			const proc = Bun.spawn(["timeout", "25s", "script", "-q", "-c", command, "/dev/null"], {
 				cwd: repoRoot,
 				stdin: "ignore",
 				stdout: "pipe",
@@ -63,4 +66,5 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 			await removeWithRetries(root);
 		}
 	}, 35_000);
+	}, 30_000);
 });

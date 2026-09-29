@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -81,11 +82,11 @@ function formatFastModeStatus(session: AgentSession): string {
 }
 
 const SLOW_UNSUPPORTED =
-	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and subscription slow mode on Anthropic.";
+	"The current model has no slow mode: /slow uses the flex tier on OpenAI/Google models and low priority on Anthropic subscriptions.";
 
 /**
  * `/slow [on|off|status]` for the active model: the `flex` service tier on
- * OpenAI/Google, subscription slow mode (`providers.anthropic.slowMode`
+ * OpenAI/Google, subscription low priority (`providers.anthropic.slowMode`
  * `auto`/`off`) on Anthropic. Bare invocation toggles. Returns the user-facing
  * reply, or `undefined` for an unknown argument.
  */
@@ -93,21 +94,23 @@ function runSlowCommand(arg: string, session: AgentSession): string | undefined 
 	if (arg !== "" && arg !== "toggle" && arg !== "on" && arg !== "off" && arg !== "status") return undefined;
 	const anthropic = session.model?.provider === "anthropic";
 	if (arg === "status") {
-		if (!session.isSlowModeEnabled()) return "Slow mode is off.";
+		const label = anthropic ? session.getAnthropicSlowModeLabel() : undefined;
+		if (!session.isSlowModeEnabled()) return label ? `Slow mode is off (${label}).` : "Slow mode is off.";
 		if (!anthropic) return "Slow mode is on (flex tier).";
-		const label = session.getAnthropicSlowModeLabel();
-		return label ? `Slow mode is on (${label}).` : "Slow mode is on (auto at the Claude session limit).";
+		return label ? `Slow mode is on (${label}).` : "Slow mode is on (low priority at the Claude session limit).";
 	}
 	const enabled = arg === "on" || (arg !== "off" && !session.isSlowModeEnabled());
 	if (!session.setSlowMode(enabled)) return SLOW_UNSUPPORTED;
 	if (!session.isSlowModeEnabled()) {
-		return anthropic ? "Slow mode off: requests wait for your Claude usage limit as usual." : "Slow mode off.";
+		return anthropic
+			? "Slow mode off: at your Claude usage limit, requests may get a short wrap-up allowance, then wait for the limit to reset."
+			: "Slow mode off.";
 	}
 	if (!anthropic) return "Slow mode on: requests use the flex tier (lower cost, higher latency).";
 	const resetsAtSec = session.getAnthropicSlowModeLane()?.activeResetsAtSec();
 	return resetsAtSec !== undefined
-		? `Slow mode on: continuing at lower priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
-		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers lower-priority service, requests switch to it automatically.";
+		? `Slow mode on: continuing at low priority until your limit resets at ${formatSlowModeResetClock(resetsAtSec)}. Your weekly limit still applies, and responses may pause while waiting for spare capacity.`
+		: "Slow mode on: when your Claude subscription hits its session limit and Anthropic offers low priority, requests switch to it after any wrap-up allowance.";
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
@@ -153,21 +156,16 @@ function formatComputerUseStatus(session: AgentSession): string {
 }
 
 /**
- * Apply a session-scoped computer-use toggle and rebuild the current prompt.
+ * Apply a session-scoped computer-use toggle; the session's setting listener
+ * reconciles the prompt without a mid-session cache-busting rebuild.
  * The override is never persisted to settings.json.
  */
-async function applyComputerUseToggle(session: AgentSession, enable: boolean): Promise<string> {
+function applyComputerUseToggle(session: AgentSession, enable: boolean): string {
 	const previous = cfgComputerEnabled.get(session.settings);
 	cfgComputerEnabled.override(session.settings, enable);
 	if (enable && !session.getEvalPreludes().some(definition => definition.name === "computer")) {
 		cfgComputerEnabled.override(session.settings, previous);
 		return "Computer use is unavailable in this session.";
-	}
-	try {
-		await session.refreshBaseSystemPrompt();
-	} catch (error) {
-		cfgComputerEnabled.override(session.settings, previous);
-		throw error;
 	}
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
@@ -325,8 +323,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "loop",
 		icon: "loop",
-		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with `--until '<cmd>'` / `--while '<cmd>'` — the command's exit status decides whether the next iteration runs. Esc suspends the ongoing loop; /loop again to disable.",
+		get description() {
+			return `Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Bound it with a count/duration, or gate it with \`--until '<cmd>'\` / \`--while '<cmd>'\` — the command's exit status decides whether the next iteration runs. ${formatKeyHint("escape")} suspends the ongoing loop; /loop again to disable.`;
+		},
 		inlineHint: "[count|duration] [--while|--until '<cmd>'] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -405,7 +404,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "switch",
 		icon: "swap",
-		description: "Switch model for this session (same as alt+p); accepts fuzzy ids, provider/id, @role, :level",
+		get description() {
+			return `Switch model for this session (same as ${formatKeyHint("alt+p")}); accepts fuzzy ids, provider/id, @role, :level`;
+		},
 		acpDescription: "Switch model for this session only",
 		acpInputHint: "[model]",
 		inlineHint: "[model]",
@@ -525,12 +526,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "slow",
 		icon: "fast",
 		description:
-			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at lower priority after the Claude session limit",
+			"Toggle slow mode: flex tier on OpenAI/Google; on Anthropic, continue at low priority after the Claude session limit",
 		acpDescription: "Toggle slow mode",
 		acpInputHint: "[on|off|status]",
 		subcommands: [
-			{ name: "on", description: "Flex tier, or Anthropic lower priority at the session limit (auto)" },
-			{ name: "off", description: "Standard service; stop Anthropic lower-priority mode" },
+			{ name: "on", description: "Flex tier, or Anthropic low priority at the session limit (auto)" },
+			{ name: "off", description: "Standard service; stop Anthropic low priority" },
 			{ name: "status", description: "Show slow mode status" },
 		],
 		allowArgs: true,
@@ -654,7 +655,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
 				const enable = arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.session.settings);
-				await runtime.output(await applyComputerUseToggle(runtime.session, enable));
+				await runtime.output(applyComputerUseToggle(runtime.session, enable));
 				return commandConsumed();
 			}
 			return usage("Usage: /computer [on|off|status]", runtime);
@@ -669,7 +670,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
 				const enable =
 					arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.ctx.session.settings);
-				runtime.ctx.showStatus(await applyComputerUseToggle(runtime.ctx.session, enable));
+				runtime.ctx.showStatus(applyComputerUseToggle(runtime.ctx.session, enable));
 				runtime.ctx.editor.setText("");
 				return;
 			}

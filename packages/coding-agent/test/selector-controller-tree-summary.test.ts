@@ -91,6 +91,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showHookSelector,
+		keybindings: { getKeys: () => ["escape"] },
 		showHookEditor: vi.fn(),
 		chatContainer: { addChild: vi.fn() },
 		statusContainer: {

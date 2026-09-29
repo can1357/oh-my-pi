@@ -6,20 +6,22 @@ import { Spacer } from "../../components/spacer";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { Input } from "../../components/input";
+import { formatKeyHint } from "../../app-keybindings";
+import { editorKey } from "../../chrome/keybinding-hints";
 import { matchesKey } from "../../keys";
 import { type SgrMouseEvent } from "../../mouse";
 import { wrapTextWithAnsi } from "../../utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
 import { theme } from "../../theme/theme";
-import type { SetupSceneHost, SetupTab } from "./types";
+import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 function loginUrlLink(url: string): string {
 	return `\x1b]8;;${url}\x07Open login URL\x1b]8;;\x07`;
 }
 
 function loginCopyHint(): string {
-	return theme.fg("dim", "(clipboard copy attempted; Alt+C retries)");
+	return theme.fg("dim", `(clipboard copy attempted; ${formatKeyHint("alt+c")} retries)`);
 }
 
 class CopyablePromptInput implements Component, Focusable {
@@ -67,13 +69,15 @@ interface PromptState {
 }
 
 /**
- * "Sign in" panel: lets the user authenticate one or more model providers via
- * OAuth. Unlike a standalone scene it never auto-advances the wizard — the user
- * may sign in to several providers and then continue with Esc.
+ * "Sign in" scene: lets the user authenticate one or more model providers via
+ * OAuth. It never auto-advances the wizard — the user may sign in to several
+ * providers and then continue with Esc.
  */
-export class SignInTab implements SetupTab {
-	readonly id = "sign-in";
-	readonly label = "Sign in";
+export class SignInScene implements SetupSceneController {
+	readonly title = "Sign in to your providers";
+	get subtitle(): string {
+		return `Sign in to one or more providers. Press ${editorKey("tui.select.cancel")} when you're done.`;
+	}
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
@@ -95,11 +99,6 @@ export class SignInTab implements SetupTab {
 		this.#host = host;
 		this.#authStorage = host.ctx.authStorage;
 		this.#selector = this.#createSelector();
-	}
-
-	/** Modal while an OAuth flow is running so the scene won't switch tabs or finish. */
-	get modal(): boolean {
-		return this.#loggingInProvider !== undefined;
 	}
 
 	dispose(): void {
@@ -290,7 +289,7 @@ export class SignInTab implements SetupTab {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
 					theme.fg("error", `Login failed: ${message}`),
-					theme.fg("dim", "Choose another provider or press Esc to continue."),
+					theme.fg("dim", `Choose another provider or press ${editorKey("tui.select.cancel")} to continue.`),
 				];
 				this.#authUrl = undefined;
 				this.#authLaunchUrl = undefined;
@@ -371,3 +370,11 @@ export class SignInTab implements SetupTab {
 		this.#host.requestRender();
 	}
 }
+
+/** Onboarding scene for provider sign-in. */
+export const providersSetupScene: SetupScene = {
+	id: "providers",
+	title: "Sign in to your providers",
+	minVersion: 1,
+	mount: host => new SignInScene(host),
+};

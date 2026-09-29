@@ -1161,6 +1161,18 @@ const response = await complete(
 );
 ```
 
+When an auth-broker client requests recovery after a provider rejects an OAuth
+bearer, the broker may reuse a still-fresh token that it minted in the previous
+five minutes instead of rotating the refresh token again. The process-local
+cache is bound to the credential ID and access token. Scheduled expiry refreshes,
+direct forced refreshes such as MCP recovery, ordinary hard-auth blocks, and
+sibling rotation keep their existing behavior. Cached refresh responses rebind
+by durable credential ID so concurrent row removal cannot switch a pinned
+session to another account.
+Generic `forceRefresh: true` requests do not opt into reuse. Provider-401 retry
+paths pass `refreshReason: "auth-recovery"` explicitly; expiry sentinels and
+usage polling do not imply that reason.
+
 ### Provider Notes
 
 **OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options.

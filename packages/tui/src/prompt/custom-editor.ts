@@ -14,6 +14,7 @@ import { imageAttachmentSource } from "./image-source";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
+	type ChipKind,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
@@ -21,15 +22,24 @@ import {
 	collapseSkillTokens,
 	composerTokenRegex,
 	modelChipStyle,
+	PLACEHOLDER_REGEX,
+	referencedAttachments,
 	renderPlaceholders,
 	skillChipLabel,
 	skillChipStyle,
 	skillToken,
 } from "./composer-attachments";
-import { MacOSSpellingProvider, type SpellingFeatures } from "./macos-spelling";
+import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "./magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
+import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
+
+/** Independently switchable prose-assistance features of the composer. */
+export interface SpellingFeatures extends MacOSSpellingFeatures {
+	/** Word-completion engine; `off` disables ghost text. */
+	autocomplete: WordCompletionMethod;
+}
 
 type ConfigurableEditorAction = Extract<
 	AppKeybinding,
@@ -374,6 +384,7 @@ export type ComposerChipDescriptor =
  */
 export class CustomEditor extends Editor {
 	#spelling = new MacOSSpellingProvider();
+	#wordCompletion = new WordCompletionProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -432,14 +443,24 @@ export class CustomEditor extends Editor {
 			this.#requestShimmerRepaint?.();
 		};
 		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.#wordCompletion.onUpdate = requestTextAssistRepaint;
 		this.onTextAssistApplied = requestTextAssistRepaint;
-		this.setTextAssistProvider(this.#spelling);
+		this.setTextAssistProvider({
+			getWordCompletion: (lines, cursorLine, cursorCol) =>
+				this.#wordCompletion.getWordCompletion(lines, cursorLine, cursorCol),
+			wordCompletionFeedback: (lines, cursorLine, cursorCol, suggestion, accepted) =>
+				this.#wordCompletion.wordCompletionFeedback(lines, cursorLine, cursorCol, suggestion, accepted),
+			tryAutocorrect: (lines, cursorLine, cursorCol) => this.#spelling.tryAutocorrect(lines, cursorLine, cursorCol),
+			getWordReplacements: (lines, cursorLine, cursorCol) =>
+				this.#spelling.getWordReplacements(lines, cursorLine, cursorCol),
+		});
 		if (args[0] instanceof TUI) this.tui = args[0];
 	}
 
-	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	/** Independently configure typo detection, the word-completion engine, and autocorrect. */
 	setSpellingFeatures(features: SpellingFeatures): void {
-		this.#spelling.setFeatures(features);
+		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
+		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -644,14 +665,29 @@ export class CustomEditor extends Editor {
 		) {
 			return cached.chips;
 		}
-		const text = this.getText();
+		const recorded = new Map<string, ChipKind>();
+		if (this.pendingImages.length > 0) {
+			for (const [label, expansion] of this.atoms) {
+				const kind = expansion.startsWith("[Image #")
+					? "image"
+					: expansion.startsWith("[Video #")
+						? "video"
+						: undefined;
+				if (kind !== undefined && expansion.match(PLACEHOLDER_REGEX)?.[0] === expansion) {
+					recorded.set(label, kind);
+				}
+			}
+		}
+		for (const entry of this.pendingTexts) {
+			// A reused label belongs to the atom currently expanding it, not a deleted paste.
+			if (!recorded.has(entry.label)) recorded.set(entry.label, "paste");
+		}
+		const refs = referencedAttachments(this.getText(), recorded);
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
 			const n = i + 1;
-			const video =
-				text.includes(chipLabel("video", n)) || text.includes(`[Video #${n}]`) || text.includes(`[Video #${n},`);
-			const image =
-				text.includes(chipLabel("image", n)) || text.includes(`[Image #${n}]`) || text.includes(`[Image #${n},`);
+			const video = refs.video.has(n);
+			const image = refs.image.has(n);
 			if (!video && !image) continue;
 			chips.push({
 				kind: video ? "video" : "image",
@@ -661,7 +697,7 @@ export class CustomEditor extends Editor {
 			});
 		}
 		for (const entry of this.pendingTexts) {
-			if (!text.includes(entry.label)) continue;
+			if (!refs.paste.has(entry.n)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
 		this.#composerChipsCache = {

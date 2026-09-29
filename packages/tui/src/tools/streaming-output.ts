@@ -718,6 +718,12 @@ const MAX_PENDING = 10;
 export class TailBuffer {
 	#pending: string[] = [];
 	#pos = 0; // byte count of the currently-held tail (after trims)
+	// `#pending[0]` and its byte count. Clean = well-formed and `#headBytes` is its exact
+	// UTF-8 length (a head compacted from chunks that split a surrogate pair is neither).
+	#headBytes = 0;
+	#headClean = true;
+	// Every chunk after `#pending[0]` is well-formed (no lone surrogates).
+	#restWellFormed = true;
 
 	constructor(readonly maxBytes: number) {}
 
@@ -726,8 +732,7 @@ export class TailBuffer {
 
 		const max = this.maxBytes;
 		if (max === 0) {
-			this.#pending.length = 0;
-			this.#pos = 0;
+			this.#setHead("", 0, true);
 			return;
 		}
 
@@ -736,19 +741,17 @@ export class TailBuffer {
 		// If the incoming chunk alone is >= budget, it fully dominates the tail.
 		if (n >= max) {
 			const { text: t, bytes } = truncateTailBytes(text, max);
-			this.#pending[0] = t;
-			this.#pending.length = 1;
-			this.#pos = bytes;
+			// A chunk of exactly `max` bytes comes back verbatim, lone surrogates included.
+			this.#setHead(t, bytes, t.isWellFormed());
 			return;
 		}
 
-		this.#pos += n;
-
 		if (this.#pending.length === 0) {
-			this.#pending[0] = text;
-			this.#pending.length = 1;
+			this.#setHead(text, n, text.isWellFormed());
 		} else {
+			this.#pos += n;
 			this.#pending.push(text);
+			if (this.#restWellFormed && !text.isWellFormed()) this.#restWellFormed = false;
 			if (this.#pending.length > MAX_PENDING) this.#compact();
 		}
 
@@ -770,9 +773,22 @@ export class TailBuffer {
 
 	// -- private ---------------------------------------------------------------
 
+	/** Replace the whole buffer with a single chunk. */
+	#setHead(text: string, bytes: number, clean: boolean): void {
+		this.#pending[0] = text;
+		this.#pending.length = 1;
+		this.#pos = bytes;
+		this.#headBytes = bytes;
+		this.#headClean = clean;
+		this.#restWellFormed = true;
+	}
+
 	#compact(): void {
 		this.#pending[0] = this.#pending.join("");
 		this.#pending.length = 1;
+		this.#headBytes = this.#pos;
+		this.#headClean = this.#headClean && this.#restWellFormed;
+		this.#restWellFormed = true;
 	}
 
 	#flush(): string {
@@ -783,17 +799,64 @@ export class TailBuffer {
 
 	#trimTo(max: number): void {
 		if (max === 0) {
-			this.#pending.length = 0;
-			this.#pos = 0;
+			this.#setHead("", 0, true);
 			return;
 		}
 		if (this.#pos <= max) return;
 
-		const joined = this.#flush();
-		const { text, bytes } = truncateTailBytes(joined, max);
-		this.#pos = bytes;
-		this.#pending[0] = text;
-		this.#pending.length = 1;
+		// Steady state (one `text()` per appended chunk): the overflow lies inside the
+		// already-trimmed head, so only the head's front is cut and the chunks after it
+		// are kept verbatim instead of re-encoding the whole window. Those chunks must be
+		// well-formed: the full path round-trips them through UTF-8, which rewrites lone
+		// surrogates (and heals pairs split across chunk boundaries).
+		const restBytes = this.#pos - this.#headBytes;
+		if (restBytes < max && this.#restWellFormed) {
+			const head = this.#pending[0];
+			const keep = max - restBytes;
+			const drop = this.#headBytes - keep;
+			if (head.length === this.#headBytes) {
+				// All-ASCII head: byte offsets are char offsets and every byte is a boundary.
+				this.#pending[0] = head.slice(drop);
+				this.#headBytes = keep;
+			} else if (this.#headClean && drop <= keep) {
+				// Walk code points to the first boundary at or after `drop` bytes.
+				let dropped = 0;
+				let index = 0;
+				while (dropped < drop) {
+					const code = head.charCodeAt(index);
+					if (code < 0x80) {
+						dropped += 1;
+						index += 1;
+					} else if (code < 0x800) {
+						dropped += 2;
+						index += 1;
+					} else if (code >= 0xd800 && code <= 0xdbff) {
+						// Well-formed, so a high surrogate always starts a pair.
+						dropped += 4;
+						index += 2;
+					} else {
+						dropped += 3;
+						index += 1;
+					}
+				}
+				this.#pending[0] = head.slice(index);
+				this.#headBytes -= dropped;
+			} else {
+				// A head that already fits comes back verbatim, lone surrogates included.
+				const { text, bytes } = truncateTailBytes(head, keep);
+				this.#pending[0] = text;
+				this.#headBytes = bytes;
+				this.#headClean = text.isWellFormed();
+				this.#pos = this.#headBytes + restBytes;
+				return;
+			}
+			this.#headClean = true;
+			this.#pos = this.#headBytes + restBytes;
+			return;
+		}
+
+		const { text, bytes } = truncateTailBytes(this.#flush(), max);
+		this.#setHead(text, bytes, text.isWellFormed());
 	}
 }
 

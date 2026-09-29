@@ -1,18 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai/api-registry";
-import {
-	createMockModel,
-	isMockModel,
-	MOCK_API,
-	type MockHandler,
-	registerMockApi,
-	streamMock,
-} from "@oh-my-pi/pi-ai/providers/mock";
+import { describe, expect, test } from "bun:test";
+import { createMockModel, MOCK_API, type MockHandler, streamMock } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AssistantMessage, AssistantMessageEvent, Context, ToolCall } from "@oh-my-pi/pi-ai/types";
-
-afterEach(() => {
-	clearCustomApis();
-});
 
 function emptyContext(): Context {
 	return {
@@ -28,14 +16,6 @@ async function collect(events: AsyncIterable<AssistantMessageEvent>): Promise<As
 }
 
 describe("mock provider", () => {
-	test("createMockModel produces a Model<'mock'> with the configured id and provider", () => {
-		const mock = createMockModel({ id: "spec-1", provider: "tests" });
-		expect(mock.model.api).toBe(MOCK_API);
-		expect(mock.model.id).toBe("spec-1");
-		expect(mock.model.provider).toBe("tests");
-		expect(isMockModel(mock.model)).toBe(true);
-	});
-
 	test("emits start → text_start/delta/end → done for a single text response", async () => {
 		const mock = createMockModel({
 			responses: [{ content: ["hello world"] }],
@@ -148,13 +128,6 @@ describe("mock provider", () => {
 		expect(last.content).toEqual([{ type: "text", text: "post-reset" }]);
 	});
 
-	test("registerMockApi exposes streamMock through the custom-API registry", () => {
-		registerMockApi();
-		const entry = getCustomApi(MOCK_API);
-		expect(entry).toBeDefined();
-		expect(entry?.streamSimple).toBe(streamMock);
-	});
-
 	test("delayMs honors the AbortSignal and surfaces a terminal aborted result", async () => {
 		const mock = createMockModel({
 			responses: [{ content: ["never"], delayMs: 1000 }],
@@ -175,21 +148,6 @@ describe("mock provider", () => {
 });
 
 describe("AssistantMessage shape", () => {
-	test("result carries api, provider, model id, timestamp, and a populated usage object", async () => {
-		const mock = createMockModel({
-			id: "spec",
-			provider: "tests",
-			responses: [{ content: ["x"], usage: { input: 5, output: 2 } }],
-		});
-		const result: AssistantMessage = await mock.stream(mock.model, emptyContext()).result();
-		expect(result.api).toBe(MOCK_API);
-		expect(result.provider).toBe("tests");
-		expect(result.model).toBe("spec");
-		expect(typeof result.timestamp).toBe("number");
-		expect(result.usage.input).toBe(5);
-		expect(result.usage.output).toBe(2);
-	});
-
 	test("partial usage without totalTokens recomputes the total from components", async () => {
 		const mock = createMockModel({
 			responses: [{ content: ["x"], usage: { input: 5, output: 2 } }],

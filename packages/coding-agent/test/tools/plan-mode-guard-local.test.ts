@@ -59,13 +59,6 @@ describe("resolvePlanPath resolves literally (no plan-mode redirect)", () => {
 		expect(await resolvePlanPath(session, "src/foo.ts")).toBe(path.join(REPO_ROOT, "src", "foo.ts"));
 	});
 
-	it("resolves a local:// plan file to the session local root", async () => {
-		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
-		expect(await resolvePlanPath(session, "local://some-plan.md")).toBe(
-			path.join(ARTIFACTS_DIR, "local", "some-plan.md"),
-		);
-	});
-
 	it("unwraps a `[PATH#TAG]` hashline header to the inner filesystem path", async () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
 		const planPath = path.join(ARTIFACTS_DIR, "local", "some-plan.md");

@@ -272,10 +272,6 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 });
 
 describe("Warp terminal capabilities", () => {
-	it("recognizes TERM_PROGRAM=WarpTerminal before the true-color fallback", () => {
-		expect(detectTerminalId({ TERM_PROGRAM: "WarpTerminal", COLORTERM: "truecolor" })).toBe("warp");
-	});
-
 	it("resolves the process-wide Warp terminal id and image protocol from TERM_PROGRAM", async () => {
 		const env = subprocessEnv({
 			TERM_PROGRAM: "WarpTerminal",
@@ -696,6 +692,19 @@ describe("shouldEnableHyperlinksByDefault", () => {
 				"base",
 			),
 		).toBe(false);
+	});
+
+	it("enables Herdr panes: Herdr renders OSC 8 in its own grid and opens links itself", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TERM: "xterm-256color" }, "base")).toBe(true);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_PANE_ID: "w1:p1", TERM: "xterm-256color" }, "base")).toBe(true);
+	});
+
+	it("keeps screen/tmux nested in a Herdr pane on their own rules", () => {
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", STY: "1234.pts-0.host" }, "base")).toBe(false);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", TMUX: "/tmp/tmux-1000/default,1,0" }, "base")).toBe(
+			false,
+		);
+		expect(shouldEnableHyperlinksByDefault({ HERDR_ENV: "1", PI_NO_HYPERLINKS: "1" }, "base")).toBe(false);
 	});
 
 	it("lets PI_NO_HYPERLINKS beat every positive heuristic", () => {

@@ -12,7 +12,7 @@ import type { AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
-import { convertImageToPng } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -33,7 +33,8 @@ const EMPTY_STABLE_RENDER: readonly string[] = [];
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
-type StablePart = { kind: "thinking" | "text"; text: string } | { kind: "spacer" };
+type StablePartKind = "thinking" | "text";
+type StablePart = { kind: StablePartKind; text: string } | { kind: "spacer" };
 
 /**
  * One published prefix of the block's finished content. Later snapshots extend
@@ -45,6 +46,37 @@ interface StableSnapshot {
 	// Earlier parts are immutable; only the final part needs a historical offset.
 	readonly partCount: number;
 	readonly lastTextLength: number;
+}
+
+/**
+ * Stable-row renders at one width. `rows` renders snapshot `newest`; every
+ * count in `ends` renders byte-identically to `rows.slice(0, end)` — checked
+ * against `rows` when recorded — so an earlier prefix is a slice of the newest
+ * render instead of a re-render, and one row array stays resident per width.
+ */
+interface StableRowLedger {
+	newest: number;
+	rows: readonly string[];
+	readonly ends: Map<number, number>;
+	/** Rendered rows of parts a snapshot has closed (full text final), by part index. */
+	readonly parts: (
+		| { readonly kind: StablePartKind; readonly text: string; readonly rows: readonly string[] }
+		| undefined
+	)[];
+}
+
+/** One Markdown instance reused while a stable part's text grows between renders. */
+interface StablePartRenderer {
+	readonly index: number;
+	readonly kind: StablePartKind;
+	readonly md: Markdown;
+}
+
+/** Theme inputs cached stable renders were produced with; any change drops them. */
+interface StableRenderInputs {
+	readonly prose: MarkdownTheme;
+	readonly markdown: MarkdownTheme;
+	readonly color: ((text: string) => string) | undefined;
 }
 
 function isSnapshotExtension(previous: readonly StablePart[], current: readonly StablePart[]): boolean {
@@ -186,10 +218,20 @@ export class AssistantMessageComponent extends Container {
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
-	#convertedKittyImages = new Map<string, ImageContent>();
+	/**
+	 * Payload keys ({@link imagePayloadKey}) whose Kitty PNG conversion this
+	 * component already awaits, so a re-delivered image neither re-encodes nor
+	 * schedules a second {@link updateContent} cascade. The conversions
+	 * themselves are shared process-wide by {@link convertImageToPngShared}.
+	 */
+	#kittyConversionsAwaited = new Set<string>();
+	/**
+	 * Conversions this component displays, held so a later re-render (theme
+	 * invalidation) still finds them after the bounded shared cache evicts them.
+	 */
+	#kittyConverted = new Map<string, ImageContent>();
 	#showImages = true;
 	#showToolResultImages = true;
-	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
 	/** See {@link setMidStreamPublication}; the wire's `stream-revision` axis decides it. */
 	#midStreamPublication = true;
@@ -250,13 +292,20 @@ export class AssistantMessageComponent extends Container {
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
 	/**
-	 * Rendered rows per published snapshot index and width. The container asks
-	 * for several different counts in one frame (emitted, offered end,
-	 * projected, pressure-loop +1s); a 2-entry LRU thrashes across those and
-	 * re-renders the whole prefix per miss. Sized generously so the live prefix
-	 * stays cached; cleared on reset/finalize like before.
+	 * Verified stable-row renders per width ({@link StableRowLedger}). The
+	 * container asks for several counts per frame (emitted, offered end,
+	 * projected) and each publication re-checks the previous prefix; the ledger
+	 * answers all of them from the newest render. A few widths cover resizes.
+	 * Cleared on reset, finalize, and theme change.
 	 */
-	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 64 });
+	#stableLedgers = new LRUCache<number, StableRowLedger>({ max: 4 });
+	/** Prefixes handed out as ledger slices or rendered off-ledger, by `${count}:${width}`. */
+	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 8 });
+	/** Reused for the growing final part of each publication candidate. */
+	#stableHeadRenderer: StablePartRenderer | undefined;
+	/** Reused for final parts of published snapshots rendered off-ledger (reflow, replay). */
+	#stableReplayRenderer: StablePartRenderer | undefined;
+	#stableRenderInputs: StableRenderInputs | undefined;
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */
@@ -616,22 +665,33 @@ export class AssistantMessageComponent extends Container {
 		this.#stableSnapshots = [];
 		this.#stableParts = [];
 		this.#transcriptStableRows = [];
-		this.#stableRenderCache.clear();
+		this.#dropStableRenders();
 	}
 
 	renderTranscriptStableRows(count: number, width: number): readonly string[] {
 		const index = Math.min(Math.trunc(count), this.#stableSnapshots.length);
 		if (index <= 0) return EMPTY_STABLE_RENDER;
+		this.#syncStableRenderInputs();
+		const ledger = this.#stableLedgers.get(width);
+		if (ledger?.newest === index) return ledger.rows;
 		const key = `${index}:${width}`;
 		const cached = this.#stableRenderCache.get(key);
 		if (cached) return cached;
-		const snapshot = this.#stableSnapshots[index - 1]!;
-		const parts = this.#stableParts.slice(0, snapshot.partCount);
-		const last = parts.at(-1);
-		if (last && last.kind !== "spacer") {
-			parts[parts.length - 1] = { kind: last.kind, text: last.text.slice(0, snapshot.lastTextLength) };
+		const end = ledger?.ends.get(index);
+		let rows: readonly string[];
+		if (ledger !== undefined && end !== undefined) {
+			rows = ledger.rows.slice(0, end);
+		} else {
+			const snapshot = this.#stableSnapshots[index - 1]!;
+			rows = this.#renderStableParts(
+				this.#stableParts,
+				snapshot.partCount,
+				snapshot.lastTextLength,
+				width,
+				"replay",
+			);
+			if (this.#recordStableRows(index, width, rows)) return rows;
 		}
-		const rows = this.#renderStableSnapshot(parts, width);
 		this.#stableRenderCache.set(key, rows);
 		return rows;
 	}
@@ -652,9 +712,12 @@ export class AssistantMessageComponent extends Container {
 		if (!last || last.kind === "spacer") return;
 		const snapshot = { partCount: parts.length, lastTextLength: last.text.length };
 		const previous = this.#stableSnapshots.at(-1);
-		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
+		// An unmoved boundary publishes nothing whether or not it still extends
+		// the last snapshot, so most frames skip the whole-document comparison.
 		if (previous?.partCount === snapshot.partCount && previous.lastTextLength === snapshot.lastTextLength) return;
-		const currentRows = this.#renderStableSnapshot(parts, width);
+		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
+		this.#syncStableRenderInputs();
+		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head");
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -666,7 +729,7 @@ export class AssistantMessageComponent extends Container {
 		this.#stableParts = parts;
 		this.#stableSnapshots.push(snapshot);
 		this.#transcriptStableRows.push({ key: `thinking:${this.#nextStableRowId++}` });
-		this.#stableRenderCache.set(`${this.#stableSnapshots.length}:${width}`, currentRows);
+		this.#recordStableRows(this.#stableSnapshots.length, width, currentRows);
 	}
 
 	/**
@@ -716,35 +779,134 @@ export class AssistantMessageComponent extends Container {
 		return parts;
 	}
 
-	#renderStableSnapshot(parts: readonly StablePart[], width: number): readonly string[] {
+	/**
+	 * Render the first `partCount` stable parts, the final one cut to
+	 * `lastLength`. Rows match fresh Markdown renders of each part byte for
+	 * byte — {@link #createStableMarkdown} mirrors the live children — but a
+	 * closed part renders once per width, and the growing final part reuses one
+	 * Markdown instance so its already-frozen blocks are not re-lexed.
+	 */
+	#renderStableParts(
+		parts: readonly StablePart[],
+		partCount: number,
+		lastLength: number,
+		width: number,
+		role: "head" | "replay",
+	): readonly string[] {
+		const ledger = this.#stableLedger(width);
 		const rows: string[] = [];
-		for (const part of parts) {
+		const lastIndex = partCount - 1;
+		for (let index = 0; index < partCount; index++) {
+			const part = parts[index]!;
 			if (part.kind === "spacer") {
 				rows.push("");
 				continue;
 			}
-			// Constructor args mirror the live child Markdown exactly so these
-			// rows are byte-identical to the block render's prefix — including the
-			// trim the live children apply, which drops the trailing blank line a
-			// frozen prefix still carries.
-			const text = part.text.trim();
-			const markdown =
-				part.kind === "text"
-					? new Markdown(
-							text,
-							1,
-							0,
-							this.#getProseTheme(),
-							this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
-							0,
-						)
-					: new Markdown(text, 1, 0, getMarkdownTheme(), {
-							color: (value: string) => theme.fg("thinkingText", value),
-							italic: true,
-						});
-			rows.push(...markdown.render(width));
+			const closed = index < lastIndex;
+			const text = closed || lastLength === part.text.length ? part.text : part.text.slice(0, lastLength);
+			const cached = ledger.parts[index];
+			let partRows: readonly string[];
+			if (cached?.kind === part.kind && cached.text === text) {
+				partRows = cached.rows;
+			} else {
+				partRows = this.#renderStablePart(index, part.kind, text, width, closed ? undefined : role);
+				if (closed) ledger.parts[index] = { kind: part.kind, text, rows: partRows };
+			}
+			for (const row of partRows) rows.push(row);
 		}
 		return rows;
+	}
+
+	/**
+	 * Render one part's Markdown. `role` names the instance reused for a final
+	 * part as its text grows; a closed part continues whichever instance was
+	 * already growing it, else renders once. Finalized blocks keep no instance.
+	 */
+	#renderStablePart(
+		index: number,
+		kind: StablePartKind,
+		text: string,
+		width: number,
+		role: "head" | "replay" | undefined,
+	): readonly string[] {
+		// Trim like the live children, dropping the trailing blank line a frozen
+		// prefix still carries.
+		const trimmed = text.trim();
+		if (this.#transcriptBlockFinalized) return this.#createStableMarkdown(kind, trimmed).render(width);
+		const head = this.#stableHeadRenderer;
+		const replay = this.#stableReplayRenderer;
+		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
+		if (renderer?.index === index && renderer.kind === kind) {
+			renderer.md.setText(trimmed);
+			return renderer.md.render(width);
+		}
+		const md = this.#createStableMarkdown(kind, trimmed);
+		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
+		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
+		return md.render(width);
+	}
+
+	/** Constructor args mirror the live child Markdown so stable rows prefix the block render. */
+	#createStableMarkdown(kind: StablePartKind, text: string): Markdown {
+		return kind === "text"
+			? new Markdown(
+					text,
+					1,
+					0,
+					this.#getProseTheme(),
+					this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
+					0,
+				)
+			: new Markdown(text, 1, 0, getMarkdownTheme(), {
+					color: (value: string) => theme.fg("thinkingText", value),
+					italic: true,
+				});
+	}
+
+	#stableLedger(width: number): StableRowLedger {
+		let ledger = this.#stableLedgers.get(width);
+		if (ledger === undefined) {
+			ledger = { newest: 0, rows: EMPTY_STABLE_RENDER, ends: new Map(), parts: [] };
+			this.#stableLedgers.set(width, ledger);
+		}
+		return ledger;
+	}
+
+	/**
+	 * Remember `rows` as snapshot `index`'s render at `width`. A newer snapshot
+	 * becomes the ledger's newest render — keeping earlier counts only when it
+	 * extends their rows; an older one that prefixes the newest keeps just its
+	 * row count. Returns whether `rows` is now the newest render.
+	 */
+	#recordStableRows(index: number, width: number, rows: readonly string[]): boolean {
+		const ledger = this.#stableLedger(width);
+		if (index > ledger.newest) {
+			if (!isRowPrefix(ledger.rows, rows)) ledger.ends.clear();
+			ledger.newest = index;
+			ledger.rows = rows;
+			ledger.ends.set(index, rows.length);
+			return true;
+		}
+		if (index < ledger.newest && isRowPrefix(rows, ledger.rows)) ledger.ends.set(index, rows.length);
+		return false;
+	}
+
+	/** Drop cached stable renders once the themes they were rendered with change. */
+	#syncStableRenderInputs(): void {
+		const prose = this.#getProseTheme();
+		const markdown = getMarkdownTheme();
+		const color = this.#textColorTransform;
+		const inputs = this.#stableRenderInputs;
+		if (inputs?.prose === prose && inputs.markdown === markdown && inputs.color === color) return;
+		this.#dropStableRenders();
+		this.#stableRenderInputs = { prose, markdown, color };
+	}
+
+	#dropStableRenders(): void {
+		this.#stableLedgers.clear();
+		this.#stableRenderCache.clear();
+		this.#stableHeadRenderer = undefined;
+		this.#stableReplayRenderer = undefined;
 	}
 
 	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */
@@ -759,7 +921,7 @@ export class AssistantMessageComponent extends Container {
 
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
-		this.#stableRenderCache.clear();
+		this.#dropStableRenders();
 		this.#stopThinkingAnimation();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
@@ -832,16 +994,6 @@ export class AssistantMessageComponent extends Container {
 	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
 		if (!toolCallId) return;
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
-		for (const key of Array.from(this.#convertedKittyImages.keys())) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#convertedKittyImages.delete(key);
-			}
-		}
-		for (const key of Array.from(this.#kittyConversionsInFlight)) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#kittyConversionsInFlight.delete(key);
-			}
-		}
 		if (validImages.length === 0) {
 			this.#toolImagesByCallId.delete(toolCallId);
 		} else {
@@ -855,21 +1007,27 @@ export class AssistantMessageComponent extends Container {
 
 	#convertImagesForKitty(entries: Array<{ image: ImageContent; key: string }>): void {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
-		for (const { image, key } of entries) {
+		for (const { image } of entries) {
 			if (image.mimeType === "image/png") continue;
-			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
-			this.#kittyConversionsInFlight.add(key);
-			convertImageToPng(image)
+			const key = imagePayloadKey(image);
+			if (this.#kittyConverted.has(key)) continue;
+			const cached = cachedPngConversion(image);
+			if (cached) {
+				this.#kittyConverted.set(key, cached);
+				continue;
+			}
+			if (this.#kittyConversionsAwaited.has(key)) continue;
+			this.#kittyConversionsAwaited.add(key);
+			convertImageToPngShared(image)
 				.then(converted => {
-					this.#kittyConversionsInFlight.delete(key);
-					this.#convertedKittyImages.set(key, converted);
+					this.#kittyConverted.set(key, converted);
 					if (this.#lastMessage) {
 						this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 					}
 					this.#onImageUpdate?.();
 				})
 				.catch(() => {
-					this.#kittyConversionsInFlight.delete(key);
+					this.#kittyConversionsAwaited.delete(key);
 				});
 		}
 	}
@@ -882,7 +1040,7 @@ export class AssistantMessageComponent extends Container {
 		for (const { image, key } of entries) {
 			const displayImage =
 				TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png"
-					? this.#convertedKittyImages.get(key)
+					? this.#kittyConverted.get(imagePayloadKey(image))
 					: image;
 			if (TERMINAL.imageProtocol && displayImage) {
 				this.#contentContainer.addChild(

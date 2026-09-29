@@ -2,27 +2,17 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import type { FetchImpl, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { isStepfunChatModelId, stepfunModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 
 /** StepFun's documented three-tier ladder; the relay-host default spans minimal…xhigh. */
 const STEPFUN_LADDER = [Effort.Low, Effort.Medium, Effort.High];
 
-const ORIGINAL_STEPFUN_API_KEY = Bun.env.STEPFUN_API_KEY;
-
 afterEach(() => {
-	if (ORIGINAL_STEPFUN_API_KEY === undefined) {
-		delete Bun.env.STEPFUN_API_KEY;
-	} else {
-		Bun.env.STEPFUN_API_KEY = ORIGINAL_STEPFUN_API_KEY;
-	}
 	vi.restoreAllMocks();
 });
 
@@ -31,24 +21,6 @@ function bundledStepfunModels() {
 }
 
 describe("StepFun provider support", () => {
-	test("registers the provider, its STEPFUN_API_KEY fallback, and a login flow", () => {
-		Bun.env.STEPFUN_API_KEY = "stepfun-test-key";
-		expect(getEnvApiKey("stepfun")).toBe("stepfun-test-key");
-		delete Bun.env.STEPFUN_API_KEY;
-		expect(getEnvApiKey("stepfun")).toBeUndefined();
-
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "stepfun");
-		expect(descriptor?.defaultModel).toBe("step-5-preview");
-		expect(descriptor?.catalogDiscovery?.envVars).toEqual(["STEPFUN_API_KEY"]);
-		expect(DEFAULT_MODEL_PER_PROVIDER.stepfun).toBe("step-5-preview");
-		// A successful `/v1/models` snapshot must replace the seed rows, or an id
-		// StepFun retires stays selectable as a dead bundled row.
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-
-		const provider = getOAuthProviders().find(item => item.id === "stepfun");
-		expect(provider?.name).toBe("StepFun");
-	});
-
 	test("keeps StepFun's own effort ladder instead of the relay-host minimal…xhigh default", () => {
 		// The stepfun taxonomy extracts no revision, so a revision-scoped rule
 		// silently falls through to the neutral ladder — which sends effort

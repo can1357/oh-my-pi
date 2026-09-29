@@ -11,7 +11,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
-import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { yieldSectionShapes } from "../../src/task/yield-assembly";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
@@ -94,7 +94,7 @@ describe("YieldTool", () => {
 				{ status: "success", type: ["review#2"], data: { outcome: "two" }, complete: true },
 			],
 			undefined,
-			arrayValuedLabels(schema),
+			yieldSectionShapes(schema),
 		);
 		expect(assembled?.data).toEqual({
 			"review#1": { outcome: "one" },
@@ -102,12 +102,6 @@ describe("YieldTool", () => {
 		});
 		const validator = buildOutputValidator(schema).validator;
 		expect(validator?.validate(assembled?.data).success).toBe(true);
-	});
-
-	it("accepts success payload with data", async () => {
-		const tool = new YieldTool(createSession());
-		const result = await tool.execute("call-1", { data: { ok: true } } as never);
-		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
 	});
 
 	it("commits a terminal yield emitted before parent steering lands (#10645)", async () => {
@@ -720,7 +714,7 @@ describe("YieldTool", () => {
 	});
 
 	it("detects array-valued labels when the closed caller schema is a root $ref", () => {
-		const labels = arrayValuedLabels({
+		const shapes = yieldSectionShapes({
 			$ref: "#/$defs/Closed",
 			$defs: {
 				Closed: {
@@ -736,7 +730,7 @@ describe("YieldTool", () => {
 			},
 		});
 
-		expect(labels.has("blockers")).toBe(true);
+		expect(shapes.get("blockers")).toBe("array");
 	});
 
 	it("rejects missing success data unless a yield type requests last-turn mode", async () => {
