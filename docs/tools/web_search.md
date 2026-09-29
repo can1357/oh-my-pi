@@ -130,7 +130,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Gemini** — `packages/coding-agent/src/web/search/providers/gemini.ts`
     - Availability: OAuth credentials in `agent.db` for `google-gemini-cli` / `google-antigravity`, or a Google Developer API key.
     - Querying: SSE `streamGenerateContent` call with Google Search grounding enabled. Antigravity auth tries two fallback endpoints and retries `401/403/400 invalid auth` once after token refresh; `429/5xx` retry with exponential backoff and server-provided retry delay, capped by a `5 * 60 * 1000` ms rate-limit budget.
-    - Model: the selected `web` candidate (`google/…`, `google-antigravity/…`, or `google-gemini-cli/…` chat model); the default chain uses `gemini-2.5-flash`.
+    - Model: the selected `web` candidate (`google/…`, `google-antigravity/…`, or `google-gemini-cli/…` chat model).
     - `max_tokens` and `temperature` pass through as `generationConfig.maxOutputTokens` / `generationConfig.temperature`.
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`.
@@ -139,7 +139,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Env overrides specific to search (do not affect chat completions):
       - `ANTHROPIC_SEARCH_API_KEY` — highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / `ANTHROPIC_FOUNDRY_API_KEY` for the search call only.
       - `ANTHROPIC_SEARCH_BASE_URL` — search-only base URL for either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode); defaults to `https://api.anthropic.com`.
-    - Model: the selected `web` candidate; the default chain uses `anthropic/claude-haiku-4-5`.
+    - Model: the selected `web` candidate.
     - Querying: Claude Messages API with web-search tool enabled.
     - `max_tokens` passes through. `temperature` passes through only for models that support sampling parameters; it is omitted for Opus 4.7+, Sonnet 5+, and Fable/Mythos 5+ because those APIs reject sampling parameters.
     - `limit` and `num_search_results` are collapsed together before dispatch: `num_results = params.numSearchResults ?? params.limit`.
@@ -147,20 +147,20 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Codex** — `packages/coding-agent/src/web/search/providers/codex.ts`
     - Availability: OAuth credential for `openai-codex` in `agent.db`; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
     - Querying: streams the Codex Responses endpoint with hosted `web_search` and `search_context_size: "high"`. Google-style directives are re-emitted in the query.
-    - Model: the selected `web` candidate; the default chain tries `openai-codex/gpt-6-luna`, then `openai-codex/gpt-5.6-luna`, then `gpt-5.6`, then `gpt-5.5` as separate candidates. A completion without a `web_search_call` is rejected rather than presented as searched content.
+    - Model: the selected `web` candidate. A completion without a `web_search_call` is rejected rather than presented as searched content.
     - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
     - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
   - **OpenAI API** — `packages/coding-agent/src/web/search/providers/openai.ts`
     - Availability: `OPENAI_API_KEY` or an API key configured for the `openai` provider in the model registry. It resolves credentials for the selected `openai` model and does not use `openai-codex` OAuth.
     - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`.
-    - Model: catalog grounding is limited to verified Responses web-search models (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`); Realtime-only and unverified models are not `web` candidates. The default chain tries `openai/gpt-6-luna`, then `openai/gpt-5.6-luna`, after all `openai-codex/*` entries.
+    - Model: catalog grounding is limited to verified Responses web-search models (`gpt-5.5`, `gpt-5.6-luna`, `gpt-6-astra`, `gpt-6-luna`); Realtime-only and unverified models are not `web` candidates.
     - A generated answer is rejected unless the response includes an actual `web_search_call`. `usage.searchRequests` counts `search` actions, not `open_page` or `find_in_page`, and is omitted when there are none.
     - `site:` hosts map to `filters.allowed_domains`; other directives are re-emitted in the query. `max_tokens` passes through as `max_output_tokens`. Ignores `recency` and `temperature`.
     - `num_search_results ?? limit` hard-caps parsed sources/citations locally (default `10`, max `100`); answer-cited URLs are collected first, so they survive the cap ahead of merely consulted sources. HTTP failures report OpenAI's structured `type`/`code`/`param`, never the free-form error message (which can echo a masked key).
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`, `requestId`, `authMode: "api_key"`.
   - **xAI** — `packages/coding-agent/src/web/search/providers/xai.ts`
     - Availability: `shouldPreferXAIOAuth()` prefers the `xai-oauth` credential — true when `XAI_OAUTH_TOKEN` is set or a stored `xai-oauth` credential exists whose origin would not be shadowed by a shared `XAI_API_KEY` env key — otherwise `authStorage.keys.source("xai")` (`XAI_API_KEY` env or `agent.db` credential for `xai`).
-    - Querying: POSTs the Responses API with the selected `web` candidate's model id (the default chain uses `grok-4.5`), `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
+    - Querying: POSTs the Responses API with the selected `web` candidate's model id, `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
     - Up to five `site:` or `-site:` hosts map to mutually exclusive `allowed_domains` / `excluded_domains` filters (allow-list wins); path restrictions remain for central filtering. Absolute dates stay as query hints because the current Responses `web_search` tool has no date fields.
     - The request carries no `search_parameters` (the deprecated Live Search field now returns 410), so `recency` is ignored beyond natural-language date hints in the query text.
     - `max_tokens` and `temperature` pass through. `num_search_results` (or `limit`) only caps parsed sources/citations locally via `clampNumResults(...)`, default `10`, max `30`; it is not sent as an upstream search-count parameter.
@@ -269,7 +269,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Default chain length: 30 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
+- Default chain length: 11 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -286,7 +286,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - OpenAI API local sources/citations cap: `num_search_results` before `limit`, default `10`, max `100`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/openai.ts`).
 - xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => default `10`, max `30`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
-- Anthropic defaults: model `claude-haiku-4-5`, `DEFAULT_MAX_TOKENS = 4096` when the provider omits `max_tokens` (`packages/coding-agent/src/web/search/providers/anthropic.ts`).
+- Anthropic defaults: `DEFAULT_MAX_TOKENS = 4096` when the provider omits `max_tokens` (`packages/coding-agent/src/web/search/providers/anthropic.ts`).
 - Gemini retries: up to `3` retries per endpoint, base delay `1000` ms, rate-limit delay budget `5 * 60 * 1000` ms (`packages/coding-agent/src/web/search/providers/gemini.ts`).
 
 ## Errors

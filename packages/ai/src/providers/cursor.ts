@@ -447,6 +447,15 @@ function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	return frame;
 }
 
+/**
+ * Write one client message. Once the server's end frame has half-closed our
+ * side, late writes (heartbeats, exec replies from a handler still running)
+ * are dropped: writing after `end()` would error the stream.
+ */
+function writeClientMessage(h2Request: http2.ClientHttp2Stream, data: Uint8Array): void {
+	if (!h2Request.writableEnded) h2Request.write(frameConnectMessage(data));
+}
+
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
 
@@ -982,6 +991,30 @@ function streamCursorWithWireMode(
 						requestBytes = toBinary(AgentClientMessageSchema, resumedClientMessage);
 					} else {
 						requestBytes = builtRequest.requestBytes;
+				// Steady state drains fully per chunk; alias the fresh h2 chunk instead
+				// of copying it through Buffer.concat (see aws-eventstream.ts).
+				pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
+
+				while (pendingBuffer.length >= 5) {
+					const flags = pendingBuffer[0];
+					const msgLen = pendingBuffer.readUInt32BE(1);
+					if (pendingBuffer.length < 5 + msgLen) break;
+
+					const messageBytes = pendingBuffer.subarray(5, 5 + msgLen);
+					pendingBuffer = pendingBuffer.subarray(5 + msgLen);
+
+					if (flags & CONNECT_END_STREAM_FLAG) {
+						const endError = parseConnectEndStream(messageBytes);
+						if (endError) {
+							endStreamError = endError;
+							h2Request?.close();
+						} else {
+							// The end frame is the server's last message. Half-close our
+							// side so the stream can finish: a CONNECT proxy holds the
+							// HTTP/2 stream open until the client ends its request.
+							h2Request?.end();
+						}
+						continue;
 					}
 
 					const debugSession = isRequestDebugEnabled()
@@ -1036,6 +1069,16 @@ function streamCursorWithWireMode(
 					});
 
 					h2Request = h2Client.request(requestHeaders);
+			const sendHeartbeat = () => {
+				if (!h2Request || h2Request.closed) {
+					return;
+				}
+				const heartbeatMessage = create(AgentClientMessageSchema, {
+					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
+				});
+				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+				writeClientMessage(h2Request, heartbeatBytes);
+			};
 
 					let pendingBuffer: Buffer = Buffer.alloc(0);
 
@@ -1650,7 +1693,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		writeClientMessage(h2Request, responseBytes);
 
 		log("kvClient", "getBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	} else if (kvCase === "setBlobArgs") {
@@ -1671,7 +1714,7 @@ function handleKvServerMessage(
 		});
 
 		const responseBytes = toBinary(AgentClientMessageSchema, kvClientMessage);
-		h2Request.write(frameConnectMessage(responseBytes));
+		writeClientMessage(h2Request, responseBytes);
 
 		log("kvClient", "setBlobResult", { blobId: blobIdKey.slice(0, 40) });
 	}
@@ -3129,7 +3172,7 @@ function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["mess
 	});
 
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	writeClientMessage(h2Request, responseBytes);
 
 	log("execClientMessage", messageCase, value);
 }
@@ -3165,7 +3208,7 @@ function sendExecClientThrow(
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "execClientControlMessage", value: controlMessage },
 	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	writeClientMessage(h2Request, toBinary(AgentClientMessageSchema, clientMessage));
 	log("execClientControl", "throw", { id: execMsg.id, execId: execMsg.execId, error, errorCode });
 	sendExecClientStreamClose(h2Request, execMsg);
 }
@@ -3183,7 +3226,7 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
 		message: { case: "execClientControlMessage", value: closeMessage },
 	});
 	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
+	writeClientMessage(h2Request, responseBytes);
 	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
 }
 
