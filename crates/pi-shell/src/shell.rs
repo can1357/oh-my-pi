@@ -5686,6 +5686,28 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(minimized.output_bytes, ("HI\n".repeat(200).len() + world.len()) as u32);
 	}
 
+	/// Regression: a comment at the head of a chain segment must not disable
+	/// output minimization for that segment. Verbatim segments keep their
+	/// comments (the old AST re-render dropped them), and a `#`-leading token
+	/// used to be detected as the program, so comment-bearing segments lost
+	/// their filters silently (`minimized` stayed absent).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn comment_bearing_chain_segments_still_minimize() {
+		let root = unique_temp_dir("comment-chain");
+		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
+		let command = format!("# setup\nprintf '{}' && printf 'after\\n'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
+		let _ = std::fs::remove_dir_all(&root);
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, format!("{}after\n", "hello\n".repeat(200)));
+		let minimized = result
+			.minimized
+			.expect("comment-bearing segment should still minimize");
+		assert_eq!(minimized.text, format!("{}after\n", "HI\n".repeat(200)));
+	}
+
 	/// Regression: valid multi-line commands that end at EOF without a
 	/// trailing newline must execute like bash. `brush-parser` rejects some of
 	/// those inputs (a trailing `\` continuation reports "syntax error at end
