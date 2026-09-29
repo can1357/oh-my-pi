@@ -12,7 +12,7 @@
  * `format_tree`): one node per line, two spaces of indent per depth, then
  * `- role "label" [ref=eN] …`.
  */
-import type { DesktopWindow, DiffRun } from "@oh-my-pi/pi-natives";
+import type { DesktopDisplay, DesktopWindow, DiffRun } from "@oh-my-pi/pi-natives";
 
 /**
  * `"42" Code "main.ts"`: the id JSON-quoted, as `window()` takes it (ids are
@@ -54,9 +54,9 @@ export interface PendingSettle {
 	/** Processes the cell sent window input to; their new windows are reported. */
 	pids: Set<number>;
 	/**
-	 * Inputs whose window is unknown: desktop-root input and actions on
-	 * elements found by position or focus. They reach the focused window, whose
-	 * report carries them; a failure among them is the last entry.
+	 * Inputs whose window is unknown (the roster could not be read, or no
+	 * listed window was under the pointer). They are shown on the focused
+	 * window, whose report carries them; a failure among them is the last entry.
 	 */
 	unattributed: string[];
 	/** Roster captured before the cell's first input; absent when it could not be read. */
@@ -126,6 +126,62 @@ export function treeRefs(text: string): string[] {
 		if (row) refs.push(row.ref);
 	}
 	return refs;
+}
+
+/** Whether the cell's output carries this tree: every ref it names, or the whole text when it names none. */
+function printedIn(printedRefs: ReadonlySet<string>, output: string, text: string): boolean {
+	const refs = treeRefs(text);
+	return refs.length > 0 ? refs.every(ref => printedRefs.has(ref)) : output.includes(text);
+}
+
+/**
+ * A desktop-root pointer position (pixels of the latest desktop screenshot) in
+ * desktop coordinates, through the display regions that screenshot reported;
+ * undefined when it falls outside them. Native pointer input maps it the same way.
+ */
+export function desktopPoint(
+	displays: readonly DesktopDisplay[],
+	point: { x: number; y: number },
+): { x: number; y: number } | undefined {
+	const display = displays.find(
+		candidate =>
+			point.x >= candidate.pixelX &&
+			point.x < candidate.pixelX + candidate.pixelWidth &&
+			point.y >= candidate.pixelY &&
+			point.y < candidate.pixelY + candidate.pixelHeight,
+	);
+	if (!display) return undefined;
+	return {
+		x: display.x + ((point.x - display.pixelX) * display.width) / display.pixelWidth,
+		y: display.y + ((point.y - display.pixelY) * display.height) / display.pixelHeight,
+	};
+}
+
+/**
+ * The topmost listed window containing a desktop point (native window lists
+ * run front to back). A window covering a whole display is passed over:
+ * system overlays list above app windows (the macOS Dock keeps a transparent
+ * one over each display), so such a window does not tell where input went.
+ */
+export function windowAt(
+	windows: readonly DesktopWindow[],
+	displays: readonly DesktopDisplay[],
+	point: { x: number; y: number },
+): DesktopWindow | undefined {
+	return windows.find(
+		window =>
+			point.x >= window.x &&
+			point.x < window.x + window.width &&
+			point.y >= window.y &&
+			point.y < window.y + window.height &&
+			!displays.some(
+				display =>
+					window.x <= display.x &&
+					window.y <= display.y &&
+					window.x + window.width >= display.x + display.width &&
+					window.y + window.height >= display.y + display.height,
+			),
+	);
 }
 
 /** A tree line without its ref: what stays equal when a re-read renews refs. */
@@ -230,7 +286,11 @@ export class ObservationLedger {
 	readonly #windows = new Map<string, WindowRecord>();
 	/** Ref → window id, for elements resolved without their window. Oldest first. */
 	readonly #refs = new Map<string, string>();
-	#touched = new Map<string, { labels: string[]; failure?: string }>();
+	/** Windows input or a failure touched since the last settle; `sequence` orders them against reads. */
+	#touched = new Map<string, { labels: string[]; failure?: string; sequence: number }>();
+	/** `ax()` reads the cell made, latest per window; they count as shown once the cell's output carries them. */
+	#reads = new Map<string, { window: InputWindow; text: string; options: AxReadOptions; sequence: number }>();
+	#sequence = 0;
 	#pids = new Set<number>();
 	#unattributed: string[] = [];
 	#inputs = 0;
@@ -275,6 +335,16 @@ export class ObservationLedger {
 		this.#touched.delete(window.id);
 	}
 
+	/**
+	 * The cell's code read this tree of the window. Its refs map to the window
+	 * at once; it becomes what the model saw only if the cell's output carries
+	 * it (see `take`), since code can read a tree without printing it.
+	 */
+	recordRead(window: InputWindow, text: string, options: AxReadOptions): void {
+		this.recordRefs(window.id, treeRefs(text));
+		this.#reads.set(window.id, { window, text, options: { ...options }, sequence: this.#sequence });
+	}
+
 	/** Whether no input since the last settle has claimed the roster-before read yet. */
 	get wantsRoster(): boolean {
 		return !this.#rosterClaimed;
@@ -307,8 +377,10 @@ export class ObservationLedger {
 			this.#pids.add(pid);
 		}
 		const touched = this.#touched.get(window.id);
-		if (touched) touched.labels.push(label);
-		else this.#touched.set(window.id, { labels: [label] });
+		if (touched) {
+			touched.labels.push(label);
+			touched.sequence = ++this.#sequence;
+		} else this.#touched.set(window.id, { labels: [label], sequence: ++this.#sequence });
 	}
 
 	/** An input returned or threw. */
@@ -324,18 +396,36 @@ export class ObservationLedger {
 			return;
 		}
 		const touched = this.#touched.get(window.id);
-		if (touched) touched.failure = failure;
-		else this.#touched.set(window.id, { labels: [], failure });
+		if (touched) {
+			touched.failure = failure;
+			touched.sequence = ++this.#sequence;
+		} else this.#touched.set(window.id, { labels: [], failure, sequence: ++this.#sequence });
 	}
 
-	/** Take what the cell left to settle, or undefined when it sent no input and nothing failed. */
-	take(): PendingSettle | undefined {
+	/**
+	 * Take what the cell left to settle, or undefined when it sent no input and
+	 * nothing failed. First, each `ax()` read whose tree the cell's `output`
+	 * carries becomes what the model saw, and settles its window unless input
+	 * reached the window after the read.
+	 */
+	take(output: string): PendingSettle | undefined {
+		if (this.#reads.size > 0) {
+			const printedRefs = new Set(Array.from(output.matchAll(/\[ref=(e\d+)\]/g), match => match[1]!));
+			for (const read of this.#reads.values()) {
+				if (!printedIn(printedRefs, output, read.text)) continue;
+				const touched = this.#touched.get(read.window.id);
+				this.recordShown(read.window, read.text, read.options);
+				if (touched && touched.sequence > read.sequence) this.#touched.set(read.window.id, touched);
+			}
+			this.#reads.clear();
+		}
 		if (this.#inputs === 0 && this.#touched.size === 0 && this.#unattributed.length === 0) return undefined;
-		const touched: TouchedWindow[] = [...this.#touched].map(([id, entry]) => {
+		const touched: TouchedWindow[] = [...this.#touched].map(([id, { labels, failure }]) => {
 			const record = this.#windows.get(id);
 			return {
 				id,
-				...entry,
+				labels,
+				failure,
 				baseline: record?.shown,
 				options: { ...record?.options },
 			};
@@ -364,7 +454,7 @@ export class ObservationLedger {
 	attributeToFocused(pending: PendingSettle, window: DesktopWindow): void {
 		if (pending.unattributed.length === 0) return;
 		const labels = [...pending.unattributed];
-		labels[labels.length - 1] += " (sent without a window; shown on the focused window)";
+		labels[labels.length - 1] += " (its window is unknown; shown on the focused window)";
 		const own = pending.touched.find(touched => touched.id === window.id);
 		if (own) {
 			own.labels.push(...labels);

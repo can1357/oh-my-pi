@@ -160,11 +160,11 @@ export function createComputerPrelude(
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
 		status: describeComputerCall,
-		settleCell: async cell => {
+		settleCell: async (cell, { output }) => {
 			if (!cells.has(cell) || closed || !controller.settle) return undefined;
 			cells.delete(cell);
 			try {
-				const text = await controller.settle(buildComputerSnapshot(session, true), cell.signal);
+				const text = await controller.settle(buildComputerSnapshot(session, true), output, cell.signal);
 				return text === undefined ? undefined : { text };
 			} catch (error) {
 				// Cancellation of the turn needs no report; anything else leaves the
