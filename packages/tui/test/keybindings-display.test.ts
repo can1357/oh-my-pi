@@ -114,10 +114,10 @@ describe("persisted hub shortcut migration", () => {
 			);
 
 			const manager = KeybindingsManager.create(agentDir);
-			expect(manager.getKeys("app.agents.hub")).toEqual(["ctrl+s", "ctrl+o"]);
+			expect(manager.getKeys("app.agents.hub")).toEqual(["alt+a", "ctrl+s", "ctrl+o"]);
 			expect(manager.getKeys("app.editor.stash")).toEqual([]);
 			expect(YAML.parse(await Bun.file(path.join(agentDir, "keybindings.yml")).text())).toEqual({
-				"app.agents.hub": ["ctrl+s", "ctrl+o"],
+				"app.agents.hub": ["alt+a", "ctrl+s", "ctrl+o"],
 			});
 		} finally {
 			await removeWithRetries(agentDir);
