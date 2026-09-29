@@ -93,6 +93,17 @@ Common environment fallbacks:
 
 Local embeddings use the `fastembed` npm package. Its default `BGESmallENV15` model is 384-dimensional and uses the package's CLS pooling plus vector normalization path. Local GGUF LLMs are not available in this package.
 
+### Sharing one embedding model across processes
+
+Each process that embeds locally loads its own fastembed/ONNX runtime. To load it once per machine, run the server and point every client at it:
+
+```sh
+mnemopi embed-serve --model BAAI/bge-base-en-v1.5 --port 11439
+MNEMOPI_EMBEDDING_API_URL=http://127.0.0.1:11439/v1 mnemopi recall "production deploy target"
+```
+
+Serve the same model the store already uses (`MNEMOPI_EMBEDDING_MODEL`, default `BAAI/bge-small-en-v1.5`). A request for another model gets a 400, and clients keep writing that model name, so existing embeddings stay valid. The server binds `127.0.0.1` and has no auth. If it is down, API-mode clients get no vectors and recall falls back to keyword-only.
+
 ## Commands
 
 ```sh

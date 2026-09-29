@@ -384,7 +384,7 @@ const KNOWN_MODEL_NAMES: Record<string, string> = {
 	"intfloat/multilingual-e5-large": "fast-multilingual-e5-large",
 	"sentence-transformers/all-MiniLM-L6-v2": "fast-all-MiniLM-L6-v2",
 };
-function fastembedModelName(modelName: string): StandardEmbeddingModel | null {
+export function fastembedModelName(modelName: string): StandardEmbeddingModel | null {
 	// Fastembed `EmbeddingModel` enum string values, inlined so resolving a model name
 	// (and `available()`) never imports `fastembed` — its module eagerly loads the
 	// `onnxruntime-node` native addon, which segfaults in some runtimes.
