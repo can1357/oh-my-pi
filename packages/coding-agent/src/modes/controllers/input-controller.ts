@@ -2097,7 +2097,7 @@ export class InputController {
 			images,
 			imageLinks,
 			detachedText: input?.text,
-			onAccepted: input?.onAccepted,
+			...(input ? { onAccepted: input.onAccepted } : {}),
 		});
 	}
 
@@ -2135,8 +2135,8 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		const awaitingStash = this.#stashedDraft;
-		const restoreOnAccepted = options.onAccepted ?? this.#restoreOnAccepted();
+		const restoreOnAccepted = "onAccepted" in options ? options.onAccepted : this.#restoreOnAccepted();
+		const awaitingStash = restoreOnAccepted ? this.#stashedDraft : undefined;
 		const appendQueueText = (text: string) => {
 			const draft = this.ctx.editor.captureComposerDraft();
 			this.ctx.editor.restoreComposerDraft({

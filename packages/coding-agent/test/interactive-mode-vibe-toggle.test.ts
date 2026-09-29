@@ -208,6 +208,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		mode.editor.setText("saved draft");
 		mode.editor.handleInput("\x13");
 		mode.editor.setText("/vibe exit");
+		mode.editor.setText(""); // Enter detaches the submitted text before onSubmit.
 
 		await mode.editor.onSubmit?.("/vibe exit");
 

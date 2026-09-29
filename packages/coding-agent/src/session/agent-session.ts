@@ -9226,6 +9226,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
 			this.#reportDroppedCustomPrompt(message, options, followUps);
 			outcome.sessionClaimed = true;
+			options?.onAccepted?.();
 			return true;
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
