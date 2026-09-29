@@ -381,11 +381,10 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
-			// The TUI already refreshes the pending-messages bar at every queue
-			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
-			// this event exists for RPC/ACP clients that have no equivalent local
-			// call site to hook, so there is nothing additional to do here.
-			queue_update: async () => {},
+			// Local queue mutations refresh the pending-messages bar at their call
+			// sites; this covers the ones the agent makes on its own, e.g. live
+			// steering taking a steer (it loses its edit affordance) or recording it.
+			queue_update: async () => this.ctx.updatePendingMessagesDisplay(),
 		} satisfies AgentSessionEventHandlers;
 	}
 

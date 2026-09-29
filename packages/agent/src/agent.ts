@@ -1044,10 +1044,12 @@ export class Agent {
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
+		let adopted = false;
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
+			adopted = true;
 			for (const message of pending) {
 				if (taken.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
 			}
@@ -1058,6 +1060,7 @@ export class Agent {
 				delivery.next = 0;
 			}
 		}
+		if (adopted) this.#emitQueueChanged();
 	}
 
 	/**
@@ -1067,6 +1070,7 @@ export class Agent {
 	withdrawLiveSteering(): AgentMessage[] {
 		const messages = this.peekLiveSteeredMessages();
 		this.#liveSteered = [];
+		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
@@ -1257,6 +1261,7 @@ export class Agent {
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
+			this.#emitQueueChanged();
 			return;
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {

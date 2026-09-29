@@ -7,7 +7,11 @@ import {
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type {
+	AgentSession,
+	AgentSessionEvent,
+	QueuedMessagesSnapshot,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -24,7 +28,7 @@ interface SessionStub {
 function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let unsubscribeCalls = 0;
-	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
+	let queue: QueuedMessagesSnapshot = { steering: [], followUp: [], liveSteered: 0 };
 	const stub = {
 		isStreaming: opts.isStreaming ?? false,
 		agent: { state: { streamMessage: null } },
@@ -50,7 +54,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 			stub.isStreaming = streaming;
 		},
 		setQueue: next => {
-			queue = { steering: next.steering ?? [], followUp: next.followUp ?? [] };
+			queue = { steering: next.steering ?? [], followUp: next.followUp ?? [], liveSteered: 0 };
 		},
 	};
 }

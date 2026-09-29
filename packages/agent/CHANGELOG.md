@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `Agent.onQueueChange()` listeners now also fire when live steering takes a steer into the streaming response, records it, or has it withdrawn ([#13798](https://github.com/can1357/oh-my-pi/issues/13798))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

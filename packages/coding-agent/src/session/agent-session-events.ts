@@ -80,9 +80,25 @@ export type AgentSessionEvent =
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, dequeue on
-	// delivery, remove, clear/restore, or session switch), never on a no-op
-	// mutation. Mirrors `AgentSession.getQueuedMessages()`.
-	| { type: "queue_update"; steering: string[]; followUp: string[] };
+	// delivery, live steering taking or recording input, remove, clear/restore,
+	// or session switch), never on a no-op mutation. Mirrors
+	// `AgentSession.getQueuedMessages()`.
+	| ({ type: "queue_update" } & QueuedMessagesSnapshot);
+
+/**
+ * Displayable queue-chip text for pending user-authored messages
+ * (`AgentSession.getQueuedMessages()`, the `queue_update` event).
+ */
+export interface QueuedMessagesSnapshot {
+	steering: string[];
+	followUp: string[];
+	/**
+	 * How many leading `steering` entries live steering already sent into the
+	 * streaming response. They stay listed until the transcript records them,
+	 * but only an interrupt takes them back: dequeue and removal never reach them.
+	 */
+	liveSteered: number;
+}
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

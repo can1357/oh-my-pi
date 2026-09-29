@@ -9,7 +9,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
-import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { AgentSessionEvent, QueuedMessagesSnapshot, SessionStats } from "../../session/agent-session";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -122,7 +122,7 @@ export interface RpcSessionState {
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
 	 *  (and the `queue_update` event) instead of tracking chips independently. */
-	queuedMessages: { steering: string[]; followUp: string[] };
+	queuedMessages: QueuedMessagesSnapshot;
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];

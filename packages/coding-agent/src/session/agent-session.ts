@@ -256,7 +256,7 @@ import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
-import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import type { AgentSessionEvent, AgentSessionEventListener, QueuedMessagesSnapshot } from "./agent-session-events";
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
@@ -8517,13 +8517,16 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
+	 *  stays listed until the transcript records it, when the model actually switches to it
+	 *  (see {@link QueuedMessagesSnapshot.liveSteered}). */
+	getQueuedMessages(): QueuedMessagesSnapshot {
+		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
-				.filter(isUserAuthoredQueuedMessage)
-				.map(queueChipText),
+			steering: [...liveSteered, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(
+				queueChipText,
+			),
 			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
+			liveSteered: liveSteered.length,
 		};
 	}
 
@@ -8532,20 +8535,26 @@ export class AgentSession implements SettingsScope {
 	 *  externally observable transitions RPC/ACP/TUI subscribers actually care
 	 *  about, so a mutation that leaves the displayable queue unchanged (e.g. an
 	 *  agent-authored aside, or a claim/restore round-trip) never re-emits. */
-	#lastEmittedQueueSnapshot: { steering: readonly string[]; followUp: readonly string[] } | undefined;
+	#lastEmittedQueueSnapshot: QueuedMessagesSnapshot | undefined;
 
 	#emitQueueUpdateIfChanged(): void {
 		const snapshot = this.getQueuedMessages();
 		const last = this.#lastEmittedQueueSnapshot;
 		const unchanged =
 			last !== undefined &&
+			last.liveSteered === snapshot.liveSteered &&
 			last.steering.length === snapshot.steering.length &&
 			last.followUp.length === snapshot.followUp.length &&
 			last.steering.every((text, i) => text === snapshot.steering[i]) &&
 			last.followUp.every((text, i) => text === snapshot.followUp[i]);
 		if (unchanged) return;
 		this.#lastEmittedQueueSnapshot = snapshot;
-		this.#emit({ type: "queue_update", steering: [...snapshot.steering], followUp: [...snapshot.followUp] });
+		this.#emit({
+			type: "queue_update",
+			steering: [...snapshot.steering],
+			followUp: [...snapshot.followUp],
+			liveSteered: snapshot.liveSteered,
+		});
 	}
 
 	/**
@@ -8588,7 +8597,9 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Pop the last queued message (steering first, then follow-up).
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
-	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
+	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers)
+	 * and never reaches live-steered input: the provider already has it, so only an
+	 * interrupt can take it back (see {@link getQueuedMessages}).
 	 */
 	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
 		const steering = this.agent.peekSteeringQueue();

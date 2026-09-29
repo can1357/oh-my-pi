@@ -185,6 +185,25 @@ describe("native queued messages", () => {
 		const single = new QueuedMessagesBand([{ label: "Steering", messages: ["only"] }], "alt+up", onEdit);
 		expect(byRole(single.describe(), "omp.queue.count")).toBeUndefined();
 	});
+
+	it("offers no edit control or hint for sent (locked) steering (#13798)", () => {
+		const onEdit = vi.fn();
+		const band = new QueuedMessagesBand(
+			[
+				{ label: "Sent", messages: ["sent"], locked: true },
+				{ label: "Steering", messages: ["queued"] },
+			],
+			"alt+up",
+			onEdit,
+		);
+		const pills = (band.describe().c ?? []).filter(isNode);
+		expect(pills.map(pill => byRole(pill, "omp.queue.edit") !== undefined)).toEqual([false, true]);
+		expect(band.render(80).some(line => line.includes("to edit"))).toBe(true);
+
+		const sentOnly = new QueuedMessagesBand([{ label: "Sent", messages: ["sent"], locked: true }], "alt+up", onEdit);
+		expect(byRole(sentOnly.describe(), "omp.queue.edit")).toBeUndefined();
+		expect(sentOnly.render(80).some(line => line.includes("to edit"))).toBe(false);
+	});
 });
 
 describe("native autocomplete list", () => {

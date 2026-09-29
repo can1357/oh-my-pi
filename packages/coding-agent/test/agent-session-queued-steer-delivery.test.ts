@@ -22,7 +22,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type QueuedMessagesSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -452,7 +452,7 @@ describe("AgentSession queued steer delivery", () => {
 		const skillPath = path.join(tempDir, "SKILL.md");
 		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n");
 		const invocation = "/skill:reviewer  focus on risks\nand correctness";
-		let queued: { steering: readonly string[]; followUp: readonly string[] } | undefined;
+		let queued: QueuedMessagesSnapshot | undefined;
 		let injected = false;
 		session.agent.setOnBeforeYield(async () => {
 			if (injected) return;
@@ -479,7 +479,7 @@ describe("AgentSession queued steer delivery", () => {
 		await session.prompt("start");
 		await session.waitForIdle();
 
-		expect(queued).toEqual({ steering: [invocation], followUp: [] });
+		expect(queued).toEqual({ steering: [invocation], followUp: [], liveSteered: 0 });
 		const delivered = session.messages.filter(
 			(message): message is CustomMessage => message.role === "custom" && message.customType === "skill-prompt",
 		);
@@ -684,7 +684,7 @@ describe("AgentSession queued steer delivery", () => {
 
 			expect(session.removeQueuedMessage("/review raw", "followUp")).toBe(true);
 			expect(session.removeQueuedMessage("/review expanded", "followUp")).toBe(true);
-			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"] });
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"], liveSteered: 0 });
 		});
 
 		it("removes a queued file-based slash command by its raw /cmd invocation", async () => {

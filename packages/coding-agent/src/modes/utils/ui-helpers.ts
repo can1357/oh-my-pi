@@ -109,10 +109,6 @@ function waitForImmediate(): Promise<void> {
 	return promise;
 }
 
-type QueuedMessages = {
-	steering: string[];
-	followUp: string[];
-};
 type AddMessageOptions = {
 	imageLinks?: readonly (string | undefined)[];
 	reuseSettledComponent?: boolean;
@@ -1087,9 +1083,12 @@ export class UiHelpers {
 
 	updatePendingMessagesDisplay(): void {
 		this.ctx.pendingMessagesContainer.disposeChildren();
-		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
+		const queuedMessages = this.ctx.viewSession.getQueuedMessages();
 
-		const steeringMessages = [...queuedMessages.steering];
+		// Live steering already handed the leading steering entries to the model;
+		// only an interrupt takes them back, so they get no edit affordance.
+		const sentMessages = queuedMessages.steering.slice(0, queuedMessages.liveSteered);
+		const steeringMessages = queuedMessages.steering.slice(queuedMessages.liveSteered);
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 			if (entry.mode === "steer") steeringMessages.push(entry.text);
 		}
@@ -1100,6 +1099,7 @@ export class UiHelpers {
 		}
 
 		const groups = [
+			{ label: "Sent", messages: sentMessages, locked: true },
 			{ label: "Steering", messages: steeringMessages },
 			{ label: "After yield", messages: followUpMessages },
 		].filter(group => group.messages.length > 0);

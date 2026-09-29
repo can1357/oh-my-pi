@@ -11,21 +11,17 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type QueuedMessagesSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-
-interface QueueSnapshot {
-	steering: readonly string[];
-	followUp: readonly string[];
-}
 
 describe("AgentSession queue_update events", () => {
 	let tempDir: string;
@@ -47,14 +43,17 @@ describe("AgentSession queue_update events", () => {
 		removeSyncWithRetries(tempDir);
 	});
 
-	function createSession(responses: MockResponse[], followUpMode: "all" | "one-at-a-time" = "one-at-a-time") {
+	function createSession(
+		responses: MockResponse[],
+		followUpMode: "all" | "one-at-a-time" = "one-at-a-time",
+		streamFn: StreamFn = createMockModel({ responses }).stream,
+	) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			convertToLlm,
-			streamFn: mock.stream,
+			streamFn,
 			followUpMode,
 		});
 		session = new AgentSession({
@@ -66,11 +65,15 @@ describe("AgentSession queue_update events", () => {
 		return session;
 	}
 
-	function collectQueueUpdates(target: AgentSession): QueueSnapshot[] {
-		const updates: QueueSnapshot[] = [];
+	function collectQueueUpdates(target: AgentSession): QueuedMessagesSnapshot[] {
+		const updates: QueuedMessagesSnapshot[] = [];
 		target.subscribe(event => {
 			if (event.type === "queue_update")
-				updates.push({ steering: [...event.steering], followUp: [...event.followUp] });
+				updates.push({
+					steering: [...event.steering],
+					followUp: [...event.followUp],
+					liveSteered: event.liveSteered,
+				});
 		});
 		return updates;
 	}
@@ -118,15 +121,15 @@ describe("AgentSession queue_update events", () => {
 		// displayable snapshot (steering still holds "kept"); it must not emit.
 		target.agent.clearFollowUpQueue();
 
-		expect(updates).toEqual([{ steering: ["kept"], followUp: [] }]);
+		expect(updates).toEqual([{ steering: ["kept"], followUp: [], liveSteered: 0 }]);
 	});
 
 	it("satisfies the snapshot-string-removal invariant for every queued chip", async () => {
 		const target = createSession([{ content: ["turn one"] }, { content: ["turn two"] }]);
 
-		let snapshot: QueueSnapshot | undefined;
+		let snapshot: QueuedMessagesSnapshot | undefined;
 		const removed: boolean[] = [];
-		let remaining: QueueSnapshot | undefined;
+		let remaining: QueuedMessagesSnapshot | undefined;
 		target.agent.setOnBeforeYield(async () => {
 			if (snapshot) return;
 			// Queue while the turn is still running: an idle session delivers a
@@ -143,8 +146,51 @@ describe("AgentSession queue_update events", () => {
 
 		await target.prompt("hello");
 
-		expect(snapshot).toEqual({ steering: ["steer one"], followUp: ["follow one", "follow two"] });
+		expect(snapshot).toEqual({ steering: ["steer one"], followUp: ["follow one", "follow two"], liveSteered: 0 });
 		expect(removed).toEqual([true, true, true]);
-		expect(remaining).toEqual({ steering: [], followUp: [] });
+		expect(remaining).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+	});
+
+	it("marks live-steered input as sent, apart from what dequeue can restore (#13798)", async () => {
+		// The provider stream stays open and claims the steer through live
+		// steering, as while `response.steer` awaits its acknowledgement.
+		const streaming = Promise.withResolvers<void>();
+		const claimed = Promise.withResolvers<void>();
+		const target = createSession([], "one-at-a-time", async (_model, _context, options) => {
+			const live = options?.liveSteering;
+			const signal = options?.signal;
+			if (!live || !signal) throw new Error("live steering was not offered");
+			const stream = new AssistantMessageEventStream();
+			signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+			streaming.resolve();
+			await live.wait(signal);
+			if (!(await live.claim(signal))) throw new Error("steer was not claimed");
+			claimed.resolve();
+			return stream;
+		});
+		const updates = collectQueueUpdates(target);
+		const running = target.prompt("start");
+		await streaming.promise;
+		await target.steer("use tabs");
+		await claimed.promise;
+
+		// Live steering took the steer: still listed, but flagged as sent, and the
+		// event reports the move so the queue bar can drop its edit hint.
+		const sent = { steering: ["use tabs"], followUp: [], liveSteered: 1 };
+		expect(target.getQueuedMessages()).toEqual(sent);
+		expect(updates.at(-1)).toEqual(sent);
+
+		await target.steer("then run tests");
+
+		// Dequeue restores only what is still queued; the sent steer stays listed.
+		expect(target.popLastQueuedMessage()?.text).toBe("then run tests");
+		expect(target.popLastQueuedMessage()).toBeUndefined();
+		expect(target.getQueuedMessages()).toEqual({ steering: ["use tabs"], followUp: [], liveSteered: 1 });
+
+		// The interrupt path (Esc) is what takes it back.
+		expect(target.clearQueue({ forInterrupt: true }).steering.map(message => message.text)).toEqual(["use tabs"]);
+		expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+		await target.abort();
+		await running;
 	});
 });

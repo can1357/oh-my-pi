@@ -840,6 +840,9 @@ class QueuedMessagesState:
 
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries live steering already sent into the streaming
+    response; `remove_queued_message` cannot reach them."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -1227,6 +1230,9 @@ class QueueUpdateEvent:
 
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries live steering already sent into the streaming
+    response; `remove_queued_message` cannot reach them."""
     type: Literal["queue_update"] = "queue_update"
 
 
@@ -1485,6 +1491,7 @@ def parse_queued_messages_state(
         or (),
         follow_up=_tuple_of_strings(payload.get("followUp"), field="queuedMessages.followUp")
         or (),
+        live_steered=int(payload.get("liveSteered", 0)),
     )
 
 
@@ -1999,6 +2006,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             or (),
             follow_up=_tuple_of_strings(payload.get("followUp"), field="queue_update.followUp")
             or (),
+            live_steered=int(payload.get("liveSteered", 0)),
         )
     return UnknownNotification(
         payload=_clone_json_object(payload, field="notification")

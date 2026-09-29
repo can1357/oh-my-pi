@@ -922,7 +922,7 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 
 		expect(count).toBe(1);
 		expect(editor.getText()).toBe("/skill:test-skill arg1 arg2");
-		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 	});
 });
 

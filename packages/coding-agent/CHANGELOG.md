@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC `get_state.queuedMessages` and `queue_update` now report `liveSteered`, the number of leading steering chips live steering already sent into the streaming response, which `remove_queued_message` cannot reach ([#13798](https://github.com/can1357/oh-my-pi/issues/13798))
+
+### Fixed
+
+- Steering that live steering already sent to the model is now listed under "Sent" without the edit hint, and the dequeue key (`Alt+Up`) points at the interrupt key instead of reporting "No queued messages to restore" ([#13798](https://github.com/can1357/oh-my-pi/issues/13798))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
