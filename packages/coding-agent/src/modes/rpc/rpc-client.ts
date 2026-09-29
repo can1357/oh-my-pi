@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -152,6 +153,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"auto_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
+	"cache_warming_start",
+	"cache_warming_end",
 	"retry_fallback_applied",
 	"retry_fallback_succeeded",
 	"ttsr_triggered",
@@ -863,6 +866,12 @@ export class RpcClient {
 	 */
 	async setAutoCompaction(enabled: boolean): Promise<void> {
 		await this.#send({ type: "set_auto_compaction", enabled });
+	}
+
+	/** Set the session-scoped cache warming mode and return the effective mode. */
+	async setCacheWarming(mode: CacheWarmingMode): Promise<CacheWarmingMode> {
+		const response = await this.#send({ type: "set_cache_warming", mode });
+		return this.#getData<{ mode: CacheWarmingMode }>(response).mode;
 	}
 
 	/**
