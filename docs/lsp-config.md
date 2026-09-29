@@ -253,6 +253,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `intelephense`                | PHP                           | `intelephense`                    |
 | `phpactor`                    | PHP                           | `phpactor`                        |
 | `omnisharp`                   | C#                            | `omnisharp`                       |
+| `ansible`                     | Ansible                       | `ansible-language-server`         |
 | `yamlls`                      | YAML                          | `yaml-language-server`            |
 | `terraformls`                 | Terraform                     | `terraform-ls`                    |
 | `dockerls`                    | Dockerfile                    | `docker-langserver`               |
@@ -272,3 +273,5 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
 
 Only one TypeScript server is kept per project: when the resolved `tsc` belongs to a TypeScript install without `lib/tsserver.js` (TypeScript 7+), `typescript-native` wins and `typescript-language-server` is dropped, since it cannot drive that install; otherwise `typescript-native` is dropped because older `tsc` rejects `--lsp`.
+
+The `ansible` server shares the `.yml`/`.yaml` extensions with `yamlls` but only claims Ansible files: playbooks and files under conventional Ansible paths (`tasks/`, `handlers/`, `group_vars/`, and similar; container roots such as `roles/` and `collections/` are not signals, because a role's `files/` and `templates/` hold arbitrary payloads) or with Ansible content markers (`hosts:`, `tasks:`, `roles:`). Every other YAML file (Kubernetes manifests, workflows, Compose files, Taskfiles) routes to `yamlls`; the manifest and workflow vetoes only fire on column-zero top-level keys, so a document embedded in a playbook's block scalar never vetoes the enclosing playbook, and the column-zero `services:` Compose key does not veto a file already under a structural Ansible directory (it is also an ordinary Ansible variable name).

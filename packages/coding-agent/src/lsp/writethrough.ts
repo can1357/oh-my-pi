@@ -408,7 +408,7 @@ async function runLspWritethrough(
 	}
 
 	const config = getConfig(cwd);
-	const servers = getServersForFile(config, dst);
+	const servers = getServersForFile(config, dst, { content, projectRoot: cwd });
 
 	if (servers.length === 0) {
 		await commitWrite();

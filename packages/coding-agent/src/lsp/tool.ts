@@ -319,7 +319,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const target of targets) {
 				throwIfAborted(signal);
 				const resolved = resolveToCwd(target, this.session.cwd);
-				const servers = getServersForFile(config, resolved);
+				const servers = getServersForFile(config, resolved, { projectRoot: this.session.cwd });
 				if (servers.length === 0) {
 					results.push(`${theme.status.error} ${target}: No language server found`);
 					continue;
@@ -567,7 +567,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allLspServers = getLspServers(config);
 			const relevantNames = new Set<string>();
 			const collectRelevant = (filePath: string) => {
-				for (const [name] of getLspServersForFile(config, filePath)) {
+				for (const [name] of getLspServersForFile(config, filePath, { projectRoot: this.session.cwd })) {
 					relevantNames.add(name);
 				}
 			};
@@ -822,7 +822,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let serverList: Array<[string, ServerConfig]>;
 			if (file && file !== "*") {
 				const resolved = resolveToCwd(file, this.session.cwd);
-				serverList = getLspServersForFile(config, resolved);
+				serverList = getLspServersForFile(config, resolved, { projectRoot: this.session.cwd });
 				if (serverList.length === 0) {
 					return {
 						content: [{ type: "text", text: "No language server found for this file" }],
@@ -888,7 +888,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let resolvedTarget: string | null = null;
 			if (file && file !== "*") {
 				resolvedTarget = resolveToCwd(file, this.session.cwd);
-				chosenServer = getLspServerForFile(config, resolvedTarget);
+				chosenServer = getLspServerForFile(config, resolvedTarget, { projectRoot: this.session.cwd });
 				if (!chosenServer) {
 					return {
 						content: [{ type: "text", text: "No language server found for this file" }],
@@ -1141,7 +1141,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const serverInfo = resolvedFile ? getLspServerForFile(config, resolvedFile) : null;
+		const serverInfo = resolvedFile
+			? getLspServerForFile(config, resolvedFile, { projectRoot: this.session.cwd })
+			: null;
 		if (!serverInfo) {
 			return {
 				content: [{ type: "text", text: "No language server found for this action" }],
