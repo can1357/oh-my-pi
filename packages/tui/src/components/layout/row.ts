@@ -1,4 +1,6 @@
 import type { MouseRoutable, SgrMouseEvent } from "../../mouse";
+import { col, row } from "../../native/describe";
+import type { DescribeContext, NativeNode } from "../../native/node";
 import type { Component } from "../../tui";
 import { padding, visibleWidth } from "../../utils";
 import {
@@ -15,6 +17,9 @@ import {
 	type LayoutInsets,
 	type LayoutRect,
 	layoutSize,
+	nativeLayoutChild,
+	nativeLayoutGap,
+	nativeSlotProps,
 	optionalLayoutSize,
 	renderLayoutContent,
 	uniqueLayoutComponents,
@@ -87,6 +92,7 @@ export class Row implements Component, MouseRoutable {
 	#frames: LayoutRect[] = [];
 	#memo: RowMemo | undefined;
 	#ignoreTight = false;
+	#native: { children: RowChild[]; gap: LayoutDecoration | undefined; node: NativeNode } | undefined;
 
 	constructor(options: RowOptions) {
 		this.#children = options.children.map(child => ({ ...child, padding: { ...child.padding } }));
@@ -166,6 +172,30 @@ export class Row implements Component, MouseRoutable {
 		for (const child of uniqueLayoutComponents(this.#children.map(item => item.content))) {
 			child.dispose?.();
 		}
+	}
+
+	/**
+	 * A flex `row`: each child sits in a slot carrying its width bounds
+	 * (fixed → min = max `ch`, else grow/min/max). Decorations become gap
+	 * spacing; clipping and the exact row budget are the terminal's.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const cached = this.#native;
+		if (cached?.children === this.#children && cached.gap === this.#gap) return cached.node;
+		const slots = this.#children.map(child =>
+			col(
+				[nativeLayoutChild(child.content)],
+				nativeSlotProps("w", {
+					fixed: child.width,
+					grow: child.width === undefined ? layoutSize(child.grow, 1) : undefined,
+					min: child.minWidth,
+					max: child.maxWidth,
+				}),
+			),
+		);
+		const described = row(slots, { gap: nativeLayoutGap(this.#gap), align: this.#align });
+		this.#native = { children: this.#children, gap: this.#gap, node: described };
+		return described;
 	}
 
 	/** Translate a row-local point into a child's local coordinates. */

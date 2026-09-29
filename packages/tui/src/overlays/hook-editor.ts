@@ -16,6 +16,10 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField } from "../components/form";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, interruptKey } from "../chrome/keybinding-hints";
+import { node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { plainText } from "../native/spans";
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
@@ -44,6 +48,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
 	#submitQueued = false;
 	#disposed = false;
+	/** Detail lines, hints and the editor under the title; every part is fixed, so it is built once. */
+	#nativeRoot: NativeNode;
 	/** Focus state mirrored to the nested editor during rendering. */
 	focused = false;
 
@@ -59,7 +65,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		// bounded ask question under "◆ Other (type your own)") stay as body rows
 		// so they are never truncated into the one-row border.
 		const [titleLine = "", ...detailLines] = title.split("\n");
-		super(titleLine);
+		super(titleLine, "omp.overlay.hook-editor");
 
 		this.#tui = tui;
 		this.#onSubmitCallback = onSubmit;
@@ -99,6 +105,41 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		});
 		this.addChild(this.#field);
 		this.addChild(new Spacer(1));
+
+		const externalHint: NativeHint = {
+			keys: boundKeys("app.editor.external", ["ctrl+g"]).slice(0, 1),
+			label: "external editor",
+		};
+		const nativeHints: NativeHint[] = this.#promptStyle
+			? [
+					{ keys: ["enter", primaryFollowUpKey], label: "submit" },
+					{ keys: ["escape"], label: "cancel" },
+					externalHint,
+				]
+			: [
+					{ keys: followUpKeys, label: "submit" },
+					{ keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "cancel" },
+					externalHint,
+				];
+		const nativeChildren: NativeChild[] = [];
+		if (detailLines.length > 0) {
+			nativeChildren.push(
+				node(
+					"text",
+					{ spans: [span(plainText(detailLines.join("\n")), "accent")], wrap: "word" },
+					undefined,
+					"detail",
+				),
+			);
+		}
+		nativeChildren.push(this.#editor, hintsRow(nativeHints));
+		this.#nativeRoot = overlayCard(this.nativeRole, plainText(titleLine), nativeChildren);
+	}
+
+	/** The editor (which describes itself) under the title and detail lines, with the key hints below. */
+	override describe(_cx: DescribeContext): NativeNode {
+		this.#field.focused = this.focused;
+		return this.#nativeRoot;
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */

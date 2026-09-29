@@ -1,5 +1,9 @@
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import { col } from "../native/describe";
+import { sameItems } from "../native/memo";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
+import { spaceForRows } from "./spacer";
 
 /** Semantic role of a wizard step's primary interactive content. */
 export type WizardStepKind = "input" | "choice" | "confirm" | "async" | "custom";
@@ -37,14 +41,6 @@ function isMouseRoutable(component: Component): component is Component & MouseRo
 	return "routeMouse" in component && typeof component.routeMouse === "function";
 }
 
-function sameLines(left: readonly string[], right: readonly string[]): boolean {
-	if (left.length !== right.length) return false;
-	for (let i = 0; i < left.length; i++) {
-		if (left[i] !== right[i]) return false;
-	}
-	return true;
-}
-
 /**
  * Reusable presentation for input, choice, confirmation, and asynchronous
  * wizard steps. Controllers retain state transitions; this component owns the
@@ -68,6 +64,7 @@ export class WizardStep implements Component, MouseRoutable {
 	#contentRowStart = -1;
 	#contentRowCount = 0;
 	#cachedLines: readonly string[] | undefined;
+	#native: { slots: readonly Component[]; node: NativeNode } | undefined;
 
 	constructor(options: WizardStepOptions) {
 		this.#kind = options.kind;
@@ -163,6 +160,18 @@ export class WizardStep implements Component, MouseRoutable {
 		content.routeMouse(event, line - this.#contentRowStart, col);
 	}
 
+	/**
+	 * The slots in order as a spaced `col`; the height budget and optional
+	 * preview collapse are the terminal's (it scrolls instead of clipping).
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const slots = this.debugChildren;
+		if (sameItems(this.#native?.slots, slots)) return this.#native!.node;
+		const described = col(slots, { gap: spaceForRows(this.#gap) });
+		this.#native = { slots, node: described };
+		return described;
+	}
+
 	render(width: number): readonly string[] {
 		const safeWidth = Math.max(1, width);
 		const gap = this.#gap;
@@ -217,7 +226,7 @@ export class WizardStep implements Component, MouseRoutable {
 			lines.push(...slot.lines);
 		}
 		const bounded = maxHeight === undefined || lines.length <= maxHeight ? lines : lines.slice(0, maxHeight);
-		if (this.#cachedLines && sameLines(this.#cachedLines, bounded)) return this.#cachedLines;
+		if (this.#cachedLines && sameItems(this.#cachedLines, bounded)) return this.#cachedLines;
 		this.#cachedLines = bounded;
 		return bounded;
 	}

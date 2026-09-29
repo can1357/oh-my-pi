@@ -8,6 +8,10 @@ import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { Form, TextFormField } from "../components/form";
 import { editorKey, interruptKey } from "../chrome/keybinding-hints";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
+import { overlayCard } from "../native/overlay";
+import { plainText } from "../native/spans";
 
 export interface HookInputOptions {
 	tui?: TUI;
@@ -22,6 +26,7 @@ export class HookInputComponent extends OverlayPanel {
 	#onCancelCallback: () => void;
 	#baseTitle: string;
 	#countdown: CountdownTimer | undefined;
+	#nativeMemo: { countdown: NativeNode | undefined; node: NativeNode } | undefined;
 
 	constructor(
 		title: string,
@@ -30,7 +35,7 @@ export class HookInputComponent extends OverlayPanel {
 		onCancel: () => void,
 		opts?: HookInputOptions,
 	) {
-		super(title);
+		super(title, "omp.overlay.hook-input");
 
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
@@ -81,5 +86,21 @@ export class HookInputComponent extends OverlayPanel {
 	override dispose(): void {
 		this.#countdown?.dispose();
 		super.dispose();
+	}
+
+	/** A card over the form, headed by the title plus the countdown `elapsed` while a timeout runs. */
+	override describe(_cx: DescribeContext): NativeNode {
+		const countdown = this.#countdown?.describe();
+		const memo = this.#nativeMemo;
+		if (memo && memo.countdown === countdown) return memo.node;
+		const title = plainText(this.#baseTitle);
+		const root = countdown
+			? overlayCard(this.nativeRole, undefined, [
+					node("row", { gap: "sm", align: "baseline" }, [node("text", { text: title }), countdown], "head"),
+					this.#form,
+				])
+			: overlayCard(this.nativeRole, title, [this.#form]);
+		this.#nativeMemo = { countdown, node: root };
+		return root;
 	}
 }

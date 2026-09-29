@@ -1,6 +1,12 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import { shimmerEnabled, shimmerText } from "../theme/shimmer";
+import { describeShimmer, shimmerEnabled, shimmerText } from "../theme/shimmer";
+import type { TspCardStatus, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { compact, elapsed, node, row, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorView, noteText, resultText, toolHead } from "./native-view";
 import type { Theme } from "../theme/theme";
 import { oneLineLabel } from "./task";
 import { renderStatusLine } from "../render/index";
@@ -14,7 +20,7 @@ import {
 	type ToolUIStatus,
 	truncateToWidth,
 } from "../render/render-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 /** Operation represented by a worker-session tool result. */
 export type VibeOp = "spawn" | "send" | "wait" | "kill" | "list";
 
@@ -294,9 +300,206 @@ function describeCall(op: VibeOp, args: VibeRenderArgs | undefined): string {
 	}
 }
 
+// =============================================================================
+// Native (TSP) Description — the terminal clocks spinners, shimmer and timers
+// =============================================================================
+
+/** Untruncated head detail for a vibe call (native twin of the ANSI call label). */
+function vibeNativeLabel(op: VibeOp, args: VibeRenderArgs | undefined): string {
+	switch (op) {
+		case "spawn":
+			return `spawn ${args?.cli ?? "?"}${args?.name ? ` · ${args.name}` : ""}`;
+		case "send":
+			return `send → ${args?.session ?? "?"}`;
+		case "wait":
+			return args?.sessions?.length ? `wait on ${args.sessions.join(", ")}` : "wait on running sessions";
+		case "kill":
+			return `kill ${args?.session ?? "?"}`;
+		case "list":
+			return "sessions";
+	}
+}
+
+/** The director's composed message as `>`-prefixed wrapped text, or undefined when empty. */
+function vibeComposer(message: string): NativeNode | undefined {
+	const trimmed = plainText(message).trim();
+	if (!trimmed) return undefined;
+	return text([span("> ", "accent"), span(trimmed, "toolOutput")], { wrap: "word", role: "omp.vibe.composer" });
+}
+
+function vibeScreenStatus(
+	screen: VibeScreenSnapshot,
+	settled: "completed" | "failed" | "cancelled" | undefined,
+): [TspCardStatus, TspTone] {
+	if (settled === "failed") return ["error", "error"];
+	if (settled === "cancelled") return ["cancelled", "warning"];
+	if (settled === "completed") return ["done", "success"];
+	switch (screen.state) {
+		case "running":
+			return ["running", "accent"];
+		case "starting":
+			return ["pending", "accent"];
+		case "idle":
+			return ["done", "success"];
+		case "dead":
+			return ["cancelled", "muted"];
+	}
+}
+
+/** One worker "TV" as a nested card: identity head, roster meta, live trace, output tail. */
+function describeVibeScreen(
+	screen: VibeScreenSnapshot,
+	settled: "completed" | "failed" | "cancelled" | undefined,
+	nowMs: number,
+): NativeNode {
+	const live = screen.state === "running" || screen.state === "starting";
+	const [status, tone] = vibeScreenStatus(screen, settled);
+	const head: TspSpan[] = [
+		live && shimmerEnabled()
+			? span(screen.id, "accent", { fx: "shimmer" })
+			: span(screen.id, live ? "accent" : "toolOutput"),
+		span(` ${settled ?? screen.state}`, "dim"),
+		span(` ${screen.turns}t${screen.queued > 0 ? `+${screen.queued}q` : ""}`, "muted"),
+	];
+	if (screen.model) head.push(span(` ${plainText(screen.model)}`, "muted"));
+	const body: NativeChild[] = [
+		row(
+			compact([
+				node("badge", { text: screen.cli, tone }),
+				screen.turnStartedAt !== undefined ? elapsed(nowMs - screen.turnStartedAt, !live) : undefined,
+			]),
+			{ gap: "sm" },
+		),
+	];
+	if (live) {
+		if (screen.turnMessage) {
+			body.push(text([span("> ", "accent"), span(plainText(screen.turnMessage), "dim")], { truncate: "end" }));
+		}
+		for (const line of screen.trace.slice(-TV_TRACE_EXPANDED)) {
+			body.push(text([span(plainText(line), "dim")], { truncate: "end" }));
+		}
+		const detail = screen.lastIntent ?? screen.currentToolArgs;
+		if (screen.currentTool) {
+			body.push(describeShimmer([{ text: plainText(`${screen.currentTool}${detail ? `: ${detail}` : ""}`) }]));
+		} else if (screen.lastIntent) {
+			body.push(text([span(plainText(screen.lastIntent), "muted")], { truncate: "end" }));
+		}
+		for (const line of screen.outputTail.slice(-TV_OUTPUT_EXPANDED)) {
+			if (line.trim().length > 0) body.push(text([span(plainText(line), "muted")], { truncate: "end" }));
+		}
+	} else if (screen.lastActivity) {
+		body.push(text([span(plainText(screen.lastActivity), "muted")], { truncate: "end" }));
+	}
+	if (settled) {
+		body.push(
+			text([
+				span(
+					`turn ${settled} — result delivered`,
+					settled === "completed" ? "success" : settled === "failed" ? "error" : "warning",
+				),
+			]),
+		);
+	}
+	return node(
+		"card",
+		{
+			role: "omp.vibe.screen",
+			status,
+			tone,
+			head,
+			collapsible: true,
+			preview: { lines: 1 + TV_TRACE_COLLAPSED + TV_OUTPUT_COLLAPSED + 1 },
+			inset: true,
+		},
+		body,
+		screen.id,
+	);
+}
+
+function describeVibeResult(
+	op: VibeOp,
+	result: ToolRenderResult<VibeToolDetails>,
+	args: VibeRenderArgs | undefined,
+): NativeToolView {
+	const details = result.details;
+	const label = vibeNativeLabel(op, args);
+	if (result.isError) return { ...errorView("Vibe", resultText(result) || "vibe failed", label), inline: true };
+	if (!details) {
+		const fallback = resultText(result).trim();
+		return { head: toolHead("Vibe", label), inline: true, body: fallback ? [noteText(fallback)] : [] };
+	}
+
+	if (op === "spawn" || op === "send") {
+		const message = op === "spawn" ? (args?.prompt ?? "") : (args?.message ?? "");
+		const head: TspSpan[] =
+			op === "spawn"
+				? [
+						...toolHead("Vibe", "spawn"),
+						span(" "),
+						span(details.spawned?.cli ?? args?.cli ?? "?", "accent strong"),
+						span(" "),
+						span(plainText(details.spawned?.id ?? args?.name ?? ""), "accent"),
+					]
+				: [...toolHead("Vibe", "send →"), span(" "), span(plainText(args?.session ?? "?"), "accent")];
+		const ack: TspSpan =
+			op === "spawn"
+				? span(`turn started${details.spawned ? ` (job ${details.spawned.jobId})` : ""}`, "success")
+				: details.send?.mode === "steered"
+					? span("steered into the running turn", "success")
+					: details.send?.mode === "queued"
+						? span("mid-turn — queued as the next turn", "warning")
+						: span(`turn started${details.send?.jobId ? ` (job ${details.send.jobId})` : ""}`, "success");
+		return {
+			head,
+			inline: true,
+			tone: details.send?.mode === "queued" ? "warning" : undefined,
+			body: compact([vibeComposer(message), text([ack], { wrap: "word" })]),
+			preview: { lines: 3 },
+		};
+	}
+
+	if (op === "kill") {
+		const note = details.killed?.cancelledTurn ? "in-flight turn cancelled" : undefined;
+		return { head: toolHead("Vibe", `kill ${details.killed?.id ?? args?.session ?? "?"}`, note), inline: true };
+	}
+
+	const screens = details.screens;
+	const hiddenKilled = details.hiddenKilled?.length ?? 0;
+	const killedMeta = hiddenKilled > 0 ? span(` · ${hiddenKilled} killed hidden`, "dim") : undefined;
+	if (screens.length === 0) {
+		const gist = hiddenKilled > 0 ? "no live sessions" : resultText(result).trim() || "no sessions";
+		const head = toolHead("Vibe", op, gist);
+		if (killedMeta) head.push(killedMeta);
+		return { head, tone: "warning", inline: true };
+	}
+	const settledById = new Map(details.wait?.settled.map(entry => [entry.id, entry.status] as const) ?? []);
+	const running = screens.filter(screen => screen.state === "running" || screen.state === "starting").length;
+	const title =
+		op === "wait"
+			? details.wait?.waiting === true
+				? "wait — watching the wall"
+				: "wait"
+			: `sessions (${screens.length})`;
+	const head: TspSpan[] = toolHead("Vibe", title);
+	if (running > 0) head.push(span(` · ${running} on air`, "accent"));
+	if (settledById.size > 0) head.push(span(` · ${settledById.size} settled`, "success"));
+	if (details.wait?.timedOut) head.push(span(" · timed out", "warning"));
+	if (killedMeta) head.push(killedMeta);
+	const nowMs = Date.now();
+	return {
+		head,
+		inline: true,
+		tone: details.wait?.timedOut ? "warning" : undefined,
+		body: screens.map(screen => describeVibeScreen(screen, settledById.get(screen.id), nowMs)),
+		preview: "auto",
+	};
+}
+
 /** Build the shared vibe renderer for one tool name. */
 export function createVibeToolRenderer(op: VibeOp) {
 	const composerOp = op === "spawn" || op === "send";
+	const callMemo = new OwnerMemo<NativeToolView | undefined>();
+	const resultMemo = new OwnerMemo<NativeToolView | undefined>();
 	return {
 		inline: true,
 		mergeCallAndResult: true,
@@ -428,6 +631,31 @@ export function createVibeToolRenderer(op: VibeOp) {
 				}
 				return lines;
 			});
+		},
+
+		describeCall(args: VibeRenderArgs): NativeToolView | undefined {
+			const message = op === "spawn" ? (args?.prompt ?? "") : op === "send" ? (args?.message ?? "") : "";
+			return callMemo.get(args, [vibeNativeLabel(op, args), message], () => {
+				const head = toolHead("Vibe", vibeNativeLabel(op, args));
+				if (!composerOp) return { head, inline: true };
+				return {
+					head,
+					inline: true,
+					body: compact([
+						vibeComposer(message),
+						node("spinner", { label: [span(op === "spawn" ? "booting CLI…" : "delivering…", "dim")] }),
+					]),
+					preview: { lines: 3 },
+				};
+			});
+		},
+
+		describeResult(
+			result: ToolRenderResult<VibeToolDetails>,
+			_options: RenderResultOptions,
+			args?: VibeRenderArgs,
+		): NativeToolView | undefined {
+			return resultMemo.get(result, [], () => describeVibeResult(op, result, args));
 		},
 	} satisfies ToolRenderer<VibeRenderArgs, VibeToolDetails>;
 }

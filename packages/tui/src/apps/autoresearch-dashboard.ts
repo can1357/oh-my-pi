@@ -15,6 +15,28 @@ import {
 	isBetter,
 } from "./autoresearch-data";
 import { formatNum, type ExperimentResult, type ExperimentState } from "../tools/autoresearch";
+import type { TspSpan, TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
+import { card, col, elapsed, keyed, node, row, span, text } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
+import { hintsRow } from "../native/overlay";
+import { Memo } from "../native/memo";
+import { isNativeRendering } from "../native/state";
+
+/** The widget's ANSI `Text`, describing itself from the runtime instead of its pre-rendered lines. */
+class DashboardWidget extends Text {
+	readonly #build: (cx: DescribeContext) => NativeNode;
+	#node: NativeNode | undefined;
+
+	constructor(content: string, build: (cx: DescribeContext) => NativeNode) {
+		super(content, 0, 0);
+		this.#build = build;
+	}
+
+	override describe(cx: DescribeContext): NativeNode {
+		this.#node ??= this.#build(cx);
+		return this.#node;
+	}
+}
 
 /** Experiment runtime fields rendered by the dashboard. */
 export interface AutoresearchDashboardRuntime {
@@ -86,7 +108,9 @@ export function createDashboardController(): DashboardController {
 
 			ctx.ui.setWidget("autoresearch", (_tui, theme) => {
 				if (state.results.length === 0 && runtime.runningExperiment) {
-					return new Text(renderRunningOnly(runtime, state, theme), 0, 0);
+					return new DashboardWidget(renderRunningOnly(runtime, state, theme), () =>
+						describeRunningOnly(runtime, state),
+					);
 				}
 				if (runtime.dashboardExpanded) {
 					const width = process.stdout.columns ?? 120;
@@ -94,9 +118,19 @@ export function createDashboardController(): DashboardController {
 						renderExpandedHeader(runtime, width, theme),
 						...renderDashboardLines(runtime, width, theme, 8),
 					];
-					return new Text(lines.join("\n"), 0, 0);
+					return new DashboardWidget(lines.join("\n"), cx =>
+						card({ role: "omp.widget.autoresearch", head: describeTitle(runtime) }, [
+							...describeDashboard(runtime, 8, cx.supports("chart")),
+							hintsRow([
+								{ keys: ["ctrl+x"], label: "collapse" },
+								{ keys: ["ctrl+shift+x"], label: "overlay" },
+							]),
+						]),
+					);
 				}
-				return new Text(renderCollapsedLine(runtime, state, theme), 0, 0);
+				return new DashboardWidget(renderCollapsedLine(runtime, state, theme), () =>
+					describeCollapsed(runtime, state),
+				);
 			});
 		},
 		async showOverlay(ctx, runtime): Promise<void> {
@@ -104,7 +138,8 @@ export function createDashboardController(): DashboardController {
 			await ctx.ui.custom<void>(
 				(tui, theme, _keybindings, done) => {
 					overlayTui = tui;
-					if (!spinnerTimer) {
+					// Repaint-only: the native overlay declares a spinner and elapsed timer instead.
+					if (!spinnerTimer && !isNativeRendering()) {
 						spinnerTimer = setInterval(() => {
 							spinnerFrame += 1;
 							requestRender();
@@ -112,7 +147,56 @@ export function createDashboardController(): DashboardController {
 					}
 
 					let scrollView: ScrollView | undefined;
+					const native = new Memo();
 					return {
+						/** A glass sheet titled by the experiment (the panels' sheet style); the body is borderless. */
+						get nativeOverlay() {
+							return { role: "omp.overlay.autoresearch", head: describeTitle(runtime), size: "lg" as const };
+						},
+						describe(cx: DescribeContext): NativeNode {
+							const state = runtime.state;
+							const chart = cx.supports("chart");
+							return native.get(
+								[
+									chart,
+									state,
+									state.results.length,
+									state.results.at(-1),
+									state.bestMetric,
+									state.confidence,
+									state.currentSegment,
+									state.name,
+									runtime.autoresearchMode,
+									runtime.lastRunSummary,
+									runtime.runningExperiment,
+								],
+								() => {
+									const running = runtime.runningExperiment;
+									const children: NativeNode[] = describeDashboard(runtime, 0, chart);
+									if (running) {
+										children.push(
+											row(
+												[
+													node("spinner", { label: [span("running", "warning")], tone: "warning" }),
+													elapsed(Date.now() - running.startedAt),
+													text([span(replaceTabs(running.command), "warning")], { truncate: "end" }),
+												],
+												{ gap: "sm" },
+											),
+										);
+									}
+									children.push(
+										hintsRow([
+											{ keys: ["up", "down", "j", "k"], label: "scroll" },
+											{ keys: ["pageUp", "pageDown"], label: "page" },
+											{ keys: ["g", "shift+g"], label: "top/bottom" },
+											{ keys: ["escape"], label: "close" },
+										]),
+									);
+									return col(children, { gap: "md", role: "omp.app.autoresearch" });
+								},
+							);
+						},
 						render(width: number): readonly string[] {
 							const terminalRows = process.stdout.rows ?? 40;
 							const header = renderExpandedHeader(runtime, width, theme);
@@ -162,6 +246,280 @@ export function createDashboardController(): DashboardController {
 		},
 	};
 }
+
+// -- native ------------------------------------------------------------------
+
+/** Card/overlay title: the experiment name plus its mode status. */
+function describeTitle(runtime: AutoresearchDashboardRuntime): TspSpan[] {
+	const state = runtime.state;
+	const spans = [span(state.name ? `autoresearch: ${replaceTabs(state.name)}` : "autoresearch", "accent")];
+	const status = renderModeStatus(runtime, state);
+	if (status) spans.push(span(` · ${status}`, "muted"));
+	return spans;
+}
+
+/** Widget shown while the very first run is in flight. */
+function describeRunningOnly(runtime: AutoresearchDashboardRuntime, state: ExperimentState): NativeNode {
+	const children: NativeNode[] = [
+		node("spinner", { label: [span("autoresearch", "accent"), span(" running", "warning")], tone: "warning" }),
+	];
+	if (runtime.runningExperiment) children.push(elapsed(Date.now() - runtime.runningExperiment.startedAt));
+	const details: TspSpan[] = [];
+	if (state.name) details.push(span(`| ${replaceTabs(state.name)}`, "dim"));
+	if (runtime.runningExperiment) details.push(span(` | ${replaceTabs(runtime.runningExperiment.command)}`, "dim"));
+	if (details.length > 0) children.push(text(details, { truncate: "end" }));
+	return row(children, { gap: "sm", role: "omp.widget.autoresearch" });
+}
+
+/** One-line collapsed widget: run counts, best/baseline, confidence and mode. */
+function describeCollapsed(runtime: AutoresearchDashboardRuntime, state: ExperimentState): NativeNode {
+	const role = "omp.widget.autoresearch";
+	const hint = hintsRow([{ keys: ["ctrl+x"], label: "expand" }]);
+	if (runtime.lastRunSummary) {
+		const spans = [
+			span("autoresearch", "accent"),
+			span(` pending run #${runtime.lastRunSummary.runNumber}`, "warning"),
+			span(runtime.lastRunSummary.passed ? " pass" : " fail", "dim"),
+		];
+		if (runtime.lastRunSummary.parsedPrimary !== null) {
+			spans.push(
+				span(
+					` | ${state.metricName}=${formatNum(runtime.lastRunSummary.parsedPrimary, state.metricUnit)}`,
+					"muted",
+				),
+			);
+		}
+		spans.push(span(" | log_experiment required", "warning"));
+		if (!runtime.autoresearchMode) spans.push(span(" | mode off", "dim"));
+		return text(spans, { truncate: "end", role });
+	}
+	if (state.results.length === 0) {
+		const spans = [
+			span("autoresearch", "accent"),
+			span(` ${runtime.autoresearchMode ? "baseline pending" : "mode off"}`, "warning"),
+		];
+		if (state.name) spans.push(span(` | ${replaceTabs(state.name)}`, "dim"));
+		if (runtime.autoresearchMode) spans.push(span(" | run the baseline", "dim"));
+		return text(spans, { truncate: "end", role });
+	}
+	const current = currentResults(state.results, state.currentSegment);
+	const counts = statusCounts(current);
+	const best = findBestResult(state);
+	const archivedRuns = Math.max(0, state.results.length - current.length);
+	const spans = [
+		span("autoresearch", "accent"),
+		span(` ${current.length} runs`, "muted"),
+		span(` ${counts.keep} kept`, "success"),
+	];
+	if (archivedRuns > 0) spans.push(span(` +${archivedRuns} archived`, "dim"));
+	if (counts.crash > 0) spans.push(span(` ${counts.crash} crash`, "error"));
+	if (counts.checks_failed > 0) spans.push(span(` ${counts.checks_failed} checks_failed`, "error"));
+	spans.push(span(" | ", "dim"));
+	if (best && state.bestMetric !== null && best.result.metric !== state.bestMetric) {
+		spans.push(span(`best ${formatNum(best.result.metric, state.metricUnit)}`, "warning"));
+		spans.push(span(` baseline ${formatNum(state.bestMetric, state.metricUnit)}`, "dim"));
+	} else if (state.bestMetric !== null) {
+		spans.push(span(`baseline ${formatNum(state.bestMetric, state.metricUnit)}`, "warning"));
+	} else {
+		spans.push(span("no kept runs yet", "warning"));
+	}
+	if (state.confidence !== null) {
+		spans.push(span(" | ", "dim"));
+		spans.push(span(`conf ${state.confidence.toFixed(1)}x`, confidenceToken(state.confidence)));
+	}
+	const children: NativeNode[] = [text(spans, { truncate: "end" })];
+	if (runtime.runningExperiment) {
+		children.push(text([span("| running", "dim")]), elapsed(Date.now() - runtime.runningExperiment.startedAt));
+	} else if (!runtime.autoresearchMode) {
+		children.push(text([span(`| ${renderModeStatus(runtime, state)}`, "dim")]));
+	}
+	children.push(hint);
+	return row(children, { gap: "sm", role });
+}
+
+/**
+ * Summary `kv`, the metric per run as a `bars` chart when the terminal draws
+ * `chart` (`chart`), and the run `table`; `maxRows > 0` keeps only the latest runs.
+ */
+function describeDashboard(runtime: AutoresearchDashboardRuntime, maxRows: number, chart: boolean): NativeNode[] {
+	const state = runtime.state;
+	if (state.results.length === 0) {
+		const pending = runtime.lastRunSummary;
+		if (pending) {
+			const items: { k: string; v: TspText }[] = [
+				{ k: "Pending run", v: `#${pending.runNumber}` },
+				{
+					k: "Result",
+					v: `${pending.passed ? "passed" : "failed"}${pending.parsedPrimary !== null ? `  ${state.metricName} ${formatNum(pending.parsedPrimary, state.metricUnit)}` : ""}`,
+				},
+				{ k: "Next action", v: "finish log_experiment before starting another run." },
+			];
+			if (!runtime.autoresearchMode) items.push({ k: "Mode", v: "off" });
+			return [node("kv", { items, layout: "grid" }, undefined, "summary")];
+		}
+		if (runtime.autoresearchMode) {
+			return [
+				node(
+					"kv",
+					{
+						items: [
+							{ k: "Current segment", v: "0 runs" },
+							{ k: "Baseline", v: "pending" },
+							{ k: "Next action", v: "run and log the baseline experiment." },
+						],
+						layout: "grid",
+					},
+					undefined,
+					"summary",
+				),
+			];
+		}
+		return [keyed(text([span("No experiments logged yet.", "dim")]), "summary")];
+	}
+
+	const current = currentResults(state.results, state.currentSegment);
+	const counts = statusCounts(current);
+	const baseline = findBaselineMetric(state.results, state.currentSegment);
+	const baselineRunNumber = findBaselineRunNumber(state.results, state.currentSegment);
+	const baselineSecondary = findBaselineSecondary(state.results, state.currentSegment, state.secondaryMetrics);
+	const best = findBestResult(state);
+	const items: { k: string; v: TspText }[] = [
+		{
+			k: "Current segment",
+			v: [
+				span(`${current.length} runs  `),
+				span(`${counts.keep} kept`, "success"),
+				span(`  ${counts.discard} discarded`, "warning"),
+				span(`  ${counts.crash} crashed`, counts.crash > 0 ? "error" : undefined),
+				span(`  ${counts.checks_failed} checks_failed`, counts.checks_failed > 0 ? "error" : undefined),
+			],
+		},
+		{
+			k: "Baseline",
+			v: `${formatNum(baseline, state.metricUnit)}${baselineRunNumber ? ` (#${baselineRunNumber})` : ""}`,
+		},
+	];
+	if (state.results.length > current.length) {
+		items.push({ k: "Archived", v: `${state.results.length - current.length} runs from earlier segments` });
+	}
+	if (runtime.lastRunSummary) {
+		items.push({
+			k: "Pending run",
+			v: [
+				span(`#${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"})`),
+				span(" — log_experiment required", "warning"),
+			],
+		});
+	}
+	if (!runtime.autoresearchMode) items.push({ k: "Mode", v: renderModeStatus(runtime, state) });
+	if (best) {
+		const bestRunNumber = best.result.runNumber ?? best.index + 1;
+		const value: TspSpan[] = [
+			span(`${formatNum(best.result.metric, state.metricUnit)} (#${bestRunNumber})`, "strong"),
+		];
+		if (baseline !== null && baseline !== 0 && best.result.metric !== baseline) {
+			const delta = ((best.result.metric - baseline) / baseline) * 100;
+			value.push(span(` ${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`, "num"));
+		}
+		if (state.confidence !== null) {
+			value.push(span(`  conf ${state.confidence.toFixed(1)}x`, confidenceToken(state.confidence)));
+		}
+		items.push({ k: "Best", v: value });
+		const details = state.secondaryMetrics
+			.map(metric =>
+				renderSecondarySummary(
+					metric.name,
+					best.result.metrics[metric.name],
+					baselineSecondary[metric.name],
+					metric.unit,
+				),
+			)
+			.filter((detail): detail is string => Boolean(detail));
+		if (details.length > 0) items.push({ k: "Secondary", v: details.join("  ") });
+	}
+
+	const cols: TspTableColumn[] = [
+		{ id: "run", head: [span("#", "muted")], align: "end", priority: 3 },
+		{ id: "commit", head: [span("commit", "muted")], truncate: "end", priority: 2 },
+		{ id: "metric", head: [span(state.metricName, "warning")], align: "end", priority: 5 },
+		...state.secondaryMetrics.map((metric, index): TspTableColumn => ({
+			id: `secondary${index}`,
+			head: [span(metric.name, "muted")],
+			align: "end",
+			truncate: "end",
+			priority: 1,
+		})),
+		{ id: "status", head: [span("status", "muted")], priority: 4 },
+		{ id: "description", head: [span("description", "muted")], truncate: "end", grow: 1, priority: 2 },
+	];
+	const indexed = state.results
+		.map((result, index) => ({ result, index }))
+		.filter(({ result }) => result.segment === state.currentSegment);
+	const visible = maxRows > 0 ? indexed.slice(-maxRows) : indexed;
+	const rows = visible.map(({ result, index }) => {
+		const token = result.status === "keep" ? "success" : result.status === "discard" ? "warning" : "error";
+		const cells: Record<string, TspText> = {
+			run: [span(String(result.runNumber ?? index + 1), "dim")],
+			commit: [span(result.commit || "-", "accent")],
+			metric: [span(formatNum(result.metric, state.metricUnit), token)],
+			status: [span(result.status, token)],
+			description: [span(replaceTabs(result.description), "muted")],
+		};
+		state.secondaryMetrics.forEach((metric, metricIndex) => {
+			cells[`secondary${metricIndex}`] = renderSecondaryCell(
+				result.metrics[metric.name],
+				metric.unit,
+				baselineSecondary[metric.name],
+			);
+		});
+		return { id: String(index), cells };
+	});
+	const children: NativeNode[] = [node("kv", { items, layout: "grid" }, undefined, "summary")];
+	if (chart && visible.length >= 2) {
+		children.push(
+			node(
+				"chart",
+				{
+					kind: "bars",
+					series: visible.map(({ result, index }) => {
+						const run = result.runNumber ?? index + 1;
+						return {
+							label: `#${run}`,
+							value: result.metric,
+							title: `#${run} ${result.status} · ${formatNum(result.metric, state.metricUnit)} · ${replaceTabs(result.description)}`,
+						};
+					}),
+					token: "accent",
+					summary: [
+						span(`${state.metricName} per run`, "muted"),
+						...(best ? [span(` · best ${formatNum(best.result.metric, state.metricUnit)}`, "success")] : []),
+					],
+					size: "md",
+					role: "omp.autoresearch.trend",
+				},
+				undefined,
+				"trend",
+			),
+		);
+	}
+	if (visible.length < indexed.length) {
+		children.push(keyed(text([span(`… ${indexed.length - visible.length} earlier runs hidden`, "dim")]), "hidden"));
+	}
+	children.push(node("table", { cols, rows, role: "omp.autoresearch.runs" }, undefined, "runs"));
+	return [keyed(col(children, { gap: "sm" }), "dashboard")];
+}
+
+function statusCounts(results: readonly ExperimentResult[]): Record<ExperimentResult["status"], number> {
+	const counts: Record<ExperimentResult["status"], number> = { keep: 0, discard: 0, crash: 0, checks_failed: 0 };
+	for (const result of results) counts[result.status] += 1;
+	return counts;
+}
+
+function confidenceToken(confidence: number): string {
+	return confidence >= 2 ? "success" : confidence >= 1 ? "warning" : "error";
+}
+
+// -- ANSI --------------------------------------------------------------------
 
 function renderRunningOnly(runtime: AutoresearchDashboardRuntime, state: ExperimentState, theme: Theme): string {
 	const parts = [theme.fg("accent", "autoresearch"), theme.fg("warning", " running...")];

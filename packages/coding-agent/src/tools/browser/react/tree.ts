@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Page } from "puppeteer-core";
-import { requireReactHookResult } from "./devtools-hook";
+import { type ReactPageEnvelope, requireReactHookResult } from "./devtools-hook";
 
 /** Options controlling React component tree traversal. */
 export interface ReactTreeOptions {
@@ -41,12 +41,6 @@ export interface ReactInspectResult {
 	state?: unknown | ReactHookState[];
 	source?: ReactSourceInfo;
 	domSelector?: string;
-}
-
-interface ReactPageEnvelope<T> {
-	missingHook?: boolean;
-	notFound?: boolean;
-	value?: T;
 }
 
 const TREE_SOURCE_PREFIX = `(() => {
@@ -209,17 +203,36 @@ const INSPECT_SOURCE_SUFFIX = `);
 	return { value };
 })()`;
 
+/** Page expression walking every mounted fiber root; evaluates to a `ReactPageEnvelope<ReactTreeNode[]>`. */
+export function reactTreeSource(options: ReactTreeOptions): string {
+	const normalized: ReactTreeOptions = {
+		maxDepth: options.maxDepth,
+		includeHost: options.includeHost === true,
+	};
+	return `${TREE_SOURCE_PREFIX}${JSON.stringify(normalized)}${TREE_SOURCE_SUFFIX}`;
+}
+
+/** Page expression inspecting fiber `id`; evaluates to a `ReactPageEnvelope<ReactInspectResult>`. Rejects non-positive-integer ids. */
+export function reactInspectSource(id: number): string {
+	if (!Number.isInteger(id) || id <= 0)
+		throw new ToolError("tab.reactInspect(id) expects a positive integer fiber id");
+	return `${INSPECT_SOURCE_PREFIX}${JSON.stringify(id)}${INSPECT_SOURCE_SUFFIX}`;
+}
+
+/** Unwrap the page result of `reactInspectSource(id)`, mapping a missing fiber or hook to `ToolError`. */
+export function reactInspectResult(envelope: unknown, id: number): ReactInspectResult {
+	const result = envelope as ReactPageEnvelope<ReactInspectResult>;
+	if (result.notFound) throw new ToolError(`React fiber ${id} was not found in the current commit`);
+	return requireReactHookResult(result);
+}
+
 /** Walk every mounted React fiber root into a bounded nested component tree. */
 export async function readReactTree(
 	page: Page,
 	options: ReactTreeOptions = {},
 	signal?: AbortSignal,
 ): Promise<ReactTreeNode[]> {
-	const normalized: ReactTreeOptions = {
-		maxDepth: options.maxDepth,
-		includeHost: options.includeHost === true,
-	};
-	const source = `${TREE_SOURCE_PREFIX}${JSON.stringify(normalized)}${TREE_SOURCE_SUFFIX}`;
+	const source = reactTreeSource(options);
 	const result = (await untilAborted(signal, () =>
 		page.mainFrame().mainRealm().evaluate(source),
 	)) as ReactPageEnvelope<ReactTreeNode[]>;
@@ -228,12 +241,7 @@ export async function readReactTree(
 
 /** Inspect props, state, source, and host DOM location for one React fiber id. */
 export async function inspectReactFiber(page: Page, id: number, signal?: AbortSignal): Promise<ReactInspectResult> {
-	if (!Number.isInteger(id) || id <= 0)
-		throw new ToolError("tab.reactInspect(id) expects a positive integer fiber id");
-	const source = `${INSPECT_SOURCE_PREFIX}${JSON.stringify(id)}${INSPECT_SOURCE_SUFFIX}`;
-	const result = (await untilAborted(signal, () =>
-		page.mainFrame().mainRealm().evaluate(source),
-	)) as ReactPageEnvelope<ReactInspectResult>;
-	if (result.notFound) throw new ToolError(`React fiber ${id} was not found in the current commit`);
-	return requireReactHookResult(result);
+	const source = reactInspectSource(id);
+	const result = await untilAborted(signal, () => page.mainFrame().mainRealm().evaluate(source));
+	return reactInspectResult(result, id);
 }
