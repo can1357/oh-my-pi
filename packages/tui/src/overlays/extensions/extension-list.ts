@@ -10,7 +10,8 @@ import { matchesKey } from "../../keys";
 import { padding, truncateToWidth, visibleWidth } from "../../utils";
 import { theme } from "../../theme";
 import { matchesSelectDown, matchesSelectUp } from "../../keybinding-matchers";
-import { contentRowWidth, renderScrollableList, searchableChar } from "../../chrome/selector-helpers";
+import { contentRowWidth, renderScrollableList } from "../../chrome/selector-helpers";
+import { Input } from "../../components/input";
 import { MenuSelection } from "../../components/menu-selection";
 import { scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
 import { sanitizeDisplayLine } from "./display-text";
@@ -102,6 +103,8 @@ export class ExtensionList implements Component {
 
 	#extensions: Extension[];
 	readonly #callbacks: ExtensionListCallbacks;
+	/** Search field; its value is pushed into the menu query whenever it changes. */
+	readonly #search = new Input();
 
 	constructor(extensions: Extension[], callbacks: ExtensionListCallbacks = {}, maxVisible?: number) {
 		this.#extensions = extensions;
@@ -110,6 +113,7 @@ export class ExtensionList implements Component {
 		this.#mcpSource = callbacks.mcpSource;
 		this.#toolSource = callbacks.toolSource;
 		this.#maxVisible = maxVisible ?? DEFAULT_MAX_VISIBLE;
+		this.#search.prompt = "";
 		this.#menu = new MenuSelection<ListItem>(this.#buildListItems(""), {
 			getKey: getListItemKey,
 			getSearchText: getListItemSearchText,
@@ -169,7 +173,9 @@ export class ExtensionList implements Component {
 		return item?.type === "kind-header" ? item.kind : null;
 	}
 
+	/** Replace the search text (caret to end) and refilter. */
 	setSearchQuery(query: string): void {
+		if (this.#search.getValue() !== query) this.#search.setValue(query);
 		this.#menu.setQuery(query, false);
 		this.#scrollOffset = 0;
 		this.#notifySelectionChange();
@@ -188,10 +194,14 @@ export class ExtensionList implements Component {
 
 		// Search bar
 		const searchPrefix = theme.fg("muted", "Search: ");
-		const query = this.#menu.query;
-		const searchText = query || (this.#focused ? "" : theme.fg("dim", "type to filter"));
-		const cursor = this.#focused ? theme.fg("accent", "_") : "";
-		lines.push(searchPrefix + searchText + cursor);
+		const query = this.#search.getValue();
+		if (this.#focused) {
+			const fieldWidth = Math.max(1, width - visibleWidth(searchPrefix));
+			const [field = ""] = this.#search.render(Math.min(fieldWidth, visibleWidth(query) + 1));
+			lines.push(searchPrefix + field);
+		} else {
+			lines.push(searchPrefix + (query || theme.fg("dim", "type to filter")));
+		}
 		lines.push("");
 
 		const items = this.#menu.visibleItems;
@@ -631,18 +641,14 @@ export class ExtensionList implements Component {
 			return;
 		}
 
-		// Backspace: Delete from search query
-		if (matchesKey(data, "backspace")) {
-			if (this.#menu.query.length > 0) {
-				this.setSearchQuery(this.#menu.query.slice(0, -1));
-			}
-			return;
-		}
-
-		// Printable characters -> search
-		const char = searchableChar(data);
-		if (char !== null) {
-			this.setSearchQuery(this.#menu.query + char);
+		// Everything else edits the search field; refilter only when the text changed.
+		const before = this.#search.getValue();
+		this.#search.handleInput(data);
+		const after = this.#search.getValue();
+		if (after !== before) {
+			this.#menu.setQuery(after, false);
+			this.#scrollOffset = 0;
+			this.#notifySelectionChange();
 		}
 	}
 

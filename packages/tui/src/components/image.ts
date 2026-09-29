@@ -8,6 +8,9 @@ import {
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
+import { registerNativeBlob } from "../native/blobs";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 
 export interface ImageTheme {
@@ -731,6 +734,7 @@ export class Image implements Component {
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
+	#native?: NativeNode;
 
 	constructor(
 		base64Data: string,
@@ -762,6 +766,32 @@ export class Image implements Component {
 	invalidate(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/**
+	 * A native `image` backed by a content-addressed blob; the terminal fits
+	 * it. Cell caps become `ch`/`lines` bounds. The inline-image budget and
+	 * graphics protocols do not apply.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const blob = registerNativeBlob(Buffer.from(this.#base64Data, "base64"), this.#mimeType);
+		const maxW = this.#options.maxWidthCells;
+		const maxH = this.#options.maxHeightCells;
+		this.#native = node("image", {
+			blob,
+			alt: imageFallback(this.#mimeType, this.#dimensions, this.#options.filename),
+			w: this.#dimensions.widthPx,
+			h: this.#dimensions.heightPx,
+			max:
+				(maxW ?? 0) > 0 || (maxH ?? 0) > 0
+					? {
+							w: maxW && maxW > 0 ? `${maxW}ch` : undefined,
+							h: maxH && maxH > 0 ? `${maxH}lines` : undefined,
+						}
+					: undefined,
+		});
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

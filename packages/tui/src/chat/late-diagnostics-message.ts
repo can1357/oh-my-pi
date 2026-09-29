@@ -1,8 +1,16 @@
-import { Container } from "../tui";
+import { type Component, Container } from "../tui";
+import { isNativeRendering } from "../native/state";
 import { Disclosure } from "../components/disclosure";
 import { Text } from "../components/text";
 import { formatDiagnostics } from "../render/render-utils";
-import { getLanguageFromPath, theme } from "../theme";
+import { getLanguageFromPath, getThemeEpoch, theme } from "../theme";
+import { card, span, text, withHidden } from "../native/describe";
+import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { plainText } from "../native/spans";
+import { Memo } from "../native/memo";
+
+/** Diagnostics shown by the collapsed native card, matching the ANSI tree's collapsed count. */
+const COLLAPSED_DIAGNOSTICS = 5;
 
 const EMPTY_ROWS: readonly string[] = [];
 
@@ -12,6 +20,45 @@ export interface LateDiagnosticsFile {
 	summary?: string;
 	errored?: boolean;
 	messages?: string[];
+}
+
+/** A tool frame (edit/write) that takes late diagnostics for its own paths. */
+interface LateDiagnosticsTarget {
+	attachLateDiagnostics(
+		files: readonly { path: string; summary: string; errored: boolean; messages: string[] }[],
+	): boolean;
+}
+
+/**
+ * Native terminals append late diagnostics into the edit/write frame they
+ * belong to: each file goes to the most recent tool component in `blocks`
+ * that accepts it. Returns the files no frame took (all of them on the ANSI
+ * path), for the standalone {@link LateDiagnosticsMessageComponent}.
+ */
+export function routeLateDiagnostics(
+	blocks: readonly Component[],
+	files: readonly LateDiagnosticsFile[],
+): LateDiagnosticsFile[] {
+	if (!isNativeRendering()) return [...files];
+	const targets = blocks.filter(
+		(block): block is Component & LateDiagnosticsTarget =>
+			typeof (block as Partial<LateDiagnosticsTarget>).attachLateDiagnostics === "function",
+	);
+	const unrouted: LateDiagnosticsFile[] = [];
+	for (const file of files) {
+		const entry = file.path
+			? {
+					path: file.path,
+					summary: file.summary ?? "",
+					errored: file.errored === true,
+					messages: file.messages ?? [],
+				}
+			: undefined;
+		const routed =
+			entry !== undefined && targets.findLast(target => target.attachLateDiagnostics([entry])) !== undefined;
+		if (!routed) unrouted.push(file);
+	}
+	return unrouted;
 }
 
 /**
@@ -26,6 +73,8 @@ export class LateDiagnosticsMessageComponent extends Container {
 	// lazily on its first render. Only the tool-visibility gate stays here.
 	#disclosure: Disclosure | undefined;
 	readonly #files: LateDiagnosticsFile[];
+	#expanded = false;
+	readonly #native = new Memo();
 
 	constructor(files: LateDiagnosticsFile[]) {
 		super();
@@ -35,6 +84,7 @@ export class LateDiagnosticsMessageComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
 		this.#disclosure?.setExpanded(expanded);
 	}
 
@@ -45,6 +95,39 @@ export class LateDiagnosticsMessageComponent extends Container {
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return EMPTY_ROWS;
 		return super.render(width);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/**
+	 * A severity-toned card (role `omp.diagnostics.late`) with one wrapped line
+	 * per diagnostic, clamped by the terminal while collapsed.
+	 */
+	override describe(): NativeNode {
+		const key = [this.#expanded, this.#toolActivityVisible, getThemeEpoch()];
+		return this.#native.get(key, () => {
+			const input = this.#diagnosticInput();
+			const icon = input?.errored ? theme.status.error : theme.status.warning;
+			const head = [span(`${icon} `, input?.errored ? "error" : "warning"), span("Late diagnostics", "toolTitle")];
+			if (input?.summary) head.push(span(` (${plainText(input.summary)})`, "dim"));
+			const diagnostics = card(
+				{
+					role: "omp.diagnostics.late",
+					tone: input?.errored ? "error" : "warning",
+					head,
+					collapsible: true,
+					collapsed: !this.#expanded,
+					preview: { lines: COLLAPSED_DIAGNOSTICS },
+				},
+				(input?.messages ?? []).map((message, index) =>
+					text([span(plainText(message), "mono")], { wrap: "word", key: `d${index}` }),
+				),
+			);
+			return withHidden(diagnostics, !this.#toolActivityVisible);
+		});
 	}
 
 	override invalidate(): void {

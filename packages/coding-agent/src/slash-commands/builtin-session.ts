@@ -19,7 +19,13 @@ import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers
 import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
-import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
+import {
+	launchStatsDashboard,
+	parseStatsDashboardArgs,
+	type StatsDashboardArgs,
+	type StatsDashboardLaunchResult,
+} from "./helpers/stats-dashboard";
+import { StatsNotice } from "@oh-my-pi/pi-tui/overlays/stats-notice";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
@@ -173,6 +179,27 @@ async function handleSessionPinCommand(
 		return;
 	}
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
+}
+
+/**
+ * Start (or reuse) the stats dashboard for this session. The Frustration page
+ * judges through this session's settings and registry; its cost lands on this
+ * session's ledger.
+ */
+function launchSessionStatsDashboard(
+	args: StatsDashboardArgs,
+	owner: Pick<SlashCommandRuntime, "settings" | "session" | "sessionManager">,
+): Promise<StatsDashboardLaunchResult> {
+	const judge = resolveJudge({
+		settings: owner.settings,
+		registry: owner.session.modelRegistry,
+		sessionId: owner.session.sessionId,
+		purpose: "stats_frustration",
+		onUsage: journalJudgmentUsage(owner.sessionManager),
+		telemetry: owner.session.agent.telemetry,
+		cache: sharedJudgmentCache(),
+	});
+	return launchStatsDashboard(args, async () => judge);
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -394,24 +421,28 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if ("error" in parsed) return usage(parsed.error, runtime);
 
 			await runtime.output("Syncing session files...");
-			// The Frustration page judges through this session's settings and
-			// registry; its cost lands on this session's ledger.
-			const judge = resolveJudge({
-				settings: runtime.settings,
-				registry: runtime.session.modelRegistry,
-				sessionId: runtime.session.sessionId,
-				purpose: "stats_frustration",
-				onUsage: journalJudgmentUsage(runtime.sessionManager),
-				telemetry: runtime.session.agent.telemetry,
-				cache: sharedJudgmentCache(),
-			});
 			try {
-				const result = await launchStatsDashboard(parsed, async () => judge);
+				const result = await launchSessionStatsDashboard(parsed, runtime);
 				await runtime.output(result.message);
 			} catch (error) {
 				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
 			}
 			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			ctx.editor.setText("");
+			const parsed = parseStatsDashboardArgs(command.args);
+			if ("error" in parsed) {
+				ctx.showStatus(parsed.error);
+				return;
+			}
+			try {
+				const result = await launchSessionStatsDashboard(parsed, ctx);
+				ctx.presentCommandOutput(new StatsNotice(result.message, result.url));
+			} catch (error) {
+				ctx.showError(`Stats dashboard failed: ${errorMessage(error)}`);
+			}
 		},
 	},
 	{

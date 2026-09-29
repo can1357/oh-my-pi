@@ -19,8 +19,17 @@ import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
 import { sanitizeStatusText } from "../chrome/shared";
-import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "../chrome/context-thresholds";
-import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
+import {
+	formatContextUsage,
+	getContextUsageLevel,
+	getContextUsageThemeColor,
+	getContextUsageTone,
+} from "../chrome/context-thresholds";
+import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { node, span } from "../native/describe";
+import { thinkingLevelToken } from "../theme/theme-class";
+import type { StatusLineSession } from "./host";
+import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -30,6 +39,30 @@ export type { SegmentContext } from "./types";
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+
+/** Native segment description helper. */
+function segView(spans: readonly TspSpan[], icon?: string, tone?: TspTone): SegmentView {
+	return tone === undefined ? (icon === undefined ? { spans } : { spans, icon }) : { spans, icon, tone };
+}
+
+/** Span token for accent-role text; the session accent is a raw hue, so it travels as `accent`. */
+function accentToken(ctx: SegmentContext, color: ThemeColor): string {
+	return sessionAccentAnsi(ctx) ? "accent" : color;
+}
+
+/** Tone of a status/usage theme color, for the segment chrome. */
+function toneOf(color: ThemeColor): TspTone | undefined {
+	switch (color) {
+		case "warning":
+			return "warning";
+		case "error":
+			return "error";
+		case "success":
+			return "success";
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -99,6 +132,11 @@ function singleStatSegment(
 				value: formatNumber(value),
 			});
 			return { content: theme.fg(color, content ?? ""), visible: true };
+		},
+		describe(ctx) {
+			const value = ctx.usageStats[field];
+			if (!value) return null;
+			return segView([span(formatNumber(value), color)], iconKey);
 		},
 	};
 }
@@ -196,6 +234,11 @@ const piSegment: StatusLineSegment = {
 					: "";
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
+	describe(ctx) {
+		if (ctx.focusedAgentId) return segView([span(ctx.focusedAgentId, "warning")], "ghost", "warning");
+		// The dock's working row owns activity natively: the brand stays still.
+		return segView([], "omp", "muted");
+	},
 };
 /** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
 function brandSpinnerFrame(nowMs = Date.now()): string {
@@ -225,38 +268,87 @@ const statusSegment: StatusLineSegment = {
 			visible: text.length > 0,
 		};
 	},
+	describe(ctx) {
+		let text = "";
+		for (const status of ctx.hookStatuses ?? []) {
+			const sanitized = sanitizeStatusText(status);
+			if (!sanitized) continue;
+			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+		}
+		return text ? segView([span(text, accentToken(ctx, "accent"))]) : null;
+	},
 };
+
+/** Display name of the active model (`Claude ` prefix dropped). */
+function modelDisplayName(ctx: SegmentContext): string {
+	const state = ctx.session.state;
+	const modelName = state.model?.name || state.model?.id || "no-model";
+	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
+}
+
+/**
+ * The thinking-effort word (`high`, `off`; `auto` until auto thinking resolves
+ * a level), or undefined when the model has no thinking. Drives the native
+ * model segment and the composer's effort chip.
+ */
+export function thinkingLevelWord(
+	session: Pick<StatusLineSession, "state" | "isAutoThinking" | "autoResolvedThinkingLevel">,
+): string | undefined {
+	const state = session.state;
+	if (!state.model?.thinking) return undefined;
+	if (session.isAutoThinking) return session.autoResolvedThinkingLevel() ?? "auto";
+	return state.thinkingLevel ?? ThinkingLevel.Off;
+}
+
+/** Thinking-level display ("◉ xhigh", "⟳ auto", …), or "" when hidden or unsupported. */
+function modelThinkingDisplay(ctx: SegmentContext): string {
+	const state = ctx.session.state;
+	const opts = ctx.options.model ?? {};
+	if (opts.showThinkingLevel === false || !state.model?.thinking) return "";
+	if (ctx.session.isAutoThinking) {
+		// Pending (no turn classified yet / classifying) shows a symbol-theme
+		// question-box marker; once resolved it shows `<level>`.
+		const resolved = ctx.session.autoResolvedThinkingLevel();
+		return resolved
+			? (theme.thinking[resolved as keyof Theme["thinking"]] ?? resolved)
+			: `${theme.thinking.autoPending} auto`;
+	}
+	const level = state.thinkingLevel ?? ThinkingLevel.Off;
+	return level === ThinkingLevel.Off
+		? `${theme.status.disabled} off`
+		: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
+}
+
+/**
+ * Advisor symbol, colored by the worst status in the roster: success = all
+ * running, warning = quota-exhausted, error = failed, dim = everything
+ * paused/no-model. Undefined when no advisor is configured.
+ */
+function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeColor } | undefined {
+	// Optional chaining: lightweight session doubles (test mocks) that don't
+	// implement getAdvisorStatusOverview skip the badge instead of crashing.
+	const advisorStats = ctx.session.getAdvisorStatusOverview?.();
+	if (!advisorStats?.configured || advisorStats.advisors.length === 0) return undefined;
+	const statuses = advisorStats.advisors.map(a => a.status);
+	const color: ThemeColor = statuses.includes("error")
+		? "error"
+		: statuses.includes("quota_exhausted")
+			? "warning"
+			: statuses.includes("running")
+				? "success"
+				: "dim";
+	// Closed eye once every advisor has finished reviewing the yielded
+	// turn — no more comments until a new primary turn starts.
+	const allYielded = advisorStats.advisors.every(a => a.yielded);
+	const icon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
+	return icon ? { icon, color } : undefined;
+}
 
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
-		const state = ctx.session.state;
-		const opts = ctx.options.model ?? {};
-
-		let modelName = state.model?.name || state.model?.id || "no-model";
-		if (modelName.startsWith("Claude ")) {
-			modelName = modelName.slice(7);
-		}
-
-		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
-		// when the model supports thinking and the segment isn't hiding it.
-		let thinkingDisplay = "";
-		if (opts.showThinkingLevel !== false && state.model?.thinking) {
-			if (ctx.session.isAutoThinking) {
-				// Pending (no turn classified yet / classifying) shows a symbol-theme
-				// question-box marker; once resolved it shows `<level>`.
-				const resolved = ctx.session.autoResolvedThinkingLevel();
-				thinkingDisplay = resolved
-					? (theme.thinking[resolved as keyof Theme["thinking"]] ?? resolved)
-					: `${theme.thinking.autoPending} auto`;
-			} else {
-				const level = state.thinkingLevel ?? ThinkingLevel.Off;
-				thinkingDisplay =
-					level === ThinkingLevel.Off
-						? `${theme.status.disabled} off`
-						: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
-			}
-		}
+		const modelName = modelDisplayName(ctx);
+		const thinkingDisplay = modelThinkingDisplay(ctx);
 
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
 		// the " · <level>" tail, keeping the level visible as a single icon.
@@ -279,28 +371,9 @@ const modelSegment: StatusLineSegment = {
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
 		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
-		// Advisor symbol, colored by the worst status in the roster:
-		// success = all running, warning = quota-exhausted, error = failed,
-		// dim = everything paused/no-model. Per-advisor detail lives in
-		// `/advisor status`.
-		// Optional chaining: lightweight session doubles (test mocks) that don't
-		// implement getAdvisorStatusOverview skip the badge instead of crashing.
-		const advisorStats = ctx.session.getAdvisorStatusOverview?.();
-		if (advisorStats?.configured && advisorStats.advisors.length > 0) {
-			const statuses = advisorStats.advisors.map(a => a.status);
-			const badgeColor = statuses.includes("error")
-				? "error"
-				: statuses.includes("quota_exhausted")
-					? "warning"
-					: statuses.includes("running")
-						? "success"
-						: "dim";
-			// Closed eye once every advisor has finished reviewing the yielded
-			// turn — no more comments until a new primary turn starts.
-			const allYielded = advisorStats.advisors.every(a => a.yielded);
-			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
-			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
-		}
+		// Per-advisor detail lives in `/advisor status`.
+		const advisor = modelAdvisorBadge(ctx);
+		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);
 		}
@@ -311,12 +384,58 @@ const modelSegment: StatusLineSegment = {
 		if (slowModeLabel) content += theme.fg("warning", `${theme.sep.dot}${slowModeLabel}`);
 		return { content, visible: true };
 	},
+	describe(ctx) {
+		// Name, then the thinking level as a word in its level colour after a
+		// quiet separator; the terminal draws the model icon.
+		const token = accentToken(ctx, "statusLineModel");
+		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
+		const advisor = modelAdvisorBadge(ctx);
+		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
+		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
+		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
+		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
+		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
+		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
+		return segView(spans, "model", slowModeLabel ? "warning" : undefined);
+	},
 };
 
 function formatGoalBudget(current: number, budget?: number): string {
 	const used = formatNumber(current);
 	if (budget === undefined) return used;
 	return `${used}/${formatNumber(budget)}`;
+}
+
+/** Native twin of {@link renderGoalMode}: the status names its icon instead of drawing a glyph. */
+function describeGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: boolean }): SegmentView {
+	const goal = ctx.session.getGoalModeState()?.goal;
+	const status = goal?.status ?? (mode.paused ? "paused" : "active");
+	let icon = "goal";
+	let color: ThemeColor = "accent";
+	switch (status) {
+		case "paused":
+			icon = "pause";
+			color = "warning";
+			break;
+		case "complete":
+			icon = "success";
+			color = "success";
+			break;
+		case "budget-limited":
+			icon = "warning";
+			color = "warning";
+			break;
+		case "dropped":
+			icon = "aborted";
+			color = "dim";
+			break;
+		default:
+			break;
+	}
+	let label = "Goal";
+	if (ctx.goalStatusInFooter === true && goal) label += ` ${formatGoalBudget(goal.tokensUsed, goal.tokenBudget)}`;
+	const token = color === "accent" ? accentToken(ctx, color) : color;
+	return segView([span(label, token)], icon, toneOf(color));
 }
 
 function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: boolean }): RenderedSegment {
@@ -422,6 +541,33 @@ const modeSegment: StatusLineSegment = {
 
 		return { content: "", visible: false };
 	},
+	describe(ctx) {
+		const plan = ctx.planMode;
+		if (plan && (plan.enabled || plan.paused)) {
+			return plan.paused
+				? segView([span("Plan (paused)", "warning")], "plan", "warning")
+				: segView([span("Plan", accentToken(ctx, "accent"))], "plan");
+		}
+		if (ctx.prewalk?.enabled) return segView([span("Prewalk", accentToken(ctx, "accent"))], "prewalk");
+		const goal = ctx.goalMode;
+		if (goal && (goal.enabled || goal.paused)) return describeGoalMode(ctx, goal);
+		if (ctx.vibeMode?.enabled) return segView([span("Vibe", accentToken(ctx, "accent"))], "agents");
+		const loop = ctx.loopMode;
+		if (loop) {
+			const paused = loop.state === "paused";
+			const stateLabel = loop.state === "waiting" ? "next prompt repeats" : loop.state;
+			const parts = [`Loop${loop.state === "waiting" ? ":" : ""} ${stateLabel}`];
+			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
+			if (limit) parts.push(limit);
+			if (loop.condition) parts.push(summarizeLoopCondition(loop.condition, TRUNCATE_LENGTHS.SHORT));
+			return segView(
+				[span(parts.join(" "), paused ? "warning" : "customMessageLabel")],
+				paused ? "pause" : "loop",
+				paused ? "warning" : undefined,
+			);
+		}
+		return null;
+	},
 };
 
 const pathSegment: StatusLineSegment = {
@@ -458,6 +604,25 @@ const pathSegment: StatusLineSegment = {
 		const content = withIcon(icon, text);
 		return { content: theme.fg("statusLinePath", content), visible: true };
 	},
+	describe(ctx) {
+		const opts = ctx.options.path ?? {};
+		const stripPrefix = opts.stripWorkPrefix !== false;
+		// The parent dims and the leaf reads strong; a click opens the directory.
+		if (stripPrefix && ctx.worktree) {
+			const { projectName, worktreeName } = ctx.worktree;
+			const label = ctx.git.branch === worktreeName ? projectName : `${projectName}/${worktreeName}`;
+			return segView(pathSpans(label), "worktree");
+		}
+		const projectDir = ctx.activeRepo?.cwd ?? getProjectDir();
+		const { scratch, displayPath } = getProjectDirDisplay(projectDir);
+		let pwd = stripPrefix ? displayPath : projectDir;
+		if (opts.abbreviate !== false) pwd = shortenPath(pwd);
+		// `maxLength` is the user's configured cap; width fitting is the terminal's.
+		if (opts.maxLength !== undefined) pwd = clampPathLength(pwd, opts.maxLength);
+		const spans = pathSpans(pwd);
+		if (ctx.activeRepo) spans.push(span(` ↳ ${ctx.activeRepo.relativeRepoRoot}`, "statusLinePath dim"));
+		return segView(spans, scratch && stripPrefix ? "scratch-folder" : "folder");
+	},
 };
 
 const profileSegment: StatusLineSegment = {
@@ -470,7 +635,21 @@ const profileSegment: StatusLineSegment = {
 		const content = `p:${label}`;
 		return { content: theme.fg("accent", content), visible: true };
 	},
+	describe(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return null;
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		return segView([span(`p:${label}`, "accent")]);
+	},
 };
+
+/** A path as its dim parent directories and its strong leaf. */
+function pathSpans(value: string): TspSpan[] {
+	const slash = value.lastIndexOf("/", value.length - 2);
+	if (slash < 0 || slash + 1 >= value.length) return [span(value, "statusLinePath strong")];
+	const leaf = span(value.slice(slash + 1), "statusLinePath strong");
+	return [span(value.slice(0, slash + 1), "statusLinePath dim"), leaf];
+}
 
 const gitSegment: StatusLineSegment = {
 	id: "git",
@@ -515,6 +694,31 @@ const gitSegment: StatusLineSegment = {
 		const colorName = isDirty ? "statusLineGitDirty" : "statusLineGitClean";
 		return { content: theme.fg(colorName, content), visible: true };
 	},
+	describe(ctx) {
+		const { branch, status } = ctx.git;
+		if (!branch && !status) return null;
+		const opts = ctx.options.git ?? {};
+		const isDirty = status !== null && (status.staged > 0 || status.unstaged > 0 || status.untracked > 0);
+		const colorName = isDirty ? "statusLineGitDirty" : "statusLineGitClean";
+		const showBranch = opts.showBranch !== false;
+		const spans: TspSpan[] = [];
+		if (showBranch && branch) spans.push(span(branch, colorName));
+		const indicators: TspSpan[] = [];
+		if (status) {
+			if (opts.showUnstaged !== false && status.unstaged > 0) {
+				indicators.push(span(`*${status.unstaged}`, "statusLineDirty"));
+			}
+			if (opts.showStaged !== false && status.staged > 0) {
+				indicators.push(span(`+${status.staged}`, "statusLineStaged"));
+			}
+			if (opts.showUntracked !== false && status.untracked > 0) {
+				indicators.push(span(`?${status.untracked}`, "statusLineUntracked"));
+			}
+		}
+		spans.push(...indicators);
+		if (spans.length === 0) return null;
+		return segView(spans, showBranch && branch ? "branch" : "git", isDirty ? "warning" : undefined);
+	},
 };
 
 const prSegment: StatusLineSegment = {
@@ -527,6 +731,11 @@ const prSegment: StatusLineSegment = {
 		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
 		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
+	describe(ctx) {
+		const { pr } = ctx.git;
+		if (!pr) return null;
+		return segView([span(`#${pr.number}`, `${accentToken(ctx, "accent")} link`, { href: pr.url })], "pr");
+	},
 };
 
 const subagentsSegment: StatusLineSegment = {
@@ -537,6 +746,10 @@ const subagentsSegment: StatusLineSegment = {
 		}
 		const content = withIcon(theme.icon.agents, `${ctx.subagentCount}`);
 		return { content: theme.fg("statusLineSubagents", content), visible: true };
+	},
+	describe(ctx) {
+		if (ctx.subagentCount === 0) return null;
+		return segView([span(`${ctx.subagentCount}`, "statusLineSubagents")], "agents");
 	},
 };
 
@@ -574,6 +787,12 @@ const tokenTotalSegment: StatusLineSegment = {
 		});
 		return { content: theme.fg("statusLineSpend", content ?? ""), visible: true };
 	},
+	describe(ctx) {
+		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
+		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
+		if (!total) return null;
+		return segView([span(formatNumber(total), "statusLineSpend")], "tokens");
+	},
 };
 
 const tokenRateSegment: StatusLineSegment = {
@@ -588,42 +807,57 @@ const tokenRateSegment: StatusLineSegment = {
 		});
 		return { content: theme.fg("statusLineOutput", content ?? ""), visible: true };
 	},
+	describe(ctx) {
+		const { tokensPerSecond } = ctx.usageStats;
+		if (!tokensPerSecond) return null;
+		// The terminal eases the readout between updates.
+		return {
+			spans: [],
+			icon: "throughput",
+			motion: [node("rate", { value: Number(tokensPerSecond.toFixed(1)), unit: "tok/s" }, undefined, "rate")],
+		};
+	},
 };
+
+/** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
+function costSummary(ctx: SegmentContext): string | undefined {
+	const { cost, premiumRequests } = ctx.usageStats;
+	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
+	const state = ctx.session.state;
+	const pricingPeriod = state.model?.cost
+		? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
+		: undefined;
+	const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+	// Resolve the advisor subscription flag lazily: with no active advisor
+	// it walks the whole model catalog (getAvailable → hasAuth per provider
+	// → credential-file reads), and the status line re-renders at the
+	// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
+	return formatBillingSummary(
+		{
+			cost,
+			usingSubscription,
+			premiumRequests,
+			fractionDigits: 2,
+			pricingPeriod,
+			advisor: advisorCost
+				? { cost: advisorCost, usingSubscription: ctx.session.isAdvisorUsingSubscription?.() ?? false }
+				: undefined,
+		},
+		theme,
+	);
+}
 
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost, premiumRequests } = ctx.usageStats;
-		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
-		const state = ctx.session.state;
-		const pricingPeriod = state.model?.cost
-			? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
-			: undefined;
-		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
-
-		// Resolve the advisor subscription flag lazily: with no active advisor
-		// it walks the whole model catalog (getAvailable → hasAuth per provider
-		// → credential-file reads), and the status line re-renders at the
-		// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
-		const billing = formatBillingSummary(
-			{
-				cost,
-				usingSubscription,
-				premiumRequests,
-				fractionDigits: 2,
-				pricingPeriod,
-				advisor: advisorCost
-					? {
-							cost: advisorCost,
-							usingSubscription: ctx.session.isAdvisorUsingSubscription?.() ?? false,
-						}
-					: undefined,
-			},
-			theme,
-		);
+		const billing = costSummary(ctx);
 		if (!billing) return { content: "", visible: false };
 
 		return { content: theme.fg("statusLineCost", billing), visible: true };
+	},
+	describe(ctx) {
+		const billing = costSummary(ctx);
+		return billing ? segView([span(billing, "statusLineCost")]) : null;
 	},
 };
 
@@ -661,6 +895,29 @@ const contextPctSegment: StatusLineSegment = {
 
 		return { content, visible: true };
 	},
+	describe(ctx) {
+		const pct = ctx.contextPercent;
+		const window = ctx.contextWindow;
+		const level = getContextUsageLevel(pct ?? 0, window);
+		const color = getContextUsageThemeColor(level);
+		const spans: TspSpan[] = [
+			span(
+				pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
+				color,
+			),
+		];
+		if (ctx.autoCompactEnabled && theme.icon.auto) {
+			// Async-compaction indicator: the terminal pulses the auto icon while a
+			// background speculation runs; an armed result holds it in accent.
+			const speculation = ctx.compactionSpeculation;
+			if (speculation === "running") {
+				spans.push(span(` ${theme.icon.auto}`, accentToken(ctx, "accent"), { fx: "pulse" }));
+			} else {
+				spans.push(span(` ${theme.icon.auto}`, speculation === "armed" ? accentToken(ctx, "accent") : color));
+			}
+		}
+		return segView(spans, "context", getContextUsageTone(level));
+	},
 };
 
 const contextTotalSegment: StatusLineSegment = {
@@ -672,6 +929,10 @@ const contextTotalSegment: StatusLineSegment = {
 			content: theme.fg("statusLineContext", withIcon(theme.icon.context, formatNumber(window))),
 			visible: true,
 		};
+	},
+	describe(ctx) {
+		const window = ctx.contextWindow;
+		return window ? segView([span(formatNumber(window), "statusLineContext")], "context") : null;
 	},
 };
 
@@ -689,29 +950,39 @@ const timeSpentSegment: StatusLineSegment = {
 		if (ctx.activeMs < 1000) return { content: "", visible: false };
 		return { content: withIcon(theme.icon.time, formatDuration(ctx.activeMs)), visible: true };
 	},
+	describe(ctx) {
+		const running = ctx.turnElapsedMs != null;
+		if (!running && ctx.activeMs < 1000) return null;
+		// Ticks on the terminal's clock during a turn; frozen between turns.
+		const elapsed = running
+			? node("elapsed", { age: ctx.activeMs, format: "short" }, undefined, "timer")
+			: node("elapsed", { age: ctx.activeMs, stopped: ctx.activeMs, format: "short" }, undefined, "timer");
+		return { spans: [], icon: "time", motion: [elapsed] };
+	},
 };
+
+/** Wall-clock label for the `time` segment. */
+function formatClock(ctx: SegmentContext): string {
+	const opts = ctx.options.time ?? {};
+	const now = ctx.now ?? new Date();
+	let hours = now.getHours();
+	let suffix = "";
+	if (opts.format === "12h") {
+		suffix = hours >= 12 ? "pm" : "am";
+		hours = hours % 12 || 12;
+	}
+	let timeStr = `${hours}:${now.getMinutes().toString().padStart(2, "0")}`;
+	if (opts.showSeconds) timeStr += `:${now.getSeconds().toString().padStart(2, "0")}`;
+	return timeStr + suffix;
+}
 
 const timeSegment: StatusLineSegment = {
 	id: "time",
 	render(ctx) {
-		const opts = ctx.options.time ?? {};
-		const now = ctx.now ?? new Date();
-
-		let hours = now.getHours();
-		let suffix = "";
-		if (opts.format === "12h") {
-			suffix = hours >= 12 ? "pm" : "am";
-			hours = hours % 12 || 12;
-		}
-
-		const mins = now.getMinutes().toString().padStart(2, "0");
-		let timeStr = `${hours}:${mins}`;
-		if (opts.showSeconds) {
-			timeStr += `:${now.getSeconds().toString().padStart(2, "0")}`;
-		}
-		timeStr += suffix;
-
-		return { content: withIcon(theme.icon.time, timeStr), visible: true };
+		return { content: withIcon(theme.icon.time, formatClock(ctx)), visible: true };
+	},
+	describe(ctx) {
+		return segView([span(formatClock(ctx))], "time");
 	},
 };
 
@@ -724,6 +995,10 @@ const sessionSegment: StatusLineSegment = {
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},
+	describe(ctx) {
+		const sessionId = ctx.session.sessionManager?.getSessionId?.();
+		return segView([span(sessionId?.slice(0, 8) || "new")], "session");
+	},
 };
 
 const hostnameSegment: StatusLineSegment = {
@@ -733,6 +1008,10 @@ const hostnameSegment: StatusLineSegment = {
 		const content = withIcon(theme.icon.host, name);
 		const ansi = sessionAccentAnsi(ctx);
 		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
+	},
+	describe(ctx) {
+		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		return segView([span(name, sessionAccentAnsi(ctx) ? "accent" : undefined)], "host");
 	},
 };
 
@@ -765,6 +1044,12 @@ const cacheHitSegment: StatusLineSegment = {
 		parts.push(theme.fg("statusLineSpend", `${rateStr}%`));
 		return { content: parts.join(" "), visible: true };
 	},
+	describe(ctx) {
+		const { cacheRead, cacheWrite, input } = ctx.usageStats;
+		if (!cacheRead) return null;
+		const rate = (cacheRead / (cacheRead + cacheWrite + input)) * 100;
+		return segView([span(`${rate.toFixed(2)}%`, "statusLineSpend")], "cache");
+	},
 };
 
 const sessionNameSegment: StatusLineSegment = {
@@ -777,6 +1062,12 @@ const sessionNameSegment: StatusLineSegment = {
 		const content = sanitizeStatusText(name);
 		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
+	describe(ctx) {
+		const name = ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
+		const content = name ? sanitizeStatusText(name) : "";
+		// Plain: the terminal styles the title by its role.
+		return content ? segView([span(content)]) : null;
+	},
 };
 
 const collabSegment: StatusLineSegment = {
@@ -786,6 +1077,12 @@ const collabSegment: StatusLineSegment = {
 		const participants = `${ctx.collab.participantCount}`;
 		const label = ctx.collab.role === "host" ? `⇄ collab:${participants}` : `⇄ collab guest:${participants}`;
 		return { content: accentFg(ctx, "accent", label), visible: true };
+	},
+	describe(ctx) {
+		if (!ctx.collab) return null;
+		const participants = `${ctx.collab.participantCount}`;
+		const label = ctx.collab.role === "host" ? `collab:${participants}` : `collab guest:${participants}`;
+		return segView([span(label, accentToken(ctx, "accent"))], "collab");
 	},
 };
 
@@ -797,6 +1094,13 @@ const streamSegment: StatusLineSegment = {
 		if (ctx.recording) badges.push("● REC");
 		if (badges.length === 0) return { content: "", visible: false };
 		return { content: theme.fg("thinkingHigh", badges.join(" ")), visible: true };
+	},
+	describe(ctx) {
+		const badges: string[] = [];
+		if (ctx.stream) badges.push(`LIVE ${ctx.stream.viewers}`);
+		if (ctx.recording) badges.push("REC");
+		if (badges.length === 0) return null;
+		return segView([span(badges.join(" "), "thinkingHigh")], "live", "error");
 	},
 };
 
@@ -845,6 +1149,20 @@ const vimSegment: StatusLineSegment = {
 		const pending = vim.pending ? theme.fg("muted", ` ${vim.pending}`) : "";
 		return { content: `${content}${pending}`, visible: true };
 	},
+	describe(ctx) {
+		const vim = ctx.vim;
+		if (!vim || vim.display === "none") return null;
+		const color = VIM_MODE_COLORS[vim.mode];
+		const spans: TspSpan[] = [];
+		const lines = vim.selectedLines > 1 ? `${vim.selectedLines}L` : "";
+		if (vim.display === "icon") {
+			if (lines) spans.push(span(lines, color));
+		} else {
+			spans.push(span(lines ? `${VIM_MODE_LABELS[vim.mode]} ${lines}` : VIM_MODE_LABELS[vim.mode], color));
+		}
+		if (vim.pending) spans.push(span(` ${vim.pending}`, "muted"));
+		return segView(spans, vim.display === "icon" ? `vim-${vim.mode}` : undefined, toneOf(color));
+	},
 };
 
 function pickUsageColor(percent: number): "muted" | "warning" | "error" {
@@ -871,6 +1189,20 @@ function formatQuotaWindow(
 	const pctText = theme.fg(pickUsageColor(percent), `${whole}%`);
 	const resetText = reset !== undefined ? theme.fg("muted", ` (${formatUsageReset(reset, resetUnit)})`) : "";
 	return `${label} ${pctText}${resetText}`;
+}
+
+/** Native twin of {@link formatQuotaWindow}. */
+function describeQuotaWindow(
+	label: string,
+	percent: number,
+	reset: number | undefined,
+	resetUnit: "m" | "h",
+	integer: "round" | "floor",
+): TspSpan[] {
+	const whole = integer === "floor" ? Math.floor(percent) : Math.round(percent);
+	const spans = [span(`${label} `), span(`${whole}%`, pickUsageColor(percent))];
+	if (reset !== undefined) spans.push(span(` (${formatUsageReset(reset, resetUnit)})`, "muted"));
+	return spans;
 }
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {
@@ -935,6 +1267,41 @@ const usageSegment: StatusLineSegment = {
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };
 	},
+	describe(ctx) {
+		const u = ctx.usage;
+		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly && !u.resetCredits)) return null;
+		const parts: TspSpan[][] = [];
+		if (u.tier) {
+			const tier = sanitizeStatusText(u.tier);
+			if (tier) parts.push([span(tier, accentToken(ctx, "accent"))]);
+		}
+		if (u.fiveHour) {
+			parts.push(describeQuotaWindow("5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"));
+		}
+		if (u.daily) parts.push(describeQuotaWindow("1d", u.daily.percent, u.daily.resetMinutes, "m", "round"));
+		if (u.sevenDay) {
+			parts.push(describeQuotaWindow("7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
+		}
+		if (u.monthly) parts.push(describeQuotaWindow("mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
+		if (u.resetCredits) {
+			const resets = u.resetCredits;
+			let resetText = `✦ ${resets.bankedCount}`;
+			if (resets.redeemableCount !== resets.bankedCount) resetText += ` (${resets.redeemableCount} usable)`;
+			if (resets.expiryHours !== undefined) resetText += ` exp ${formatUsageReset(resets.expiryHours, "h")}`;
+			else if (resets.expired) resetText += " expired";
+			if (resets.redeemableCount === 0 && resets.unavailableReason) {
+				const reason = sanitizeStatusText(resets.unavailableReason);
+				if (reason) resetText += ` ${reason}`;
+			}
+			parts.push([span(resetText, resets.redeemableCount > 0 ? "success" : "warning")]);
+		}
+		const spans: TspSpan[] = [];
+		for (const part of parts) {
+			if (spans.length > 0) spans.push(span(theme.sep.dot, "dim"));
+			spans.push(...part);
+		}
+		return segView(spans, "time");
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -978,6 +1345,11 @@ export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): Ren
 		return { content: "", visible: false };
 	}
 	return segment.render(ctx);
+}
+
+/** Native description of one segment; null when it is hidden or unknown. */
+export function describeSegment(id: StatusLineSegmentId, ctx: SegmentContext): SegmentView | null {
+	return SEGMENTS[id]?.describe(ctx) ?? null;
 }
 
 export const ALL_SEGMENT_IDS: StatusLineSegmentId[] = Object.keys(SEGMENTS) as StatusLineSegmentId[];

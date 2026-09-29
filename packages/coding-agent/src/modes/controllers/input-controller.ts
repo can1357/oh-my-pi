@@ -21,7 +21,6 @@ import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor"
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { chipLabel, compactImageMarkers, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -2516,11 +2515,10 @@ export class InputController {
 			// filled), matching the plan-approval model slider. It renders into its
 			// own anchored container above the editor (cleared+rebuilt each cycle),
 			// so it updates in place instead of stacking duplicates in the scrollback.
-			const track = renderSegmentTrack(
+			this.ctx.showModelCycleTrack(
 				cycleOrder.map(role => ({ label: role })),
 				cycleOrder.indexOf(result.role),
 			);
-			this.ctx.showModelCycleTrack(track);
 		} catch (error) {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}

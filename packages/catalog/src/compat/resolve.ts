@@ -881,6 +881,7 @@ function resolveAnthropicPolicy(
 		supportsMidConversationToolChanges: false,
 		supportsPerMessageEffort: false,
 		supportsThinkingBindingControls: false,
+		supportsBetweenToolsThinking: false,
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
 		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
 		requiresToolResultId: false,

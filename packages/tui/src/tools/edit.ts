@@ -6,9 +6,22 @@ import { type EditInspection, editInspect } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import { code, compact, node, span } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import {
+	diagnosticsBadge,
+	diagnosticsSection,
+	diffStatsMeta,
+	displayPath,
+	errorText,
+	fileDiffSection,
+	fileHref,
+	noteText,
+	resultText,
+} from "./native-view";
 import type { FileDiagnosticsResult } from "./lsp";
-import { renderDiff as renderDiffColored } from "../chrome/diff";
+import { nativeDiff, renderDiff as renderDiffColored } from "../chrome/diff";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
@@ -1111,6 +1124,116 @@ export const editToolRenderer = {
 		});
 	},
 
+	describeCall(
+		args: EditRenderArgs,
+		options: RenderResultOptions & { renderContext?: EditRenderContext },
+	): NativeToolView {
+		const renderContext = options.renderContext;
+		const { rawPath, rename, op, fileCount, applyPatchError } = resolveEditCallFacts(
+			args,
+			options.isPartial,
+			renderContext?.editMode,
+		);
+		const body: NativeChild[] = [];
+		let tool: NativeToolHead;
+		const multi = renderContext?.perFileDiffPreview;
+		if (multi && multi.length > 1 && multi.some(p => p.diff || p.error)) {
+			let added = 0;
+			let removed = 0;
+			for (const preview of multi) {
+				const stats = preview.diff ? getDiffStats(preview.diff) : undefined;
+				added += stats?.added ?? 0;
+				removed += stats?.removed ?? 0;
+				body.push(
+					fileDiffSection(
+						{ path: preview.path, added: stats?.added, removed: stats?.removed },
+						[preview.error ? errorText(preview.error) : editDiff(preview.diff ?? "", preview.path)],
+						{ role: "omp.tool.edit.file", tone: preview.error ? "error" : undefined },
+					),
+				);
+			}
+			tool = editToolHead({ op, files: Math.max(fileCount, multi.length), added, removed });
+		} else {
+			let diffText: string | undefined;
+			let firstChangedLine: number | undefined;
+			if (args.previewDiff || (args.diff && args.op)) {
+				diffText = args.previewDiff ?? args.diff ?? "";
+				body.push(editDiff(diffText, rawPath));
+			} else if (args.diff || args.newText || args.patch) {
+				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { lang: getLanguageFromPath(rawPath) }));
+			} else if (renderContext?.editDiffPreview) {
+				const preview = renderContext.editDiffPreview;
+				if ("error" in preview && preview.error) body.push(errorText(preview.error));
+				else if (preview.diff) {
+					diffText = preview.diff;
+					firstChangedLine = preview.firstChangedLine;
+					body.push(editDiff(preview.diff, rawPath));
+				}
+			}
+			const stats = diffText ? getDiffStats(diffText) : undefined;
+			tool = editToolHead({
+				op,
+				path: rawPath,
+				files: fileCount,
+				line: firstChangedLine,
+				rename,
+				added: stats?.added ?? 0,
+				removed: stats?.removed ?? 0,
+			});
+		}
+		if (applyPatchError) body.push(errorText(applyPatchError));
+		return { tool, body, tone: applyPatchError ? "error" : undefined };
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: EditToolDetails; isError?: boolean },
+		options: RenderResultOptions & { renderContext?: EditRenderContext },
+		args?: EditRenderArgs,
+	): NativeToolView {
+		const edits = Array.isArray(args?.edits) ? args.edits : undefined;
+		const perFileResults = result.details?.perFileResults;
+		const totalFiles = edits ? countEditFiles(edits) : 0;
+		if (perFileResults && (perFileResults.length > 1 || totalFiles > 1)) {
+			const remaining = Math.max(0, totalFiles - perFileResults.length);
+			let added = 0;
+			let removed = 0;
+			// Files are borderless sections inside the one tool frame.
+			const body: NativeChild[] = perFileResults.map(fileResult => {
+				const file = editFileParts({ content: [], details: fileResult, isError: fileResult.isError }, options);
+				added += file.added;
+				removed += file.removed;
+				return fileDiffSection(file, file.body, {
+					role: "omp.tool.edit.file",
+					tone: file.isError ? "error" : undefined,
+				});
+			});
+			if (remaining > 0) {
+				body.push(
+					node("spinner", {
+						label: [span(`${remaining} more file${remaining > 1 ? "s" : ""} pending…`, "muted")],
+					}),
+				);
+			}
+			const failed = perFileResults.some(file => file.isError);
+			return {
+				tool: editToolHead({
+					files: Math.max(totalFiles, perFileResults.length),
+					added,
+					removed,
+					diagnostics: perFileResults.map(file => file.diagnostics),
+				}),
+				body,
+				tone: failed ? "error" : undefined,
+			};
+		}
+		const file = editFileParts(result, options, args);
+		return {
+			tool: editToolHead({ ...file, href: fileHref(file.resolvedPath), diagnostics: [file.fileDiagnostics] }),
+			body: file.body,
+			tone: file.isError ? "error" : undefined,
+		};
+	},
+
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: EditToolDetails; isError?: boolean },
 		options: RenderResultOptions & { renderContext?: EditRenderContext },
@@ -1126,6 +1249,128 @@ export const editToolRenderer = {
 		return renderSingleFileResult(result, options, uiTheme, args);
 	},
 } satisfies ToolRenderer<EditRenderArgs, EditToolDetails>;
+
+/** Facts behind a native edit head: one file (path, first changed line, rename) or a file count. */
+interface EditHeadFacts {
+	op?: Operation;
+	path?: string;
+	/** Distinct files in the call; more than one heads the call as `N files`. */
+	files?: number;
+	line?: number;
+	href?: string;
+	rename?: string;
+	added: number;
+	removed: number;
+	diagnostics?: readonly (FileDiagnosticsResult | undefined)[];
+}
+
+/**
+ * Native edit head (§7.3): `Edit · path:line · +8 −1 · → new/path` for one
+ * file, `Edit · 3 files · +21 −4` for several; a diagnostics chip when LSP reported.
+ */
+function editToolHead(facts: EditHeadFacts): NativeToolHead {
+	const multi = (facts.files ?? 0) > 1;
+	const meta = compact([
+		diffStatsMeta(facts.added, facts.removed),
+		!multi && facts.rename ? `→ ${displayPath(facts.rename)}` : undefined,
+	]);
+	const badge = facts.diagnostics && diagnosticsBadge(facts.diagnostics);
+	const target = multi
+		? `${facts.files} files`
+		: facts.path
+			? `${displayPath(facts.path)}${facts.line ? `:${facts.line}` : ""}`
+			: undefined;
+	return {
+		title: multi ? "Edit" : getOperationTitle(facts.op),
+		target,
+		targetKind: multi ? "text" : "path",
+		href: multi ? undefined : facts.href,
+		meta: meta.length > 0 ? meta : undefined,
+		badges: badge ? [badge] : undefined,
+	};
+}
+
+/** A file's diff: hunks highlighted by the path's language, no path header (the head or section names the file). */
+function editDiff(diffText: string, filePath: string): NativeNode {
+	return nativeDiff(diffText, { lang: filePath ? getLanguageFromPath(filePath) : undefined });
+}
+
+/** One file's edit result for native views: head facts plus its body (diff or error, then diagnostics). */
+interface EditFileParts extends Omit<EditHeadFacts, "diagnostics"> {
+	path: string;
+	/** Absolute path the edit resolved to, when known. */
+	resolvedPath?: string;
+	isError: boolean;
+	fileDiagnostics?: FileDiagnosticsResult;
+	body: NativeChild[];
+}
+
+function editFileParts(
+	result: {
+		content: Array<{ type: string; text?: string }>;
+		details?: EditToolDetails | EditToolPerFileResult;
+		isError?: boolean;
+	},
+	options: RenderResultOptions & { renderContext?: EditRenderContext },
+	args?: EditRenderArgs,
+): EditFileParts {
+	const details = result.details;
+	const isError = result.isError ?? (details && "isError" in details ? details.isError : false) ?? false;
+	const firstEdit = Array.isArray(args?.edits) ? args.edits[0] : undefined;
+	const firstHashlineInputEntry = getHashlineInputRenderSummary(args ?? {}, options.renderContext?.editMode)
+		?.entries[0];
+	const moveSource =
+		details && "sourcePath" in details && typeof details.sourcePath === "string" ? details.sourcePath : undefined;
+	const detailPath = details && "path" in details && typeof details.path === "string" ? details.path : undefined;
+	const rawPath =
+		moveSource ??
+		(typeof args?.file_path === "string"
+			? args.file_path
+			: typeof args?.path === "string"
+				? args.path
+				: (filePathFromEditEntry(firstEdit?.path) ?? detailPath ?? firstHashlineInputEntry?.path ?? ""));
+	const op = args?.op || firstEdit?.op || details?.op;
+	const rename =
+		(typeof args?.rename === "string" ? args.rename : undefined) ??
+		filePathFromEditEntry(firstEdit?.rename) ??
+		filePathFromEditEntry(firstEdit?.move) ??
+		(details && "move" in details && typeof details.move === "string" ? details.move : undefined);
+	const editDiffPreview = details ? undefined : options.renderContext?.editDiffPreview;
+	const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
+	const diffText = isError ? undefined : details?.diff || previewDiff;
+	const firstChangedLine =
+		(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
+		(details && !isError ? details.firstChangedLine : undefined);
+	const shownPath = displayPath(detailPath ?? rawPath);
+	const body: NativeChild[] = [];
+	if (isError) {
+		const displayErrorText = details && "displayErrorText" in details ? details.displayErrorText : undefined;
+		const message =
+			displayErrorText || (details && "errorText" in details && details.errorText) || resultText(result);
+		if (message) body.push(errorText(message));
+	} else if (diffText) {
+		body.push(editDiff(diffText, detailPath ?? rawPath));
+	} else if (editDiffPreview && "error" in editDiffPreview) {
+		body.push(errorText(editDiffPreview.error));
+	} else if (details && op !== "delete" && op !== "create" && !rename) {
+		body.push(noteText(`No changes were made${shownPath ? ` to ${shownPath}` : ""}.`));
+	}
+	const diagnostics = diagnosticsSection(details?.diagnostics);
+	if (diagnostics) body.push(diagnostics);
+	const stats = diffText ? getDiffStats(diffText) : undefined;
+	return {
+		op,
+		path: rawPath,
+		line: firstChangedLine,
+		rename,
+		resolvedPath: detailPath,
+		added: stats?.added ?? 0,
+		removed: stats?.removed ?? 0,
+		isError: Boolean(isError),
+		fileDiagnostics: details?.diagnostics,
+		body,
+	};
+}
 
 function renderSingleFileResult(
 	result: {
