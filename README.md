@@ -272,7 +272,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 
 **Runtime**
 
-- `bash` — workspace shell with 46 in-process coreutils, optional PTY, and background-job dispatch.
+- `bash` — workspace shell with 46 in-process coreutils, optional PTY, background jobs, and named services with optional live output delivery; `proc://` reads and writes inspect and control jobs/services.
 - `eval` — persistent Python and JavaScript cells with shared prelude and tool re-entry.
 
 **Code intelligence**
@@ -284,7 +284,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 **Coordination**
 
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
-- `wait` — block until the next background result, peer message, or steering interrupt; message peers and control jobs via `agent://` and `proc://`.
+- `wait` — await a background result, peer message, or steering interrupt when blocked; message peers via `agent://` and control jobs via `proc://`.
 - `todo` — ordered mutations over the session todo list with phase tracking.
 - `ask` — structured follow-up questions for interactive runs.
 

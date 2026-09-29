@@ -30,6 +30,21 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 - When authorized to resolve review feedback, MUST verify the fix, obtain approval for a factual reply citing the change and verification, and post it in the existing thread before resolving. NEVER resolve if the reply is unapproved or posting fails.
 - Permission to work on a PR does not authorize unrelated comments or issue creation.
 
+### Dogfood builds
+
+- Keep production `omp` and dogfood `omp-dogfood` separate.
+- Resolve the local dogfood target from `~/src/chezmoi/dot_bashrc`; NEVER infer it from `PATH`.
+- NEVER overwrite production `~/.bun/bin/omp`.
+- Local builds MUST use a unique native package version and matching Rust N-API sentinel.
+- Local builds MUST atomically install, restore temporary files, run `--smoke-test`, verify the private native cache, and compare the production checksum.
+- GitHub dogfood releases MUST use `repository_dispatch` with event `dogfood-release`; NEVER use `workflow_dispatch` or a ref-selectable release workflow.
+- Dispatch only the current fork `dogfood` branch head as `source_sha`; verify it through `gh api repos/pedropaulovc/oh-my-pi/git/ref/heads/dogfood`.
+- Use a published stable upstream tag from `can1357/oh-my-pi`; reject draft and prerelease tags.
+- Choose `dogfood_revision` above every existing `v<version>-dogfood.N`; reject duplicate releases, tags, and active runs.
+- Include `upstream_tag`, `source_sha`, and `dogfood_revision` in `client_payload`; default revision `1` is unsafe after the first release.
+- Verify validate, build, and publish jobs plus Linux/Windows assets and `SHA256SUMS`; dispatch acceptance alone is not success.
+- Restart dogfood sessions after replacing the executable; verify process path and checksum before behavioral testing.
+
 ### Pull requests
 
 When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.

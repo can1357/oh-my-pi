@@ -107,6 +107,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
 	OUTPUT_EXPANDED: 10,
+	/** UTF-8 bytes of visible text shown by a collapsed progress block (with `DEFAULT_TERMINAL_PREVIEW_LINES`) */
+	PROGRESS_COLLAPSED_BYTES: 2_000,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */
@@ -353,6 +355,10 @@ export function previewWindowRows(): number {
  * streaming and after completion so the block never jumps; only `expanded`
  * (ctrl+o) uncaps it.
  *
+ * `maxBytes` additionally bounds the UTF-8 bytes of visible text (ANSI
+ * excluded) in the tail window, so max-width lines cannot turn a `max`-row
+ * window into kilobytes; the newest line always stays.
+ *
  * `prefix` (raw, e.g. a dim tree gutter) is prepended to the marker line so
  * nested previews stay aligned. `expandHint: false` drops the "ctrl+o: Expand"
  * suffix for callers that cap even inside the expanded view (task recent
@@ -361,12 +367,24 @@ export function previewWindowRows(): number {
 export function capPreviewLines(
 	lines: string[],
 	theme: Theme,
-	options: { max?: number; expanded?: boolean; prefix?: string; expandHint?: boolean } = {},
+	options: { max?: number; maxBytes?: number; expanded?: boolean; prefix?: string; expandHint?: boolean } = {},
 ): string[] {
 	if (options.expanded) return lines;
 	const max = options.max ?? previewWindowRows();
-	if (lines.length <= max) return lines;
-	const visible = max <= 1 ? [] : lines.slice(lines.length - (max - 1));
+	let fit = Math.min(lines.length, max);
+	if (options.maxBytes !== undefined) {
+		let bytes = 0;
+		fit = 0;
+		for (let i = lines.length - 1; i >= lines.length - Math.min(lines.length, max); i--) {
+			bytes += Buffer.byteLength(Bun.stripANSI(lines[i]!), "utf8");
+			if (bytes > options.maxBytes && fit > 0) break;
+			fit++;
+		}
+	}
+	if (fit >= lines.length) return lines;
+	// The marker occupies one of the `max` rows.
+	const visibleCount = Math.min(fit, max - 1);
+	const visible = visibleCount <= 0 ? [] : lines.slice(lines.length - visibleCount);
 	const hidden = lines.length - visible.length;
 	const hint = options.expandHint === false ? "" : formatExpandHint(theme, false, true);
 	const marker = `… ${hidden} earlier ${pluralize("line", hidden)}${hint ? ` ${hint}` : ""}`;
@@ -879,6 +897,7 @@ function defaultHomeDir(): string {
 
 interface HomePattern {
 	leading: RegExp;
+	/** Whole URIs (group-less) or a delimited home (`boundary`, `candidate`). */
 	embedded: RegExp;
 }
 
@@ -909,11 +928,21 @@ function homePatternFor(homeDir: string, windowsStyle: boolean): HomePattern {
 				})
 				.join("[\\\\/]");
 		}
+		// Home must start a path token: `./home`, `~/home`, `foo//home`, and
+		// `@/home` are relative or remote spellings, not the local home. `:` and
+		// `;` separate PATH entries, `path:line` suffixes, and HTML entities;
+		// `>` ends markup tags and shell redirections.
+		const preceding = "(^|[\\s\"'\\x60([{=,:;>])";
+		const trailing =
+			"(?=$|[\\\\/\\s\"'\\x60)\\]},;:<>]|\\x1b|&(?:quot|apos|gt);|[\"'\\x60()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+		const flags = windowsStyle ? "i" : "";
 		pattern = {
-			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, windowsStyle ? "i" : ""),
+			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, flags),
+			// URIs, including `file:`, are consumed whole: their text doubles as a
+			// link target, so any rewrite would change where the link opens.
 			embedded: new RegExp(
-				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
-				windowsStyle ? "gi" : "g",
+				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|${preceding}(${escapedHome})${trailing}`,
+				`${flags}gu`,
 			),
 		};
 		if (homePatternCache.size >= 16) homePatternCache.clear();
@@ -938,7 +967,13 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten embedded home paths; normalize Windows separators unless the caller preserves native error text. */
+/**
+ * Replace home-directory paths embedded in display text without matching a
+ * longer path component or a relative spelling such as `./home`. Windows-style
+ * homes are matched case-insensitively. URIs, including `file:` URIs, are
+ * preserved verbatim so link targets never change. Windows
+ * separators are normalized unless the caller preserves native error text.
+ */
 export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSeparators = false): string {
 	const resolvedHome = homeDir ?? defaultHomeDir();
 	if (!resolvedHome || resolvedHome.length <= 1) return text;
@@ -957,10 +992,8 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSep
 			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
 			const end = segment.length - trailing.length;
 			if (leading.length >= end) return segment;
-			const shortened = shortenPath(segment.slice(leading.length, end), resolvedHome);
-			const normalized = shortened.startsWith("~")
-				? shortened.replaceAll(path.win32.sep, path.posix.sep)
-				: shortened;
+			const embeddedPath = segment.slice(leading.length, end);
+			const normalized = embeddedPath.startsWith("~") ? embeddedPath.replaceAll("\\", "/") : embeddedPath;
 			return `${leading}${normalized}${trailing}`;
 		})
 		.join(" ");
