@@ -5,6 +5,7 @@
 ### Added
 
 - Cursor turns now reconnect and resume in place after a dropped connection without re-running tools that already ran, and dead connections are detected within about 30 seconds through HTTP/2 keepalive pings ([#13685](https://github.com/can1357/oh-my-pi/pull/13685) by [@eggpeat](https://github.com/eggpeat))
+- Added Command Code usage limits (5-hour, weekly, and credit balance) to /usage and the status line ([#13666](https://github.com/can1357/oh-my-pi/pull/13666) by [@riicodespretty](https://github.com/riicodespretty))
 
 ## [18.4.3] - 2026-09-28
 
