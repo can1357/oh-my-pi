@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `RUNNER_API_KINDS` and `runnerApiKind()`, the model kind each single-purpose runner API serves; the compat compiler now rejects a provider `kind-apis` entry that lists a runner API under a different kind ([#13533](https://github.com/can1357/oh-my-pi/pull/13533) by [@oshinop](https://github.com/oshinop))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

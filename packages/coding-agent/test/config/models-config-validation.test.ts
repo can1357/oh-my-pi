@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OmpErrors } from "@oh-my-pi/omptype";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
-import { validateProviderConfiguration } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import {
+	type ProviderValidationConfig,
+	validateProviderConfiguration,
+} from "@oh-my-pi/pi-coding-agent/config/models-config";
 import { type ModelsConfig, ModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 
 const models = [{ id: "grok-4", api: "openai-completions" as const }];
@@ -100,5 +103,53 @@ describe("models.yml compat.stripImageInput (#11697)", () => {
 		if (parsed instanceof OmpErrors) {
 			expect(parsed.summary).toContain("stripImageInput");
 		}
+	});
+});
+
+describe("model kind must match its api", () => {
+	const validate = (config: Omit<ProviderValidationConfig, "baseUrl">) => () =>
+		validateProviderConfiguration("gateway", { baseUrl, apiKey: "key", ...config }, "models-config");
+
+	test("rejects a model kind its api cannot serve", () => {
+		expect(validate({ models: [{ id: "img", api: "openai-completions", kind: "image" }] })).toThrow(
+			/model img: kind "image" does not match api "openai-completions", which serves kind "chat"/,
+		);
+		expect(validate({ models: [{ id: "img", api: "openai-images", kind: "chat" }] })).toThrow(
+			/model img: kind "chat" does not match api "openai-images", which serves kind "image"/,
+		);
+		expect(validate({ models: [{ id: "img", api: "openai-images", kind: "image" }] })).not.toThrow();
+	});
+
+	test("chat transports that generate_image runs also serve image", () => {
+		expect(validate({ models: [{ id: "gpt-image-2", api: "openai-responses", kind: "image" }] })).not.toThrow();
+		expect(
+			validate({ models: [{ id: "gemini-3-pro-image", api: "google-generative-ai", kind: "image" }] }),
+		).not.toThrow();
+		expect(validate({ models: [{ id: "voice", api: "openai-responses", kind: "tts" }] })).toThrow(
+			/model voice: kind "tts" does not match api "openai-responses", which serves kind "chat" or "image"/,
+		);
+	});
+
+	test("checks an override kind against the api it resolves to", () => {
+		const provider = { api: "openai-responses" as const, models: [] };
+		expect(validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "tts" } } })).toThrow(
+			/modelOverrides\.gpt-image-2: kind "tts" does not match api "openai-responses"/,
+		);
+		expect(
+			validate({ ...provider, modelOverrides: { "gpt-image-2": { kind: "image", api: "openai-images" } } }),
+		).not.toThrow();
+		expect(validate({ models: [], modelOverrides: { "gpt-image-2": { kind: "image" } } })).toThrow(
+			/modelOverrides\.gpt-image-2: "kind" requires "api"/,
+		);
+	});
+
+	test("multi-kind local-inference accepts any kind", () => {
+		expect(() =>
+			validateProviderConfiguration(
+				"local-rt",
+				{ baseUrl, apiKey: "key", models: [{ id: "whisper", api: "local-inference", kind: "stt" }] },
+				"runtime-register",
+			),
+		).not.toThrow();
 	});
 });

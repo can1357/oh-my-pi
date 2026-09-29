@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Custom providers can declare model kinds: `models` entries and `modelOverrides` in `models.yml` accept `kind` and the runner APIs (`openai-images`, `openai-speech`, `openai-embeddings`, …), so a gateway's image, speech, or embedding models reach their roles instead of registering as chat. A `kind` its api cannot serve is rejected; chat transports that `generate_image` runs, such as `openai-responses`, also accept `image` and generate through the hosted image tool. An omitted `kind` follows the api, so custom `typesafe`/`openrouter-decisions` models now register as `judge` ([#13533](https://github.com/can1357/oh-my-pi/pull/13533) by [@oshinop](https://github.com/oshinop))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

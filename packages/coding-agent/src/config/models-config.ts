@@ -2,7 +2,9 @@
  * Custom model/provider config file handle and validation.
  */
 
+import { isImageGenerationApi } from "@oh-my-pi/pi-ai/images";
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { ConfigFile } from "./config-file";
 import type { ModelsConfig, ProviderAuthMode, ProviderDiscovery } from "./models-config-schema";
 import { getModelsConfigSchema } from "./models-config-schema-bundle";
@@ -12,6 +14,7 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 export interface ProviderValidationModel {
 	id: string;
 	api?: Api;
+	kind?: ModelKind;
 	contextWindow?: number;
 	supportsTools?: boolean;
 	maxTokens?: number;
@@ -30,8 +33,19 @@ export interface ProviderValidationConfig {
 	disableStrictTools?: boolean;
 	guardrailIdentifier?: string;
 	requestMetadata?: Record<string, string>;
-	modelOverrides?: Record<string, unknown>;
+	modelOverrides?: Record<string, { api?: Api; kind?: ModelKind }>;
 	models: ProviderValidationModel[];
+}
+
+/**
+ * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
+ * transport serves `chat`, plus `image` when `generate_image` runs it (hosted
+ * Responses image tool, Gemini image models).
+ */
+function servedKinds(api: Api): readonly ModelKind[] {
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return [runnerKind];
+	return isImageGenerationApi(api) ? ["chat", "image"] : ["chat"];
 }
 
 export function validateProviderConfiguration(
@@ -84,6 +98,17 @@ export function validateProviderConfiguration(
 		throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
 	}
 
+	// Runners dispatch on `api`, so an explicit `kind` must be one its api serves. An
+	// omitted `kind` follows the api. `local-inference` hosts several kinds, so it
+	// accepts any `kind`.
+	const checkKind = (subject: string, kind: ModelKind, api: Api) => {
+		if (api === "local-inference") return;
+		const served = servedKinds(api);
+		if (served.includes(kind)) return;
+		throw new Error(
+			`Provider ${providerName}, ${subject}: kind "${kind}" does not match api "${api}", which serves kind ${served.map(k => `"${k}"`).join(" or ")}.`,
+		);
+	};
 	for (const modelDef of models) {
 		if (!hasProviderApi && !modelDef.api) {
 			throw new Error(
@@ -95,6 +120,8 @@ export function validateProviderConfiguration(
 		if (!modelDef.id) {
 			throw new Error(`Provider ${providerName}: model missing "id"`);
 		}
+		const api = modelDef.api ?? config.api;
+		if (modelDef.kind !== undefined && api !== undefined) checkKind(`model ${modelDef.id}`, modelDef.kind, api);
 		if (mode === "models-config") {
 			if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
@@ -103,6 +130,17 @@ export function validateProviderConfiguration(
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
 			}
 		}
+	}
+
+	for (const [modelId, override] of Object.entries(config.modelOverrides ?? {})) {
+		if (override.kind === undefined) continue;
+		const api = override.api ?? models.find(model => model.id === modelId)?.api ?? config.api;
+		if (api === undefined) {
+			throw new Error(
+				`Provider ${providerName}, modelOverrides.${modelId}: "kind" requires "api" on the override or the provider.`,
+			);
+		}
+		checkKind(`modelOverrides.${modelId}`, override.kind, api);
 	}
 }
 

@@ -3,7 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
@@ -233,6 +233,8 @@ export function mergeProviderRemoteCompactionConfig(
  */
 export interface ModelPatch {
 	name?: string;
+	api?: Api;
+	kind?: ModelKind;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -268,6 +270,8 @@ type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.api !== undefined) result.api = patch.api;
+	if (patch.kind !== undefined) result.kind = patch.kind;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
@@ -322,6 +326,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	built.maxTokens = result.maxTokens;
 	// Explicit input and cost patches outrank catalog corrections.
 	if (patch.input !== undefined) built.input = patch.input;
+	if (patch.kind !== undefined) built.kind = patch.kind;
 	// Patches never change model identity. Preserve already-resolved pricing,
 	// including earlier custom prices and the deliberate absence of a schedule.
 	built.cost = result.cost;
@@ -329,5 +334,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 }
 
 export function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<Api> {
-	return applyModelPatch(model, override as ModelPatch, "merge");
+	// An `api` change without `kind` takes the api's kind, as validated in `validateProviderConfiguration`.
+	const kind = override.kind ?? (override.api === undefined ? undefined : (runnerApiKind(override.api) ?? "chat"));
+	return applyModelPatch(model, { ...(override as ModelPatch), kind }, "merge");
 }
