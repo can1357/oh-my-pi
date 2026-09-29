@@ -325,4 +325,9 @@ describe("KeybindingsManager.create", () => {
 
 		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q"]);
 	});
+
+	it("defaults settings shortcut to Alt+S", () => {
+		const manager = KeybindingsManager.inMemory();
+		expect(manager.getKeys("app.settings.open")).toEqual(["alt+s"]);
+	});
 });

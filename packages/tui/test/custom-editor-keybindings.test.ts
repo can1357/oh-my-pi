@@ -63,6 +63,16 @@ describe("CustomEditor keybindings", () => {
 		expect(onDisplayReset).toHaveBeenCalledTimes(1);
 		expect(onLiveToggle).toHaveBeenCalledTimes(1);
 	});
+
+	it("routes configured settings shortcut chord through handleInput", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onOpenSettings = vi.fn();
+		editor.setActionKeys("app.settings.open", ["alt+s"]);
+		editor.onOpenSettings = onOpenSettings;
+		editor.handleInput("\x1bs");
+		expect(onOpenSettings).toHaveBeenCalledTimes(1);
+	});
+
 	it("exits on ctrl+d with an empty draft", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onExit = vi.fn();
