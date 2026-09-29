@@ -24,9 +24,10 @@
 //! ```
 
 use std::{
-	fs::{self, Metadata},
+	fs::{self, File, Metadata},
 	io,
 	path::Path,
+	sync::atomic::{AtomicU64, Ordering},
 };
 
 /// Makes `dst` a copy-on-write clone of the regular file `src`, following
@@ -36,20 +37,20 @@ use std::{
 /// also carries `src`'s mode, flags, extended attributes, and timestamps,
 /// while elsewhere `dst` gets default permissions.
 ///
-/// An existing `dst` must be a regular file, and keeps what an in-place copy
-/// keeps: its mode, owner, and hard links. Linux and Windows clone into it in
-/// place. APFS clones only into new files, so the clone is made beside `dst`
-/// and renamed over it; that needs a writable `dst` with one link whose owner
-/// and group the clone can take on, and `dst`'s extended attributes and ACL
-/// become `src`'s.
+/// An existing `dst` is never written in place: the clone is made beside it
+/// and renamed over it, so a failed clone leaves `dst` untouched. The swap
+/// keeps what an in-place copy keeps: `dst`'s mode, its owner and group
+/// (Unix), and its hard links, which is why `dst` must be a writable regular
+/// file with one link whose owner the clone can take on. `dst`'s extended
+/// attributes and ACL do not survive; on Windows the clone gets the
+/// directory's inherited ACL and the caller as owner.
 ///
 /// # Errors
 ///
 /// An [`is_unsupported`] error when the files cannot share extents
 /// (different filesystems, a filesystem without cloning, an unsupported
-/// platform) or `dst` cannot take a clone (not a regular file, or one APFS
-/// cannot swap); otherwise the failing call. A created `dst` is removed on
-/// error; an existing one may have been truncated.
+/// platform) or `dst` cannot be swapped for a clone; otherwise the failing
+/// call. On error no clone is left behind and an existing `dst` is unchanged.
 pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
 	let existing = match fs::metadata(dst) {
 		Ok(metadata) if metadata.is_file() => Some(metadata),
@@ -59,7 +60,11 @@ pub fn clone_file(src: &Path, dst: &Path) -> io::Result<()> {
 	};
 	#[cfg(unix)]
 	check_same_device(src, dst, existing.as_ref())?;
-	clone_to(src, dst, existing.as_ref())
+	match existing {
+		None => clone_new(src, dst),
+		// Swap the file a symlinked `dst` names, as an in-place copy writes it.
+		Some(metadata) => clone_over(src, &fs::canonicalize(dst)?, &metadata),
+	}
 }
 
 /// Whether `err` from [`clone_file`] means the files cannot be cloned, as
@@ -108,39 +113,93 @@ fn check_same_device(src: &Path, dst: &Path, existing: Option<&Metadata>) -> io:
 	}
 }
 
-/// Clones by opening both files: in place into an existing `dst`, else into
-/// a new one that is removed again on failure.
-#[cfg(any(target_os = "linux", target_os = "android", windows))]
-fn clone_to(src: &Path, dst: &Path, existing: Option<&Metadata>) -> io::Result<()> {
-	let src = fs::File::open(src)?;
-	let mut options = fs::OpenOptions::new();
-	options.write(true);
-	if existing.is_some() {
-		// A whole-file clone must end at `dst`'s end of file.
-		options.truncate(true);
-	} else {
-		options.create_new(true);
+/// Replaces the regular file `dst` (described by `metadata`) with a clone of
+/// `src` made beside it, when the swap passes for an in-place copy.
+fn clone_over(src: &Path, dst: &Path, metadata: &Metadata) -> io::Result<()> {
+	/// Keeps the temporaries of concurrent clones in one process apart.
+	static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+	let file = fs::OpenOptions::new()
+		.write(true)
+		.open(dst)
+		.map_err(|_| unsupported("destination is not writable"))?;
+	if link_count(&file, metadata)? != 1 {
+		return Err(unsupported("destination has other hard links"));
 	}
-	let dst_file = options.open(dst)?;
+	drop(file);
+
+	let temp = dst.with_file_name(format!(
+		".cow-clone-{}-{}",
+		std::process::id(),
+		SEQUENCE.fetch_add(1, Ordering::Relaxed)
+	));
+	clone_new(src, &temp)?;
+	let swapped = (|| {
+		#[cfg(unix)]
+		take_owner(&temp, metadata)?;
+		fs::set_permissions(&temp, metadata.permissions())?;
+		fs::rename(&temp, dst)
+	})();
+	if swapped.is_err() {
+		let _ = fs::remove_file(&temp);
+	}
+	swapped
+}
+
+/// Gives `clone` the owner and group of the file it replaces.
+#[cfg(unix)]
+fn take_owner(clone: &Path, metadata: &Metadata) -> io::Result<()> {
+	use std::os::unix::fs::{MetadataExt as _, chown};
+
+	let current = fs::symlink_metadata(clone)?;
+	if (current.uid(), current.gid()) == (metadata.uid(), metadata.gid()) {
+		return Ok(());
+	}
+	chown(clone, Some(metadata.uid()), Some(metadata.gid()))
+		.map_err(|_| unsupported("clone cannot take the destination's owner"))
+}
+
+/// The number of hard links to the file open as `file`.
+#[cfg(unix)]
+#[expect(clippy::unnecessary_wraps, reason = "the Windows lookup through `file` can fail")]
+fn link_count(_file: &File, metadata: &Metadata) -> io::Result<u64> {
+	Ok(std::os::unix::fs::MetadataExt::nlink(metadata))
+}
+
+#[cfg(windows)]
+fn link_count(file: &File, _metadata: &Metadata) -> io::Result<u64> {
+	imp::link_count(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn link_count(_file: &File, _metadata: &Metadata) -> io::Result<u64> {
+	Err(unsupported("copy-on-write cloning is not implemented on this platform"))
+}
+
+/// Creates `dst` as a clone of `src`.
+#[cfg(target_os = "macos")]
+fn clone_new(src: &Path, dst: &Path) -> io::Result<()> {
+	clonefile(src, dst, 0)
+}
+
+/// Creates `dst` as a clone of `src`, removing it again on failure.
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
+fn clone_new(src: &Path, dst: &Path) -> io::Result<()> {
+	let src = File::open(src)?;
+	let dst_file = fs::OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.open(dst)?;
 	let cloned = imp::clone_into(&src, &dst_file);
-	if cloned.is_err() && existing.is_none() {
+	if cloned.is_err() {
 		drop(dst_file);
 		let _ = fs::remove_file(dst);
 	}
 	cloned
 }
 
-#[cfg(target_os = "macos")]
-fn clone_to(src: &Path, dst: &Path, existing: Option<&Metadata>) -> io::Result<()> {
-	match existing {
-		None => clonefile(src, dst, 0),
-		// Swap the file a symlinked `dst` names, as an in-place copy writes it.
-		Some(metadata) => imp::clone_over(src, &fs::canonicalize(dst)?, metadata),
-	}
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
-fn clone_to(_src: &Path, _dst: &Path, _existing: Option<&Metadata>) -> io::Result<()> {
+fn clone_new(_src: &Path, _dst: &Path) -> io::Result<()> {
 	Err(unsupported("copy-on-write cloning is not implemented on this platform"))
 }
 
@@ -152,7 +211,7 @@ mod imp {
 	// fits both.
 	const FICLONE: libc::Ioctl = 0x4004_9409;
 
-	/// Replaces the data of the empty `dst` with a clone of `src`'s.
+	/// Clones `src`'s data into the empty `dst`.
 	pub fn clone_into(src: &File, dst: &File) -> io::Result<()> {
 		// SAFETY: both descriptors are borrowed from live files for the call,
 		// and the kernel retains neither.
@@ -170,19 +229,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-	use std::{
-		ffi::CString,
-		fs::{self, Metadata},
-		io,
-		os::unix::{
-			ffi::OsStrExt as _,
-			fs::{MetadataExt as _, chown},
-		},
-		path::Path,
-		sync::atomic::{AtomicU64, Ordering},
-	};
-
-	use super::unsupported;
+	use std::{ffi::CString, io, os::unix::ffi::OsStrExt as _, path::Path};
 
 	/// Clones a symlink itself rather than its target. Darwin's `clonefile.h`
 	/// defines it; `libc` does not.
@@ -199,39 +246,6 @@ mod imp {
 		} else {
 			Err(io::Error::last_os_error())
 		}
-	}
-
-	/// Replaces the regular file `dst` (described by `metadata`) with a clone
-	/// of `src` made beside it, when the swap passes for an in-place copy.
-	pub fn clone_over(src: &Path, dst: &Path, metadata: &Metadata) -> io::Result<()> {
-		/// Keeps the temporaries of concurrent clones in one process apart.
-		static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-		if metadata.nlink() != 1 {
-			return Err(unsupported("destination has other hard links"));
-		}
-		if fs::OpenOptions::new().write(true).open(dst).is_err() {
-			return Err(unsupported("destination is not writable"));
-		}
-		let temp = dst.with_file_name(format!(
-			".cow-clone-{}-{}",
-			std::process::id(),
-			SEQUENCE.fetch_add(1, Ordering::Relaxed)
-		));
-		clonefile(src, &temp, 0)?;
-		let swapped = (|| {
-			let clone = fs::symlink_metadata(&temp)?;
-			if (clone.uid(), clone.gid()) != (metadata.uid(), metadata.gid()) {
-				chown(&temp, Some(metadata.uid()), Some(metadata.gid()))
-					.map_err(|_| unsupported("clone cannot take the destination's owner"))?;
-			}
-			fs::set_permissions(&temp, metadata.permissions())?;
-			fs::rename(&temp, dst)
-		})();
-		if swapped.is_err() {
-			let _ = fs::remove_file(&temp);
-		}
-		swapped
 	}
 
 	pub const fn is_unsupported_code(code: i32) -> bool {
@@ -253,7 +267,9 @@ mod imp {
 			ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
 			ERROR_NOT_SAME_DEVICE, ERROR_NOT_SUPPORTED,
 		},
-		Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE,
+		Storage::FileSystem::{
+			BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_SPARSE_FILE, GetFileInformationByHandle,
+		},
 		System::{
 			IO::DeviceIoControl,
 			Ioctl::{
@@ -273,25 +289,12 @@ mod imp {
 	/// holding the end of file, as the `reflink` tools do
 	/// (`0xbadfca11/reflink`, `reflink-copy`).
 	pub fn clone_into(src: &File, dst: &File) -> io::Result<()> {
-		// Filesystems without block cloning fail here, before `dst` changes.
-		let mut integrity = FSCTL_GET_INTEGRITY_INFORMATION_BUFFER::default();
-		fsctl(src, FSCTL_GET_INTEGRITY_INFORMATION, &(), &mut integrity)?;
-		let cloned = clone_extents(src, dst, &integrity);
-		if cloned.is_err() {
-			let _ = dst.set_len(0);
-			let _ = set_sparse(dst, false);
-		}
-		cloned
-	}
-
-	fn clone_extents(
-		src: &File,
-		dst: &File,
-		integrity: &FSCTL_GET_INTEGRITY_INFORMATION_BUFFER,
-	) -> io::Result<()> {
 		/// The largest cloned region is under 4 GiB.
 		const MAX_REGION: u64 = (4 << 30) - 1;
 
+		// Filesystems without block cloning fail here.
+		let mut integrity = FSCTL_GET_INTEGRITY_INFORMATION_BUFFER::default();
+		fsctl(src, FSCTL_GET_INTEGRITY_INFORMATION, &(), &mut integrity)?;
 		let metadata = src.metadata()?;
 		let len = metadata.len();
 		let cluster = u64::from(integrity.ClusterSizeInBytes).max(1);
@@ -334,6 +337,18 @@ mod imp {
 			set_sparse(dst, false)?;
 		}
 		Ok(())
+	}
+
+	/// The number of hard links to `file`.
+	pub fn link_count(file: &File) -> io::Result<u64> {
+		let mut info = BY_HANDLE_FILE_INFORMATION::default();
+		// SAFETY: `file` owns a valid handle for the call, and `info` is a live,
+		// writable buffer of the expected type.
+		if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &raw mut info) } == 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(u64::from(info.nNumberOfLinks))
+		}
 	}
 
 	fn set_sparse(file: &File, sparse: bool) -> io::Result<()> {

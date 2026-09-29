@@ -88,18 +88,23 @@ describe("MCPManager initial connection ownership", () => {
 			type: "stdio",
 			command: process.execPath,
 			args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts"), marker],
-			timeout: 100,
+			timeout: 1_000,
 		};
 		manager.setOnToolsChanged(tools => {
 			if (tools.some(tool => tool.name === `mcp__server_${DELAYED_TOOL_NAME}`)) rebound.resolve();
 		});
 
 		try {
-			const result = await manager.connectServers({ server: config }, {}, event => {
-				statusTypes.push(event.type);
-				if (event.type === "connected") statusSettled.resolve();
-			});
-			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 100ms');
+			const result = await manager.connectServers(
+				{ server: config },
+				{},
+				event => {
+					statusTypes.push(event.type);
+					if (event.type === "connected") statusSettled.resolve();
+				},
+				0,
+			);
+			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 1000ms');
 			await rebound.promise;
 			await statusSettled.promise;
 
@@ -110,7 +115,7 @@ describe("MCPManager initial connection ownership", () => {
 			await manager.disconnectAll();
 			await removeWithRetries(workDir);
 		}
-	}, 5_000);
+	}, 10_000);
 
 	it("stops a startup-timeout retry when that server is disconnected", async () => {
 		vi.useFakeTimers();

@@ -561,6 +561,15 @@ export interface AnthropicCompat {
 	 */
 	disableStrictTools?: boolean;
 	/**
+	 * The endpoint is Amazon Bedrock's Anthropic Messages API (`/anthropic` on
+	 * bedrock-runtime or bedrock-mantle). Requests drop tool `strict`, fit
+	 * `metadata.user_id` to Bedrock's request-metadata pattern, and may use
+	 * on-demand compaction. Detected from the model `baseUrl`; set it in
+	 * models.yml `compat` for a route the URL check cannot see (a proxy, an
+	 * `ANTHROPIC_BASE_URL` reroute) or to `false` to opt out.
+	 */
+	bedrockMessagesApi?: boolean;
+	/**
 	 * Map adaptive thinking (`thinking: { type: "adaptive" }`) to
 	 * `{ type: "enabled", budget_tokens }`. Vertex AI rejects the `adaptive`
 	 * tag with `Input tag 'adaptive' ... does not match any of the expected
@@ -960,9 +969,17 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 export type ResolvedOpenRouterCompat = ResolvedOpenAICompat & ResolvedOpenAIResponsesCompat;
 
 /** Fully-resolved anthropic-messages compat view (same contract as `ResolvedOpenAICompat`). */
-export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdleTimeoutMs" | "thinkingLoopGuard">> & {
+export type ResolvedAnthropicCompat = Required<
+	Omit<AnthropicCompat, "streamIdleTimeoutMs" | "thinkingLoopGuard" | "bedrockMessagesApi">
+> & {
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: AnthropicCompat["thinkingLoopGuard"];
+	/**
+	 * Bedrock's Anthropic Messages API (see {@link AnthropicCompat.bedrockMessagesApi}).
+	 * `true` when detected or configured; otherwise unset, so rows baked before
+	 * this field keep matching.
+	 */
+	bedrockMessagesApi?: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts; 0 disables the idle watchdog.
 	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
@@ -1201,6 +1218,12 @@ export interface Model<TApi extends Api = Api> {
 	kind?: ModelKind;
 	/** Grounding transport supported by this chat model. */
 	webSearch?: WebSearchGrounding;
+	/** Cheaper same-provider model to run hosted web search in this model's place (model id or provider/id). */
+	webSearchModel?: string;
+	/** Whether this chat model can carry the Responses `image_generation` tool itself. */
+	hostedImage?: boolean;
+	/** Same-provider image model to generate images in this model's place (model id or provider/id). */
+	imageModel?: string;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and

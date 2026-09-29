@@ -6,7 +6,7 @@ import { hexToOklch, oklchCusp, relativeLuminance } from "@oh-my-pi/pi-utils";
 
 const lum = (hex: string): number => relativeLuminance(hex) ?? 0;
 const contrast = (a: number, b: number): number => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-const saturatedThemeHues = (colors: string[]): number[] => {
+const saturatedThemeHues = (colors: readonly string[]): number[] => {
 	const hues: number[] = [];
 	for (const color of colors) {
 		const { c, h } = hexToOklch(color);

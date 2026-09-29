@@ -135,10 +135,11 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("requested-image");
 	});
 
-	it("hoists the active provider only within the non-explicit default image chain", async () => {
-		const openai = catalogModel("openai", "gpt-image-1", "openai-responses");
+	it("tries the session model's same-provider image swap before the default image chain", async () => {
+		const openai = catalogModel("openai", "gpt-image-2", "openai-responses");
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
-		const active = catalogModel("xai", "grok-chat", "openai-responses", "chat");
+		const active = catalogModel("xai", "grok-4.5", "openai-responses", "chat");
+		expect(active.imageModel).toBe("grok-imagine-image");
 		const urls: string[] = [];
 		const fetchMock: FetchImpl = async input => {
 			urls.push(input.toString());
@@ -151,7 +152,7 @@ describe("imageGenTool catalog routing", () => {
 			activeModel: active,
 		});
 
-		const result = await imageGenTool.execute("hoist", { subject: "active provider" }, undefined, ctx);
+		const result = await imageGenTool.execute("swap", { subject: "active provider" }, undefined, ctx);
 		collectPaths(result);
 
 		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
@@ -390,6 +391,31 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gpt-image-selected");
 	});
 
+	it("lets a hosted-image session model generate by itself when its proxy lacks the swap target", async () => {
+		const proxied = catalogModel("my-proxy", "gpt-5.6-sol", "openai-responses", "chat");
+		expect(proxied.hostedImage).toBe(true);
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body));
+			return hostedResponse();
+		};
+		const ctx = createContext({
+			models: [proxied],
+			settings: Settings.isolated(),
+			fetch: fetchMock,
+			activeModel: proxied,
+		});
+
+		const result = await imageGenTool.execute("as-is", { subject: "proxy" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requestBody?.model).toBe("gpt-5.6-sol");
+		const tools = requestBody?.tools;
+		if (!Array.isArray(tools)) throw new Error("Expected hosted image tools");
+		expect(tools[0]).not.toHaveProperty("model");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
 	it("omits the image tool model for Codex hosted image requests", async () => {
 		const image = catalogModel("openai-codex", "gpt-image-selected", "openai-codex-responses");
 		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
@@ -419,7 +445,7 @@ describe("imageGenTool catalog routing", () => {
 	});
 
 	it("reports the image model, size, and quality the Codex backend actually ran", async () => {
-		const image = catalogModel("openai-codex", "gpt-image-1", "openai-codex-responses");
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
 		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
 		// The Codex backend streams the image in `output_item.done`, leaves `response.completed.output` empty,
 		// and echoes its own tool configuration, ignoring the requested model/size/quality.
@@ -441,7 +467,7 @@ describe("imageGenTool catalog routing", () => {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
 			});
-		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-1" } });
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
 		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
 
 		const result = await imageGenTool.execute(
@@ -455,7 +481,7 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gpt-image-2-codex");
 		expect(result.details?.images[0]).toMatchObject({ size: "1774x887", quality: "low" });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-1)");
+		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)");
 		expect(text).toContain("(1774x887, quality low)");
 	});
 });

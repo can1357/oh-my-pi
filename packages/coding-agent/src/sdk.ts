@@ -773,8 +773,6 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
-	/** Inherited eval executor session id for subagents sharing parent eval state. */
-	parentEvalSessionId?: string;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -2208,8 +2206,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
-			getEvalSessionId: () =>
-				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
+			getEvalSessionId: () => session?.getEvalSessionId() ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
@@ -4301,18 +4298,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformToolCallArguments,
 			// A stray sloppy payload in plain text becomes a real edit tool call so
 			// the normal pipeline (validation, approval, rendering) executes it.
-			transformAssistantMessage: message => {
-				if (!cfgEditRecoverInlineEdits.get(settings)) return;
-				// The live tool is an ExtensionToolWrapper whose proxy forwards the
-				// EditTool `mode` getter; a bridge/custom edit tool without a sloppy
-				// mode (e.g. Cursor's replace-pinned pi_edit) never recovers.
-				const editTool = agent.state.tools.find(tool => tool.name === "edit") as { mode?: EditMode } | undefined;
-				if (editTool?.mode !== "sloppy") return;
-				const recovered = recoverInlineSloppyEdit(message);
-				if (recovered > 0) {
-					logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
+			transformAssistantMessage: async (message, signal) => {
+				if (cfgEditRecoverInlineEdits.get(settings)) {
+					// The live tool is an ExtensionToolWrapper whose proxy forwards the
+					// EditTool `mode` getter; a bridge/custom edit tool without a sloppy
+					// mode (e.g. Cursor's replace-pinned pi_edit) never recovers.
+					const editTool = agent.state.tools.find(tool => tool.name === "edit") as { mode?: EditMode } | undefined;
+					if (editTool?.mode === "sloppy") {
+						const recovered = recoverInlineSloppyEdit(message);
+						if (recovered > 0) {
+							logger.info("recovered inline sloppy edit payload into edit tool call", { regions: recovered });
+						}
+					}
 				}
+				const content = await session?.extensionRunner?.emitAssistantMessage(message, signal);
+				if (content) message.content = content;
 			},
+			// Recovery only fires on turns without tool calls and appends a new one,
+			// so streamed calls (and their speculation sessions) are never rewritten.
+			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
@@ -4543,7 +4547,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
-			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and

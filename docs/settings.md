@@ -358,7 +358,7 @@ modelRoles:
   memory: local/lfm2-1.2b
 
   # Model-kind workloads
-  image: openai/gpt-image-1
+  image: openai/gpt-image-2
   web: web/duckduckgo
   speech: local/kokoro
   dictation: local/parakeet-tdt-0.6b-v3

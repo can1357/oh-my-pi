@@ -515,18 +515,27 @@ async function spillLargeResultToArtifact(
 	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
 	if (existingMeta?.pagedSource) return result;
 
-	// Measure total text content
+	// Measure total text content. `totalLength` is the UTF-16 length of the "\n"-joined text.
 	const textParts: string[] = [];
+	let totalLength = -1;
 	for (const block of result.content) {
 		if (block.type === "text" && block.text) {
 			textParts.push(block.text);
+			totalLength += block.text.length + 1;
 		}
 	}
 	if (textParts.length === 0) return result;
 
+	// UTF-8 takes 1–3 bytes per UTF-16 code unit (a surrogate pair is 4 bytes for 2 units), so
+	// the length alone settles short and long results. In between, per-part byte lengths sum
+	// to the joined length: the "\n" joiner keeps lone surrogates from pairing across parts.
+	if (totalLength * 3 <= threshold) return result;
+	if (totalLength <= threshold) {
+		let totalBytes = textParts.length - 1;
+		for (const part of textParts) totalBytes += Buffer.byteLength(part, "utf-8");
+		if (totalBytes <= threshold) return result;
+	}
 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
-	const totalBytes = Buffer.byteLength(fullText, "utf-8");
-	if (totalBytes <= threshold) return result;
 
 	// Save the full output as an artifact so the elided bytes stay recoverable.
 	// In a persistent session this hits `Bun.write`, which can throw (disk full,

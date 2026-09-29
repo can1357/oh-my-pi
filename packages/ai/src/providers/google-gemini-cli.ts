@@ -751,9 +751,16 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const responseSignal = options?.signal
 					? AbortSignal.any([options.signal, responseAbortController.signal])
 					: responseAbortController.signal;
+				const onSseEvent = options?.onSseEvent;
 				const chunks = iterateWithIdleTimeout(
-					readSseJson<CloudCodeAssistResponseChunk>(activeResponse.body, responseSignal, event =>
-						options?.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
+					// Attach the observer only when a diagnostic listener exists: any
+					// observer turns on per-line raw capture in `readSseJson`.
+					readSseJson<CloudCodeAssistResponseChunk>(
+						activeResponse.body,
+						responseSignal,
+						onSseEvent
+							? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+							: undefined,
 					),
 					{
 						firstItemTimeoutMs: firstEventTimeoutMs,

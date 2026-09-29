@@ -47,6 +47,15 @@ export class WidthAwareText implements Component {
 		this.#inner.invalidate();
 	}
 
+	/**
+	 * Re-run the formatter on the next render because its inputs changed.
+	 * Unlike {@link invalidate}, the inner `Text` keeps its wrap cache, so a
+	 * reformat that yields the same string skips re-wrapping and re-tinting.
+	 */
+	reformat(): void {
+		this.#cachedText = undefined;
+	}
+
 	render(width: number): readonly string[] {
 		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
 		const contentWidth = Math.max(1, width - paddingX * 2);

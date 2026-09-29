@@ -1,4 +1,4 @@
-import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isBedrockAnthropicRoute, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Model } from "../types";
 import type { AnthropicMessagesClientLike } from "./anthropic-client";
 import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
@@ -46,6 +46,15 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 		(model.provider === "anthropic"
 			? resolveDirectAnthropicBaseUrl(model)
 			: normalizeAnthropicBaseUrl(model.baseUrl));
+	// Bedrock's Anthropic Messages API implements on-demand compaction. The flag is detected
+	// from a Bedrock `/anthropic` baseUrl, or set in models.yml for a proxy or a reroute; it
+	// applies to the model's own endpoint or a Bedrock `/anthropic` route it reaches.
+	if (
+		model.compat.bedrockMessagesApi === true &&
+		(isBedrockAnthropicRoute(route) || route === normalizeAnthropicBaseUrl(model.baseUrl))
+	) {
+		return true;
+	}
 	return (
 		isSupportedCompactionEndpoint(route) &&
 		(model.compat.firstPartyProvider === true ||

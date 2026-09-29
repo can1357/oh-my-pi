@@ -262,6 +262,59 @@ describe("Loader component", () => {
 		loader.stop();
 	});
 
+	it("redocks changing trailers with live colors and variable-width spinner output", () => {
+		vi.useFakeTimers();
+		const tui = new TUI(new VirtualTerminal(24, 4));
+		let color = 31;
+		let spinnerSuffix = "";
+		let trailer = "T";
+		const loader = new Loader(
+			tui,
+			text => `\x1b[${color}m${text}${spinnerSuffix}\x1b[0m`,
+			text => `\x1b[${color}m${text}\x1b[0m`,
+			"界 e\u0301\nnext",
+			["⠋", "界"],
+		);
+		loader.setTrailer(() => trailer);
+
+		const initial = loader.render(24);
+		expect(Bun.stripANSI(initial[1])).toBe(` ⠋ 界 e\u0301${" ".repeat(16)}T`);
+		expect(initial[2]).toContain("\x1b[31mnext\x1b[0m");
+
+		color = 32;
+		spinnerSuffix = ">>";
+		trailer = "界!";
+		const recolored = loader.render(24);
+		expect(Bun.stripANSI(recolored[1])).toBe(` ⠋>> 界 e\u0301${" ".repeat(12)}界!`);
+		expect(recolored[2]).toContain("\x1b[32mnext\x1b[0m");
+
+		vi.advanceTimersByTime(80);
+		expect(Bun.stripANSI(loader.render(24)[1])).toBe(` 界>> 界 e\u0301${" ".repeat(11)}界!`);
+
+		trailer = "a trailer that does not fit";
+		expect(loader.render(24)[1]).not.toContain(trailer);
+		loader.stop();
+	});
+
+	it("preserves trailer docking when colorizers move ANSI past trailing message whitespace", () => {
+		vi.useFakeTimers();
+		const tui = new TUI(new VirtualTerminal(18, 4));
+		let reset = "";
+		const loader = new Loader(
+			tui,
+			text => text,
+			text => Bun.stripANSI(text) + reset,
+			"\x1b[31mHi \x1b[0m",
+			["*"],
+		);
+		loader.setTrailer(() => "T");
+
+		expect(loader.render(18)[1]).toBe(` * Hi${" ".repeat(12)}T`);
+		reset = "\x1b[0m";
+		expect(loader.render(18)[1]).toBe(` * Hi \x1b[0m${" ".repeat(11)}T`);
+		loader.stop();
+	});
+
 	it("holds animated message-only frames when synchronized output is unavailable", () => {
 		vi.useFakeTimers();
 		setSystemTime(new Date(1_000));
