@@ -19,7 +19,6 @@ import {
 	type ToolRenderer,
 	toolRenderers,
 } from "../tools/index";
-import { BASH_DEFAULT_PREVIEW_LINES } from "../tools/bash";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
 import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
@@ -36,7 +35,6 @@ import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache } from "../native/blobs";
 import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
-import { EVAL_DEFAULT_PREVIEW_LINES } from "../tools/eval";
 import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
 import { isNativeRendering } from "../native/state";
@@ -1672,13 +1670,13 @@ export class ToolExecutionComponent extends Container {
 				context.output = output;
 			}
 			context.expanded = this.#expanded;
-			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
 			context.expanded = this.#expanded;
-			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

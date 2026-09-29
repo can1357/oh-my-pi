@@ -1042,39 +1042,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					appendTail(cellOutput);
 				}
 
-				if (result.cancelled) {
-					cellResult.status = "error";
-					pushUpdate();
-					const errorMsg = result.output || "Command aborted";
-					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput || errorMsg;
-
-					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
-					commitDisplaySpills(summaryForMeta);
-					const details: EvalToolDetails = {
-						language: languages[0],
-						languages,
-						cells: cellResults,
-						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
-						isError: true,
-					};
-					if (notice) details.notice = notice;
-
-					return toolResult(details)
-						.content([{ type: "text", text: outputText }, ...images])
-						.truncationFromSummary(summaryForMeta, { direction: "tail" })
-						.error()
-						.done();
-				}
-
-				if (result.exitCode !== 0 && result.exitCode !== undefined) {
+				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput
-						? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
-						: `Command exited with code ${result.exitCode}`;
+					const exitLine = `Command exited with code ${result.exitCode}`;
+					const outputText = result.cancelled
+						? combinedOutput || result.output || "Command aborted"
+						: combinedOutput
+							? `${combinedOutput}\n\n${exitLine}`
+							: exitLine;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					commitDisplaySpills(summaryForMeta);

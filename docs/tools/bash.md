@@ -214,7 +214,7 @@ Choose the setting by the desired outcome:
 - Non-PTY executor with a deadline arms a host-side timer at `max(1_000, timeoutMs)` and passes the same positive timeout to the native run; `timeout: 0` passes no deadline. A timed-out persistent shell session is quarantined (`packages/coding-agent/src/exec/bash-executor.ts`).
 - In-memory output tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). Once exceeded, the sink keeps only the tail window in memory.
 - Streaming callback throttle in `executeBash()`: `50ms` between `onChunk` calls when streaming is enabled.
-- TUI collapsed preview: `10` visual lines (`BASH_DEFAULT_PREVIEW_LINES`) when rendered inline in the agent UI; this is a renderer cap, not a tool output cap.
+- TUI collapsed preview: `10` visual lines (`DEFAULT_TERMINAL_PREVIEW_LINES`) when rendered inline in the agent UI; this is a renderer cap, not a tool output cap.
 
 ## Errors
 - Input validation:

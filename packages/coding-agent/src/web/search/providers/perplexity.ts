@@ -21,7 +21,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -214,11 +214,6 @@ function mergeOAuthEventSnapshot(
 	}
 
 	return merged;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-	return value as Record<string, unknown>;
 }
 
 function parseJson(text: string): unknown | null {

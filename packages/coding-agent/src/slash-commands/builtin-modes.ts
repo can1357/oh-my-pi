@@ -92,9 +92,40 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
+	if (session.isUltrafastModeEnabled()) return "ultra";
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
+
+/**
+ * `/fast [on|ultra|off|status]` for the active model: `on` selects the
+ * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
+ * either. Bare invocation toggles between off and priority. Returns the
+ * user-facing reply, or `undefined` for an unknown argument.
+ */
+function runFastCommand(arg: string, session: AgentSession): string | undefined {
+	switch (arg) {
+		case "":
+		case "toggle":
+			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "on":
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		case "ultra":
+		case "ultrafast":
+			return session.setUltrafastMode(true)
+				? "Ultrafast mode enabled."
+				: "Ultrafast is unavailable for the current model.";
+		case "off":
+			session.setFastMode(false);
+			return "Fast mode disabled.";
+		case "status":
+			return `Fast mode is ${formatFastModeStatus(session)}.`;
+		default:
+			return undefined;
+	}
 }
 
 const SLOW_UNSUPPORTED =
@@ -474,70 +505,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description:
+			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
 		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
+			{ name: "on", description: "Enable fast mode (priority tier)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
-				return commandConsumed();
-			}
-			if (arg === "status") {
-				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
-				return commandConsumed();
-			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage(FAST_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "status") {
-				runtime.ctx.showStatus(`Fast mode is ${formatFastModeStatus(runtime.ctx.session)}.`);
-				clearSubmittedText(runtime);
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? FAST_USAGE);
 			clearSubmittedText(runtime);
 		},
 	},

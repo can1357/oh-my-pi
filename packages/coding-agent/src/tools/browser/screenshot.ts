@@ -1,8 +1,9 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import { inflateSync } from "node:zlib";
 
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
+import { encodeRawPng } from "../../utils/png-encode";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
@@ -325,48 +326,10 @@ export function decodePng(buffer: Uint8Array): DecodedPng {
 	return { width, height, pixels };
 }
 
-function crc32(bytes: Uint8Array): number {
-	let crc = 0xffffffff;
-	for (const byte of bytes) {
-		crc ^= byte;
-		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-	}
-	return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type: string, data: Uint8Array): Buffer {
-	const typeBytes = Buffer.from(type, "ascii");
-	const chunk = Buffer.alloc(12 + data.length);
-	chunk.writeUInt32BE(data.length, 0);
-	typeBytes.copy(chunk, 4);
-	Buffer.from(data).copy(chunk, 8);
-	chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, Buffer.from(data)])), 8 + data.length);
-	return chunk;
-}
-
 /** Encode RGBA pixels as a non-interlaced 8-bit PNG. */
 export function encodePng(image: DecodedPng): Buffer {
 	if (image.pixels.length !== image.width * image.height * 4) throw new ToolError("RGBA pixel buffer size mismatch");
-	const header = Buffer.alloc(13);
-	header.writeUInt32BE(image.width, 0);
-	header.writeUInt32BE(image.height, 4);
-	header[8] = 8;
-	header[9] = 6;
-	const raw = Buffer.alloc((image.width * 4 + 1) * image.height);
-	for (let y = 0; y < image.height; y++) {
-		const rowStart = y * (image.width * 4 + 1);
-		raw[rowStart] = 0;
-		Buffer.from(image.pixels.buffer, image.pixels.byteOffset + y * image.width * 4, image.width * 4).copy(
-			raw,
-			rowStart + 1,
-		);
-	}
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(raw)),
-		pngChunk("IEND", Buffer.alloc(0)),
-	]);
+	return encodeRawPng(image.pixels, image.width, image.height, 4);
 }
 
 function rgbaAt(image: DecodedPng, x: number, y: number): readonly [number, number, number, number] {

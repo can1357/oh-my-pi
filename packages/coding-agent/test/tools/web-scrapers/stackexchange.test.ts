@@ -91,5 +91,6 @@ describe.skipIf(SKIP)("handleStackOverflow", () => {
 		expect(result?.content).toContain("# ");
 		expect(result?.content).toContain("Score:");
 		expect(result?.content).toContain("Tags:");
+		expect(result?.content).toContain("## Question");
 	});
 });
