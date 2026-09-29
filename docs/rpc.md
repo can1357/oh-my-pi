@@ -86,7 +86,8 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), one per accepted prompt; see [`prompt` payload](#prompt-payload)
 10. Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
 11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Idle recap updates (`{ type: "recap_update", recap }`); see [Idle recap updates](#idle-recap-updates)
+13. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Inbound frame categories (stdin)
 
@@ -317,6 +318,11 @@ is re-armed.
       ]
     }
   ],
+  "latestRecap": {
+    "text": "Mapped the RPC surface. Next: implement the client adapter.",
+    "trigger": "idle",
+    "timestamp": 1787911200000
+  },
   "systemPrompt": ["..."],
   "dumpTools": [
     {
@@ -332,6 +338,43 @@ is re-armed.
   }
 }
 ```
+
+### Idle recap updates
+
+After a terminal `agent_end`, RPC mode applies the configured `recap.enabled`
+and `recap.idleSeconds` policy, then runs the same ephemeral recap model turn
+used by the TUI. Like TUI recaps, the full reply is journaled to history.db for
+persisted sessions; it never enters the session file or LLM context. A
+completed recap is emitted as:
+
+```json
+{
+  "type": "recap_update",
+  "recap": {
+    "text": "Mapped the RPC surface. Next: implement the client adapter.",
+    "trigger": "idle",
+    "timestamp": 1787911200000
+  }
+}
+```
+
+`timestamp` is Unix epoch milliseconds. A new agent turn or an RPC session
+command that switches sessions (reopening the active session with
+`open_session` does not) invalidates the current recap and emits
+`{ "type": "recap_update", "recap": null }`. `prompt` (including local builtins
+such as `/compact`), `abort`, and `compact` cancel a pending or in-flight recap
+but keep the current one. `get_state.latestRecap` exposes the current value for
+reconnecting clients and is absent when no recap is active or when the recap no
+longer describes the active position: a different session (ownership follows
+the session file and persisted session id, not the provider `sessionId`, which
+`--provider-session-id` can pin) or a tree navigation off the recapped branch.
+Such extension-driven changes hide the recap from `get_state` at once; the null
+frame follows the next agent turn.
+`recap_update` is a session event, so `set_event_filter` suppresses it unless
+listed; the recap is still generated and exposed via `get_state`. Set
+`recap.enabled: false` to stop generating recaps (and their model calls). The
+bundled TypeScript and Python clients expose these frames through
+`onRecapUpdate` and `on_recap_update`, respectively.
 
 ### `set_fast_mode` payload
 
@@ -527,6 +570,7 @@ Common event types:
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
+- `recap_update` (synthesized by RPC mode; see [Idle recap updates](#idle-recap-updates))
 
 Extension runner errors are emitted separately as:
 

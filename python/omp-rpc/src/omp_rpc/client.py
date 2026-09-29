@@ -45,6 +45,7 @@ from .protocol import (
     OpenSessionResult,
     PromptResultEvent,
     ReadyEvent,
+    RecapUpdateEvent,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
@@ -93,6 +94,7 @@ ExtensionErrorListener = Callable[[ExtensionError], None]
 PromptResultListener = Callable[[PromptResultEvent], None]
 SessionSettledListener = Callable[[SessionSettledEvent], None]
 ReadyListener = Callable[[ReadyEvent], None]
+RecapUpdateListener = Callable[[RecapUpdateEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
 AgentEndListener = Callable[[AgentEndEvent], None]
@@ -558,6 +560,7 @@ class RpcClient:
         self._typed_event_listeners: dict[str, list[AgentEventListener]] = {}
         self._ready_listeners: list[ReadyListener] = []
         self._unknown_notification_listeners: list[UnknownNotificationListener] = []
+        self._recap_update_listeners: list[RecapUpdateListener] = []
         self._ui_request_listeners: list[UiRequestListener] = []
         self._extension_error_listeners: list[ExtensionErrorListener] = []
         self._prompt_result_listeners: list[PromptResultListener] = []
@@ -822,6 +825,10 @@ class RpcClient:
 
     def on_todo_auto_clear(self, listener: TodoAutoClearListener) -> Callable[[], None]:
         return self._add_typed_event_listener("todo_auto_clear", listener)
+
+    def on_recap_update(self, listener: RecapUpdateListener) -> Callable[[], None]:
+        self._recap_update_listeners.append(listener)
+        return lambda: self._remove_listener(self._recap_update_listeners, listener)
 
     def on_ui_request(self, listener: UiRequestListener) -> Callable[[], None]:
         self._ui_request_listeners.append(listener)
@@ -2181,6 +2188,15 @@ class RpcClient:
                         "session_settled",
                         notification.type,
                         self._session_settled_listeners,
+                        notification,
+                    )
+                    continue
+
+                if isinstance(notification, RecapUpdateEvent):
+                    self._dispatch_listeners(
+                        "recap_update",
+                        notification.type,
+                        self._recap_update_listeners,
                         notification,
                     )
                     continue

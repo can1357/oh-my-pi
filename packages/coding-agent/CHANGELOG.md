@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added idle recap updates to JSONL RPC sessions, including reconnect state and bundled TypeScript/Python client listeners ([#10085](https://github.com/can1357/oh-my-pi/pull/10085) by [@rhlsthrm](https://github.com/rhlsthrm)).
+
 ### Fixed
 
 - Fixed `computer.window(74)` matching every open window and `computer.window({ id: 74 })` matching none; a numeric id now resolves the same window as `"74"` ([#13649](https://github.com/can1357/oh-my-pi/pull/13649) by [@will-bogusz](https://github.com/will-bogusz))
