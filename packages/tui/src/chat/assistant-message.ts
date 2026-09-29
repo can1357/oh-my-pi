@@ -13,6 +13,8 @@ import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { latexImage } from "./latex-image";
+import { latexSpans } from "./latex-spans";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -230,6 +232,8 @@ export class AssistantMessageComponent extends Container {
 	 * invalidation) still finds them after the bounded shared cache evicts them.
 	 */
 	#kittyConverted = new Map<string, ImageContent>();
+	#latexImages = new Map<string, ImageContent>();
+	#latexImagesAwaited = new Set<string>();
 	#showImages = true;
 	#showToolResultImages = true;
 	#transcriptBlockFinalized: boolean;
@@ -1057,6 +1061,29 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	#renderLatexImages(markdown: string, contentIndex: number): void {
+		if (!this.#showImages || !TERMINAL.imageProtocol) return;
+		const spans = latexSpans(markdown);
+		for (let index = 0; index < spans.length; index++) {
+			const span = spans[index]!;
+			const key = `${span.display ? "display" : "inline"}\0${span.tex}`;
+			const image = this.#latexImages.get(key);
+			if (image) {
+				this.#renderImageEntries([{ image, key: `latex:${contentIndex}:${index}:${key}` }], true);
+				continue;
+			}
+			if (this.#latexImagesAwaited.has(key)) continue;
+			this.#latexImagesAwaited.add(key);
+			latexImage(span.tex, span.display)
+				.then(rendered => {
+					this.#latexImages.set(key, rendered);
+					if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+					this.#onImageUpdate?.();
+				})
+				.catch(() => this.#latexImagesAwaited.delete(key));
+		}
+	}
+
 	#renderToolImages(): void {
 		if (!this.#showToolResultImages) return;
 		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
@@ -1111,6 +1138,12 @@ export class AssistantMessageComponent extends Container {
 	#canFastPath(message: AssistantMessage): boolean {
 		for (const content of message.content) {
 			if (content.type === "toolCall" || content.type === "image") return false;
+		}
+		if (
+			TERMINAL.imageProtocol &&
+			message.content.some(content => content.type === "text" && latexSpans(content.text).length > 0)
+		) {
+			return false;
 		}
 		if (this.#toolImagesByCallId.size > 0) return false;
 		const errorPresentation = resolveAssistantErrorPresentation(message);
@@ -1272,6 +1305,7 @@ export class AssistantMessageComponent extends Container {
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				this.#renderLatexImages(trimmed, i);
 				hasRenderedContent = true;
 			} else if (content.type === "thinking") {
 				if (this.#hideThinkingBlock) {

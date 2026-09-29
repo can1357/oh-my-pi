@@ -52,6 +52,7 @@
 			"kitty-vt-wasm": "^0.2.0",
 			"lint-staged": "^17.0.8",
 			"lucide-react": "^1.24.0",
+			"mathjax": "^4.0.0",
 			"onnxruntime-node": "1.26.0",
 			"oxfmt": "^0.65.0",
 			"oxlint": "^1.80.0",

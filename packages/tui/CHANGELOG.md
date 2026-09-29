@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed complex LaTeX in assistant replies rendering as fragmented terminal characters by displaying formulas through the terminal image renderer ([#7996](https://github.com/can1357/oh-my-pi/issues/7996)).
+
 ## [18.4.3] - 2026-09-28
 
 ### Changed

@@ -45,7 +45,8 @@
     "@oh-my-pi/pi-natives": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
-    "@oh-my-pi/snapcompact": "catalog:"
+    "@oh-my-pi/snapcompact": "catalog:",
+    "mathjax": "catalog:"
   },
   "devDependencies": {
     "kitty-vt-wasm": "catalog:"
