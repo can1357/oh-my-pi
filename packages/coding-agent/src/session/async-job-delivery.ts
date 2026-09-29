@@ -23,6 +23,13 @@ import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
  */
 export const ASYNC_RESULT_MESSAGE_TYPE = "async-result";
 
+/**
+ * `customType` of the dead-letter record appended during dispose when owned
+ * background jobs are cancelled before completion: the transcript entry is
+ * what a revived agent reads instead of confabulating job state (#11564).
+ */
+export const ASYNC_JOBS_DEAD_LETTERED_TYPE = "async-jobs-dead-lettered";
+
 /** Result payloads longer than this spill to an artifact with an inline preview. */
 export const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
