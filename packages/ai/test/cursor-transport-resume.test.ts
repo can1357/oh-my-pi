@@ -12,6 +12,9 @@ import {
 	ExecServerMessageSchema,
 	InteractionUpdateSchema,
 	McpArgsSchema,
+	ShellArgsSchema,
+	ShellResultSchema,
+	ShellSuccessSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -91,6 +94,42 @@ function mcpRequestFrame(toolCallId: string, name = "e2e_probe", execId = 1): Bu
 		},
 	});
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+function shellStreamRequestFrame(toolCallId: string, execId: number): Buffer {
+	const message = create(AgentServerMessageSchema, {
+		message: {
+			case: "execServerMessage",
+			value: create(ExecServerMessageSchema, {
+				id: execId,
+				execId: `exec-${toolCallId}-${execId}`,
+				message: {
+					case: "shellStreamArgs",
+					value: create(ShellArgsSchema, { command: "echo hi", workingDirectory: "/tmp", toolCallId }),
+				},
+			}),
+		},
+	});
+	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+}
+
+/** Exec-channel frames the client sent for exec `id`, named by message case. */
+function execFrameCases(body: Buffer, id: number): string[] {
+	const cases: string[] = [];
+	let offset = 0;
+	while (offset + 5 <= body.length) {
+		const length = body.readUInt32BE(offset + 1);
+		const message = fromBinary(AgentClientMessageSchema, body.subarray(offset + 5, offset + 5 + length));
+		offset += 5 + length;
+		if (message.message.case === "execClientMessage" && message.message.value.id === id) {
+			const exec = message.message.value.message;
+			cases.push(exec.case === "shellStream" ? `shellStream:${exec.value.event.case}` : String(exec.case));
+		} else if (message.message.case === "execClientControlMessage") {
+			const control = message.message.value.message;
+			if (control.case === "streamClose" && control.value.id === id) cases.push("streamClose");
+		}
+	}
+	return cases;
 }
 
 let server: http2.Http2Server | undefined;
@@ -672,5 +711,82 @@ describe("Cursor transport mid-stream connection loss and resume", () => {
 		// No second stream was opened because caller aborted during backoff
 		expect(streamIndex).toBe(1);
 		expect(recordedStreams.length).toBe(1);
+	});
+
+	it("fails a non-200 Run response at once with its status instead of resending the request", async () => {
+		cursorTransportTunables.initialBackoffMs = 10;
+		cursorTransportTunables.maxBackoffMs = 20;
+
+		streamHandler = stream => {
+			stream.respond({ ":status": 401, "content-type": "application/json" });
+			stream.end(JSON.stringify({ error: "invalid token" }));
+		};
+
+		const baseUrl = await startServer();
+		const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token" });
+		for await (const _event of stream) {
+		}
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("HTTP 401");
+		expect(result.errorMessage).toContain("invalid token");
+		expect(recordedStreams.length).toBe(1);
+	});
+
+	it("replays a resumed shell stream with the same start-first frame sequence a first run sends", async () => {
+		cursorTransportTunables.initialBackoffMs = 10;
+		cursorTransportTunables.maxBackoffMs = 20;
+
+		let shellExecutions = 0;
+		const execHandlers: CursorExecHandlers = {
+			shell: async () => {
+				shellExecutions++;
+				await Bun.sleep(60);
+				return create(ShellResultSchema, {
+					result: {
+						case: "success",
+						value: create(ShellSuccessSchema, {
+							command: "echo hi",
+							workingDirectory: "/tmp",
+							exitCode: 0,
+							stdout: "hi\n",
+						}),
+					},
+				});
+			},
+		};
+
+		let streamIndex = 0;
+		streamHandler = stream => {
+			const current = streamIndex++;
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			if (current === 0) {
+				stream.write(shellStreamRequestFrame("tool-shell-1", 1));
+				stream.write(checkpointFrame(["tool-shell-1"]));
+				setTimeout(() => stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR), 15);
+				return;
+			}
+			// The resumed stream re-issues the call; finish once the client closes it.
+			stream.write(shellStreamRequestFrame("tool-shell-1", 2));
+			stream.on("data", () => {
+				if (stream.closed || !execFrameCases(recordedStreams[1].body, 2).includes("streamClose")) return;
+				stream.write(checkpointFrame([]));
+				stream.write(turnEndedFrame());
+				stream.end();
+			});
+		};
+
+		const baseUrl = await startServer();
+		const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token", execHandlers });
+		for await (const _event of stream) {
+		}
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(shellExecutions).toBe(1);
+		const replayed = execFrameCases(recordedStreams[1].body, 2);
+		expect(replayed[0]).toBe("shellStream:start");
+		expect(replayed.slice(-2)).toEqual(["shellResult", "streamClose"]);
 	});
 });

@@ -177,6 +177,7 @@ import {
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	sanitizeText,
+	truncate,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
@@ -368,6 +369,9 @@ export const cursorTransportTunables: CursorTransportTunables = {
 	maxTransportRetries: 3,
 	maxNoProgressResumes: 2,
 };
+
+/** Cap on a non-200 Run response body echoed into the error message. */
+const MAX_HTTP_ERROR_BODY_CHARS = 400;
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
@@ -839,6 +843,13 @@ function streamCursorWithWireMode(
 				let sawTurnEnded = false;
 				let endStreamError: Error | null = null;
 				let checkpointReceivedThisAttempt = false;
+				// Only a lost connection is retried inside the turn. Set solely by the
+				// connection-loss paths below, when they are the ones that settle.
+				let transportLost = false;
+				// Connect streams answer HTTP 200 even for application errors, so any
+				// other status is a gateway/auth rejection whose body is not framed.
+				let responseStatus: number | undefined;
+				let httpErrorBody = "";
 
 				const clearKeepaliveTimers = () => {
 					if (keepalivePingTimer) {
@@ -868,7 +879,7 @@ function streamCursorWithWireMode(
 					await log?.close();
 				};
 
-				const settleH2 = (error?: unknown): void => {
+				const settleH2 = (error?: unknown, transportLoss = false): void => {
 					if (h2Settled) return;
 					h2Settled = true;
 					clearKeepaliveTimers();
@@ -876,6 +887,22 @@ function streamCursorWithWireMode(
 						clearInterval(heartbeatTimer);
 						heartbeatTimer = null;
 					}
+					if (error instanceof AIError.AbortError) {
+						h2Completion.reject(error);
+						return;
+					}
+					// A non-200 status names the failure even when a reset follows it.
+					if (responseStatus !== undefined && responseStatus !== 200) {
+						const body = httpErrorBody.trim();
+						h2Completion.reject(
+							new AIError.ProviderHttpError(
+								`Cursor run request failed with HTTP ${responseStatus}${body ? `: ${truncate(body, MAX_HTTP_ERROR_BODY_CHARS)}` : ""}`,
+								responseStatus,
+							),
+						);
+						return;
+					}
+					if (transportLoss) transportLost = true;
 					if (error !== undefined) {
 						h2Completion.reject(error);
 						return;
@@ -885,6 +912,7 @@ function streamCursorWithWireMode(
 						return;
 					}
 					if (!sawTurnEnded) {
+						transportLost = true;
 						h2Completion.reject(
 							new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 								kind: "incomplete-stream",
@@ -979,7 +1007,11 @@ function streamCursorWithWireMode(
 						h2Client = http2.connect(baseUrl);
 					}
 
-					h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+					h2Client.on("error", error => {
+						// The ALPN mapping names a permanent misconfiguration, not a drop.
+						const mapped = mapH2TransportError(error, baseUrl);
+						settleH2(mapped, mapped === error);
+					});
 
 					h2Client.on("goaway", (errorCode: number, lastStreamID: number) => {
 						const streamId = h2Request?.id ?? 1;
@@ -997,7 +1029,7 @@ function streamCursorWithWireMode(
 							`Cursor HTTP/2 GOAWAY received (code ${codeName} / ${errorCode}, lastStreamID ${lastStreamID}, streamId ${streamId})`,
 							{ kind: "incomplete-stream" },
 						);
-						settleH2(goawayError);
+						settleH2(goawayError, true);
 						try {
 							h2Client?.destroy();
 						} catch {}
@@ -1015,6 +1047,7 @@ function streamCursorWithWireMode(
 					};
 
 					h2Request.on("response", headers => {
+						responseStatus = Number(headers[":status"]);
 						debugResponseLogPromise = debugSession?.openResponseLog(
 							`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
 							headers,
@@ -1026,6 +1059,10 @@ function streamCursorWithWireMode(
 							void debugResponseLogPromise.then(log => {
 								log?.write(chunk);
 							});
+						}
+						if (responseStatus !== undefined && responseStatus !== 200) {
+							if (httpErrorBody.length < MAX_HTTP_ERROR_BODY_CHARS) httpErrorBody += chunk.toString("utf8");
+							return;
 						}
 						pendingBuffer = pendingBuffer.length === 0 ? chunk : Buffer.concat([pendingBuffer, chunk]);
 
@@ -1113,7 +1150,7 @@ function streamCursorWithWireMode(
 
 					h2Request.on("error", error => {
 						const mapped = mapH2TransportError(error, baseUrl);
-						void closeDebugLog().finally(() => settleH2(mapped));
+						void closeDebugLog().finally(() => settleH2(mapped, mapped === error));
 					});
 
 					const pingInterval = cursorTransportTunables.keepalivePingIntervalMs;
@@ -1132,7 +1169,7 @@ function streamCursorWithWireMode(
 								"Cursor HTTP/2 keepalive PING timed out",
 								{ kind: "incomplete-stream" },
 							);
-							settleH2(pingTimeoutError);
+							settleH2(pingTimeoutError, true);
 							try {
 								h2Client?.destroy();
 							} catch {}
@@ -1149,7 +1186,7 @@ function streamCursorWithWireMode(
 										`Cursor HTTP/2 keepalive PING failed: ${err.message}`,
 										{ kind: "incomplete-stream" },
 									);
-									settleH2(pingFailedError);
+									settleH2(pingFailedError, true);
 									try {
 										h2Client?.destroy();
 									} catch {}
@@ -1166,6 +1203,7 @@ function streamCursorWithWireMode(
 										`Cursor HTTP/2 keepalive PING error: ${err instanceof Error ? err.message : String(err)}`,
 										{ kind: "incomplete-stream" },
 									),
+									true,
 								);
 							}
 						}
@@ -1208,14 +1246,12 @@ function streamCursorWithWireMode(
 					await closeDebugLog();
 					closeTransport();
 
-					const isValidationError = attemptError instanceof AIError.ValidationError;
+					// Only a lost connection is retried here. HTTP status and auth
+					// rejections, Connect/gRPC application errors, request setup
+					// failures, caller aborts, and anything after turnEnded reach the
+					// caller unchanged.
 					const isCallerAbort = options?.signal?.aborted || attemptError instanceof AIError.AbortError;
-					const isAfterTurnEnded = sawTurnEnded;
-					const isConnectEndStream = endStreamError !== null || attemptError instanceof ConnectEndStreamError;
-					const isGrpcTrailerError =
-						attemptError instanceof Error && attemptError.message.startsWith("gRPC error");
-
-					if (isValidationError || isCallerAbort || isAfterTurnEnded || isConnectEndStream || isGrpcTrailerError) {
+					if (!transportLost || isCallerAbort || sawTurnEnded || endStreamError !== null) {
 						throw attemptError;
 					}
 
@@ -2315,6 +2351,10 @@ async function handleExecServerMessage(
 			const claim = claimExec<ShellResult>(state, "shellStreamArgs", serverToolCallId);
 			if (claim.replay !== undefined) {
 				const shellResult = await claim.replay;
+				// Same start → output/exit → shellResult → streamClose sequence a
+				// first execution sends (`handleShellStreamArgs`), with the output
+				// replayed from the recorded result.
+				sendShellStreamEvent(h2Request, execMsg, { case: "start", value: create(ShellStreamStartSchema, {}) });
 				sendShellStreamExitFromResult(h2Request, execMsg, shellResult, true);
 				sendExecClientMessage(h2Request, execMsg, "shellResult", shellResult);
 				sendExecClientStreamClose(h2Request, execMsg);
