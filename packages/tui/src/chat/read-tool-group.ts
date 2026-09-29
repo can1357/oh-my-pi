@@ -1,17 +1,38 @@
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
 import { getLanguageFromPath, theme } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
-import { type ReadRenderArgs, type ReadToolDetails, readSourceFsPath, splitPathAndSel } from "../tools/read";
+import {
+	type ReadRenderArgs,
+	type ReadToolDetails,
+	readContentCode,
+	readSourceFsPath,
+	splitPathAndSel,
+} from "../tools/read";
 import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
+import { formatCount } from "@oh-my-pi/pi-utils";
+import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { NativeToolHead } from "../tools/renderer";
+import { card, code, keyed, node, span, text, withHidden } from "../native/describe";
+import {
+	type DescribeContext,
+	type NativeChild,
+	type NativeNode,
+	type NativeUiEvent,
+	rootToggleExpanded,
+} from "../native/node";
+import { plainText } from "../native/spans";
+import { Memo } from "../native/memo";
+import { fileHref, fileRow, inlineErrorView } from "../tools/native-view";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -116,6 +137,21 @@ type ReadUsageRow = {
 
 /** Number of code lines to show in collapsed preview mode */
 const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
+
+/**
+ * Collapsed clamp for a data-first group whose previews are already trimmed
+ * to {@link COLLAPSED_PREVIEW_LINES}: large enough never to cut the trimmed
+ * body, so collapsed shows every file and the head of each preview.
+ */
+const TRIMMED_BODY_PREVIEW = { lines: 1000 } as const;
+
+/** Native item tone per read status; successful reads stay neutral. */
+const READ_STATUS_TONE: Record<ReadEntry["status"], "pending" | "warning" | "error" | undefined> = {
+	success: undefined,
+	pending: "pending",
+	warning: "warning",
+	error: "error",
+};
 
 type ReadDisplayTarget = {
 	entry: ReadEntry;
@@ -329,6 +365,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	// run broke, seal(), or an expansion toggle — and the transcript's
 	// width-epoch resolution and committed-render bypass must observe it.
 	#blockVersion = 0;
+	#displayVersion = 0;
+	readonly #native = new Memo();
+	/** Content previews toggled in the terminal, by tool call id. */
+	#previewCollapsed = new Map<string, boolean>();
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
@@ -503,6 +543,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
+		this.#previewCollapsed.clear();
 		this.#updateDisplay();
 	}
 
@@ -515,7 +556,306 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this;
 	}
 
+	/**
+	 * Mirrors the terminal's toggles: the `tool` head (the group's root) is
+	 * `Ctrl+O`'s expansion; a fallback preview card collapses on its own
+	 * (`setExpanded` resets those).
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) {
+			this.setExpanded(expanded);
+			return;
+		}
+		if (event.type !== "toggle" || !event.key.startsWith("p")) return;
+		const toolCallId = event.key.slice(1);
+		if (!this.#entries.has(toolCallId)) return;
+		this.#previewCollapsed.set(toolCallId, event.collapsed);
+		this.#displayVersion++;
+	}
+
+	/**
+	 * The read run as one inline `tool` on terminals that list the kind, else
+	 * the fallback: a bare `card` (role `omp.tool.read`) with `Read <path>` or
+	 * `Read (N)` in the head, a `list` of path items (status tone, link,
+	 * correction and conflict detail, nested usage) and, with content previews
+	 * on, a `code` block per read clamped by the card's preview while collapsed.
+	 */
+	override describe(cx?: DescribeContext): NativeNode {
+		const dataFirst = cx?.supports("tool") === true;
+		const key = [dataFirst, this.#displayVersion, this.#toolActivityVisible, this.#sealed];
+		return this.#native.get(key, () =>
+			withHidden(dataFirst ? this.#describeTool() : this.#describeGroup(), !this.#toolActivityVisible),
+		);
+	}
+
+	/**
+	 * The data-first read (§7.3 read, read group, read error): one inline
+	 * `tool` (role `omp.tool.read`). One file: `Read path:13-36`, a failure's
+	 * message in the head. Several: `Read 3 files` over one 22px row per file
+	 * (glyph, dim dir, strong name, range). Content previews are numbered
+	 * `code` (a section per file in a group), trimmed while collapsed.
+	 */
+	#describeTool(): NativeNode {
+		const entries = [...this.#entries.values()];
+		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
+		const status = this.#groupStatus(entries);
+		const previews = entries.filter(entry => entry.status !== "error" && this.#shouldRenderPreview(entry));
+		const body: NativeChild[] = [];
+		let head: NativeToolHead;
+		// Previews (and a long error message) are what a collapse hides; plain rows always show.
+		let collapsible = previews.length > 0;
+		if (rows.length <= 1) {
+			const row = rows[0];
+			const error = row && this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
+			const rowHead: NativeToolHead = row ? this.#nativeRowHead(row) : { target: "…", targetKind: "path" };
+			if (error !== undefined) {
+				const view = inlineErrorView(rowHead, error);
+				head = view.tool ?? rowHead;
+				if (view.body) {
+					body.push(...view.body);
+					collapsible = true;
+				}
+			} else {
+				head = rowHead;
+			}
+			for (const entry of previews) body.push(...this.#nativePreview(entry));
+			for (const [i, usage] of (this.#usageRowsBySummaryRow(rows).get(0) ?? []).entries()) {
+				body.push(this.#nativeUsage(usage, `u${i}`));
+			}
+		} else {
+			head = { target: formatCount("file", rows.length), targetKind: "text" };
+			const summaryRows = this.#buildSummaryRows(
+				this.#displayTargetsForEntries(entries.filter(entry => !previews.includes(entry))),
+			);
+			const usageByRow = this.#usageRowsBySummaryRow(summaryRows);
+			for (const [index, row] of summaryRows.entries()) {
+				body.push(this.#nativeFileRow(row));
+				for (const [i, usage] of (usageByRow.get(index) ?? []).entries()) {
+					body.push(this.#nativeUsage(usage, `u${index}.${i}`));
+				}
+			}
+			for (const entry of previews) {
+				const split = splitPathAndSel(entry.path);
+				const name = shortenPath(split.path);
+				const sectionHead: TspSpan[] = [span(name || "…", "path")];
+				if (split.sel) sectionHead.push(span(`:${split.sel}`, "muted"));
+				body.push(node("section", { head: sectionHead }, this.#nativePreview(entry), `p${entry.toolCallId}`));
+				const usage = this.#usageRows.get(entry.toolCallId);
+				if (usage) body.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
+			}
+		}
+		return node(
+			"tool",
+			{
+				...head,
+				role: "omp.tool.read",
+				name: "read",
+				title: "Read",
+				status,
+				tone: status === "error" ? "error" : undefined,
+				frame: "inline",
+				collapsible,
+				collapsed: collapsible ? !this.#expanded : undefined,
+				preview: collapsible ? TRIMMED_BODY_PREVIEW : undefined,
+			},
+			body,
+		);
+	}
+
+	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */
+	#nativeRowHead(row: ReadSummaryRow): NativeToolHead {
+		const split = splitPathAndSel(row.targetPath);
+		const filePath = shortenPath(split.sel ? split.path : row.targetPath);
+		const correctedFrom = this.#correctedFromForTargets(row.targets);
+		const conflicts = this.#conflictCountForTargets(row.targets);
+		return {
+			target: filePath ? `${filePath}${split.sel ? `:${split.sel}` : ""}` : "…",
+			targetKind: "path",
+			href: fileHref(linkPathForTargets(row.targets)),
+			meta: correctedFrom ? [`corrected from ${shortenPath(correctedFrom)}`] : undefined,
+			badges: conflicts
+				? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }]
+				: undefined,
+		};
+	}
+
+	/** One 22px group row: status glyph, path and range, conflicts chip, then the correction or error message. */
+	#nativeFileRow(row: ReadSummaryRow): NativeNode {
+		const split = splitPathAndSel(row.targetPath);
+		const status = this.#statusForTargets(row.targets);
+		const correctedFrom = this.#correctedFromForTargets(row.targets);
+		const conflicts = this.#conflictCountForTargets(row.targets);
+		const error = status === "error" ? this.#errorFor(row) : undefined;
+		const detail: TspText | undefined =
+			error !== undefined
+				? [span(`— ${error.split("\n", 1)[0]}`, "error")]
+				: correctedFrom
+					? `corrected from ${shortenPath(correctedFrom)}`
+					: undefined;
+		return fileRow(shortenPath(split.sel ? split.path : row.targetPath), {
+			range: split.sel ? `:${split.sel}` : undefined,
+			href: fileHref(linkPathForTargets(row.targets)),
+			icon: status === "error" ? "x-circle" : undefined,
+			tone: READ_STATUS_TONE[status],
+			chip: conflicts ? { text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}` } : undefined,
+			detail,
+			title: error,
+			key: row.targetPath,
+		});
+	}
+
+	/** The failure message of a row's failed read (its result text, `Error:` prefix dropped). */
+	#errorFor(row: ReadSummaryRow): string {
+		const failed = row.targets.find(target => target.entry.status === "error")?.entry;
+		return (
+			plainText(failed?.contentText ?? "")
+				.replace(/^Error:\s*/, "")
+				.trim() || "Read failed"
+		);
+	}
+
+	/** One read's content as numbered `code`, trimmed to its first lines (plus a count) while collapsed. */
+	#nativePreview(entry: ReadEntry): NativeChild[] {
+		const split = splitPathAndSel(entry.path);
+		const lines = (entry.contentText ?? "").split("\n");
+		const shown = this.#expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
+		const blocks: NativeChild[] = readContentCode(
+			lines.slice(0, shown).join("\n"),
+			entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
+			entry.codeLineNumbers?.slice(0, shown),
+			getLanguageFromPath(split.path),
+		);
+		const hidden = lines.length - shown;
+		if (hidden > 0) {
+			blocks.push(
+				keyed(text([span(formatCount("more line", hidden), "muted")], { role: "omp.tool.stats" }), "more"),
+			);
+		}
+		return blocks;
+	}
+
+	#describeGroup(): NativeNode {
+		const entries = [...this.#entries.values()];
+		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
+		const usageByRow = this.#usageRowsBySummaryRow(rows);
+		const previews = entries.filter(entry => this.#shouldRenderPreview(entry));
+		const status = this.#groupStatus(entries);
+		const title = span("Read", "toolTitle");
+		const children: NativeChild[] = [];
+		let head: TspSpan[] = [title];
+		if (rows.length === 1) {
+			head = [title, span(" "), ...this.#nativePathSpans(rows[0]!)];
+			if (previews.length === 0) {
+				for (const usage of usageByRow.get(0) ?? []) children.push(this.#nativeUsage(usage, "u0"));
+			}
+		} else if (rows.length > 1) {
+			head = [title, span(` (${rows.length})`, "dim")];
+			const summaryTargets = this.#displayTargetsForEntries(
+				entries.filter(entry => !this.#shouldRenderPreview(entry)),
+			);
+			const summaryRows = this.#buildSummaryRows(summaryTargets);
+			const summaryUsage = this.#usageRowsBySummaryRow(summaryRows);
+			const items = summaryRows.map((row, index) => {
+				const usage = (summaryUsage.get(index) ?? []).map(usageRow =>
+					plainText(
+						formatUsageRow(
+							usageRow.usage,
+							usageRow.durationMs,
+							usageRow.ttftMs,
+							usageRow.timestamp,
+							usageRow.turnElapsedMs,
+						),
+					),
+				);
+				return node(
+					"item",
+					{
+						label: this.#nativePathSpans(row),
+						tone: READ_STATUS_TONE[this.#statusForTargets(row.targets)],
+						detail: usage.length > 0 ? [span(usage.join(" · "), "dim")] : undefined,
+					},
+					[],
+					row.targetPath,
+				);
+			});
+			if (items.length > 0) children.push(node("list", {}, items));
+		}
+		for (const entry of previews) {
+			const split = splitPathAndSel(entry.path);
+			const pathValue = shortenPath(entry.path);
+			children.push(
+				node(
+					"card",
+					{
+						role: "omp.tool.read.preview",
+						tone: READ_STATUS_TONE[entry.status],
+						head: pathValue ? [title, span(" "), span(pathValue, "path")] : [title],
+						collapsible: true,
+						collapsed: this.#previewCollapsed.get(entry.toolCallId) ?? !this.#expanded,
+						preview: { lines: COLLAPSED_PREVIEW_LINES },
+					},
+					[
+						code(entry.contentText ?? "", {
+							lang: getLanguageFromPath(split.path),
+							start: entry.codeStartLine,
+							numbers: true,
+						}),
+					],
+					`p${entry.toolCallId}`,
+				),
+			);
+			const usage = this.#usageRows.get(entry.toolCallId);
+			if (usage) children.push(this.#nativeUsage(usage, `u${entry.toolCallId}`));
+		}
+		return card(
+			{
+				role: "omp.tool.read",
+				// A group is plain rows: the per-file previews are the only frames.
+				variant: "bare",
+				status,
+				tone: status === "error" ? "error" : status === "running" ? "pending" : undefined,
+				head,
+			},
+			children,
+		);
+	}
+
+	#groupStatus(entries: readonly ReadEntry[]): TspCardStatus {
+		let rank = 0;
+		for (const entry of entries) rank = Math.max(rank, READ_STATUS_RANK[entry.status]);
+		if (rank === READ_STATUS_RANK.error) return "error";
+		if (rank === READ_STATUS_RANK.pending) return this.#sealed ? "cancelled" : "running";
+		return "done";
+	}
+
+	/** Path spans for a summary row: linked path, selector, correction note and conflict badge. */
+	#nativePathSpans(row: ReadSummaryRow): TspSpan[] {
+		const split = splitPathAndSel(row.targetPath);
+		const filePath = shortenPath(split.sel ? split.path : row.targetPath);
+		const linkPath = linkPathForTargets(row.targets);
+		const spans: TspSpan[] = [];
+		if (filePath) {
+			const href = linkPath && path.isAbsolute(linkPath) ? pathToFileURL(linkPath).href : undefined;
+			spans.push(span(filePath, "path", href ? { href } : undefined));
+		} else {
+			spans.push(span("…", "toolOutput"));
+		}
+		if (split.sel) spans.push(span(`:${split.sel}`, "accent"));
+		const correctedFrom = this.#correctedFromForTargets(row.targets);
+		if (correctedFrom) spans.push(span(` (corrected from ${shortenPath(correctedFrom)})`, "dim"));
+		const conflicts = this.#conflictCountForTargets(row.targets);
+		if (conflicts) spans.push(span(` (⚠ ${conflicts} conflict${conflicts === 1 ? "" : "s"})`, "warning"));
+		return spans;
+	}
+
+	#nativeUsage(usage: ReadUsageRow, key: string): NativeNode {
+		const line = formatUsageRow(usage.usage, usage.durationMs, usage.ttftMs, usage.timestamp, usage.turnElapsedMs);
+		return text([span(plainText(line), "dim")], { wrap: "word", key, role: "omp.usage" });
+	}
+
 	#updateDisplay(): void {
+		this.#displayVersion++;
 		const entries = [...this.#entries.values()];
 		const displayTargets = this.#displayTargetsForEntries(entries);
 		const displayRows = this.#buildSummaryRows(displayTargets);

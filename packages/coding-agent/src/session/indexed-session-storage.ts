@@ -8,6 +8,7 @@ import {
 	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { isAssistantMessageLine } from "./session-entries";
+import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
@@ -75,15 +76,6 @@ interface IndexAppend {
 }
 
 const RESOLVED = Promise.resolve();
-
-function enoent(p: string): NodeJS.ErrnoException {
-	const err = new Error(`ENOENT: no such file, '${p}'`) as NodeJS.ErrnoException;
-	err.code = "ENOENT";
-	err.errno = -2;
-	err.path = p;
-	err.syscall = "open";
-	return err;
-}
 
 function matchesGlob(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;

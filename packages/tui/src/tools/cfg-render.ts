@@ -16,8 +16,11 @@ import {
 } from "../render/render-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { parseCfgUrl } from "./cfg-url";
-import type { RenderResultOptions } from "./renderer";
+import type { NativeToolView, RenderResultOptions } from "./renderer";
 import { card, type CardToolResult, firstText, safe } from "./result-card";
+import { code, compact, span, text } from "../native/describe";
+import { plainText } from "../native/spans";
+import { errorView, toolHead } from "./native-view";
 
 /** Summary of a `cfg://` read, attached to read tool details. */
 export interface CfgReadDetails {
@@ -75,6 +78,68 @@ export function renderCfgRead(
 		if (shown.hidden) lines.push(theme.fg("dim", `  ${formatMoreItems(shown.hidden, "line")}`));
 		return lines;
 	}, options);
+}
+
+/** TSP view of `read cfg://…`: path and counts in the head, the listing as YAML. */
+export function describeCfgRead(
+	url: string,
+	result: CardToolResult | undefined,
+	details: CfgReadDetails | undefined,
+): NativeToolView {
+	const description = (details?.path ?? parseCfgUrl(url)?.segments.join(".")) || "all settings";
+	const meta: string[] = [];
+	if (details) {
+		meta.push(details.count === 1 ? "1 setting" : `${details.count} settings`);
+		if (details.modified) meta.push(`${details.modified} modified`);
+	}
+	if (result?.isError) return errorView("Config", firstText(result) || "Settings read failed.", description, ...meta);
+	const head = toolHead("Config", description, ...meta);
+	if (!result) return { head };
+	const listing = plainText(safe(firstText(result).trimEnd()));
+	return {
+		head,
+		body: listing ? [code(listing, { lang: "yaml" })] : undefined,
+		preview: { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS },
+	};
+}
+
+/** TSP view of `write cfg://…[/save]`: scope/outcome in the head, then `previous → value`. */
+export function describeCfgWrite(
+	url: string,
+	content: string | undefined,
+	result: CardToolResult | undefined,
+	details: CfgWriteDetails | undefined,
+): NativeToolView {
+	const target = parseCfgUrl(url);
+	const path = details?.path ?? target?.segments.join(".");
+	const save = details?.save ?? target?.save ?? false;
+	if (result?.isError) return errorView("Config", firstText(result) || "Settings write failed.", path);
+	const head = toolHead("Config", path);
+	head.push(span(" "), span(save ? "persist" : "session", save ? "accent strong" : "muted"));
+	if (details?.outcome === "declined") head.push(span(" "), span("declined", "warning strong"));
+	if (details?.outcome === "unchanged") head.push(span(" "), span("unchanged", "muted"));
+	const next = span(plainText(details?.value ?? content?.trim() ?? "…"), "toolOutput");
+	const change = details
+		? [span(plainText(details.previous), "dim"), span(" → ", "dim"), next]
+		: [span("→ ", "dim"), next];
+	return {
+		head,
+		tone: details?.outcome === "declined" ? "warning" : undefined,
+		body: compact([
+			text(change, { wrap: "word" }),
+			details?.effective !== undefined
+				? text(
+						[
+							span(
+								`still ${plainText(details.effective)}: a higher-precedence layer overrides the saved value`,
+								"warning",
+							),
+						],
+						{ wrap: "word" },
+					)
+				: undefined,
+		]),
+	};
 }
 
 /** Render `write cfg://…[/save]`: the proposed value while pending, then the approved/declined change. */

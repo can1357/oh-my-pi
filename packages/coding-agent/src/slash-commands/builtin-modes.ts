@@ -1,3 +1,4 @@
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import {
@@ -57,7 +58,14 @@ async function runWithDetachedModeDraft(
 	if (!runtime.draftDetached) editor.clearDraft();
 	try {
 		const submitted = await run();
-		if (!submitted && ((runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0)) {
+		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
+		if (!submitted && hasAttachments) {
+			if (runtime.draftDetached) {
+				// Newer typing may already sit in the editor: merge the submission
+				// back beside it so each draft's image markers keep their images.
+				restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				return;
+			}
 			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];
 			editor.pendingImageLinks = [
 				...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
@@ -66,6 +74,14 @@ async function runWithDetachedModeDraft(
 			editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		}
 	} catch (error) {
+		if (runtime.draftDetached) {
+			// The caller already took this draft out of the editor before
+			// dispatch (Ctrl+Enter's `handleFollowUp`, or `onSubmit` for these
+			// mode commands); it owns restoring the submission and reporting
+			// the error so a submission that failed after newer text was typed
+			// merges with it once, instead of being silently dropped here.
+			throw error;
+		}
 		if (!editor.getText() && editor.pendingImages.length === 0) {
 			editor.setText(command.text);
 			editor.pendingImages = runtime.input?.images ? [...runtime.input.images] : [];
@@ -76,9 +92,40 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
+	if (session.isUltrafastModeEnabled()) return "ultra";
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
+
+/**
+ * `/fast [on|ultra|off|status]` for the active model: `on` selects the
+ * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
+ * either. Bare invocation toggles between off and priority. Returns the
+ * user-facing reply, or `undefined` for an unknown argument.
+ */
+function runFastCommand(arg: string, session: AgentSession): string | undefined {
+	switch (arg) {
+		case "":
+		case "toggle":
+			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "on":
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		case "ultra":
+		case "ultrafast":
+			return session.setUltrafastMode(true)
+				? "Ultrafast mode enabled."
+				: "Ultrafast is unavailable for the current model.";
+		case "off":
+			session.setFastMode(false);
+			return "Fast mode disabled.";
+		case "status":
+			return `Fast mode is ${formatFastModeStatus(session)}.`;
+		default:
+			return undefined;
+	}
 }
 
 const SLOW_UNSUPPORTED =
@@ -211,7 +258,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -229,7 +276,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			} else {
 				runtime.ctx.showWarning(`Usage: /${command.name} [providers]`);
 			}
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -261,7 +308,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.openPlanReview();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -341,7 +388,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (command, runtime) => {
 			const prompt = await runtime.ctx.handleLoopCommand(command.args);
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			// Surface any inline prompt so the dispatcher returns it and the normal
 			// submit flow runs the first loop iteration (recording it as the loop prompt).
 			if (prompt) return { prompt };
@@ -354,7 +401,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "<message>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleQueueCommand(command.args);
+			await runtime.ctx.handleQueueCommand(
+				command.args,
+				runtime.draftDetached ? { ...runtime.input, text: command.text } : undefined,
+			);
 		},
 	},
 	{
@@ -398,7 +448,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -437,7 +487,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			const selector = command.args.trim();
 			if (!selector) {
 				runtime.ctx.showModelSelector({ temporaryOnly: true });
@@ -455,71 +505,29 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description:
+			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
 		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
+			{ name: "on", description: "Enable fast mode (priority tier)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
-				return commandConsumed();
-			}
-			if (arg === "status") {
-				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
-				return commandConsumed();
-			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage(FAST_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "status") {
-				runtime.ctx.showStatus(`Fast mode is ${formatFastModeStatus(runtime.ctx.session)}.`);
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
-			runtime.ctx.editor.setText("");
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? FAST_USAGE);
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -547,7 +555,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const message = runSlowCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(message ?? "Usage: /slow [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -588,7 +596,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
 				runtime.ctx.showStatus(`Skill listing: ${cfgSkillful.get(runtime.ctx.session.settings) ? "on" : "off"}.`);
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
@@ -599,11 +607,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							? await runtime.ctx.session.setSkillful(false)
 							: await runtime.ctx.session.toggleSkillful();
 				runtime.ctx.showStatus(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /skillful [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -630,7 +638,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(output ?? "Usage: /extended-context [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{
@@ -664,18 +672,18 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const arg = command.args.trim().toLowerCase();
 			if (arg === "status") {
 				runtime.ctx.showStatus(formatComputerUseStatus(runtime.ctx.session));
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
 				const enable =
 					arg === "off" ? false : arg === "on" || !cfgComputerEnabled.get(runtime.ctx.session.settings);
 				runtime.ctx.showStatus(applyComputerUseToggle(runtime.ctx.session, enable));
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 		},
 	},
 	{

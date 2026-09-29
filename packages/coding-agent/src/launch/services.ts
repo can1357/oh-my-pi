@@ -25,7 +25,6 @@ export interface ServiceStart {
 	command: string;
 	cwd?: string;
 	pty?: boolean;
-	env?: Record<string, string>;
 	ready?: ServiceReady;
 }
 
@@ -208,7 +207,7 @@ export async function startService(
 		name: params.name,
 		application: shell.shell,
 		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
-		env: { ...shell.env, ...params.env },
+		env: shell.env,
 		cwd: resolveToCwd(params.cwd ?? session.cwd, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready

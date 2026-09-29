@@ -15,10 +15,11 @@ import {
 	readArgsHaveTarget,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
-import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -96,6 +97,31 @@ function hasNestedTodo(details: unknown): boolean {
 	);
 }
 
+interface AsyncResultJob {
+	jobId?: string;
+	type?: string;
+	label?: string;
+	durationMs?: number;
+}
+
+/**
+ * Toast text for an `async-result` delivery whose jobs are all background
+ * task spawns, or undefined when it is anything else (bash jobs keep their
+ * transcript rows). Native rendering only: the task call's agent nodes carry
+ * the outcome, so the delivery needs no transcript block of its own.
+ */
+function nativeTaskJobToast(message: { role: string; customType?: string; details?: unknown }): string | undefined {
+	if (message.role !== "custom" || message.customType !== "async-result" || !isRecord(message.details)) return;
+	const details = message.details as AsyncResultJob & { jobs?: AsyncResultJob[] };
+	const jobs = details.jobs && details.jobs.length > 0 ? details.jobs : [details];
+	if (!jobs.every(job => job.type === "task")) return;
+	if (jobs.length > 1) return `${jobs.length} background tasks completed`;
+	const job = jobs[0]!;
+	const name = sanitizeText(job.label ?? job.jobId ?? "task").trim() || "task";
+	const took = typeof job.durationMs === "number" ? ` · ${formatDuration(job.durationMs)}` : "";
+	return `Background task ${name} completed${took}`;
+}
+
 function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknown): boolean {
 	if (rawInput) return true;
 	if (RAW_PARTIAL_JSON_RENDERERS[toolName]) return true;
@@ -117,6 +143,8 @@ export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
 	#turnStartedAt: number | undefined = undefined;
+	/** The running turn's token and cost totals, shown under its last answer on a TSP terminal. */
+	readonly #turnUsage = new TurnUsageTally();
 	/** When the last completed run ended; stale `#turnStartedAt` anchors are cleared against it. */
 	#lastAgentEndAt: number | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
@@ -353,6 +381,11 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
+			// The TUI already refreshes the pending-messages bar at every queue
+			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
+			// this event exists for RPC/ACP clients that have no equivalent local
+			// call site to hook, so there is nothing additional to do here.
+			queue_update: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -792,6 +825,7 @@ export class EventController {
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
 		this.#turnStartedAt = undefined;
+		this.#turnUsage.reset();
 		this.#lastAgentEndAt = undefined;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
@@ -985,7 +1019,9 @@ export class EventController {
 			// delta from it, the same as a user message.
 			if (event.message.role === "custom" && isUserTurnInitiator(event.message)) {
 				this.#turnStartedAt = event.message.timestamp;
+				this.#turnUsage.reset();
 			}
+			const taskJobToast = isNativeRendering() ? nativeTaskJobToast(event.message) : undefined;
 			if (
 				event.message.role === "custom" &&
 				this.ctx.optimisticSkillMessagePending &&
@@ -994,6 +1030,11 @@ export class EventController {
 				// The optimistic `/skill:` row painted at submit time (issue #8895):
 				// swap it for the canonical message instead of appending a duplicate.
 				this.ctx.reconcileOptimisticSkillMessage(event.message);
+			} else if (taskJobToast) {
+				// Native: the task call's `agent` nodes already settled in place
+				// (its terminal async update); a toast replaces the appended
+				// "Background job completed" rows.
+				this.ctx.showStatus(taskJobToast);
 			} else {
 				this.ctx.addMessageToChat(event.message);
 			}
@@ -1008,7 +1049,10 @@ export class EventController {
 			vocalizer.clear();
 			// Only genuinely user-attributed prompts anchor the delta; a mid-run
 			// agent-attributed `user` message (advisor tool-loop redirect) must not.
-			if (event.message.attribution !== "agent") this.#turnStartedAt = event.message.timestamp;
+			if (event.message.attribution !== "agent") {
+				this.#turnStartedAt = event.message.timestamp;
+				this.#turnUsage.reset();
+			}
 			const userText = textContent(event.message.content);
 			const imageBlocks =
 				typeof event.message.content === "string"
@@ -1065,6 +1109,7 @@ export class EventController {
 				// turn's own prompt: anchor the delta to it instead of clearing.
 				if (event.message.userInitiated) this.#turnStartedAt = event.message.timestamp;
 				else this.#turnStartedAt = undefined;
+				this.#turnUsage.reset();
 			}
 		} else if (event.message.role === "fileMention") {
 			this.#resetReadGroup();
@@ -1584,6 +1629,7 @@ export class EventController {
 				const supersededByRewind =
 					this.ctx.streamingMessage.stopReason === "aborted" && this.ctx.viewSession.isTtsrAbortPending;
 				if (supersededByRewind) {
+					this.ctx.streamingComponent.markRewound();
 					for (const [toolCallId, component] of Array.from(this.ctx.pendingTools.entries())) {
 						if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
 						if (
@@ -1627,6 +1673,8 @@ export class EventController {
 				if (component) lastPostToolAssistantComponent = component;
 			}
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
+			const turnUsage = this.#turnUsage.add(event.message, this.#turnStartedAt);
+			if (turnUsage) this.#lastAssistantComponent.setTurnUsage(turnUsage);
 			if (cfgDisplayShowTokenUsage.get(settings) && assistantUsageIsBilled(event.message.usage)) {
 				const readCallIds = groupedReadUsageCallIds(event.message);
 				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
@@ -2247,6 +2295,16 @@ export class EventController {
 			`${reasonText}${actionLabel}…${this.#maintenanceEscHint()}`,
 			getSymbolTheme().spinnerFrames,
 		);
+		const compactionStartMs = Date.now();
+		this.ctx.autoCompactionLoader.setWorkingRow(
+			() => ({
+				label: `${reasonText}${actionLabel}…`,
+				startedAt: compactionStartMs,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
+		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
 		this.ctx.ui.requestRender();
 	}
@@ -2370,6 +2428,15 @@ export class EventController {
 				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.retryLoader.setWorkingRow(
+			() => ({
+				label: `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`,
+				startedAt: retryStartMs,
+				variant: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(this.ctx.retryLoader);
 		this.ctx.ui.requestRender();

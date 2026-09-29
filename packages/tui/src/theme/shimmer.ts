@@ -1,3 +1,7 @@
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { node } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { isNativeRendering } from "../native/state";
 import type { Theme, ThemeColor } from "./theme";
 import { FG_RESET } from "./color";
 
@@ -152,6 +156,28 @@ export function shimmerEnabled(): boolean {
 }
 
 /**
+ * Describe shimmering segments for a TSP terminal, which clocks the sweep
+ * itself: a `shimmer` node in the active mode, or plain spans in the mid tier
+ * color when shimmer is disabled. Palette tiers given as theme colors travel as
+ * token names; raw-ANSI tiers are dropped (the terminal's theme decides).
+ */
+export function describeShimmer(segments: readonly ShimmerSegment[], key?: string): NativeNode {
+	const spans: TspSpan[] = [];
+	for (const { text: value, palette } of segments) {
+		if (value.length === 0) continue;
+		const mid = (palette ?? DEFAULT_SHIMMER_PALETTE).mid;
+		spans.push(typeof mid === "string" ? { t: value, s: mid } : { t: value });
+	}
+	if (activeMode === "disabled") return node("text", { spans }, undefined, key);
+	const palette = segments[0]?.palette ?? DEFAULT_SHIMMER_PALETTE;
+	const tokens: { low?: string; mid?: string; high?: string } = {};
+	if (typeof palette.low === "string") tokens.low = palette.low;
+	if (typeof palette.mid === "string") tokens.mid = palette.mid;
+	if (typeof palette.high === "string") tokens.high = palette.high;
+	return node("shimmer", { spans, mode: activeMode, palette: tokens }, undefined, key);
+}
+
+/**
  * Apply a shimmer sweep across one or more segments, treating them as a
  * single continuous string for band positioning. Each segment can supply
  * its own palette so the gradient stays in lockstep while the colors
@@ -165,6 +191,13 @@ export function shimmerEnabled(): boolean {
  *   - No per-char allocations beyond the run buffer.
  */
 export function shimmerSegments(segments: readonly ShimmerSegment[], theme: ShimmerTheme): string {
+	// A TSP terminal animates shimmer from described nodes; a frame painted
+	// here would freeze mid-sweep, so the text goes out unstyled.
+	if (isNativeRendering()) {
+		let out = "";
+		for (const { text: value } of segments) out += value;
+		return out;
+	}
 	const mode = activeMode;
 
 	// Disabled: no animation or code-point scan. Preserve the all-empty result,

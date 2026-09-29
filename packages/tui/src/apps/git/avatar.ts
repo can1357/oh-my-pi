@@ -1,3 +1,5 @@
+import { hslToHex } from "@oh-my-pi/pi-utils/color";
+
 /** Cached author photos supplied by the command host. */
 export interface AvatarSource {
 	get(email: string, cwd: string): string | null | undefined;
@@ -27,26 +29,4 @@ export function identiconLines(email: string, colorize: (hex: string, text: stri
 		lines.push(colorize(hex, line));
 	}
 	return lines;
-}
-
-function hslToHex(hue: number, saturation: number, lightness: number): string {
-	const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
-	const second = chroma * (1 - Math.abs(((hue / 60) % 2) - 1));
-	const base = lightness - chroma / 2;
-	const sector = Math.floor(hue / 60) % 6;
-	const rgb = [
-		[chroma, second, 0],
-		[second, chroma, 0],
-		[0, chroma, second],
-		[0, second, chroma],
-		[second, 0, chroma],
-		[chroma, 0, second],
-	][sector];
-	return `#${rgb
-		.map(channel =>
-			Math.round((channel + base) * 255)
-				.toString(16)
-				.padStart(2, "0"),
-		)
-		.join("")}`;
 }

@@ -13,6 +13,9 @@ import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
 import { TextFormField } from "../components/form";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import type { NativeNode, NativeUiEvent } from "../native/node";
+import { node, span } from "../native/describe";
+import { actionHint, overlayCard, statusHintsRow } from "../native/overlay";
 
 export interface MoveOverlayResult {
 	directory: string;
@@ -51,6 +54,7 @@ export class MoveOverlay implements Component, Focusable {
 	#renderMemo:
 		| { width: number; fieldLines: readonly string[]; revision: number; lines: readonly string[] }
 		| undefined;
+	#native: { revision: number; node: NativeNode } | undefined;
 
 	constructor(cwd: string, done: (result: MoveOverlayResult | undefined) => void, source: MoveDirectorySource) {
 		this.#cwd = cwd;
@@ -169,6 +173,47 @@ export class MoveOverlay implements Component, Focusable {
 		lines.push(bottomBorder(w));
 		this.#renderMemo = { width: w, fieldLines, revision: this.#revision, lines };
 		return lines;
+	}
+
+	describe(): NativeNode {
+		const memo = this.#native;
+		if (memo?.revision === this.#revision) return memo.node;
+		const items = this.#results
+			.slice(0, MAX_RESULTS)
+			.map(item => node("item", { label: item.label, detail: [span(item.value, "path")] }, undefined, item.value));
+		const list = node(
+			"list",
+			{
+				selected: this.#results[this.#selectedIndex]?.value ?? null,
+				empty: this.#field.getValue().length > 0 ? [span("No matching directories", "dim")] : undefined,
+			},
+			items,
+			"results",
+		);
+		const hints = statusHintsRow(
+			[span("Type to filter", "dim")],
+			[
+				actionHint(["tui.select.up", "tui.select.down"], "navigate"),
+				{ keys: ["tab"], label: "accept" },
+				{ keys: ["enter"], label: "confirm" },
+				actionHint("tui.select.cancel", "cancel"),
+			],
+		);
+		const described = overlayCard("omp.dialog.move", "Move to directory", [this.#field, list, hints]);
+		this.#native = { revision: this.#revision, node: described };
+		return described;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "select" && event.type !== "activate") return;
+		const index = this.#results.findIndex(result => result.value === event.item);
+		if (index === -1) return;
+		if (index !== this.#selectedIndex) {
+			this.#selectedIndex = index;
+			this.#revision++;
+		}
+		// Enter submits the field, which confirms the highlighted suggestion.
+		if (event.type === "activate") this.#field.submit();
 	}
 
 	invalidate(): void {

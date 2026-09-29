@@ -705,7 +705,7 @@ async function commitPatchToBranchWorktree(
 				// it can't resolve; reset the worktree so the WIP-seeded retry
 				// starts from a clean HEAD tree.
 				await repo.reset("hard", "HEAD");
-				await applyDeltaOverBaselineWip(tmpDir, taskId, patchText, wipPatches, baselineWip);
+				await applyDeltaOverBaselineWip(tmpDir, patchText, wipPatches, baselineWip);
 			} catch (wipErr) {
 				if (!vcs.isVcsError(wipErr)) throw wipErr;
 				const stderr = wipErr.stderr.slice(0, 2000);
@@ -737,7 +737,6 @@ async function commitPatchToBranchWorktree(
  */
 async function applyDeltaOverBaselineWip(
 	tmpDir: string,
-	_taskId: string,
 	patchText: string,
 	wipPatches: readonly string[],
 	baselineWip: BaselineWipContext,
