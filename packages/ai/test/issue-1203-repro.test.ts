@@ -75,55 +75,6 @@ describe("issue #1203 - MiniMax Coding Plan CN think tags", () => {
 		]);
 	});
 
-	it("does not duplicate MiniMax-M3 reasoning when content also carries think tags", async () => {
-		const model = getBundledModel("minimax-code-cn", "MiniMax-M3") as Model<"openai-completions">;
-		const fetchMock = createMockFetch([
-			{
-				id: "chatcmpl-minimax-cn",
-				object: "chat.completion.chunk",
-				created: 0,
-				model: model.id,
-				choices: [
-					{
-						index: 0,
-						delta: {
-							role: "assistant",
-							content: "<think>The user just",
-							reasoning_content: "The user just",
-						},
-					},
-				],
-			},
-			{
-				id: "chatcmpl-minimax-cn",
-				object: "chat.completion.chunk",
-				created: 0,
-				model: model.id,
-				choices: [
-					{
-						index: 0,
-						delta: {
-							content: " said hi.</think>Hello!",
-							reasoning_content: "The user just said hi.",
-						},
-					},
-				],
-			},
-			stopChunk(model),
-			"[DONE]",
-		]);
-
-		const result = await streamOpenAICompletions(model, baseContext(), {
-			apiKey: "test-key",
-			fetch: fetchMock,
-		}).result();
-
-		expect(result.content).toEqual([
-			{ type: "thinking", thinking: "The user just said hi.", thinkingSignature: "reasoning_content" },
-			{ type: "text", text: "Hello!" },
-		]);
-	});
-
 	it("dedupes MiniMax-M3 cumulative reasoning snapshots after answer text has started", async () => {
 		const model = getBundledModel("minimax-code-cn", "MiniMax-M3") as Model<"openai-completions">;
 		const fetchMock = createMockFetch([

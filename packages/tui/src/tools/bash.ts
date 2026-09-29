@@ -130,19 +130,51 @@ function unescapePartialJsonString(value: string): string {
 	return output;
 }
 
-function extractPartialBashEnv(partialJson: string | undefined): Record<string, string> | undefined {
+// One-slot memo: every render path over one streamed args object (call
+// preview, result header, repaint) asks for the same buffer.
+let lastPartialEnvJson: string | undefined;
+let lastPartialEnv: Readonly<Record<string, string>> | undefined;
+
+function extractPartialBashEnv(partialJson: string | undefined): Readonly<Record<string, string>> | undefined {
 	if (!partialJson) return undefined;
+	if (partialJson === lastPartialEnvJson) return lastPartialEnv;
+	let env: Record<string, string> | undefined;
 	const envStart = partialJson.search(/"env"\s*:\s*\{/u);
-	if (envStart === -1) return undefined;
-	const objectStart = partialJson.indexOf("{", envStart);
-	if (objectStart === -1) return undefined;
-	const envBody = partialJson.slice(objectStart + 1);
-	const env: Record<string, string> = {};
-	const matcher = /"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/gu;
-	for (const match of envBody.matchAll(matcher)) {
-		env[match[1]!] = unescapePartialJsonString(match[2]!);
+	const objectStart = envStart === -1 ? -1 : partialJson.indexOf("{", envStart);
+	if (objectStart !== -1) {
+		// Scan only the env object: stop at its closing brace (outside strings)
+		// so the keys that follow it are not read as env assignments.
+		let objectEnd = partialJson.length;
+		let depth = 0;
+		for (let i = objectStart + 1; i < partialJson.length; i++) {
+			const ch = partialJson.charCodeAt(i);
+			if (ch === 0x22) {
+				// Skip the string body, honoring escapes; an unterminated string runs to the end.
+				for (i++; i < partialJson.length; i++) {
+					const inner = partialJson.charCodeAt(i);
+					if (inner === 0x5c) i++;
+					else if (inner === 0x22) break;
+				}
+			} else if (ch === 0x7b || ch === 0x5b) {
+				depth++;
+			} else if (ch === 0x7d || ch === 0x5d) {
+				if (depth === 0) {
+					objectEnd = i;
+					break;
+				}
+				depth--;
+			}
+		}
+		const envBody = partialJson.slice(objectStart + 1, objectEnd);
+		const matcher = /"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/gu;
+		for (const match of envBody.matchAll(matcher)) {
+			env ??= {};
+			env[match[1]!] = unescapePartialJsonString(match[2]!);
+		}
 	}
-	return Object.keys(env).length > 0 ? env : undefined;
+	lastPartialEnvJson = partialJson;
+	lastPartialEnv = env ? Object.freeze(env) : undefined;
+	return lastPartialEnv;
 }
 
 function formatWallTimeSeconds(wallTimeMs: number): string {
@@ -243,8 +275,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
-			const cmdLines = formatBashCommandLines(renderArgs, uiTheme);
+			// Highlighting the whole (possibly still-streaming) command is the
+			// expensive part: defer it to the first paint, once per component,
+			// so a rebuild that is replaced before painting never pays for it.
+			let cmdLines: string[] | undefined;
 			return framedToolCard(uiTheme, () => {
+				cmdLines ??= formatBashCommandLines(renderArgs, uiTheme);
 				const header =
 					config.showHeader === false
 						? undefined
@@ -275,7 +311,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			args?: TArgs,
 		): Component {
 			const renderArgs = toBashRenderArgs(args, config);
-			const cmdLines = args ? formatBashCommandLines(renderArgs, uiTheme) : undefined;
+			let cmdLines: string[] | undefined;
 			const isError = result.isError === true;
 			const isPartial = options.isPartial === true;
 			const success = !isPartial && !isError;
@@ -438,7 +474,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							{
 								// Viewport-sized tail window in every state — streaming and final
 								// render identically; only ctrl+o uncaps.
-								content: capPreviewLines(cmdLines ?? [], uiTheme, { expanded }),
+								content: capPreviewLines(
+									args ? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme)) : [],
+									uiTheme,
+									{ expanded },
+								),
 							},
 							{ label: uiTheme.fg("toolTitle", "Output"), content: outputLines },
 						],

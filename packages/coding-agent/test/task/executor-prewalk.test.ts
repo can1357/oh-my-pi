@@ -79,6 +79,7 @@ function yieldEmittingSession(
 					isError: false,
 				});
 			}
+			return true;
 		},
 	};
 	return session as unknown as AgentSession;

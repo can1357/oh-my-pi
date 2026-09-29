@@ -322,6 +322,9 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
+/** Why a delegated OAuth refresh was requested. */
+export type OAuthRefreshReason = "auth-recovery";
+
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
@@ -351,6 +354,9 @@ export type AuthStorageOptions = {
 	 * per-provider local refresh function. Receives the credential id so the
 	 * implementation can address remote credentials.
 	 *
+	 * `reason` is `"auth-recovery"` only for a provider-auth retry; generic and
+	 * managed MCP force-refresh calls leave it unset.
+	 *
 	 * Must return updated {@link OAuthCredentials} with at least `access` and
 	 * `expires`. `refresh` may be an opaque sentinel (e.g. `"__remote__"`) when
 	 * the actual refresh token never leaves the broker.
@@ -360,6 +366,7 @@ export type AuthStorageOptions = {
 		credentialId: number,
 		credential: OAuthCredential,
 		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
 	) => Promise<OAuthCredentials>;
 	/**
 	 * Human-readable description of the credential store backing this
@@ -475,6 +482,8 @@ export type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
+	refreshReason?: OAuthRefreshReason;
 };
 
 /**
@@ -632,6 +641,10 @@ export interface ResetCreditRedeemOutcome {
 /** One stored account's live saved-reset status, from {@link AuthStorage.resets.list}. */
 export interface ResetCreditAccountStatus extends UsageResetCredits {
 	provider: string;
+	/** Live quota evidence from this exact account's reset-discovery response. */
+	report?: UsageReport;
+	/** Provider-requested wait before retrying throttled reset discovery (not redemption). */
+	retryAfterMs?: number;
 	credentialId: number;
 	accountId?: string;
 	email?: string;
@@ -700,6 +713,21 @@ export type RotateCredentialOptions = {
 	credentialId?: number;
 	signal?: AbortSignal;
 };
+
+/**
+ * Outcome of {@link LimitsApi.rotate}.
+ *
+ * `switched` is `true` when a usable same-type sibling credential is available,
+ * so the caller's next resolve hands it out. `afterSiblingWait` is `true` when
+ * no sibling was free at the failure but rotation slept out a sibling's short
+ * block (e.g. a Cloud Code Assist capacity 429 that resets in under a second);
+ * the freed credential may be one the caller already sent in this request, so
+ * attempted-bearer dedupe must let it through once.
+ */
+export interface CredentialRotation {
+	switched: boolean;
+	afterSiblingWait?: boolean;
+}
 
 /** Filter saved reset credits by provider and session. */
 export type ListResetCreditsOptions = {
@@ -937,6 +965,16 @@ export interface KeysApi {
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver;
 }
 
+/** Controls whether a row-id refresh may reuse a token minted by this refresher. */
+export interface OAuthRefreshByIdOptions {
+	/**
+	 * Return the stored credential when it still holds a fresh access token this
+	 * refresher minted recently. Auth-recovery callers use this to avoid rotating
+	 * refresh tokens repeatedly when a provider rejects every valid bearer.
+	 */
+	reuseRecentMint?: boolean;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1015,9 +1053,10 @@ export interface OAuthApi {
 	 * Refresh the OAuth credential with the given id through a per-credential
 	 * single-flight. Concurrent callers for the same row await the same upstream
 	 * refresh attempt, which is required for providers that rotate refresh tokens
-	 * on every successful refresh.
+	 * on every successful refresh. Mints unconditionally unless
+	 * {@link OAuthRefreshByIdOptions.reuseRecentMint} is set.
 	 */
-	refresh(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry>;
+	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry>;
 	/**
 	 * Refresh one stored OAuth credential under durable row ownership.
 	 */
@@ -1199,9 +1238,15 @@ export interface LimitsApi {
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
 	 *
-	 * Returns whether another usable credential of the same type remains.
+	 * For usage-limit and account-policy failures with no free sibling, waits
+	 * (abortable via `options.signal`) when a sibling's block expires within a
+	 * few seconds, then reports `afterSiblingWait`.
 	 */
-	rotate(provider: string, sessionId: string | undefined, options?: RotateCredentialOptions): Promise<boolean>;
+	rotate(
+		provider: string,
+		sessionId: string | undefined,
+		options?: RotateCredentialOptions,
+	): Promise<CredentialRotation>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,
@@ -1232,7 +1277,7 @@ export interface BlocksApi {
 	 */
 	upsert(block: StoredCredentialBlock): void;
 	/**
-	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
+	 * Broker-server seam: clear one exact persisted block and notify snapshot waiters.
 	 */
 	delete(credentialId: number, providerKey: string, blockScope: string): void;
 	/** Delete all persisted blocks for a credential. */

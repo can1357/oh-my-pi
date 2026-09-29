@@ -10,19 +10,22 @@ members = [
    "crates/pi-edit",
    "crates/pi-iso",
    "crates/pi-natives",
+   "crates/pi-predict",
    "crates/pi-shell",
    "crates/pi-vcs",
    "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
+   "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
+   "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "18.3.1"
+version = "18.4.3"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -31,9 +34,15 @@ repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
 brush-core = { path = "crates/vendor/brush-core" }
+# brush-parser 0.4.0 (latest release) re-parses `$(...)` bodies without
+# here-document awareness; the vendored copy fixes it (see its README.md).
+brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
+# napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
+# of never-torn-down envs; the vendored copy releases them (see its README.md).
+napi = { path = "crates/vendor/napi" }
 # tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
 # vendored copy carries the upstream grammar fix (see its README.md).
 tree-sitter-go = { path = "crates/vendor/tree-sitter-go" }
@@ -224,6 +233,7 @@ pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
+pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
@@ -367,10 +377,13 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 tinyvec = "=1.13.3"
 png = "0.18"
 inferno = { version = "0.12", default-features = false }
+# Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
+# compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
+# RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms).
 syntect = { version = "5.3", default-features = false, features = [
    "default-syntaxes",
    "default-themes",
-   "regex-fancy",
+   "regex-onig",
    "yaml-load",
 ] }
 
@@ -390,7 +403,7 @@ tiktoken-rs = "0.12"
 # ──────────────────────────────────────────────────────────────────────────────
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
-brush-parser = "0.4"
+brush-parser = { path = "crates/vendor/brush-parser" }
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -478,6 +491,15 @@ tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
 tree-sitter-xml = "0.7"
 tree-sitter-yaml = "0.7"
 tree-sitter-zig = "1.1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Machine Learning (pi-predict SmolLM2 engine)
+# ──────────────────────────────────────────────────────────────────────────────
+# macOS-only (Metal decoder; other targets use pi-predict's own CPU decoder).
+# 0.9.x, not 0.10+: later candle-core releases depend unconditionally on
+# `tokenizers` with the `onig` C library.
+candle-core = "0.9.2"
+candle-nn = "0.9.2"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)

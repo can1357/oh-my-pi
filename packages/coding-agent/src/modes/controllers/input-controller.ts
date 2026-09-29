@@ -9,6 +9,8 @@ import {
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -20,7 +22,6 @@ import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
-import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-tui/overlays/tiny-title-download-progress";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { chipLabel, compactImageMarkers, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -40,9 +41,8 @@ import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
-import { getTinyLocalModelSpec, isTinyLocalModelKey } from "../../tiny/models";
+import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
-import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { resolveReadPath } from "../../tools/path-utils";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
@@ -52,7 +52,7 @@ import {
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "../../utils/clipboard";
-import { getSlashCommandUsage, loadSlashCommandUsage, recordSlashCommandUsage } from "../../utils/command-usage";
+import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { loadImageInput } from "../../utils/image-loading";
@@ -65,6 +65,7 @@ import { resizeImage } from "../../utils/image-resize";
 
 import { cfgCycleOrder } from "../../config/model-settings";
 import {
+	cfgBareExitOnEmptySession,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -73,6 +74,9 @@ import {
 	cfgTuiMouse,
 } from "../settings";
 import { cfgHideThinkingBlock } from "../../session/settings";
+
+/** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
+const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
 
 /**
  * Slash commands that may carry secrets in their arguments should never be
@@ -137,6 +141,7 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
  * `/usage reset`, which spends a saved rate-limit reset) still needs the main session.
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
+	btw: () => true,
 	export: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
@@ -194,12 +199,6 @@ function safeAbort(label: string, fn: () => void): void {
 	}
 }
 
-const TINY_TITLE_PROGRESS_DONE_TTL_MS = 3_000;
-// A cached model fires its file-load events in a short burst and then goes silent
-// while onnxruntime builds the session; a genuine download keeps streaming progress
-// events for seconds. Only reveal the bar once a still-incomplete event arrives after
-// this grace window, so an already-downloaded model never flashes the bar.
-const TINY_TITLE_PROGRESS_REVEAL_DELAY_MS = 1_000;
 // Double-tap ← on an empty editor opens the Agent Hub (and, in a focused
 // subagent view, ←← returns to the main session). The second tap must land
 // inside this window. The lower bound rejects terminal-synthesized arrow-key
@@ -242,12 +241,6 @@ export class InputController {
 		if (modelKey) tinyTitleClient.prewarm(modelKey);
 	}
 
-	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
-	notifyTitleGenerationStart(): (() => void) | undefined {
-		const modelKey = this.#resolveTinyTitleLocalModelKey();
-		return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
-	}
-
 	#enhancedPaste?: EnhancedPasteController;
 	#draftText: string | undefined;
 	#focusedLeftTapListenerInstalled = false;
@@ -276,54 +269,6 @@ export class InputController {
 	// Visible-chip signature from the last editor change; a difference escapes the
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
-
-	#showTinyTitleDownloadProgress(modelKey: string | undefined): (() => void) | undefined {
-		if (!modelKey || !isTinyLocalModelKey(modelKey)) return;
-		const spec = getTinyLocalModelSpec(modelKey);
-		if (!spec) return;
-		const component = new TinyTitleDownloadProgressComponent(spec.label);
-		let added = false;
-		let disposed = false;
-		let removeTimer: NodeJS.Timeout | undefined;
-		const remove = (): void => {
-			if (disposed) return;
-			disposed = true;
-			unsubscribe();
-			if (removeTimer) {
-				clearTimeout(removeTimer);
-				removeTimer = undefined;
-			}
-			if (added) {
-				this.ctx.chatContainer.removeChild(component);
-				this.ctx.ui.requestRender();
-			}
-		};
-		const scheduleRemove = (): void => {
-			if (removeTimer) clearTimeout(removeTimer);
-			removeTimer = setTimeout(remove, TINY_TITLE_PROGRESS_DONE_TTL_MS);
-			removeTimer.unref?.();
-		};
-		let revealAt = 0;
-		const update = (event: TinyTitleProgressEvent): void => {
-			if (disposed || event.modelKey !== modelKey) return;
-			component.update(event);
-			if (revealAt === 0) revealAt = performance.now() + TINY_TITLE_PROGRESS_REVEAL_DELAY_MS;
-			const complete = component.isComplete();
-			// Reveal only for a download still in flight past the grace window. Cache hits
-			// either complete or fall silent (onnx init emits no events) before this fires.
-			if (!added && !complete && performance.now() >= revealAt) {
-				this.ctx.chatContainer.addChild(component);
-				added = true;
-			}
-			if (added) this.ctx.ui.requestRender();
-			if (complete) {
-				if (added) scheduleRemove();
-				else remove();
-			}
-		};
-		const unsubscribe = tinyTitleClient.onProgress(update);
-		return remove;
-	}
 
 	#abortStreamingTurn(): void {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -629,7 +574,10 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.suspend", this.ctx.keybindings.getKeys("app.suspend"));
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
-		this.ctx.editor.onCycleThinkingLevel = () => this.cycleThinkingLevel();
+		this.ctx.editor.onCycleThinkingLevel = () => {
+			hintUsage.record("effort");
+			this.cycleThinkingLevel();
+		};
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
@@ -721,6 +669,7 @@ export class InputController {
 				return;
 			}
 			if (this.#detectLeftDoubleTap()) {
+				hintUsage.record("agents");
 				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
 			}
 		};
@@ -767,7 +716,7 @@ export class InputController {
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
-		if (!cfgTuiMouse.get(settings)) return undefined;
+		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
@@ -920,6 +869,7 @@ export class InputController {
 
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
+			const submittedText = text;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
@@ -932,10 +882,11 @@ export class InputController {
 				return;
 			}
 
-			// Empty submit while streaming with queued messages: abort the active
-			// turn and let the post-unwind drain deliver the agent-core queue.
+			// Empty submit while streaming with queued (or live-steered) messages:
+			// abort the active turn and let the post-unwind drain deliver the
+			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
-				if (this.ctx.session.queuedMessageCount > 0) {
+				if (this.ctx.session.hasInterruptibleInput) {
 					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
@@ -1015,6 +966,26 @@ export class InputController {
 					imageLinks: inputImageLinks,
 				});
 				return;
+			}
+
+			// Bare `exit`/`quit`/`q` on a session with no messages: nobody opens a
+			// fresh session to send that word to the model, so route it to the
+			// slash command (collab-guest gating applies there unchanged). The whole
+			// submitted input must be the word, case-insensitive — no surrounding
+			// whitespace, extra text, or extension rewrite. A first prompt still in
+			// flight (pending submission, preflight, or streaming) has not reached
+			// `messages` yet, so it must not count as an empty session.
+			const bareExitWord = text.toLowerCase();
+			if (
+				text === submittedText &&
+				Object.hasOwn(BARE_EXIT_WORDS, bareExitWord) &&
+				!hasInputImages &&
+				!this.ctx.session.isStreaming &&
+				this.ctx.locallySubmittedUserSignatures.size === 0 &&
+				this.ctx.session.messages.length === 0 &&
+				(!isSettingsInitialized() || cfgBareExitOnEmptySession.get(settings))
+			) {
+				text = `/${bareExitWord}`;
 			}
 
 			// Handle built-in slash commands
@@ -1097,7 +1068,9 @@ export class InputController {
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
 					if (this.ctx.session.isBashRunning) {
-						this.ctx.showWarning("A bash command is already running. Press Esc to cancel it first.");
+						this.ctx.showWarning(
+							`A bash command is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
+						);
 						this.ctx.editor.setText(text);
 						return;
 					}
@@ -1116,7 +1089,9 @@ export class InputController {
 				const { code, isExcluded } = pythonCommand;
 				if (code) {
 					if (this.ctx.session.isEvalRunning) {
-						this.ctx.showWarning("A Python execution is already running. Press Esc to cancel it first.");
+						this.ctx.showWarning(
+							`A Python execution is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
+						);
 						this.ctx.editor.setText(text);
 						return;
 					}
@@ -1166,7 +1141,8 @@ export class InputController {
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
 				this.ctx.editor.addToHistory(text);
-				this.ctx.editor.setText("");
+				// Enter already cleared the editor synchronously. A later clear here
+				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
@@ -1230,12 +1206,15 @@ export class InputController {
 				// `submitInteractiveInput` dispatches it. Steering matches the
 				// streaming-branch Enter (above) and keeps the message from throwing
 				// AgentBusyError on that race.
-				const submission = this.ctx.startPendingSubmission({
-					text,
-					images,
-					imageLinks: inputImageLinks,
-					streamingBehavior: "steer",
-				});
+				const submission = this.ctx.startPendingSubmission(
+					{
+						text,
+						images,
+						imageLinks: inputImageLinks,
+						streamingBehavior: "steer",
+					},
+					{ clearEditor: false },
+				);
 				// Start titling only after the optimistic row painted, so the local
 				// tiny-title worker's subprocess spawn never blocks the first frame.
 				this.#maybeStartTitleGeneration(text);
@@ -1309,10 +1288,7 @@ export class InputController {
 		if (this.#isLocalExtensionCommand(text)) {
 			return;
 		}
-		this.ctx.session.maybeStartTitleGeneration(text, () => {
-			const modelKey = this.#resolveTinyTitleLocalModelKey();
-			return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
-		});
+		this.ctx.session.maybeStartTitleGeneration(text);
 	}
 
 	/** Submit editor text to the focused subagent session (chat-only focus policy). */
@@ -1322,7 +1298,7 @@ export class InputController {
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) {
-			if (target.isStreaming && target.queuedMessageCount > 0) {
+			if (target.isStreaming && target.hasInterruptibleInput) {
 				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL });
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
@@ -1333,8 +1309,8 @@ export class InputController {
 		if (text?.startsWith("/")) {
 			const parsed = parseSlashCommand(text);
 			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
-				// Viewer-scoped commands: /export writes the focused transcript (with its
-				// own subagents), /usage reports account-wide limits.
+				// Viewer-scoped commands: /btw asks about the focused transcript, /export
+				// writes it (with its own subagents), /usage reports account-wide limits.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -1344,7 +1320,7 @@ export class InputController {
 		}
 		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
 			this.ctx.showStatus(
-				`Only ${FOCUSED_VIEW_COMMAND_LIST} run here; other commands run in the main session — press ←← to return first`,
+				`Only ${FOCUSED_VIEW_COMMAND_LIST} run here; other commands run in the main session — press ${formatDoubleTap("left")} to return first`,
 			);
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
@@ -1427,7 +1403,9 @@ export class InputController {
 		// via an uncaught exception (issue #2036, originally for SIGTSTP — same
 		// shape for SIGSTOP). No-op on platforms that cannot suspend.
 		if (process.platform === "win32") {
-			this.ctx.showStatus("Suspend (Ctrl+Z) is not supported on this platform");
+			this.ctx.showStatus(
+				`Suspend (${appKey(this.ctx.keybindings, "app.suspend")}) is not supported on this platform`,
+			);
 			return;
 		}
 
@@ -2267,7 +2245,7 @@ export class InputController {
 					{ label: LOCAL_FILE, description: "Save the text to a local://paste file" },
 					{ label: INLINE, description: "Collapse the text to an inline paste marker" },
 				],
-				{ helpText: "Esc to paste inline" },
+				{ helpText: `${editorKey("tui.select.cancel")} to paste inline` },
 			);
 		} catch (error) {
 			logger.warn("large-paste menu failed", { error: error instanceof Error ? error.message : String(error) });
@@ -2343,20 +2321,20 @@ export class InputController {
 			session.customCommands.some(loaded => loaded.command.name === token) ||
 			session.promptTemplates.some(template => template.name === token);
 		if (knownToken) {
-			recordSlashCommandUsage(token);
+			commandUsage.record(token);
 			return;
 		}
 		const parsedName = parseSlashCommand(text)?.name;
 		const builtin = parsedName ? lookupBuiltinSlashCommand(parsedName) : undefined;
-		if (builtin) recordSlashCommandUsage(builtin.name);
+		if (builtin) commandUsage.record(builtin.name);
 	}
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
-		void loadSlashCommandUsage();
+		void commandUsage.load();
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
-			commandUsage: getSlashCommandUsage,
+			commandUsage: name => commandUsage.get(name),
 			modelMentions: createModelMentionSource({
 				source: createModelBrowserSource(this.ctx.settings),
 				registry: this.ctx.session.modelRegistry,
@@ -2419,7 +2397,9 @@ export class InputController {
 
 	cycleThinkingLevel(): void {
 		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
+			this.ctx.showStatus(
+				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
+			);
 			return;
 		}
 		const newLevel = this.ctx.session.cycleThinkingLevel();
@@ -2433,7 +2413,9 @@ export class InputController {
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
 		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
+			this.ctx.showStatus(
+				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
+			);
 			return;
 		}
 		try {
@@ -2463,7 +2445,7 @@ export class InputController {
 
 	toggleToolOutputExpansion(): void {
 		if (this.ctx.hideToolActivity) {
-			const visibilityKey = this.ctx.keybindings.getDisplayString("app.tools.toggleVisibility");
+			const visibilityKey = appKey(this.ctx.keybindings, "app.tools.toggleVisibility");
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
 			return;

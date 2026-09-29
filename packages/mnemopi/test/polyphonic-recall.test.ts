@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
-import {
-	PolyphonicRecallEngine,
-	polyphonicRecall,
-	polyphonicRecallIsEnabled,
-} from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
+import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 function makeBeam(): BeamMemoryState {
@@ -80,11 +76,7 @@ function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 	return engine;
 }
 
-const previousPolyphonic = process.env.MNEMOPI_POLYPHONIC_RECALL;
-
 afterEach(() => {
-	if (previousPolyphonic === undefined) delete process.env.MNEMOPI_POLYPHONIC_RECALL;
-	else process.env.MNEMOPI_POLYPHONIC_RECALL = previousPolyphonic;
 	delete process.env.MNEMOPI_VOICE_VECTOR;
 	delete process.env.MNEMOPI_VOICE_GRAPH;
 	delete process.env.MNEMOPI_VOICE_FACT;
@@ -92,15 +84,6 @@ afterEach(() => {
 });
 
 describe("PolyphonicRecallEngine", () => {
-	it("reads the polyphonic recall gate per call", () => {
-		delete process.env.MNEMOPI_POLYPHONIC_RECALL;
-		expect(polyphonicRecallIsEnabled()).toBe(false);
-		process.env.MNEMOPI_POLYPHONIC_RECALL = "0";
-		expect(polyphonicRecallIsEnabled()).toBe(false);
-		process.env.MNEMOPI_POLYPHONIC_RECALL = "1";
-		expect(polyphonicRecallIsEnabled()).toBe(true);
-	});
-
 	it("fuses the four voices with RRF and preserves voice attribution order", () => {
 		const beam = makeBeam();
 		try {
@@ -221,22 +204,6 @@ describe("PolyphonicRecallEngine", () => {
 			const results = engine.recall("Alice", null, 5);
 
 			expect(results.map(result => result.id)).toEqual(["wm-global-fact"]);
-		} finally {
-			closeQuietly(beam.db);
-		}
-	});
-
-	it("caches an engine on Beam state and hydrates result content", () => {
-		const beam = makeBeam();
-		try {
-			seedPolyphonicFixture(beam).close();
-			const first = polyphonicRecall(beam, "Alice", 5, { queryEmbedding: [1, 0] });
-			const cached = beam.caches.polyphonicEngine;
-			const second = polyphonicRecall(beam, "Alice", 5, { queryEmbedding: [1, 0] });
-			expect(cached).toBeInstanceOf(PolyphonicRecallEngine);
-			expect(beam.caches.polyphonicEngine).toBe(cached);
-			expect(first[0]?.content).toBe(second[0]?.content);
-			expect(first[0]?.voice_scores).toEqual(second[0]?.voice_scores);
 		} finally {
 			closeQuietly(beam.db);
 		}

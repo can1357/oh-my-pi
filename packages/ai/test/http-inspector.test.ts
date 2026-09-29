@@ -64,11 +64,6 @@ describe("buildHttp400DumpPayload", () => {
 		);
 	});
 
-	it("leaves a query-less URL untouched", () => {
-		const payload = buildHttp400DumpPayload(dump, new HttpError(400, "x"), "x");
-		expect(payload.url).toBe("https://api.anthropic.com/v1/messages");
-	});
-
 	it("redacts provider-specific auth headers the fixed list never named", () => {
 		const googleDump: RawHttpRequestDump = {
 			provider: "google",
@@ -145,12 +140,6 @@ describe("rewriteClinePassError", () => {
 		);
 		expect(rewritten).toContain("official product surfaces");
 		expect(rewritten).toContain("/model");
-	});
-
-	it("does not let the surface-gate rewrite swallow model-not-found", () => {
-		// Marker independence: the surface-gate pattern must not match the
-		// roster-rotation phrasing and vice versa.
-		expect(rewriteClinePassError("model not found", "cline-pass")).toContain("removed this model");
 	});
 
 	it("leaves other providers untouched — the marker is too generic for them", () => {

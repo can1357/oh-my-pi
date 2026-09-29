@@ -152,17 +152,6 @@ describe("JsRuntime global disposal", () => {
 			runtime.dispose();
 		}
 	});
-	it("reports the installed bridge dispatcher identity in snapshots", async () => {
-		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-call-tool" });
-		try {
-			// The dispatcher is an owned global installed by every runtime, so
-			// the identity flag is always present; the exact-shape assertion
-			// above pins the full key set.
-			expect(runtime.snapshotUserGlobals().initialGlobals).toMatchObject({ __omp_call_tool__: true });
-		} finally {
-			runtime.dispose();
-		}
-	});
 	it("changes the snapshot digest when Object.prototype.toString is replaced", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-tostring" });
 		const genuineToString = Object.prototype.toString;

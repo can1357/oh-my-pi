@@ -4,6 +4,7 @@ import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { buildBrowserItems, ModelBrowser, resolveRoleAssignments, sortModelItems } from "../../overlays/model-browser";
 import { BROWSER_FRAME_ROWS } from "../../overlays/model-picker";
+import { formatKeyHint } from "../../app-keybindings";
 import { theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
@@ -58,7 +59,8 @@ class ModelSceneController implements SetupSceneController {
 
 	render(width: number, maxLines?: number): readonly string[] {
 		const intro = new Text(
-			this.#status ?? theme.fg("muted", "Type to search. Enter saves the highlighted model as your default."),
+			this.#status ??
+				theme.fg("muted", `Type to search. ${formatKeyHint("enter")} saves the highlighted model as your default.`),
 			0,
 			0,
 		);

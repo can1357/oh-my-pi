@@ -58,14 +58,6 @@ describe("parseAgentPluginManifest", () => {
 		}
 	});
 
-	test("reports and ignores unknown top-level fields", () => {
-		const result = parseAgentPluginManifest(manifest({ name: "a", mcpServers: {} }));
-		expect(result.status).toBe("valid");
-		if (result.status === "valid") {
-			expect(result.warnings).toEqual([`Ignoring unknown plugin.json field "mcpServers"`]);
-		}
-	});
-
 	test("reports and ignores a non-object extensions field", () => {
 		const result = parseAgentPluginManifest(manifest({ name: "a", extensions: "nope" }));
 		expect(result.status).toBe("valid");

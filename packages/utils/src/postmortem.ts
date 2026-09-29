@@ -7,6 +7,7 @@
  */
 
 import * as fs from "node:fs";
+import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
 
@@ -366,6 +367,62 @@ export function registerStdioDisconnectHandling(): () => void {
 			process.stdout.removeListener("error", onStdoutDisconnect);
 		}
 	};
+}
+
+/**
+ * Fail a process entry whose event loop drains while `work` is still pending.
+ *
+ * The CLI starts from a floating `runCli()` call because top-level await breaks
+ * `--bytecode` builds. When a one-shot command awaits a promise that never
+ * settles and holds no live handle, the loop drains and Bun exits 0 without
+ * output: an unfinished command reported as success. `beforeExit` fires in
+ * that state; explicit exits (`process.exit`, {@link quit},
+ * {@link exitProcess}, the signal handlers) never emit it.
+ *
+ * `beforeExit` alone is not the verdict: on Windows Bun emits it while I/O is
+ * still in flight and then keeps running the loop, so a command that goes on
+ * to complete must keep its own exit code (#13470). The verdict is taken at
+ * `exit` instead, and only when the last `beforeExit` was final: an unref'd
+ * timer armed there runs only if the loop turns again, clearing the mark
+ * before a later explicit exit. Any later drain emits `beforeExit` again and
+ * re-arms it, so other `beforeExit` listeners (LSP shutdown) still run before
+ * the process exits 1.
+ *
+ * `describe` names what was running (e.g. the resolved subcommand) at report
+ * time; it must return only a command name, never user arguments.
+ */
+export function reportUnsettledEntry(work: Promise<unknown>, describe?: () => string | undefined): void {
+	let pending = true;
+	let drained = false;
+	const settled = (): void => {
+		pending = false;
+	};
+	// Observe both outcomes without claiming the rejection: the caller's `.catch` still owns it.
+	void work.then(settled, settled);
+	process.on("beforeExit", () => {
+		if (!pending) return;
+		drained = true;
+		setTimeout(() => {
+			drained = false;
+		}, 0).unref();
+	});
+	process.once("exit", code => {
+		if (!pending || !drained) return;
+		// A non-zero code is already a failure verdict — an explicit
+		// `process.exit(n)` (possibly on the same loop turn as a Windows
+		// mid-I/O `beforeExit`, before the clearing timer runs) or an
+		// `exitCode` the command set. Overwriting it with 1 and a second
+		// "ended before completing" line only obscures the real error.
+		if (code !== 0) return;
+		const command = describe?.();
+		const subject = command ? `\`${APP_NAME} ${command}\`` : "command";
+		const message = `${subject} ended before completing: the event loop drained while it was still pending (rerun with PI_DEBUG_STARTUP=1 to see the last phase reached)`;
+		try {
+			fs.writeSync(2, `${APP_NAME}: ${message}\n`);
+		} catch {}
+		logger.error(message, { command });
+		process.exitCode = 1;
+	});
 }
 
 // Well-known key marking an error as an *expected* teardown artifact (e.g. a

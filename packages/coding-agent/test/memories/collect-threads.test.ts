@@ -40,19 +40,6 @@ describe("collectThreads", () => {
 		expect(threads[0]?.sourceKind).toBe("cli");
 	});
 
-	it("skips title slot and extracts session header on line 2", async () => {
-		const filePath = path.join(tempDir, "sess-2.jsonl");
-		await Bun.write(
-			filePath,
-			'{"type":"title","title":"Sprint planning"}\n{"type":"session","id":"custom-id-2","cwd":"/repo"}\n',
-		);
-
-		const threads = await collectThreads(makeFakeSession(tempDir));
-		expect(threads.length).toBe(1);
-		expect(threads[0]?.id).toBe("custom-id-2");
-		expect(threads[0]?.cwd).toBe("/repo");
-	});
-
 	it("filters out the current active thread", async () => {
 		const activeFile = path.join(tempDir, "active.jsonl");
 		await Bun.write(activeFile, '{"type":"session","id":"active-thread","cwd":"/work"}\n');

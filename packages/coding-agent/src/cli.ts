@@ -38,6 +38,7 @@ import {
 	LSP_MUX_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
+	TEXT_PREDICT_WORKER_ARG,
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
@@ -146,6 +147,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestIdaHost } = await import("./ida/client");
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
+	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -173,6 +175,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestIdaHost();
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
+	await smokeTestTextPredictDaemon();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -298,6 +301,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === BLOB_BROKER_WORKER_ARG) {
 		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
 		await startBlobBrokerFromEnvironment();
+		return true;
+	}
+	if (arg === TEXT_PREDICT_WORKER_ARG) {
+		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
+		await startTextPredictDaemonFromEnvironment();
 		return true;
 	}
 	return false;
@@ -469,6 +477,9 @@ async function runTinyWorker(): Promise<void> {
 	await startTinyWorkerFromEnvironment();
 }
 
+/** Resolved top-level command name (never its arguments), for the unsettled-entry report. */
+let runningCommand: string | undefined;
+
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
 	let resolvedArgv = argv;
@@ -592,6 +603,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
+		runningCommand = resolved.argv[0];
 		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 	} finally {
 		stopStartupComposer?.();
@@ -601,23 +613,28 @@ export async function runCli(argv: string[]): Promise<void> {
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS
 // lowering) builds to fail, and the entrypoint needs nothing after this.
 // The catch mirrors what an unhandled TLA rejection produced: error dump to
-// stderr, exit code 1. Success paths resolve without touching the exit code.
+// stderr, exit code 1. A settled entry leaves the exit code to the command. An
+// entry still pending when the event loop drains (an await that can never
+// settle) exits 1 with a diagnostic: TLA would have hung there, and a bare
+// floating call exits 0 as if the command had succeeded.
 // Guarded so importing `runCli` (profile CLI tests, SDK embedding) does not
 // launch the agent as a side effect. Worker threads re-enter this module as
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
 if (isProcessEntry || !Bun.isMainThread) {
+	const postmortem: typeof Postmortem | undefined = isProcessEntry
+		? require("@oh-my-pi/pi-utils/postmortem.js")
+		: undefined;
 	// A one-shot CLI run (`omp --help | head`, `omp --version | true`, `omp <sub> | grep -m1`)
 	// whose stdout consumer closes before the write drains gets an EPIPE that Bun surfaces as
 	// an unhandled rejection. Treat a vanished stdout peer as an ordinary Unix disconnect
 	// (graceful exit) rather than the fatal path. Interactive launches register their own
 	// terminal lifetime; help/version/subcommand launches never start one. See #10930. The
 	// registration lives for the process — a one-shot entry exits right after runCli settles.
-	if (isProcessEntry) {
-		const { registerStdioDisconnectHandling }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
-		registerStdioDisconnectHandling();
-	}
-	runCli(process.argv.slice(2)).catch(async error => {
+	postmortem?.registerStdioDisconnectHandling();
+	const entry = runCli(process.argv.slice(2));
+	postmortem?.reportUnsettledEntry(entry, () => runningCommand);
+	entry.catch(async error => {
 		// Failure boundary: inspector/postmortem is irrelevant to successful startup.
 		const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");
 		fatal(error);

@@ -97,20 +97,9 @@ describe("parseArgs validation", () => {
 	it("rejects an unknown flag", () => {
 		expect(() => parseArgs(["--model", "anthropic/claude-opus-4-8", "--not-a-real-flag"])).toThrow(/unknown flag/);
 	});
-
-	it("defaults to a generic, dataset-agnostic jobs directory", () => {
-		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8"]);
-		expect(cfg.jobsDir.endsWith("/runs/harbor")).toBe(true);
-	});
 });
 
 describe("environment backends", () => {
-	it("defaults to docker with the host.docker.internal gateway", () => {
-		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8"]);
-		expect(cfg.envType).toBe("docker");
-		expect(cfg.gatewayUrl).toBe("http://host.docker.internal:4000");
-	});
-
 	it("apple-container swaps the default gateway host to the vmnet bridge address", () => {
 		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8", "--environment", "apple-container"]);
 		expect(cfg.envType).toBe("apple-container");

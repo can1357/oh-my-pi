@@ -43,11 +43,12 @@ describe("extension/hook loader process.exit guard (#3680)", () => {
 			stderr: "pipe",
 		});
 		// Real process signals cannot use fake timers; this only bounds a wedged child.
+		// 2 s SIGKILLed healthy children (exit 137) on loaded CI runners.
 		const watchdog = setTimeout(() => {
 			try {
 				proc.kill("SIGKILL");
 			} catch {}
-		}, 2000);
+		}, 20_000);
 		try {
 			const [exitCode, stdout, stderr] = await Promise.all([
 				proc.exited,

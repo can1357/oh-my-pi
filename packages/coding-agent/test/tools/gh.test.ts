@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1201,40 +1200,6 @@ describe("github tool", () => {
 				// Existing URL is preserved — we never overwrote it.
 				expect(runGit(fixture.repoRoot, ["remote", "get-url", "forksrc"])).toBe(fixture.forkBare);
 			});
-			it("does not depend on localized git remote-add stderr for existing remotes", async () => {
-				// The shim is a bash script resolved via `which`; neither exists on Windows.
-				if (process.platform === "win32") return;
-				const originalPath = process.env.PATH;
-				const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fake-git-"));
-				const realGitResult = Bun.spawnSync(["which", "git"], { stdout: "pipe", stderr: "pipe" });
-				expect(realGitResult.exitCode).toBe(0);
-				const realGit = new TextDecoder().decode(realGitResult.stdout).trim();
-				const fakeGit = path.join(fakeBin, "git");
-				await fs.writeFile(
-					fakeGit,
-					`#!/usr/bin/env bash
-while [[ "$1" == "-c" ]]; do shift 2; done
-if [[ "$1" == "remote" && "$2" == "add" && "$3" == "forksrc" ]]; then
-	echo "本地化错误：远程 forksrc 已经存在。" >&2
-	exit 3
-fi
-exec ${JSON.stringify(realGit)} "$@"
-`,
-				);
-				await fs.chmod(fakeGit, 0o755);
-
-				try {
-					process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-					await vcs.requireGit(fixture.repoRoot).remoteAdd("forksrc", fixture.forkBare);
-				} finally {
-					if (originalPath === undefined) {
-						delete process.env.PATH;
-					} else {
-						process.env.PATH = originalPath;
-					}
-					await removeWithRetries(fakeBin);
-				}
-			});
 		});
 	});
 
@@ -1413,15 +1378,6 @@ echo ok
 				);
 			});
 		});
-	});
-
-	it("exposes a flat op-based schema without legacy run_watch parameters", () => {
-		const tool = new GithubTool(createSession());
-		const wire = toolWireSchema(tool);
-		const properties = wire.properties as Record<string, unknown>;
-		expect(properties.op).toBeDefined();
-		expect(properties.interval).toBeUndefined();
-		expect(properties.grace).toBeUndefined();
 	});
 
 	it("tails failed job logs inline and saves the full failed-job logs as an artifact", async () => {

@@ -266,7 +266,7 @@ export interface MCPResourceContent {
 /** Supported MCP result content blocks retained in display metadata. */
 export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
 
-/** Details included in MCP tool results for rendering */
+/** MCP result details shared by renderers and programmatic tool consumers. */
 export interface MCPToolDetails {
 	/** Server name */
 	serverName: string;
@@ -276,6 +276,8 @@ export interface MCPToolDetails {
 	isError?: boolean;
 	/** Raw content from MCP response */
 	rawContent?: MCPContent[];
+	/** Server-supplied structured data, independent of the model-facing text rendering. */
+	structuredContent?: Record<string, unknown>;
 	/** Structured metadata from the MCP response */
 	mcpMeta?: Record<string, unknown>;
 	/** Provider ID (e.g., "claude", "mcp-json") */

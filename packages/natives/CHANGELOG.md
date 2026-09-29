@@ -29,6 +29,86 @@ Completeness reporting is Linux-only. **macOS and Windows descendant walks and p
 - A process group recorded for termination is a bare number, and the wave signals it as one: PTY cancellation and background-job cleanup both record the group id and then send `TERM` and `KILL` to it with nothing established about whose group it now is, so a group that empties and has its id reused takes the wave. The pinned process target alongside it does not cover this — the group is a separate target with its own signal. This is the group-shaped twin of the bare-pid case above, and the identity guards added elsewhere cannot be routed onto it: authenticating a group needs a reference to its leader pinned when the group was recorded, and with no such anchor the leader check refuses every group instead of the reused ones. The fix therefore belongs at the recording site, the same move that replaced a bare pid with a pinned handle for the PTY child. Deferred rather than done here, because it changes destructive group semantics.
 - `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
 - A cancelled shell run counts the children it could never pin and reports that count nowhere. Plumbing is not what blocks it: all three cancellation paths already await the termination bridge (`shell.rs:347`, `:417`, `:483`) and all three normal paths abort and then await it (`:359-360`, `:428-429`, `:494-495`), so a value can come back without restructuring. The cost is result handling in the three cancellation arms, six result literals (`:348`, `:368`, `:418`, `:433`, `:484`, `:499` — `ShellExecuteResult` at `:143` is an alias of the same struct, not a second one), two native fixtures, and a new field on each of two parallel structs — the serde wire type in `pi-shell` and the `#[napi(object)]` in `pi-natives` that converts from it. What actually defers it is the decision at the end: on the cancellation path the JS caller never reads the native result at all, quarantining the pending run and returning a synthetic cancellation notice, so surfacing the count means first deciding what a cancelled run should tell the agent about children it could not account for. Deferred with the `kill`/`pkill` residual above.
+### Fixed
+
+- Fixed `computer.window(id).ax()` and `find()` failing with `AxFailed` on macOS sheets, popovers and open menus that `computer.windows()` lists, such as TextEdit's Save sheet or a Calendar event popover ([#13659](https://github.com/can1357/oh-my-pi/pull/13659) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS 26 background scrolls moving twice the requested distance; background hovers, scrolls and right or middle clicks are now delivered once ([#13739](https://github.com/can1357/oh-my-pi/pull/13739) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed macOS `takeover` clicks and scrolls failing with `AX action 'AXRaise' failed (AXError(-25205))` on covered windows that do not support `AXRaise`, such as iPhone Mirroring, even when activation brings them forward; a window that stays covered still refuses before any input is sent ([#13737](https://github.com/can1357/oh-my-pi/pull/13737) by [@will-bogusz](https://github.com/will-bogusz)).
+
+## [18.4.3] - 2026-09-28
+
+### Changed
+
+- Lowered the macOS native addons' minimum supported macOS version to 12.0 (previously 15.5)
+- Reduced snapshot cost on every hashline read and grep: file-hash tagging no longer builds a normalized copy of the file, and the seen-line prefix regex is compiled once ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed released Darwin arm64 addons omitting Apple Foundation Models support ([#13610](https://github.com/can1357/oh-my-pi/issues/13610)).
+- Fixed the edit tool's `replace block`/`delete block` operations in indentation-based languages such as Python extending a statement's block over every following statement in its body when a comment line at a different indentation came right after it ([#13358](https://github.com/can1357/oh-my-pi/pull/13358) by [@jchanghong023](https://github.com/jchanghong023)).
+
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added `summarizeCodeAsync` for non-blocking source structure summarization on the libuv thread pool
+
+### Fixed
+
+- Fixed concurrent streaming searches hanging indefinitely or ignoring cancellation while waiting to deliver results to JavaScript.
+- Fixed ngram word completion losing learned state between sessions on Windows when saving its snapshot ([#13589](https://github.com/can1357/oh-my-pi/issues/13589)).
+- Fixed Windows shell pipelines losing their final output when cancelled or timed out (e.g. `yes x | tail -5`): cancelled runs now get a longer grace period to flush before being aborted ([#13365](https://github.com/can1357/oh-my-pi/pull/13365) by [@jchanghong023](https://github.com/jchanghong023))
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed `grep` retaining every matching line until the search finished: the new `onMatches` option streams bounded batches while the search runs, pauses the search while JS catches up, and returns only counts ([#13495](https://github.com/can1357/oh-my-pi/issues/13495))
+- Fixed omp crashing at startup on macOS when built from source with `SDKROOT` set (e.g. via Nix) on a host whose Command Line Tools ship the macOS 27 SDK ([#13168](https://github.com/can1357/oh-my-pi/pull/13168) by [@johnrichardrinehart](https://github.com/johnrichardrinehart)).
+- Hashline edit rejections for a tag issued for another file now name the path the tag belongs to ([#13464](https://github.com/can1357/oh-my-pi/pull/13464) by [@holny](https://github.com/holny)).
+- Fixed the native terminal output pump exiting on temporary nonblocking backpressure ([#13463](https://github.com/can1357/oh-my-pi/pull/13463) by [@hancens1024](https://github.com/hancens1024)).
+- Fixed commits failing on Windows when a repository has commit hooks; hooks now run through `git hook run` ([#13366](https://github.com/can1357/oh-my-pi/pull/13366) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed Windows path stats lacking a file identity, which let `rg` search its own redirected output and made `tail -F` report spurious replacements ([#13367](https://github.com/can1357/oh-my-pi/pull/13367) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed the embedded shell running backtick spans inside a quoted heredoc within a double-quoted command substitution ([#13307](https://github.com/can1357/oh-my-pi/issues/13307)).
+- Fixed native operations to deliver results completed within their timeout and reject results when an abort signal arrives before settlement ([#13209](https://github.com/can1357/oh-my-pi/pull/13209) by [@Komzpa](https://github.com/Komzpa)).
+- Fixed `ulimit` in the embedded shell changing the host process's own resource limits, including from inside `( … )` subshells: limits are now shell state applied only to the external commands the shell spawns ([#13325](https://github.com/can1357/oh-my-pi/issues/13325))
+
+## [18.4.0] - 2026-09-28
+
+### Added
+
+- Added Windows path utilities for converting between long and 8.3 short path spellings without resolving symlinks or junctions. Import them from `@oh-my-pi/pi-natives/path`.
+
+### Fixed
+
+- Fixed the native `xargs` builtin so `-P`/`--max-procs` correctly limits parallel command execution, including GNU-compatible `-P 0` behavior.
+- Improved snapcompact rendering performance for stretched shapes on Windows x64, Intel Macs, and Linux CPUs without AVX2, with no visual changes.
+
+## [18.3.5] - 2026-09-27
+
+### Changed
+
+- Improved syntax highlighting to use about 5x less memory and run 3-5x faster by compiling grammars with Oniguruma instead of fancy-regex; highlighted output is unchanged.
+
+### Fixed
+
+- Fixed SmolLM word completion (`spelling.autocomplete: smollm`) being about 25x slower on Windows x64 and Intel Macs; suggestions are unchanged ([#13488](https://github.com/can1357/oh-my-pi/pull/13488) by [@H4vC](https://github.com/H4vC))
+
+## [18.3.4] - 2026-09-27
+
+### Fixed
+
+- Fixed the native addon keeping every `bun test --isolate`/`--parallel` test file's global object and module graph alive, which grew each test worker by ~15 MB per file until the run was OOM-killed.
+
+## [18.3.3] - 2026-09-27
+
+### Added
+
+- Added a `TextPredictor` N-API binding for managing the high-performance ghost-text completion engine.
+
+### Changed
+
+- Updated desktop input-control capabilities to use a unified `takeover` setting, including `takeover: true` for forced foreground pointer interaction.
 
 ## [18.3.1] - 2026-09-25
 

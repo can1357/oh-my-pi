@@ -270,6 +270,8 @@ export interface CompiledCursorParameter {
 /** One provider quota-scope table. */
 export interface CompiledQuotaRule {
 	provider: string;
+	/** Tier used when no exact or fallback membership matches. */
+	defaultTier?: string;
 	tiers: { label: string; models: string[] }[];
 	fallbacks: { label: string; substring: string }[];
 }
@@ -375,8 +377,17 @@ export type CompiledAuthValidation =
 			maxTokensField?: "max_tokens" | "max_completion_tokens";
 			maxTokens?: number;
 			optional?: boolean;
+			/** With `optional`: a 403 also trusts the key; only a 401 rejects it. */
+			trustForbidden?: boolean;
 	  }
-	| { kind: "anthropic-messages"; label?: string; baseUrl: string; model: string; optional?: boolean }
+	| {
+			kind: "anthropic-messages";
+			label?: string;
+			baseUrl: string;
+			model: string;
+			optional?: boolean;
+			trustForbidden?: boolean;
+	  }
 	| {
 			kind: "models-endpoint";
 			label?: string;
@@ -386,6 +397,7 @@ export type CompiledAuthValidation =
 			/** Hook returning extra request headers (may throw a configuration error). */
 			headersHook?: string;
 			optional?: boolean;
+			trustForbidden?: boolean;
 	  };
 
 /** Paste-an-API-key login: optional browser hint, prompt, optional validation. */

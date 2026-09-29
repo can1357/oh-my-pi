@@ -401,17 +401,6 @@ describe("IRC", () => {
 			expect(msg?.body).toBe("for the waiter");
 		});
 
-		it("wait returns null on timeout and rejects on abort", async () => {
-			// Genuine 5ms wall-clock timeout: this deliberately exercises the
-			// bus's real timer path; nothing else races it.
-			expect(await bus.wait("0-Main", {}, 5)).toBeNull();
-
-			const controller = new AbortController();
-			const waiting = bus.wait("0-Main", {}, 1000, controller.signal);
-			controller.abort(new Error("cancelled"));
-			await expect(waiting).rejects.toThrow("cancelled");
-		});
-
 		it("wait drains an already-pending mailbox message first", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });

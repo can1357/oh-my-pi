@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as nativePath from "@oh-my-pi/pi-natives/path";
 import {
 	__resetProjectDirCacheForTests,
 	directoryIsMissing,
@@ -36,6 +37,19 @@ describe("project directory state", () => {
 			else process.env.PWD = originalPwd;
 		}
 	});
+
+	it.skipIf(process.platform !== "win32")(
+		"surfaces a native path-expansion failure instead of relocating the process",
+		() => {
+			__resetProjectDirCacheForTests();
+			const before = process.cwd();
+			spyOn(nativePath, "expandWindowsLongPath").mockImplementation(() => {
+				throw new Error("stale addon");
+			});
+			expect(() => getProjectDir()).toThrow("stale addon");
+			expect(process.cwd()).toBe(before);
+		},
+	);
 
 	it("treats denied stat as probeable rather than missing", async () => {
 		const stat = spyOn(fs.promises, "stat").mockRejectedValue(

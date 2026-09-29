@@ -25,6 +25,32 @@
 ### Known gaps
 
 **A command deadline that fires after a detached root, or a Windows root with a retained handle, has already exited records a `TimeoutError` even when nothing was left behind.** The deadline sweeps the group or the retained-handle tree in that state, which it must — a detached group outlives its leader, and an earlier round on this branch fixed the opposite defect of skipping that sweep. What it cannot do is tell "swept a survivor" from "swept nothing": the native sweep reports only whether it completed, so an empty tree and one whose survivor it killed both come back `true` (it does reject when it cannot account for a live member, but that is a different question from whether one was there). Reporting no timeout in both cases is worse, because a real survivor past the deadline is exactly what the timeout is for — `ptree-timeout.test.ts` pins that case with a root that exits immediately while its `sleep 30` holds the group. Closing this needs the sweep to report what it found, which is a native API change and is deferred with the platform work.
+## [18.4.3] - 2026-09-28
+
+### Added
+
+- Added an optional `onDone` callback to `readSseJsonOrText` that reports the `[DONE]` sentinel without attaching a raw-event observer ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Changed
+
+- SSE events read without raw capture now share one frozen empty `raw` array instead of allocating one per event ([#13650](https://github.com/can1357/oh-my-pi/pull/13650) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Fixed the unsettled-command report overriding an explicit non-zero exit code with 1 and printing a spurious "ended before completing" line ([#13623](https://github.com/can1357/oh-my-pi/pull/13623) by [@H4vC](https://github.com/H4vC))
+
+## [18.4.2] - 2026-09-28
+
+### Added
+
+- Added cloneJsonTree to provide a high-performance deep copy utility for JSON-shaped object trees
+
+## [18.4.1] - 2026-09-28
+
+### Fixed
+
+- Fixed SQLite stores opened with `recoverCorruption` crashing on a corrupt file instead of being preserved and recreated when the corruption surfaced as a different initialization error such as `no such table` ([#13530](https://github.com/can1357/oh-my-pi/pull/13530) by [@Hunter-124](https://github.com/Hunter-124))
+- Fixed raw stderr output staying on the previous day's log file after the log sink rotates at local midnight ([#13003](https://github.com/can1357/oh-my-pi/issues/13003)).
 
 ## [18.3.1] - 2026-09-25
 

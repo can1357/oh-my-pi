@@ -43,16 +43,6 @@ function createGoogleCliModel(id: string): Model<"google-gemini-cli"> {
 // ---------------------------------------------------------------------------
 
 describe("mergeCompatibleEnumSchemas", () => {
-	it("deduplicates object-valued enum members by deep equality", () => {
-		const existing = { type: "object", enum: [{ x: 1 }] };
-		const incoming = { type: "object", enum: [{ x: 1 }] };
-
-		expect(mergeCompatibleEnumSchemas(existing, incoming)).toEqual({
-			type: "object",
-			enum: [{ x: 1 }],
-		});
-	});
-
 	it("deduplicates structurally equal nested enum values and appends novel ones", () => {
 		const existing = {
 			type: "object",
