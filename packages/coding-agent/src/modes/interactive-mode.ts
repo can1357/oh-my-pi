@@ -6677,8 +6677,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.updatePendingMessagesDisplay();
 	}
 
-	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void {
-		this.#uiHelpers.queueCompactionMessage(text, mode, images);
+	queueCompactionMessage(
+		text: string,
+		mode: "steer" | "followUp",
+		images?: ImageContent[],
+		options?: { preserveDraft?: boolean },
+	): void {
+		this.#uiHelpers.queueCompactionMessage(text, mode, images, options);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
@@ -7179,8 +7184,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Queue slash-command input behind the active turn. */
-	handleQueueCommand(message: string): Promise<void> {
-		return this.#inputController.handleQueueCommand(message);
+	handleQueueCommand(
+		message: string,
+		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+	): Promise<void> {
+		return this.#inputController.handleQueueCommand(message, detached);
 	}
 
 	handleBtwCommand(question: string): Promise<void> {
