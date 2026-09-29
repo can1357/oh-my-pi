@@ -13,8 +13,6 @@ import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, REMOTE_ID_PREFIX } from "../registry/agent-registry";
-import type { AgentSession } from "../session/agent-session";
-import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
 
 /**

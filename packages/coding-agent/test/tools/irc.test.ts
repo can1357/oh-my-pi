@@ -594,10 +594,6 @@ describe("IRC", () => {
 		});
 	});
 
-
-
-
-
 	describe("AgentSession.deliverIrcMessage", () => {
 		it("wakes an idle session with a real turn and emits the irc_message event", async () => {
 			const { session } = createRealSession();

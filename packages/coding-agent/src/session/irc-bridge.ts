@@ -245,5 +245,4 @@ export class IrcBridge {
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
 	}
-
 }

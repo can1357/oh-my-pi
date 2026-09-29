@@ -363,7 +363,6 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
 
-
 		if (!agentId) {
 			const visible = (context?.agentRegistry ?? AgentRegistry.global())
 				.list()
