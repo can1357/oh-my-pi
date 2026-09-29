@@ -362,6 +362,8 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimEscapeSequence,
+	cfgTuiVimEscapeSequenceTimeoutMs,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgProseOnlyThinking } from "../session/settings";
@@ -398,6 +400,8 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.vimEscapeSequence": cfgTuiVimEscapeSequence,
+	"tui.vimEscapeSequenceTimeoutMs": cfgTuiVimEscapeSequenceTimeoutMs,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
 	"compaction.idleThresholdTokens": cfgCompactionIdleThresholdTokens,
@@ -3285,7 +3289,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
-		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
+		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimEscapeSequence", "tui.vimEscapeSequenceTimeoutMs"))
+			this.#applyVimModeSetting();
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("compaction.idleEnabled", "compaction.idleThresholdTokens", "compaction.idleTimeoutSeconds")) {
 			this.#eventController.refreshIdleCompactionTimer();
@@ -5068,6 +5073,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
 	#applyVimMode(editor: CustomEditor): void {
 		editor.setVimMode(cfgTuiVimMode.get(settings));
+		editor.setVimEscapeSequence(cfgTuiVimEscapeSequence.get(settings));
+		editor.setVimEscapeSequenceTimeoutMs(cfgTuiVimEscapeSequenceTimeoutMs.get(settings));
 		editor.onYank = text => {
 			void this.#copyYankToClipboard(text);
 		};
