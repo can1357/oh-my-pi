@@ -65,11 +65,11 @@ describe("default web chain", () => {
 			{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
 		);
 
-		// The cheaper same-provider swap runs first; its failure falls back to the session model as-is.
+		// The cheaper same-provider swap and session model run before unrelated defaults.
 		expect(attempted.slice(0, 3)).toEqual([
-			"web/parallel",
 			"anthropic/claude-haiku-4-5",
 			"anthropic/claude-sonnet-4-5",
+			"web/parallel",
 		]);
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual([
 			"anthropic/claude-haiku-4-5",

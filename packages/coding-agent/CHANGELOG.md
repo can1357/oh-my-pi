@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed `computer.window(74)` matching every open window and `computer.window({ id: 74 })` matching none; a numeric id now resolves the same window as `"74"` ([#13649](https://github.com/can1357/oh-my-pi/pull/13649) by [@will-bogusz](https://github.com/will-bogusz))
+- Automatic web search now prefers grounding from the active model's provider, using Anthropic search for Claude sessions and OpenAI search for Codex sessions while preserving explicit web-role configuration. ([#13011](https://github.com/can1357/oh-my-pi/pull/13011) by [@0xGREG](https://github.com/0xGREG))
 
 ## [18.4.3] - 2026-09-28
 

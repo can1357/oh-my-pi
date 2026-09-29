@@ -162,6 +162,33 @@ function expandHostedCandidate(
 	return models.map(model => ({ ...candidate, model }));
 }
 
+/**
+ * Prefer implicit candidates using the session model's grounding family while
+ * leaving every explicitly configured position fixed.
+ */
+function preferSessionGrounding(
+	candidates: RoleChainCandidate[],
+	sessionModel: Model<Api> | undefined,
+): RoleChainCandidate[] {
+	const grounding = sessionModel?.webSearch;
+	if (!grounding) return candidates;
+
+	const reordered: RoleChainCandidate[] = [];
+	for (const candidate of candidates) {
+		if (!candidate.explicit && candidate.model.webSearch === grounding) reordered.push(candidate);
+	}
+	if (reordered.length === 0) return candidates;
+	for (const candidate of candidates) {
+		if (!candidate.explicit && candidate.model.webSearch !== grounding) reordered.push(candidate);
+	}
+
+	let reorderedIndex = 0;
+	for (let index = 0; index < candidates.length; index++) {
+		if (!candidates[index]!.explicit) candidates[index] = reordered[reorderedIndex++]!;
+	}
+	return candidates;
+}
+
 /** Execute web search */
 async function executeSearch(
 	_toolCallId: string,
@@ -179,7 +206,10 @@ async function executeSearch(
 					: [];
 			})()
 		: resolveRoleChain("web", settings, pool);
-	const expanded = candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool));
+	const expanded = preferSessionGrounding(
+		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
+		options.sessionModel,
+	);
 
 	const parsedQuery = parseSearchQuery(params.query);
 
