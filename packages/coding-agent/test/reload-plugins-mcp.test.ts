@@ -50,6 +50,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		effectiveExtensionRoots: TEST_EXTENSION_ROOTS,
 		getEvalPreludes: () => [],
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
+		refreshSkillsAndCommands: vi.fn(async () => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
 	const ctx = {
@@ -57,8 +58,6 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		session,
 		sessionManager: { getCwd: () => cwd },
 		settings: Settings.isolated(settingsValues),
-		refreshSkillState: vi.fn(async () => {}),
-		refreshSlashCommandState: vi.fn(async () => {}),
 		showStatus: vi.fn(() => {}),
 		editor: { setText: vi.fn(() => {}) },
 	} as never as InteractiveModeContext;

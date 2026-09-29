@@ -34,7 +34,8 @@ export interface InitializeExtensionsOptions {
 
 /**
  * Initialize the session's extension runner with the standard action set
- * shared by non-interactive modes, then emit `session_start`.
+ * shared by non-interactive modes, then emit `session_start` followed by the
+ * startup `resources_discover` round.
  *
  * No-op when the session was constructed without an extension runner.
  */
@@ -162,4 +163,5 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 
 	runner.onError(reportRuntimeError);
 	await runner.emit({ type: "session_start" });
+	await session.discoverExtensionResources();
 }

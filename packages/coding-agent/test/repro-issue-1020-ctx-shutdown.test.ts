@@ -50,6 +50,7 @@ async function createHost(initializeUi: boolean) {
 			},
 			hasPendingAsyncWork: () => state.asyncWork,
 			async waitForIdle() {},
+			async discoverExtensionResources() {},
 			waitForAdmittedSubmissions() {
 				if (state.admitted === 0) return Promise.resolve();
 				const settled = Promise.withResolvers<void>();

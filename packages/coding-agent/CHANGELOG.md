@@ -33,6 +33,7 @@
 - Added native HUD and UI elements (status, tool cards, usage heatmap) for TSP terminals
 - Added support for native-only session info and job dashboard views in TSP terminals
 - Inside a Tern pane, the browser tool opens tabs as browser picture-in-pictures over omp's pane and drives their native web view (trusted input, ARIA snapshots, screenshots, PDF, dialogs, downloads, cookies, console, fetch/XHR routes and HAR, recording); it falls back to Chromium when no Tern window can host them. Opt out with `browser.tern`, `PI_BROWSER_TERN=0` or `app.tern: false`; `app.tern: true` requires it
+- Fixed the extension `resources_discover` event never firing: it now runs after `session_start` and on every reload (`ctx.reload()`, `/reload-plugins`, cwd moves), and the skill, prompt-template, and theme paths it returns show up in the session; a reload that stops returning a path removes its resources, and missing or invalid paths are reported as extension warnings
 
 ## [18.4.3] - 2026-09-28
 

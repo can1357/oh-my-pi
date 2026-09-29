@@ -750,17 +750,28 @@ export interface ToolInfo {
 // Resource Events
 // ============================================================================
 
-/** Fired after session_start to allow extensions to provide additional resource paths. */
+/**
+ * Fired after session_start (`reason: "startup"`) and again on every resource rediscovery
+ * (`reason: "reload"`: `ctx.reload()`, `/reload-plugins`, cwd changes) so extensions can
+ * contribute additional skill, prompt-template, and theme paths.
+ */
 export interface ResourcesDiscoverEvent {
 	type: "resources_discover";
 	cwd: string;
 	reason: "startup" | "reload";
 }
 
-/** Result from resources_discover event handler */
+/**
+ * Result from a resources_discover event handler. Relative paths resolve against the session
+ * cwd (`~` expands to home). Each round replaces the previous contribution; missing or
+ * wrong-type paths are reported as extension errors and skipped.
+ */
 export interface ResourcesDiscoverResult {
+	/** Skills roots, single skill directories, or `SKILL.md` files. */
 	skillPaths?: string[];
+	/** Prompt-template directories (scanned recursively) or `.md` files. */
 	promptPaths?: string[];
+	/** Directories of `.json` theme files or single `.json` theme files. */
 	themePaths?: string[];
 }
 

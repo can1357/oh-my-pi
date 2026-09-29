@@ -475,8 +475,35 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 ### `resources_discover`
 
-`resources_discover` exists in extension types and `ExtensionRunner`.
-Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemented, but there are no `AgentSession` callsites invoking it in the current codebase.
+Contribute extra skill, prompt-template, and theme paths:
+
+```ts
+pi.on("resources_discover", async (event, ctx) => {
+  // event.cwd: session working directory; event.reason: "startup" | "reload"
+  return {
+    skillPaths: ["./skills"], // skills root, one skill directory, or a SKILL.md file
+    promptPaths: ["./prompts"], // directory (scanned recursively) or a .md file
+    themePaths: ["~/themes/solarized.json"], // directory of .json files or one .json file
+  };
+});
+```
+
+When it fires:
+
+- `reason: "startup"` fires once, right after `session_start`, in interactive, print, RPC, and ACP sessions. Subagents don't emit it; they inherit the parent's skill list.
+- `reason: "reload"` fires on every later rediscovery: `ctx.reload()`, `/reload-plugins`, enabling or disabling a plugin in `/settings`, a cwd change (`/move`, resuming a session from another project), and live edits to the skills/commands discovery settings or the configured extension list.
+
+Path handling:
+
+- Relative paths resolve against `event.cwd` (the session cwd), not the extension's directory, matching upstream pi. A leading `~` expands to the home directory. To ship resources inside an extension, return absolute paths built from `import.meta.dir`.
+- Each round replaces the previous one. If a reload stops returning a path, its skills, prompt templates, and themes go away. The same path returned twice (or spelled two ways) counts once.
+- Missing paths, the wrong file type, unreadable directories, non-string entries, and theme files that don't validate are skipped. So are skill and prompt-template files under a contributed path that can't be read or scanned. Each one is reported as an extension error for event `resources_discover`, attributed to the extension that returned the path, and logged: the interactive UI shows it, print mode writes it to stderr, and RPC emits an `extension_error` frame. The session keeps running.
+
+How contributions merge:
+
+- **Skills** join skill discovery at the lowest priority. A name that a configured source already provides keeps that source's skill, and the collision goes into the skill warnings. `skills.enabled`, `ignoredSkills`, `includeSkills`, and `disabledExtensions` still apply. Sessions with an explicit skill list (`--no-skills`, SDK `skills`) ignore extension skills.
+- **Prompt templates** get the `(extension)` source label and show up as `/name` commands. User and project templates win name clashes.
+- **Themes** are named after their file (`solarized.json` → `solarized`) and appear in the theme selector and in `ctx.ui.getAllThemes()` / `ctx.ui.setTheme()`. Built-in and custom-directory themes keep their names. If the configured dark/light theme only exists as an extension theme, it's applied once the extension registers it. When a reload finds that the active extension theme's file moved or changed, the theme is re-applied from the new contents. If a reload drops the active theme, it stays applied until the next theme change. Themes belong to the session that contributed them: when two top-level sessions share a process, one session's reload never removes the other's themes, the earlier session keeps a name both contribute, and disposing a session removes its themes. ACP sessions ignore `themePaths`, since ACP clients don't render omp themes.
 
 ## Tool authoring details
 

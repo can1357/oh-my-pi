@@ -379,6 +379,7 @@ describe("reportPromptResult", () => {
 					onError: () => {},
 					emit: async () => {},
 				},
+				discoverExtensionResources: async () => {},
 				...testCase.session,
 			} as unknown as AgentSession;
 			await initializeExtensions(session, {
@@ -465,6 +466,7 @@ describe("initializeExtensions markAgentInvokingMessage", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverExtensionResources: async () => {},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
 				sentOptions = options;
 				return true;
@@ -514,6 +516,7 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverExtensionResources: async () => {},
 			// Mirrors AgentSession.sendCustomMessage's contract: `false` iff no turn started,
 			// e.g. an idle steer superseded by a concurrent turn's preflight generation check.
 			sendCustomMessage: async () => false,

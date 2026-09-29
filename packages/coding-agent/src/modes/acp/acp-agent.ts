@@ -2646,6 +2646,9 @@ export class AcpAgent implements Agent {
 			"rpc",
 		);
 		await extensionRunner.emit({ type: "session_start" });
+		// ACP never renders TUI themes (its ui context lists none and rejects setTheme), and it
+		// hosts several live sessions: registering one session's themes would only leak them.
+		await record.session.discoverExtensionResources({ themes: false });
 		record.extensionsConfigured = true;
 	}
 

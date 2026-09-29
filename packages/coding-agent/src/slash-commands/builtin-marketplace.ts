@@ -32,8 +32,9 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
-	await ctx.refreshSkillState();
-	await ctx.refreshSlashCommandState();
+	// Rediscovers skills and slash commands, re-emits `resources_discover` (reason `reload`),
+	// and rebuilds the picker through the session's command-metadata notification.
+	await ctx.session.refreshSkillsAndCommands();
 	resetCapabilities();
 	if (ctx.mcpManager) {
 		await new MCPCommandController(ctx).reloadServers();

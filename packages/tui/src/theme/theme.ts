@@ -11,10 +11,13 @@ import {
 	type CreateThemeOptions,
 	createTheme,
 	getBuiltinThemes,
+	getExtensionThemeFiles,
+	isExtensionThemeStale,
 	loadTheme,
 	loadThemeJson,
 	loadThemeJsonSync,
 	loadThemeSync,
+	setExtensionThemeFiles,
 } from "./loader";
 import { isValidThemeBg, isValidThemeColor, type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
@@ -320,6 +323,41 @@ export function setThemeInstance(themeInstance: Theme): void {
 	currentThemeName = "<in-memory>";
 	stopThemeWatcher();
 	notifyThemeChange({ ephemeral: true });
+}
+
+/**
+ * Replace `owner`'s extension-contributed themes (`resources_discover` `themePaths`), keyed by
+ * name; other owners' contributions are untouched and an empty list unregisters `owner`.
+ * When auto-detection resolves to a configured theme only an extension provides — startup
+ * fell back to `dark` before extensions ran — that theme is applied now. An active extension
+ * theme whose contributed file moved or changed on disk is reloaded. An active theme whose
+ * contribution is dropped stays applied until the next theme change.
+ */
+export async function setExtensionThemes(
+	owner: object,
+	themes: Iterable<{ name: string; path: string }>,
+): Promise<void> {
+	setExtensionThemeFiles(owner, themes);
+	if (typeof theme === "undefined") return;
+	if (autoDetectedTheme) {
+		const resolved = getDefaultTheme();
+		if (resolved !== currentThemeName && getExtensionThemeFiles().has(resolved)) {
+			reevaluateAutoTheme("extension themes");
+			return;
+		}
+	}
+	const activeName = currentThemeName;
+	if (!activeName || previewThemeName !== undefined || !(await isExtensionThemeStale(activeName))) return;
+	const requestId = ++themeLoadRequestId;
+	try {
+		const loadedTheme = await loadTheme(activeName, getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId || currentThemeName !== activeName) return;
+		assignTheme(loadedTheme);
+		notifyThemeChange({ ephemeral: true });
+	} catch (error) {
+		// Keep the last good theme while the contributed file is invalid.
+		logger.debug("Extension theme reload failed", { theme: activeName, error: String(error) });
+	}
 }
 
 /**
@@ -874,8 +912,8 @@ export function getNativeThemePalette(): NativeThemePalette {
 
 /**
  * Check if a theme is a "light" theme by analyzing its status-line background
- * luminance. Loads theme JSON synchronously (built-in or custom file on disk)
- * for callers in synchronous flows (settings migration, setup wizard).
+ * luminance. Loads theme JSON synchronously (built-in, custom file on disk, or an
+ * extension-contributed file) for callers in synchronous flows (settings migration, setup wizard).
  */
 export function isLightTheme(themeName?: string): boolean {
 	const name = themeName ?? "dark";
@@ -884,9 +922,13 @@ export function isLightTheme(themeName?: string): boolean {
 	if (name in builtinThemes) {
 		themeJson = builtinThemes[name];
 	} else {
+		const customPath = path.join(getCustomThemesDir(), `${name}.json`);
+		const extensionPath = getExtensionThemeFiles().get(name);
 		try {
-			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
-			const content = fs.readFileSync(customPath, "utf-8");
+			const content = fs.readFileSync(
+				extensionPath && !fs.existsSync(customPath) ? extensionPath : customPath,
+				"utf-8",
+			);
 			themeJson = JSON.parse(content) as ThemeJson;
 		} catch {
 			return false;

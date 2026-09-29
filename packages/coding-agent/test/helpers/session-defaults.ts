@@ -15,5 +15,6 @@ export function createSessionDefaults() {
 		setIrcWakeTurnObserver: () => {},
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
+		discoverExtensionResources: async () => {},
 	} satisfies Partial<AgentSession>;
 }

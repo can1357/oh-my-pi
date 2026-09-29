@@ -71,13 +71,44 @@ export function appendInlineArgsFallback(
 	return `${rendered}\n\n${argsText}`;
 }
 
+type PromptTemplateSource = "user" | "project" | "extension";
+
+/** Parse one markdown file into a prompt template named after the file. */
+async function loadTemplateFile(fullPath: string, sourceStr: string): Promise<PromptTemplate> {
+	const rawContent = await Bun.file(fullPath).text();
+	const { frontmatter, body } = parseFrontmatter(rawContent, { source: fullPath });
+
+	// Get description from frontmatter or first non-empty line
+	let description = String(frontmatter.description || "");
+	if (!description) {
+		const firstLine = body.split("\n").find(line => line.trim());
+		if (firstLine) {
+			// Truncate if too long
+			description = firstLine.slice(0, 60);
+			if (firstLine.length > 60) description += "...";
+		}
+	}
+
+	// Append source to description
+	description = description ? `${description} ${sourceStr}` : sourceStr;
+
+	return {
+		name: path.basename(fullPath).slice(0, -3), // Remove .md extension
+		description,
+		content: body,
+		source: sourceStr,
+	};
+}
+
 /**
- * Recursively scan a directory for .md files (and symlinks to .md files) and load them as prompt templates
+ * Recursively scan a directory for .md files (and symlinks to .md files) and load them as prompt templates.
+ * Read/scan failures go to `onError` when given, otherwise to the log.
  */
 async function loadTemplatesFromDir(
 	dir: string,
-	source: "user" | "project",
+	source: PromptTemplateSource,
 	subdir: string = "",
+	onError?: (message: string) => void,
 ): Promise<PromptTemplate[]> {
 	const templates: PromptTemplate[] = [];
 	try {
@@ -92,62 +123,75 @@ async function loadTemplatesFromDir(
 
 		for (const entry of entries) {
 			const fullPath = path.join(dir, entry);
-			const file = Bun.file(fullPath);
 
 			try {
-				const stat = await file.exists();
-				if (!stat) continue;
+				if (!entry.endsWith(".md") || !(await Bun.file(fullPath).exists())) continue;
 
-				if (entry.endsWith(".md")) {
-					const rawContent = await file.text();
-					const { frontmatter, body } = parseFrontmatter(rawContent, { source: fullPath });
+				// Build source string based on subdirectory structure
+				const entryDir = entry.includes("/") ? entry.split("/").slice(0, -1).join(":") : "";
+				const fullSubdir = subdir && entryDir ? `${subdir}:${entryDir}` : entryDir || subdir;
+				const sourceStr = fullSubdir ? `(${source}:${fullSubdir})` : `(${source})`;
 
-					const name = entry.split("/").pop()!.slice(0, -3); // Remove .md extension
-
-					// Build source string based on subdirectory structure
-					const entryDir = entry.includes("/") ? entry.split("/").slice(0, -1).join(":") : "";
-					const fullSubdir = subdir && entryDir ? `${subdir}:${entryDir}` : entryDir || subdir;
-
-					let sourceStr: string;
-					if (source === "user") {
-						sourceStr = fullSubdir ? `(user:${fullSubdir})` : "(user)";
-					} else {
-						sourceStr = fullSubdir ? `(project:${fullSubdir})` : "(project)";
-					}
-
-					// Get description from frontmatter or first non-empty line
-					let description = String(frontmatter.description || "");
-					if (!description) {
-						const firstLine = body.split("\n").find(line => line.trim());
-						if (firstLine) {
-							// Truncate if too long
-							description = firstLine.slice(0, 60);
-							if (firstLine.length > 60) description += "...";
-						}
-					}
-
-					// Append source to description
-					description = description ? `${description} ${sourceStr}` : sourceStr;
-
-					templates.push({
-						name,
-						description,
-						content: body,
-						source: sourceStr,
-					});
-				}
+				templates.push(await loadTemplateFile(fullPath, sourceStr));
 			} catch (error) {
-				logger.warn("Failed to load prompt template", { path: fullPath, error: String(error) });
+				if (onError) onError(`Failed to load prompt template ${fullPath}: ${String(error)}`);
+				else logger.warn("Failed to load prompt template", { path: fullPath, error: String(error) });
 			}
 		}
 	} catch (error) {
 		if (!fs.existsSync(dir)) {
 			return [];
 		}
-		logger.warn("Failed to scan prompt templates directory", { dir, error: String(error) });
+		if (onError) onError(`Failed to scan prompt templates directory ${dir}: ${String(error)}`);
+		else logger.warn("Failed to scan prompt templates directory", { dir, error: String(error) });
 	}
 
 	return templates;
+}
+
+/** A prompt-template read/scan failure under one contributed path. */
+export interface PromptTemplatePathError {
+	/** The contributed path (as passed in) whose scan produced the failure. */
+	path: string;
+	message: string;
+}
+
+/**
+ * Load extension-contributed prompt templates (`resources_discover` `promptPaths`).
+ * Each path is an absolute directory (scanned recursively like `prompts/`) or a
+ * single `.md` file, told apart by its stat; templates carry the `(extension)` source
+ * label. Unreadable entries are skipped and returned as errors keyed by the
+ * contributed path so callers can attribute them.
+ */
+export async function loadPromptTemplatesFromPaths(
+	paths: readonly string[],
+): Promise<{ templates: PromptTemplate[]; errors: PromptTemplatePathError[] }> {
+	const templates: PromptTemplate[] = [];
+	const errors: PromptTemplatePathError[] = [];
+	for (const templatePath of paths) {
+		const report = (message: string) => errors.push({ path: templatePath, message });
+		let stat: fs.Stats;
+		try {
+			stat = await fs.promises.stat(templatePath);
+		} catch (error) {
+			report(`Cannot read prompt path ${templatePath}: ${String(error)}`);
+			continue;
+		}
+		if (stat.isDirectory()) {
+			templates.push(...(await loadTemplatesFromDir(templatePath, "extension", "", report)));
+			continue;
+		}
+		if (!stat.isFile() || !templatePath.toLowerCase().endsWith(".md")) {
+			report(`Ignoring prompt path ${templatePath}: expected a directory or a .md file`);
+			continue;
+		}
+		try {
+			templates.push(await loadTemplateFile(templatePath, "(extension)"));
+		} catch (error) {
+			report(`Failed to load prompt template ${templatePath}: ${String(error)}`);
+		}
+	}
+	return { templates, errors };
 }
 
 export interface LoadPromptTemplatesOptions {

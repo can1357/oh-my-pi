@@ -308,14 +308,7 @@ export class SelectorController {
 						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
 					describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
-					onPluginsChanged: async () => {
-						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
-						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-						await this.ctx.refreshSkillState();
-						await this.ctx.refreshSlashCommandState();
-						resetCapabilities();
-						this.ctx.ui.requestRender();
-					},
+					onPluginsChanged: () => this.reloadAfterPluginToggle(),
 					onCancel: () => {
 						done();
 						// Restore status line to saved settings
@@ -337,6 +330,19 @@ export class SelectorController {
 			);
 			const overlayHandle = this.#showFullscreenMenu(selector);
 		});
+	}
+
+	/**
+	 * Plugin enable/disable from the settings panel: drop cached plugin roots, then rediscover
+	 * skills and slash commands through the session, which also re-emits `resources_discover`
+	 * (reason `reload`) and rebuilds the picker via its command-metadata notification.
+	 */
+	async reloadAfterPluginToggle(): Promise<void> {
+		const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await this.ctx.session.refreshSkillsAndCommands();
+		resetCapabilities();
+		this.ctx.ui.requestRender();
 	}
 
 	/**

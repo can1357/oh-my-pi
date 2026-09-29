@@ -13,7 +13,13 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	type ExtensionSkillPath,
+	loadSkills,
+	type Skill,
+	type SkillWarning,
+	setActiveSkills,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -387,6 +393,8 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	/** Skill paths from extension `resources_discover` handlers, merged on every rediscovery. */
+	#extensionSkillPaths: readonly ExtensionSkillPath[] = [];
 	/**
 	 * Prompt surface committed by the last system-prompt rebuild. The
 	 * provider-visible system prompt is deliberately byte-stable across
@@ -1707,6 +1715,14 @@ export class SessionTools {
 		};
 	}
 
+	/**
+	 * Replaces the extension-contributed skill paths used by {@link refreshSkills}.
+	 * Sessions with an explicit (non-reloadable) skill list ignore them.
+	 */
+	setExtensionSkillPaths(paths: readonly ExtensionSkillPath[]): void {
+		this.#extensionSkillPaths = [...paths];
+	}
+
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
@@ -1717,6 +1733,7 @@ export class SessionTools {
 				cwd: this.#host.sessionManager.getCwd(),
 				disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
 				extensionRoots: this.#host.effectiveExtensionRoots(),
+				extensionSkillPaths: this.#extensionSkillPaths,
 			});
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;

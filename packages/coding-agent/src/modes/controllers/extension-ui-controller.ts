@@ -328,10 +328,11 @@ export class ExtensionUiController {
 			this.showExtensionError(error.extensionPath, error.error);
 		});
 
-		// Emit session_start event
+		// Emit session_start event, then let extensions contribute skill/prompt/theme paths
 		await extensionRunner.emit({
 			type: "session_start",
 		});
+		await this.ctx.session.discoverExtensionResources();
 	}
 
 	/**

@@ -485,6 +485,65 @@ export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	depth: 0,
 });
 
+/** One resource path returned by a `resources_discover` handler, tagged with its extension. */
+export interface DiscoveredResourcePath {
+	path: string;
+	extensionPath: string;
+}
+
+/** Paths every `resources_discover` handler returned, grouped by resource kind in extension order. */
+export interface DiscoveredResourcePaths {
+	skillPaths: DiscoveredResourcePath[];
+	promptPaths: DiscoveredResourcePath[];
+	themePaths: DiscoveredResourcePath[];
+}
+
+/**
+ * Render an untrusted handler value for a warning. Never throws: BigInts, cycles, and
+ * hostile `toJSON`/`toString` fall back to `Bun.inspect`, then to the value's type.
+ */
+function formatDiscoveredEntry(entry: unknown): string {
+	try {
+		return JSON.stringify(entry) ?? String(entry);
+	} catch {
+		// BigInt, a cycle, or a throwing toJSON/toString: fall through to Bun.inspect.
+	}
+	try {
+		return Bun.inspect(entry, { depth: 1, compact: true });
+	} catch {
+		return `<${typeof entry}>`;
+	}
+}
+
+/**
+ * Append a handler's `field` entries to `out`. Handler results are untyped at runtime,
+ * so a non-array field or a non-string / blank entry is reported and skipped.
+ */
+function collectDiscoveredPaths(
+	value: unknown,
+	field: keyof ResourcesDiscoverResult,
+	extensionPath: string,
+	out: DiscoveredResourcePath[],
+	report: (error: ExtensionError) => void,
+): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		report({ extensionPath, event: "resources_discover", error: `Ignoring ${field}: expected an array of paths` });
+		return;
+	}
+	for (const entry of value) {
+		if (typeof entry === "string" && entry.trim().length > 0) {
+			out.push({ path: entry.trim(), extensionPath });
+		} else {
+			report({
+				extensionPath,
+				event: "resources_discover",
+				error: `Ignoring ${field} entry ${formatDiscoveredEntry(entry)}: expected a non-empty path string`,
+			});
+		}
+	}
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -1862,18 +1921,25 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	/**
+	 * Emit `resources_discover` to every handler and collect the returned skill, prompt,
+	 * and theme paths verbatim (unresolved) in extension order. Malformed results are
+	 * reported through {@link emitError} and skipped.
+	 */
 	async emitResourcesDiscover(
 		cwd: string,
 		reason: ResourcesDiscoverEvent["reason"],
-	): Promise<{
-		skillPaths: Array<{ path: string; extensionPath: string }>;
-		promptPaths: Array<{ path: string; extensionPath: string }>;
-		themePaths: Array<{ path: string; extensionPath: string }>;
-	}> {
+	): Promise<DiscoveredResourcePaths> {
 		const ctx = this.createContext();
-		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
-		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
-		const themePaths: Array<{ path: string; extensionPath: string }> = [];
+		const discovered: DiscoveredResourcePaths = { skillPaths: [], promptPaths: [], themePaths: [] };
+		// Logged as well as emitted: hosts without an onError listener (ACP) would drop them otherwise.
+		const report = (error: ExtensionError) => {
+			logger.warn("resources_discover result entry skipped", {
+				extension: error.extensionPath,
+				message: error.error,
+			});
+			this.emitError(error);
+		};
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("resources_discover");
@@ -1889,20 +1955,14 @@ export class ExtensionRunner {
 					extensionHandlerTimeoutMs,
 				);
 				const result = handlerResult as ResourcesDiscoverResult | undefined;
-
-				if (result?.skillPaths?.length) {
-					skillPaths.push(...result.skillPaths.map(path => ({ path, extensionPath: ext.path })));
-				}
-				if (result?.promptPaths?.length) {
-					promptPaths.push(...result.promptPaths.map(path => ({ path, extensionPath: ext.path })));
-				}
-				if (result?.themePaths?.length) {
-					themePaths.push(...result.themePaths.map(path => ({ path, extensionPath: ext.path })));
-				}
+				if (!result || typeof result !== "object") continue;
+				collectDiscoveredPaths(result.skillPaths, "skillPaths", ext.path, discovered.skillPaths, report);
+				collectDiscoveredPaths(result.promptPaths, "promptPaths", ext.path, discovered.promptPaths, report);
+				collectDiscoveredPaths(result.themePaths, "themePaths", ext.path, discovered.themePaths, report);
 			}
 		}
 
-		return { skillPaths, promptPaths, themePaths };
+		return discovered;
 	}
 
 	/** Emit input event. Transforms chain, "handled" short-circuits. */
