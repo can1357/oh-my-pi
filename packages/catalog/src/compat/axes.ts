@@ -196,6 +196,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"inject-claude-code-instruction": wire("injectClaudeCodeInstruction", ["anthropic"]),
+	"max-image-dimension": wire("maxImageDimension", ["anthropic"]),
+	"max-image-payload-bytes": wire("maxImagePayloadBytes", ["anthropic"]),
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
