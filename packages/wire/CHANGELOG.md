@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.4] - 2026-09-29
+
 ### Added
 
 - Added the Tern Surface Protocol wire contract (`@oh-my-pi/pi-wire`): message framing constants, the component vocabulary, document ops, frames, the handshake and terminal events that let omp render natively in terminals that speak it

@@ -1382,6 +1382,12 @@ export interface Model<TApi extends Api = Api> {
 	useResponsesLite?: boolean;
 	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
 	toolMode?: "code_mode_only";
+	/**
+	 * Service-tier ids the provider advertises for this model (Codex discovery
+	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). Absent when the
+	 * provider publishes no per-model tier list.
+	 */
+	serviceTiers?: readonly string[];
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */

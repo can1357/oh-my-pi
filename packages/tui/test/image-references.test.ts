@@ -262,6 +262,13 @@ describe("shiftImageMarkers", () => {
 		);
 	});
 
+	it("leaves markers above the image count alone", () => {
+		expect(shiftImageMarkers("[Image #1] attachment://1 beside [Image #2]", 3, 1)).toBe(
+			"[Image #4] attachment://4 beside [Image #2]",
+		);
+		expect(shiftImageMarkers("see [Image #1]", 3, 0)).toBe("see [Image #1]");
+	});
+
 	it("never touches Paste markers", () => {
 		expect(shiftImageMarkers("[Image #1] [Paste #1, +5 lines]", 2)).toBe("[Image #3] [Paste #1, +5 lines]");
 	});

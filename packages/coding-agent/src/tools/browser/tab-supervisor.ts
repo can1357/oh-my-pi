@@ -12,7 +12,7 @@ import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
-import { ToolAbortError } from "../tool-errors";
+import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
 import { CmuxTab } from "./cmux/cmux-tab";
@@ -1481,7 +1481,7 @@ async function dispatchToolCall(
 		});
 		safeSend(tab, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
-		safeSend(tab, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		safeSend(tab, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toWorkerErrorPayload(error) } });
 	} finally {
 		pending.toolCalls.delete(msg.id);
 		pending.signal?.removeEventListener("abort", onParentAbort);
@@ -1495,19 +1495,6 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 	} catch (err) {
 		logger.debug("tab worker send failed", { error: err instanceof Error ? err.message : String(err) });
 	}
-}
-
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
 }
 
 async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<void> {

@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	Ellipsis,
@@ -33,6 +34,12 @@ export interface ExtensionAskDialogQuestion {
 	recommended?: number;
 }
 
+/** Prompt text and the images pasted into it (custom answers and notes). */
+export interface AskDialogPromptValue {
+	text: string;
+	images?: ImageContent[];
+}
+
 /** Submitted answer to one dialog question. */
 export interface ExtensionAskDialogResultItem {
 	id: string;
@@ -41,7 +48,9 @@ export interface ExtensionAskDialogResultItem {
 	multi: boolean;
 	selectedOptions: string[];
 	customInput?: string;
+	customInputImages?: ImageContent[];
 	note?: string;
+	noteImages?: ImageContent[];
 	timedOut?: boolean;
 }
 
@@ -145,6 +154,8 @@ interface AskDialogCallbacks {
 	onSubmit(result: ExtensionAskDialogSubmitResult): void;
 	onCancel(): void;
 	onPrompt(title: string, prefill?: string): Promise<string | undefined>;
+	/** Prompt that accepts pasted images; without it, prompts use `onPrompt`. */
+	onImagePrompt?(title: string, prefill: AskDialogPromptValue | undefined): Promise<AskDialogPromptValue | undefined>;
 }
 
 interface AskDialogInputGuard {
@@ -167,7 +178,9 @@ interface AskDialogOptions {
 interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
+	customInputImages: ImageContent[] | undefined;
 	note: string | undefined;
+	noteImages: ImageContent[] | undefined;
 	noteRowKey: string | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
@@ -399,8 +412,15 @@ function describeRowDetail(
 	return spans.length > 0 ? spans : undefined;
 }
 
+/** Normalize the result of either prompt callback. */
+function splitPromptInput(input: string | AskDialogPromptValue): { text: string; images: ImageContent[] | undefined } {
+	if (typeof input === "string") return { text: input, images: undefined };
+	return { text: input.text, images: input.images?.length ? input.images : undefined };
+}
+
 function clearNote(state: QuestionState): void {
 	state.note = undefined;
+	state.noteImages = undefined;
 	state.noteRowKey = undefined;
 }
 
@@ -565,7 +585,9 @@ export class AskDialogComponent implements Component {
 			return {
 				selectedOptions: new Set<string>(),
 				customInput: undefined,
+				customInputImages: undefined,
 				note: undefined,
+				noteImages: undefined,
 				noteRowKey: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
@@ -1231,6 +1253,7 @@ export class AskDialogComponent implements Component {
 		}
 		state.selectedOptions = new Set([option.label]);
 		state.customInput = undefined;
+		state.customInputImages = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
 		this.#advanceAfterQuestion();
 	}
@@ -1268,6 +1291,19 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
+	/**
+	 * Open the host prompt, image-capable when available. Returns the callback's promise so each
+	 * caller keeps one `await` before clearing `#promptActive`, which the host's restore relies on.
+	 */
+	#openPrompt(
+		title: string,
+		prefill: AskDialogPromptValue | undefined,
+	): Promise<string | AskDialogPromptValue | undefined> {
+		return this.callbacks.onImagePrompt
+			? this.callbacks.onImagePrompt(title, prefill)
+			: this.callbacks.onPrompt(title, prefill?.text);
+	}
+
 	async #promptForCustomInput(
 		question: ExtensionAskDialogQuestion,
 		state: QuestionState,
@@ -1275,18 +1311,21 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const input = await this.callbacks.onPrompt(
-				boundPromptTitle("Custom answer: ", question.question),
-				state.customInput,
-			);
-			if (input === undefined || this.#closed) return;
-			if (input.trim() === "") {
+			const title = boundPromptTitle("Custom answer: ", question.question);
+			const prefill =
+				state.customInput === undefined ? undefined : { text: state.customInput, images: state.customInputImages };
+			const result = await this.#openPrompt(title, prefill);
+			if (result === undefined || this.#closed) return;
+			const input = splitPromptInput(result);
+			if (input.text.trim() === "") {
 				// Submitting an empty value unselects the custom answer.
 				state.customInput = undefined;
+				state.customInputImages = undefined;
 				clearNoteIfRow(state, rowItem.key);
 				return;
 			}
-			state.customInput = input;
+			state.customInput = input.text;
+			state.customInputImages = input.images;
 			if (!question.multi) {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
@@ -1311,12 +1350,15 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
-			const input = await this.callbacks.onPrompt(
-				boundPromptTitle(`Note for ${rowItem.label}: `, question.question),
-				state.noteRowKey === rowItem.key ? state.note : undefined,
-			);
-			if (input === undefined || this.#closed) return;
-			state.note = input;
+			const title = boundPromptTitle(`Note for ${rowItem.label}: `, question.question);
+			const isReedit = state.noteRowKey === rowItem.key;
+			const prefill =
+				isReedit && state.note !== undefined ? { text: state.note, images: state.noteImages } : undefined;
+			const result = await this.#openPrompt(title, prefill);
+			if (result === undefined || this.#closed) return;
+			const note = splitPromptInput(result);
+			state.note = note.text;
+			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;
 		} finally {
 			this.#promptActive = false;
@@ -1547,6 +1589,7 @@ export class AskDialogComponent implements Component {
 			const selectedOptions = question.options
 				.map(option => option.label)
 				.filter(label => state.selectedOptions.has(label));
+			const note = noteForSubmittedAnswer(question, state);
 			results.push({
 				id: question.id,
 				question: question.question,
@@ -1554,7 +1597,9 @@ export class AskDialogComponent implements Component {
 				multi: question.multi ?? false,
 				selectedOptions,
 				customInput: state.customInput,
-				note: noteForSubmittedAnswer(question, state),
+				customInputImages: state.customInputImages,
+				note,
+				noteImages: note === undefined ? undefined : state.noteImages,
 				timedOut: state.timedOut || undefined,
 			});
 		}
