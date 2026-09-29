@@ -98,7 +98,8 @@ describe("streamDevin history handoff", () => {
 
 		expect(request.chatMessagePrompts).toHaveLength(6);
 		expect(foreign?.messageId).not.toBe("resp_foreign");
-		expect(foreign?.messageId).toMatch(/^bot-[0-9a-f-]{36}$/);
+		// Replayed assistant rows use bare UUIDs, as the native CLI sends them.
+		expect(foreign?.messageId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		expect(foreign?.prompt).toContain("foreign reasoning");
 		expect(foreign?.prompt).toContain("foreign answer");
 		expect(foreign?.thinking).toBe("");
