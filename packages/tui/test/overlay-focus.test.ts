@@ -1,6 +1,18 @@
-import { describe, expect, it } from "bun:test";
-import { type Component, Container, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
+import { beforeAll, describe, expect, it } from "bun:test";
+import {
+	type Component,
+	Container,
+	Editor,
+	type Focusable,
+	Input,
+	type OverlayFocusOwner,
+	TUI,
+} from "@oh-my-pi/pi-tui";
+import { BtwHistoryPanel } from "../src/overlays/btw-history-panel";
+import type { BtwHistoryRecord } from "../src/overlays/btw-history";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { defaultEditorTheme } from "./test-themes";
+import { initTheme } from "../src/theme/theme";
 
 class MinimalTerminal implements Terminal {
 	columns = 80;
@@ -96,6 +108,10 @@ class OwningOverlay extends FocusRecorder implements OverlayFocusOwner {
 }
 
 describe("TUI overlay focus", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
 	it("keeps keyboard focus on the visible overlay when a hidden surface requests focus", () => {
 		const terminal = new MinimalTerminal();
 		const tui = new TUI(terminal);
@@ -244,6 +260,221 @@ describe("TUI overlay focus", () => {
 			expect(tui.getFocused()).toBe(editor);
 			expect(editor.inputs).toEqual(["\x1b[B"]);
 			expect(approvalPrompt.inputs).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("notifies focus listeners on direct-to-nested focus changes, internal input transitions, and unsubscribes cleanly", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		class DelegatingInputComponent extends FocusRecorder {
+			internalState = 0;
+
+			override handleInput(data: string): void {
+				super.handleInput(data);
+				if (data === "next") {
+					this.internalState += 1;
+				}
+			}
+		}
+
+		const directComponent = new FocusRecorder("direct");
+		const nestedContainer = new Container();
+		const nestedComponent = new DelegatingInputComponent("nested");
+		nestedContainer.addChild(nestedComponent);
+
+		tui.addChild(directComponent);
+		tui.addChild(nestedContainer);
+
+		let listenerCallCount = 0;
+		const unsubscribe = tui.addFocusListener(() => {
+			listenerCallCount += 1;
+		});
+
+		try {
+			tui.start();
+
+			// Initial focus setting to direct component
+			tui.setFocus(directComponent);
+			expect(listenerCallCount).toBe(1);
+			expect(tui.getFocused()).toBe(directComponent);
+
+			// Focus transition from direct component to nested component
+			tui.setFocus(nestedComponent);
+			expect(listenerCallCount).toBe(2);
+			expect(tui.getFocused()).toBe(nestedComponent);
+
+			// Internal focus / input transition via handleInput dispatch
+			terminal.sendInput("next");
+			expect(nestedComponent.inputs).toEqual(["next"]);
+			expect(nestedComponent.internalState).toBe(1);
+			expect(listenerCallCount).toBe(3);
+
+			// Unsubscribe cleanly and ensure subsequent transitions do not notify
+			unsubscribe();
+
+			tui.setFocus(directComponent);
+			expect(tui.getFocused()).toBe(directComponent);
+			expect(listenerCallCount).toBe(3);
+
+			terminal.sendInput("x");
+			expect(directComponent.inputs).toEqual(["x"]);
+			expect(listenerCallCount).toBe(3);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("notifies focus listeners when a focused owner's getFocusedTextEditor changes across requestRender without explicit setFocus or input", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		class DynamicEditorOwner extends FocusRecorder {
+			activeEditor: Editor | null = null;
+
+			getFocusedTextEditor(): Editor | null {
+				return this.activeEditor;
+			}
+		}
+
+		const realEditor = new Editor(defaultEditorTheme);
+		const owner = new DynamicEditorOwner("dynamic-owner");
+		owner.activeEditor = realEditor;
+
+		tui.addChild(owner);
+
+		let listenerCallCount = 0;
+		let unsubscribedCallCount = 0;
+
+		const unsubscribe = tui.addFocusListener(() => {
+			listenerCallCount += 1;
+		});
+		const neverCalledUnsubscribe = tui.addFocusListener(() => {
+			unsubscribedCallCount += 1;
+		});
+		neverCalledUnsubscribe();
+
+		try {
+			tui.start();
+
+			// Initial state: editor active and owner focused
+			tui.setFocus(owner);
+			expect(tui.getFocused()).toBe(owner);
+			expect(tui.getFocusedTextEditor()).toBe(realEditor);
+			const initialCount = listenerCallCount;
+
+			// Change state asynchronously (e.g. background job error, editor removed)
+			// Calls tui.requestRender() without TUI.setFocus() or keyboard input
+			owner.activeEditor = null;
+			expect(tui.getFocusedTextEditor()).toBeNull();
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 1);
+			expect(unsubscribedCallCount).toBe(0);
+
+			// Change back asynchronously: editor reappears and requestRender() called
+			owner.activeEditor = realEditor;
+			expect(tui.getFocusedTextEditor()).toBe(realEditor);
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 2);
+			expect(unsubscribedCallCount).toBe(0);
+
+			// Unsubscribe the active listener and verify it remains silent on subsequent transitions
+			unsubscribe();
+			owner.activeEditor = null;
+			tui.requestRender();
+
+			expect(listenerCallCount).toBe(initialCount + 2);
+			expect(unsubscribedCallCount).toBe(0);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("resolves directly focused single-line Input via TUI.getFocusedTextEditor and submits via submitFocusedTextEditor", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const input = new Input();
+		let submittedValue: string | undefined;
+		input.onSubmit = value => {
+			submittedValue = value;
+		};
+		tui.addChild(input);
+
+		try {
+			tui.start();
+			expect(tui.getFocusedTextEditor()).toBeNull();
+
+			tui.setFocus(input);
+			const editor = tui.getFocusedTextEditor();
+			expect(editor).toBe(input);
+
+			editor?.insertText("single line query");
+			expect(input.getValue()).toBe("single line query");
+
+			tui.submitFocusedTextEditor(editor!);
+			expect(submittedValue).toBe("single line query");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("declares BtwHistoryPanel follow-up input as router target when composer is open and submits through TUI", async () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		let followUpQuestion: string | undefined;
+		const record: BtwHistoryRecord = {
+			id: "rec-1",
+			leafId: "leaf-1",
+			question: "What is dictation?",
+			answer: "Voice to text.",
+			status: "complete",
+			createdAt: 1000,
+			updatedAt: 2000,
+		};
+		const panel = new BtwHistoryPanel({
+			records: [record],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async (_rec, question) => {
+				followUpQuestion = question;
+				return true;
+			},
+			requestRender: () => tui.requestRender(),
+			getHeight: () => 30,
+		});
+		try {
+			tui.addChild(panel);
+			tui.start();
+			tui.setFocus(panel);
+
+			// History list focused, no follow-up composer active
+			expect(tui.getFocusedTextEditor()).toBeNull();
+			expect(panel.getFocusedTextEditor()).toBeNull();
+
+			// Press 'f' to open follow-up composer
+			panel.handleInput("f");
+			const followUpEditor = tui.getFocusedTextEditor();
+			expect(followUpEditor).not.toBeNull();
+			expect(followUpEditor).toBe(panel.getFocusedTextEditor());
+
+			// Insert text via dictation surface
+			followUpEditor!.insertText("Can it handle single-line fields?");
+			expect(followUpEditor!.getText()).toBe("Can it handle single-line fields?");
+
+			// Submit via TUI generic text editor submit
+			tui.submitFocusedTextEditor(followUpEditor!);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(followUpQuestion).toBe("Can it handle single-line fields?");
+			// After submission, follow-up composer closes and router target is null
+			expect(tui.getFocusedTextEditor()).toBeNull();
 		} finally {
 			tui.stop();
 		}

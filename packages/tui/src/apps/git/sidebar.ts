@@ -732,6 +732,18 @@ export class Sidebar {
 		);
 	}
 
+	getFocusedTextEditor(): Editor | null {
+		if (!this.focused) return null;
+		if (this.selected?.kind !== "description") return null;
+		return this.description;
+	}
+
+	submitFocusedTextEditor(): void {
+		if (!this.focused) return;
+		if (this.selected?.kind !== "description") return;
+		this.handleInput("\r");
+	}
+
 	/**
 	 * Move selection to the next/previous visible file row. False at the
 	 * boundary. `from` anchors the walk at the file currently shown in the

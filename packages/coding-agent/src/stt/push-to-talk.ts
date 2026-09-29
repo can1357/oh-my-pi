@@ -6,8 +6,8 @@ import type { SttTarget } from "./stt-controller";
 /** The cursor surface of a text input that push-to-talk paints its mic glyph onto. */
 export interface MicCursorTarget extends Component {
 	cursorOverride: string | undefined;
-	getUseTerminalCursor(): boolean;
-	setUseTerminalCursor(useTerminalCursor: boolean): void;
+	getUseTerminalCursor?(): boolean;
+	setUseTerminalCursor?(useTerminalCursor: boolean): void;
 }
 
 /** A text input push-to-talk dictates into: the text the STT controller writes and the cursor the
@@ -30,9 +30,9 @@ export class MicCursor {
 		this.#ui = ui;
 		this.#target = target;
 		this.#previousShowHardwareCursor = ui.getShowHardwareCursor();
-		this.#previousUseTerminalCursor = target.getUseTerminalCursor();
+		this.#previousUseTerminalCursor = target.getUseTerminalCursor ? target.getUseTerminalCursor() : false;
 		ui.setShowHardwareCursor(false);
-		target.setUseTerminalCursor(false);
+		target.setUseTerminalCursor?.(false);
 		this.#paintHue();
 		this.#animation = setInterval(() => {
 			this.#hue = (this.#hue + 8) % 360;
@@ -53,7 +53,7 @@ export class MicCursor {
 		this.#stopAnimation();
 		this.#target.cursorOverride = undefined;
 		this.#ui.setShowHardwareCursor(this.#previousShowHardwareCursor);
-		this.#target.setUseTerminalCursor(this.#previousUseTerminalCursor);
+		this.#target.setUseTerminalCursor?.(this.#previousUseTerminalCursor);
 	}
 
 	#stopAnimation(): void {

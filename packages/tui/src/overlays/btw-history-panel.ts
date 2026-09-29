@@ -286,6 +286,20 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#composer.input.pasteText(text);
 		this.#options.requestRender();
 	}
+
+	getFocusedTextEditor(): Input | null {
+		if (this.#composer) {
+			return this.#composer.input;
+		}
+		return null;
+	}
+
+	submitFocusedTextEditor(): void {
+		if (!this.#composer) {
+			return;
+		}
+		this.#composer.input.submit();
+	}
 	handleInput(data: string): void {
 		if (this.#composer) {
 			// The input owns every key, including panel shortcuts and pasted text.
