@@ -954,7 +954,18 @@ export class Editor implements Component, Focusable {
 		// over there is nothing left to restore, so the flag must not survive the re-seed.
 		if (drafts.length === 0) this.#historyDraftActive = false;
 		this.#history = [...drafts, ...recent.map(entry => ({ text: entry.prompt }))].slice(0, HISTORY_LIMIT);
-		this.#historyIndex = -1;
+		// A live browse pointer is the editor's claim on the buffer: `#navigateHistory` put that
+		// entry's text there and only an edit releases the claim. Dropping the pointer alone would
+		// leave the retired context's prompt on screen with nothing recording where it came from:
+		// the Up/Down dispatcher routes on the pointer, so both arrows would degrade to plain
+		// cursor motion and the leftover could be submitted as a prompt of the context the user is
+		// in now. Retiring a selection hands the buffer back exactly what pressing Down past the
+		// newest entry shows it: empty. The drafts carried above stay in the list, so a Ctrl+C
+		// draft recalled before the switch comes back on the next press, payload included.
+		if (this.#historyIndex !== -1) {
+			this.#historyIndex = -1;
+			this.#setTextInternal("");
+		}
 		return true;
 	}
 

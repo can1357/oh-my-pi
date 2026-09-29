@@ -152,6 +152,12 @@ ${HISTORY_TABLE_DDL}
 		this.#ensureColumn("use_count", "INTEGER NOT NULL DEFAULT 1");
 		const rebuilt = this.#rebuildHistory();
 
+		// A `session` scope filters on an unindexed column, which turns the ordered index walk
+		// the other scopes get into a full table scan plus a temp sort — measured 3.5 ms against
+		// 0.1 ms at 50 000 rows. This runs after `#rebuildHistory` on purpose: a store predating
+		// the session column has none until the rebuild, and the table DDL above would fail on it.
+		this.#db.run("CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_id, created_at DESC, id DESC)");
+
 		this.#db.run(`
 CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(prompt, content='history', content_rowid='id');
 
