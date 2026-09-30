@@ -1660,8 +1660,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
-		// A fatal error or a quit after a failed teardown restores the terminal
-		// through postmortem; it flushes on the same condition as stop().
+		// Every exiting stop (quit, Ctrl+D, a postmortem restore other than a
+		// signal) flushes on this session's condition.
 		this.ui.setExitFlushProvider(() => this.#exitFlush());
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
@@ -6503,7 +6503,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setCfgApprovalHost(null);
 		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
-			this.ui.stop(this.#exitFlush());
+			this.ui.stop();
 			this.#ownsStartedUi = false;
 		}
 		this.isInitialized = false;
@@ -6621,11 +6621,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * How the transcript flushes when this session hands the terminal back at
-	 * exit: capped only when the session file keeps what the cap skips (the
-	 * resume hint's condition); otherwise native scrollback is the transcript's
-	 * only copy, so it gets the full flush. A failed teardown (the escape hatch
-	 * quits without writing the log) or a latched disk failure means the file
-	 * exists but lacks the newest entries, so both flush in full.
+	 * exit: capped only when the session file keeps the messages the cap skips
+	 * (the resume hint's condition); otherwise native scrollback is the
+	 * transcript's only copy, so it gets the full flush. A failed teardown (the
+	 * escape hatch quits without writing the log) or a latched disk failure
+	 * means the file exists but lacks the newest entries, so both flush in full.
+	 * Notices (errors, warnings) are never persisted, so a capped exit does not
+	 * keep those older than the capped rows.
 	 */
 	#exitFlush(): HistoryFlushOptions {
 		if (

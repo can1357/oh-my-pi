@@ -194,23 +194,29 @@ export interface HistoryFlushOptions {
 	 * Write the newest un-retired rows as whole blocks, at most this many rows,
 	 * except that the newest block is written whole even when it alone is
 	 * taller; the older eligible blocks retire without being written anywhere.
-	 * Pass a cap only when the process is exiting and either another copy
-	 * survives (a saved session file, which `omp --resume` restores) or a fast
-	 * exit matters more than scrollback (a disconnect, a signal restore).
+	 * Pass a cap only when the process is exiting and either another copy of
+	 * the transcript survives or a fast exit matters more than scrollback (a
+	 * disconnect, a signal restore).
 	 */
 	maxRows?: number;
 }
 
-/** How TUI.stop() hands the terminal back. */
-export interface TUIStopOptions extends HistoryFlushOptions {
-	/**
-	 * The caller resumes with start() after this stop (suspend, external
-	 * editors). While a fullscreen overlay holds the screen, nothing is flushed:
-	 * nothing is committed, and retirement continues by pressure once the
-	 * overlay closes.
-	 */
-	resuming?: boolean;
-}
+/**
+ * How TUI.stop() hands the terminal back. A handoff that resumes with start()
+ * never caps its flush: the session continues, so skipped rows would be lost.
+ */
+export type TUIStopOptions =
+	| {
+			/**
+			 * The caller resumes with start() after this stop (suspend, external
+			 * editors). While a fullscreen overlay holds the screen, nothing is
+			 * flushed: nothing is committed, and retirement continues by pressure
+			 * once the overlay closes.
+			 */
+			resuming: true;
+			maxRows?: never;
+	  }
+	| (HistoryFlushOptions & { resuming?: false });
 
 /** The cap an exiting stop passes as `maxRows`. */
 export const EXIT_FLUSH_MAX_ROWS = 2_000;
@@ -1302,13 +1308,11 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * How the transcript flushes when postmortem stops a still-running TUI for
-	 * any reason but a signal: a fatal error, `postmortem.quit()` without a
-	 * prior stop (an owner's teardown-failure escape hatch, or the stdout-EPIPE
-	 * route), or a bare `process.exit()`. Read at that moment: return
-	 * `{ maxRows }` only while another copy of the transcript survives, such as
-	 * a saved session file. Without a provider that restore flushes in full; a
-	 * signal's restore is always capped.
+	 * How an exiting stop flushes: `stop()` without options, and a postmortem
+	 * restore for any reason but a signal (a fatal error, `postmortem.quit()`
+	 * without a prior stop, a bare `process.exit()`). Read at that moment:
+	 * return `{ maxRows }` only while another copy of the transcript survives.
+	 * Without a provider an exiting stop flushes in full.
 	 */
 	setExitFlushProvider(provider: (() => HistoryFlushOptions) | undefined): void {
 		this.#exitFlushProvider = provider;
@@ -1464,19 +1468,14 @@ export class TUI extends Container {
 		this.#cancelPostmortemRestore?.();
 		// Postmortem runs this synchronously on any exit that finds the TUI still
 		// running. A signal caps it: after SIGHUP the terminal is gone, and
-		// SIGTERM/SIGINT want the process gone before postmortem's deadline or a
-		// kill. Every other reason (a fatal error, `postmortem.quit()` without a
-		// prior stop, a bare `process.exit()`) flushes as the exit flush provider
-		// says, in full without one: scrollback may be the only copy of what led
-		// there.
+		// SIGTERM/SIGINT usually come shortly before a kill. Any other reason is
+		// an exiting stop.
 		this.#cancelPostmortemRestore = postmortem.register("tui-restore", reason =>
-			this.stop(
-				reason === postmortem.Reason.SIGHUP ||
-					reason === postmortem.Reason.SIGTERM ||
-					reason === postmortem.Reason.SIGINT
-					? { maxRows: EXIT_FLUSH_MAX_ROWS }
-					: (this.#exitFlushProvider?.() ?? {}),
-			),
+			reason === postmortem.Reason.SIGHUP ||
+			reason === postmortem.Reason.SIGTERM ||
+			reason === postmortem.Reason.SIGINT
+				? this.stop({ maxRows: EXIT_FLUSH_MAX_ROWS })
+				: this.stop(),
 		);
 		for (const listener of this.#startListeners) {
 			try {
@@ -2314,10 +2313,11 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Hand the terminal back. See {@link TUIStopOptions} for when to cap the
-	 * shutdown flush and when to mark a handoff that resumes with start().
+	 * Hand the terminal back. Without options this is an exiting stop, which
+	 * flushes as the exit flush provider says (in full without one). See
+	 * {@link TUIStopOptions} for a handoff that resumes with start().
 	 */
-	stop(options: TUIStopOptions = {}): void {
+	stop(options: TUIStopOptions = this.#exitFlushProvider?.() ?? {}): void {
 		const { resuming, ...flush } = options;
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
@@ -2377,17 +2377,16 @@ export class TUI extends Container {
 			this.terminal.write(MOUSE_TRACKING_OFF);
 			this.#mouseTracking = "off";
 		}
-		if (!nativeWasLive && !skipFlush) {
+		if (!skipFlush) {
 			// A latched destructive reset (settled rebuild-mode resize, /clear)
 			// pairs ED3 with a complete-ledger replay. Running that pair during
 			// stop would erase native history and re-stream the whole transcript at
 			// quit; drop the latch, and the flush cancels the replay, so only
 			// un-retired rows are written. A skipped flush keeps both halves for
-			// the overlay's close, which runs them together. The native surface
-			// already holds the transcript, so a live native stop skips retiring
-			// row history the same way.
+			// the overlay's close, which runs them together.
 			this.#clearScrollbackOnNextRender = false;
-			this.#flushHistoryBeforeStop(flush);
+			// The native surface already holds the transcript: no row history to retire.
+			if (!nativeWasLive) this.#flushHistoryBeforeStop(flush);
 		}
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their

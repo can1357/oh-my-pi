@@ -506,11 +506,12 @@ describe("Composer prepaint", () => {
 
 	it("caps the exit flush only when the session file keeps the rows the cap skips", async () => {
 		// An unsaved (`--no-session`) transcript lives only in scrollback, so its
-		// quit keeps the full flush; a saved one is restored by `omp --resume`.
+		// quit keeps the full flush; `omp --resume` restores a saved one's messages.
+		const blocks = 1_100; // one row and one blank each: 2,200 rows, over the cap
 		for (const saved of [false, true]) {
-			const terminal = new CountingTerminal();
+			const terminal = new VirtualTerminal(40, 10, 10_000);
 			const composer = new Composer({ preferences: config, terminal });
-			composer.start();
+			composer.start({ playWelcomeIntro: false });
 			const lease = new ComposerLease(composer);
 			const testSession = await createTestSession({ inMemory: !saved });
 			if (saved) await testSession.session.sessionManager.ensureOnDisk();
@@ -525,11 +526,17 @@ describe("Composer prepaint", () => {
 				lease.composer,
 			);
 			lease.adopt();
-			const stop = vi.spyOn(mode.ui, "stop");
+			const transcript = new TranscriptContainer();
+			for (let i = 0; i < blocks; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+			lease.composer.setRuntimeChildren([transcript]);
 			try {
 				mode.stop();
-				// One stop, capped exactly when the session is saved.
-				expect(stop.mock.calls.map(([flush]) => flush?.maxRows !== undefined)).toEqual([saved]);
+				await terminal.flush();
+				const rows = terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row).trim())
+					.filter(row => row.startsWith("row-"));
+				expect(rows.length).toBe(saved ? EXIT_FLUSH_MAX_ROWS / 2 : blocks);
 			} finally {
 				lease.dispose();
 				await testSession.cleanup();

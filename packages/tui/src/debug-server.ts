@@ -1,6 +1,6 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { type Component, EXIT_FLUSH_MAX_ROWS, isFocusable, type OverlayOptions, type TUI } from "./tui";
+import { type Component, isFocusable, type OverlayOptions, type TUI } from "./tui";
 import { plainText } from "./native/spans";
 
 export interface TuiDebugTreeNode {
@@ -289,7 +289,7 @@ export class TuiDebugServer {
 			const response = this.#dispatch(request);
 			if (request.op === "quit" && response.ok) {
 				this.#write(socket, response, () => {
-					this.#tui.stop({ maxRows: EXIT_FLUSH_MAX_ROWS });
+					this.#tui.stop();
 					process.exit(0);
 				});
 				return;

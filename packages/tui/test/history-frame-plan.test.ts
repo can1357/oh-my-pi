@@ -484,15 +484,33 @@ describe("terminal frame plans", () => {
 		tui.stop();
 	});
 
-	it("hands the provider only the flush shape, never the stop's resuming flag", () => {
-		const terminal = new VirtualTerminal(20, 3);
-		const provider = new FlushProvider();
-		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
-		tui.setFrameProvider(provider);
-
-		// No overlay holds the screen, so the resuming stop still flushes.
-		tui.stop({ resuming: true });
-		expect(provider.events[0]).toEqual(["begin", {}]);
+	it("flushes an exiting stop without options, such as Ctrl+D, as the owner's exit flush provider says", async () => {
+		for (const [flush, written] of [
+			[{}, 30],
+			[{ maxRows: 10 }, 5],
+		] as const) {
+			const terminal = new VirtualTerminal(40, 10);
+			const renderScheduler = new VirtualRenderScheduler();
+			const composer = new Composer({
+				terminal,
+				exit: () => {},
+				tuiOptions: { renderScheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			composer.ui.setExitFlushProvider(() => flush);
+			const transcript = new TranscriptContainer();
+			composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+			composer.start({ playWelcomeIntro: false });
+			await renderScheduler.settle(terminal);
+			composer.ui.showOverlay(new FullscreenOverlay(), { fullscreen: true });
+			await renderScheduler.settle(terminal);
+			for (let i = 0; i < 30; i++) transcript.addChild(new Text(`row-${i}`, 0, 0));
+			composer.ui.requestRender();
+			await renderScheduler.settle(terminal);
+			// Ctrl+D on the composer before InteractiveMode installs its own handlers.
+			composer.editor.onExit!();
+			expect(plainBuffer(terminal).filter(row => row.startsWith("row-"))).toHaveLength(written);
+		}
 	});
 
 	it("retires by pressure again after a handoff stop resumes", () => {
