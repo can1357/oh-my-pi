@@ -133,10 +133,12 @@ describe.skipIf(!canOpenPty())("quitting while the terminal is not reading", () 
 		expect(output).toContain(HINT);
 		expect(started).toBe(true);
 		const hintAt = output.indexOf(HINT);
-		expect(output.indexOf(SETTLE_RESET)).toBeGreaterThan(-1);
-		expect(output.indexOf(SETTLE_RESET)).toBeLessThan(hintAt);
-		expect(output.indexOf(STOP_RESTORE)).toBeGreaterThan(-1);
-		expect(output.indexOf(STOP_RESTORE)).toBeLessThan(hintAt);
+		const resetAt = output.indexOf(SETTLE_RESET);
+		expect(resetAt).toBeGreaterThan(-1);
+		expect(resetAt).toBeLessThan(hintAt);
+		const restoreAt = output.indexOf(STOP_RESTORE);
+		expect(restoreAt).toBeGreaterThan(-1);
+		expect(restoreAt).toBeLessThan(hintAt);
 		expect(reachedExitCleanup).toBe(true);
 		expect(stillRunning).toBe("timeout");
 		expect(exitCode).toBe(0);

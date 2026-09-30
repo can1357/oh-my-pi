@@ -203,7 +203,7 @@ export function setTerminalHandoffWriter(writer: ((text: string) => boolean) | n
 /**
  * Queue `text` meant for stderr behind output a stopped terminal still holds,
  * when stderr is that terminal: the text then reaches the terminal after that
- * output, or not at all if the terminal does not read again before exit.
+ * output instead of ahead of it.
  * Returns false when nothing is pending or stderr goes elsewhere; the caller
  * then writes to stderr itself.
  */

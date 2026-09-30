@@ -168,20 +168,18 @@ fn pump_loop(fd: i32, inner: &Inner) {
 				},
 				|| inner.discard_gen.load(Ordering::Acquire) != generation,
 			);
+			let rest = front.len() - written;
 			if result.is_err() {
 				inner.dead.store(true, Ordering::Release);
 				// Chunks already written were subtracted above; drop the rest —
 				// the unwritten front remainder plus everything still queued.
 				let mut back = inner.back.lock();
-				let dropped = back.len() + (front.len() - written);
+				let dropped = back.len() + rest;
 				back.clear();
 				inner.pending.fetch_sub(dropped, Ordering::AcqRel);
-			} else {
+			} else if rest > 0 {
 				// A discard abandoned the unwritten rest of this buffer.
-				let rest = front.len() - written;
-				if rest > 0 {
-					inner.pending.fetch_sub(rest, Ordering::AcqRel);
-				}
+				inner.pending.fetch_sub(rest, Ordering::AcqRel);
 			}
 		}
 		front.clear();
