@@ -284,13 +284,33 @@ describe("editing and removing custom providers", () => {
 		expect(authStorage.credentials.get(id)).toMatchObject({ key: "k2" });
 	});
 
-	it("refuses a key that would leave a custom-models provider unloadable and restores the credential", async () => {
+	it("refuses a new key on a provider that defines its own models, before touching credential or file", async () => {
 		await fs.writeFile(configPath, seeded);
+		await authStorage.credentials.set(id, { type: "api_key", key: "k1", source: "login" });
 		await expect(updateCustomProvider(id, { apiKey: "k2" }, context)).rejects.toThrow(
-			"Invalid provider configuration",
+			`Provider "${id}" defines its own models, so its API key must stay in models.yml. Edit the file directly.`,
 		);
 		expect(await fs.readFile(configPath, "utf8")).toBe(seeded);
-		expect(authStorage.credentials.has(id)).toBe(false);
+		expect(authStorage.credentials.get(id)).toMatchObject({ key: "k1" });
+		expect(refreshProvider).not.toHaveBeenCalled();
+	});
+
+	it("clearApiKey still works on a provider that defines its own models", async () => {
+		await fs.writeFile(configPath, seeded.replace("    auth: none", "    apiKey: inline-secret"));
+		await updateCustomProvider(id, { clearApiKey: true }, context);
+		expect(loadProvider()?.auth).toBe("none");
+		expect(loadProvider()?.apiKey).toBeUndefined();
+		expect(loadProvider()?.models).toHaveLength(1);
+	});
+
+	it("does not treat inherited object keys as providers", async () => {
+		await fs.writeFile(configPath, seeded);
+		expect(getCustomProvider("constructor", context.config, authStorage)).toBeUndefined();
+		await expect(updateCustomProvider("constructor", { apiKey: "k2" }, context)).rejects.toThrow(
+			'Provider "constructor" is not defined in models.yml.',
+		);
+		expect(authStorage.credentials.has("constructor")).toBe(false);
+		expect(await fs.readFile(configPath, "utf8")).toBe(seeded);
 	});
 
 	it("clearApiKey removes the credential and sets auth none", async () => {
