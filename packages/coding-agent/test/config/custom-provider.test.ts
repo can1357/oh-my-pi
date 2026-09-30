@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import {
 	addCustomProvider,
@@ -20,22 +21,38 @@ const CHANGED_ON_DISK = "models.yml changed on disk; retry";
 
 interface Fixture {
 	directory: string;
+	/** Stand-in for the real agent dir for the whole test: nothing here may ever be written. */
+	agentDir: string;
+	/** Spy on the `ModelsConfigFile` singleton's path: any call means a write fell back to the user's own models.yml. */
+	singletonPath: Mock<() => string>;
 	authStorage: AuthStorage;
 	configPath: string;
 	refreshProvider: Mock<(id: string) => Promise<void>>;
 	/** What the registry would report after a refresh; tests flip these to simulate a bad endpoint. */
 	state: { modelsFound: boolean; discoverySucceeded: boolean };
 	context: CustomProviderContext;
+	restoreAgentDir(): void;
 }
 
 async function createFixture(prefix: string): Promise<Fixture> {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}agent-`));
 	const configPath = path.join(directory, "models.yml");
 	const authStorage = await AuthStorage.create(":memory:");
 	const refreshProvider = vi.fn(async (_id: string) => {});
 	const state = { modelsFound: true, discoverySucceeded: true };
+
+	const previousAgentDir = getAgentDir();
+	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	setAgentDir(agentDir);
+	// `ModelsConfigFile` bakes the agent dir into its path when the module loads, so `setAgentDir` cannot redirect
+	// it. Should a write ever fall back to that singleton, land it in the stand-in dir instead of the user's models.yml.
+	const singletonPath = vi.spyOn(ModelsConfigFile, "path").mockReturnValue(path.join(agentDir, "models.yml"));
+
 	return {
 		directory,
+		agentDir,
+		singletonPath,
 		authStorage,
 		configPath,
 		refreshProvider,
@@ -47,13 +64,20 @@ async function createFixture(prefix: string): Promise<Fixture> {
 			discoverySucceeded: () => state.discoverySucceeded,
 			hasChatModels: () => state.modelsFound,
 		},
+		restoreAgentDir() {
+			setAgentDir(previousAgentDir);
+			if (previousAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDirEnv;
+		},
 	};
 }
 
 async function disposeFixture(fixture: Fixture): Promise<void> {
 	vi.restoreAllMocks();
+	fixture.restoreAgentDir();
 	fixture.authStorage.close();
 	await fs.rm(fixture.directory, { recursive: true, force: true });
+	await fs.rm(fixture.agentDir, { recursive: true, force: true });
 }
 
 /**
@@ -139,7 +163,12 @@ describe("addCustomProvider", () => {
 		const registry = new ModelRegistry(authStorage, configPath, {
 			fetch: async () => Response.json({ data: [{ id: "test-chat-model" }] }),
 		});
-		await addCustomProvider(input, customProviderContext(registry));
+		const outcome = await addCustomProvider(input, customProviderContext(registry)).then(
+			() => "added",
+			(error: Error) => error.message,
+		);
+		expect(fixture.singletonPath).not.toHaveBeenCalled();
+		expect(outcome).toBe("added");
 		expect(await fs.readFile(configPath, "utf8")).toContain(`${input.id}:`);
 		expect(registry.find(input.id, "test-chat-model")).toBeDefined();
 	});
@@ -844,5 +873,20 @@ describe("models.yml integrity", () => {
 		);
 		expect((await fs.lstat(configPath)).isSymbolicLink()).toBe(true);
 		expect(await fs.readFile(realPath, "utf8")).toBe(seed.replace("https://old.example/v1", newUrl));
+	});
+
+	it("keeps the permissions of an existing models.yml through an edit and an undo", async () => {
+		await fs.writeFile(configPath, `providers:\n${discoveryProvider("target", "https://old.example/v1")}`);
+		await fs.chmod(configPath, 0o640);
+		const mode = async () => (await fs.stat(configPath)).mode & 0o777;
+
+		await updateCustomProvider("target", { baseUrl: newUrl }, context);
+		expect(await mode()).toBe(0o640);
+
+		fixture.state.modelsFound = false;
+		await expect(updateCustomProvider("target", { baseUrl: "https://again.example/v1" }, context)).rejects.toThrow(
+			"No chat models were discovered",
+		);
+		expect(await mode()).toBe(0o640);
 	});
 });

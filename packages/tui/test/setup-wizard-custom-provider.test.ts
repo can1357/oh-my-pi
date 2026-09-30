@@ -24,6 +24,7 @@ function createForm(
 ) {
 	const finished: SetupSceneResult[] = [];
 	let focusTarget: Component | null = null;
+	let restoreFocusCalls = 0;
 	const host = {
 		ctx: { addCustomProvider },
 		requestRender() {},
@@ -35,6 +36,7 @@ function createForm(
 		},
 		restoreFocus() {
 			focusTarget = null;
+			restoreFocusCalls++;
 		},
 	} as unknown as SetupSceneHost;
 	return {
@@ -42,6 +44,9 @@ function createForm(
 		finished,
 		get focusTarget() {
 			return focusTarget;
+		},
+		get restoreFocusCalls() {
+			return restoreFocusCalls;
 		},
 	};
 }
@@ -294,5 +299,19 @@ describe("CustomProviderForm", () => {
 				expect(form.modal).toBe(false);
 			},
 		);
+
+		it("a save that fails after Esc does not take focus back from whatever replaced the form", async () => {
+			const gate = Promise.withResolvers<void>();
+			const state = createForm(() => gate.promise, { edit });
+			state.form.onActivate?.();
+			state.form.handleInput("\n");
+			state.form.handleInput("\n"); // submit
+			state.form.handleInput("\x1b");
+			const focusRestoresBefore = state.restoreFocusCalls;
+
+			gate.reject(new Error("late failure"));
+			await waitForSubmit();
+			expect(state.restoreFocusCalls).toBe(focusRestoresBefore);
+		});
 	});
 });

@@ -90,15 +90,15 @@ A custom provider's `apiKey` is resolved as **environment-variable-name-or-liter
 ```yaml
 # ~/.omp/agent/models.yml
 providers:
-   my-gateway:
-      baseUrl: https://gateway.example.com/v1
-      api: openai-completions
-      apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
-      models:
-         - id: claude-sonnet
-           name: Claude Sonnet via Gateway
-           contextWindow: 200000
-           maxTokens: 8192
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
+    models:
+      - id: claude-sonnet
+        name: Claude Sonnet via Gateway
+        contextWindow: 200000
+        maxTokens: 8192
 ```
 
 If `authHeader: true` is set on a custom provider, the resolved key is injected as an `Authorization: Bearer <key>` header on every request to that provider.
@@ -275,10 +275,10 @@ Use the `disabledProviders` setting to remove a provider's models from selection
 ```yaml
 # ~/.omp/agent/config.yml or <project>/.omp/config.yml
 disabledProviders:
-   - anthropic
-   - openai
-   - google
-   - groq
+  - anthropic
+  - openai
+  - google
+  - groq
 ```
 
 Provider IDs are matched exactly. Disable `google` to hide the Google Gemini API provider; the OAuth-backed Google providers `google-gemini-cli` and `google-antigravity` are separate IDs and must be disabled individually. Disable `ollama`, `llama.cpp`, or `lm-studio` to stop local discovery for that engine.
@@ -300,8 +300,8 @@ Project settings live in `<project>/.omp/config.yml`. Use them when one reposito
 ```yaml
 # <project>/.omp/config.yml
 disabledProviders:
-   - openai
-   - openrouter
+  - openai
+  - openrouter
 ```
 
 Settings arrays are **replaced** wholesale by the higher-precedence layer, not merged or appended. If the global file disables three providers and the project file disables one, the project sees only the project list:
@@ -309,13 +309,13 @@ Settings arrays are **replaced** wholesale by the higher-precedence layer, not m
 ```yaml
 # ~/.omp/agent/config.yml
 disabledProviders:
-   - anthropic
-   - openai
-   - google
+  - anthropic
+  - openai
+  - google
 
 # <project>/.omp/config.yml
 disabledProviders:
-   - groq
+  - groq
 ```
 
 Effective result inside the project:
@@ -332,16 +332,16 @@ The project array re-enables `anthropic`, `openai`, and `google` for sessions la
 
 ```yaml
 disabledProviders:
-   - ollama
-   - path: ~/projects/sensitive
-     providers:
-        - anthropic
-        - openai
-   - paths:
-        - ~/work/client-a
-        - ~/work/client-b
-     values:
-        - openrouter
+  - ollama
+  - path: ~/projects/sensitive
+    providers:
+      - anthropic
+      - openai
+  - paths:
+      - ~/work/client-a
+      - ~/work/client-b
+    values:
+      - openrouter
 ```
 
 - Bare string entries always apply.
@@ -381,20 +381,20 @@ Minimal OpenAI-compatible provider:
 
 ```yaml
 providers:
-   my-openai-compatible:
-      baseUrl: https://api.example.com/v1
-      api: openai-completions
-      apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
-      models:
-         - id: fast-chat
-           name: Fast Chat
-           contextWindow: 128000
-           maxTokens: 8192
+  my-openai-compatible:
+    baseUrl: https://api.example.com/v1
+    api: openai-completions
+    apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
+    models:
+      - id: fast-chat
+        name: Fast Chat
+        contextWindow: 128000
+        maxTokens: 8192
 ```
 
 OpenAI-compatible endpoints can also be managed from the `/models` hub instead of editing the file: `Ctrl+N` (or the `+ Add provider…` row) adds one, and on a provider declared in `models.yml`, `Ctrl+E` edits its endpoint or key (`Ctrl+X` on the key step clears it) and `Ctrl+D` deletes it.
 
-- Saves rewrite only the edited provider: comments, formatting, line endings and every other entry are kept, and a save that would not load is refused before anything is written.
+- Saves rewrite only the edited provider: comments, line endings, indentation and every other entry are kept, and a save that would not load is refused before anything is written.
 - Keys go to the credential store, never into `models.yml`; a provider that defines its own `models` keeps its `apiKey` in the file, so edit that one by hand.
 - Providers configured through environment variables (for example `OLLAMA_HOST`) are untouched unless you add a provider with the same ID.
 
@@ -406,13 +406,13 @@ Use a custom provider for an API key issued from a standard BigModel account bal
 
 ```yaml
 providers:
-   bigmodel:
-      baseUrl: https://open.bigmodel.cn/api/paas/v4
-      api: openai-completions
-      apiKey: BIGMODEL_API_KEY
-      models:
-         - id: glm-4.6
-           name: GLM-4.6 (BigModel)
+  bigmodel:
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+    api: openai-completions
+    apiKey: BIGMODEL_API_KEY
+    models:
+      - id: glm-4.6
+        name: GLM-4.6 (BigModel)
 ```
 
 Set `BIGMODEL_API_KEY` to the `<id>.<secret>` key before starting `omp`, then select `bigmodel/glm-4.6`. The key does not use an `sk-` prefix.
@@ -421,28 +421,28 @@ Keyless local provider (no credentials required):
 
 ```yaml
 providers:
-   local-proxy:
-      baseUrl: http://127.0.0.1:4000/v1
-      api: openai-completions
-      auth: none
-      models:
-         - id: local-model
-           name: Local Model
-           contextWindow: 32768
-           maxTokens: 4096
+  local-proxy:
+    baseUrl: http://127.0.0.1:4000/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: local-model
+        name: Local Model
+        contextWindow: 32768
+        maxTokens: 4096
 ```
 
 Discovery-enabled provider (models fetched from the endpoint at runtime):
 
 ```yaml
 providers:
-   team-proxy:
-      baseUrl: https://models.example.com/v1
-      apiKey: TEAM_PROXY_API_KEY
-      authHeader: true # send Authorization: Bearer <resolved key>
-      disableStrictTools: true
-      discovery:
-         type: proxy
+  team-proxy:
+    baseUrl: https://models.example.com/v1
+    apiKey: TEAM_PROXY_API_KEY
+    authHeader: true # send Authorization: Bearer <resolved key>
+    disableStrictTools: true
+    discovery:
+      type: proxy
 ```
 
 For the full schema, all allowed `api` values, discovery `type`s, model overrides, and equivalence settings, see [Model and Provider Configuration](./models.md).
@@ -451,8 +451,8 @@ To disable a custom provider, list its ID exactly:
 
 ```yaml
 disabledProviders:
-   - my-openai-compatible
-   - team-proxy
+  - my-openai-compatible
+  - team-proxy
 ```
 
 ## Troubleshooting
