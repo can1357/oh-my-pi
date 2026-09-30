@@ -1209,7 +1209,10 @@ export class SelectorController {
 				providerEditor:
 					this.ctx.session.scopedModels.length === 0
 						? {
-								get: id => getCustomProvider(id, undefined, this.ctx.session.modelRegistry.authStorage),
+								get: id => {
+									const { modelsConfigFile, authStorage } = this.ctx.session.modelRegistry;
+									return getCustomProvider(id, modelsConfigFile, authStorage);
+								},
 								add: values => addCustomProvider(values, customProviderContext(this.ctx.session.modelRegistry)),
 								update: (id, update) =>
 									updateCustomProvider(id, update, customProviderContext(this.ctx.session.modelRegistry)),
