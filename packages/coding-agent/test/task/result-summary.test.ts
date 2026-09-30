@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
-import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 function settledResult(output: string): SingleResult {
 	return {
@@ -59,5 +59,28 @@ describe("formatTaskResultSummary", () => {
 		});
 		expect(summary).toContain("<output>\ndone\n</output>");
 		expect(summary).not.toContain("<preview");
+	});
+
+	it("names the failure when the preview is the text streamed before it", () => {
+		// Production 2026-09-21: a scout whose stream died mid-prose reported
+		// status="failed (exit 1)" with only the half-written text as <output>
+		// — the provider error lived nowhere in the envelope.
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		const summary = formatTaskResultSummary(
+			{ ...settledResult("I'll systematically investigate the codebase"), exitCode: 1, stderr: error, error },
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain('status="failed (exit 1)"');
+		expect(summary).toContain(`<error>${error}</error>`);
+		expect(summary).toContain("<output>\nI'll systematically investigate the codebase\n</output>");
+	});
+
+	it("does not repeat an error that is already the preview", () => {
+		const summary = formatTaskResultSummary(
+			{ ...settledResult(""), exitCode: 1, stderr: "agent failed", error: "agent failed" },
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain("<output>\nagent failed\n</output>");
+		expect(summary).not.toContain("<error>");
 	});
 });

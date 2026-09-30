@@ -1,5 +1,11 @@
-import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
@@ -45,19 +51,6 @@ function sanitizeMcpStatusError(error: string): string {
 	return sanitizeMcpStatusText(error, TRUNCATE_LENGTHS.CONTENT);
 }
 
-function shortenEmbeddedPaths(text: string): string {
-	return text
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
-		})
-		.join(" ");
-}
-
 export function formatMCPConnectingMessage(serverNames: readonly string[]): string {
 	return `Connecting to MCP servers: ${formatServerList(serverNames)}…`;
 }
@@ -96,10 +89,6 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 		return `Connected to MCP ${formatServerCount(connectedServers.length)}: ${formatServerList(connectedServers)}.`;
 	}
 	return "";
-}
-
-function isRecord(data: unknown): data is Record<string, unknown> {
-	return typeof data === "object" && data !== null;
 }
 
 function isStringArray(data: unknown): data is string[] {

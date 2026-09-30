@@ -7,9 +7,17 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
-import * as path from "node:path";
+import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
+import type {
+	InternalResource,
+	InternalUrl,
+	ProtocolHandler,
+	ResolveContext,
+	SchemeSpec,
+	UrlCompletion,
+} from "./types";
 
 /**
  * Handler for omp:// URLs.
@@ -18,19 +26,38 @@ import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } fr
  */
 export class OmpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "omp";
-	readonly immutable = true;
+	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true };
+
+	/** Always advertised: harness docs are embedded in every build. */
+	promptDoc(): string {
+		return ompDoc.trim();
+	}
 
 	async resolve(url: InternalUrl): Promise<InternalResource> {
-		// Extract filename from host + path
-		const host = url.rawHost || url.hostname;
-		const pathname = url.rawPathname ?? url.pathname;
-		const filename = host ? (pathname && pathname !== "/" ? host + pathname : host) : "";
+		const filename = ompDocFilename(url);
+		// The docs root (`omp://`, `omp://docs`) names no doc. The grammar also
+		// rejects absolute paths and `..` traversal.
+		const docPath = ompDocRel(url);
 
-		if (!filename) {
+		if (!filename || !docPath) {
 			return this.#listDocs(url);
 		}
 
-		return this.#readDoc(filename, url);
+		return this.#readDoc(docPath, filename, url);
+	}
+
+	/** The docs root expands to every embedded doc; a single-doc URL yields that doc (or throws when unknown). */
+	async enumerate(url: InternalUrl, context?: ResolveContext): Promise<Array<{ url: string; content: string }>> {
+		const docPath = ompDocRel(url);
+		if (!docPath) {
+			const entries = await ompDocsScopeEntries(context);
+			if (entries.length === 0) {
+				throw new Error("No documentation files found");
+			}
+			return entries;
+		}
+		const resource = await this.#readDoc(docPath, ompDocFilename(url), url);
+		return [{ url: `omp://${docPath}`, content: resource.content }];
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
@@ -54,23 +81,7 @@ export class OmpProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #readDoc(filename: string, url: InternalUrl): Promise<InternalResource> {
-		// Validate: no traversal, no absolute paths
-		if (path.isAbsolute(filename)) {
-			throw new Error("Absolute paths are not allowed in omp:// URLs");
-		}
-
-		const normalized = path.posix.normalize(filename.replaceAll("\\", "/"));
-		if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
-			throw new Error("Path traversal (..) is not allowed in omp:// URLs");
-		}
-
-		const docPath =
-			normalized === "docs" ? "" : normalized.startsWith("docs/") ? normalized.slice("docs/".length) : normalized;
-		if (!docPath) {
-			return this.#listDocs(url);
-		}
-
+	async #readDoc(docPath: string, filename: string, url: InternalUrl): Promise<InternalResource> {
 		const content = await getEmbeddedDoc(docPath);
 		if (content === undefined) {
 			const lookup = docPath.replace(/\.md$/, "");

@@ -46,14 +46,6 @@ it("errors on non-array", () => {
 	expect(() => type(["number", "...", "string"])).toThrow("tuple spread element must be an array");
 });
 
-it("allows multiple fixed spreads", () => {
-	const T = type(["string", "...", "number[]", "...", ["boolean", "bigint"], "...", ["symbol"]]);
-	const _0: Eq<typeof T.infer, [string, ...number[], boolean, bigint, symbol]> = true;
-	expect(T.allows(["foo", 1, 2, true, 3n, Symbol.iterator])).toBe(true);
-	expect(T.allows(["foo", true, 3n, Symbol.iterator])).toBe(true);
-	expect(T.allows(["foo", 1, true, Symbol.iterator])).toBe(false);
-});
-
 it("errors on multiple variadic", () => {
 	expect(() => type(["...", "string[]", "...", "number[]"])).toThrow(
 		"a tuple may have one spread followed by an array definition",

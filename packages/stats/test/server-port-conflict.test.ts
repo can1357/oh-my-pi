@@ -172,20 +172,22 @@ describe("startServer port conflicts", () => {
 
 	for (const fixture of [
 		{
-			name: "reclaims a version 1 dashboard with wildcard CORS",
+			name: "reclaims a version 1 dashboard without command identity",
 			response: `Response.json([], { headers: { "${STATS_DASHBOARD_HEADER}": "1", "Access-Control-Allow-Origin": "*" } })`,
 			hostname: "0.0.0.0",
+			statsOwned: false,
 		},
 		{
 			name: "reclaims a headerless legacy dashboard",
 			response: "Response.json([])",
 			hostname: STATS_DASHBOARD_HOSTNAME,
+			statsOwned: true,
 		},
 	]) {
 		it(fixture.name, async () => {
 			const holder = await startBunHolder(fixture.response, {
 				hostname: fixture.hostname,
-				statsOwned: true,
+				statsOwned: fixture.statsOwned,
 			});
 			const server = await startServer(holder.port);
 
@@ -200,6 +202,16 @@ describe("startServer port conflicts", () => {
 			}
 		});
 	}
+
+	it("refuses to stop a newer dashboard without command identity", async () => {
+		const newerVersion = String(Number(STATS_DASHBOARD_SECURITY_VERSION) + 1);
+		const holder = await startBunHolder(
+			`Response.json([], { headers: { "${STATS_DASHBOARD_HEADER}": "${newerVersion}" } })`,
+		);
+
+		await expect(startServer(holder.port)).rejects.toThrow("not identifiable as an omp stats dashboard");
+		expect(holder.child.exitCode).toBeNull();
+	});
 
 	it("refuses to stop a foreign 200 responder", async () => {
 		const holder = await startBunHolder('Response.json({ app: "spa" })');

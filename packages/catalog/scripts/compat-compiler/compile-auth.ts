@@ -288,8 +288,14 @@ function scopes(node: KdlNodeView): { scopes: string[]; separator: string } {
 function validation(node: KdlNodeView): CompiledAuthValidation {
 	const kind = singleString(node);
 	const optional = propBool(node, "optional");
+	const trustForbidden = propBool(node, "trust-forbidden");
+	if (trustForbidden && !optional) malformed(node);
 	const label = propString(node, "label");
-	const common = { ...(label !== undefined ? { label } : {}), ...(optional ? { optional } : {}) };
+	const common = {
+		...(label !== undefined ? { label } : {}),
+		...(optional ? { optional } : {}),
+		...(trustForbidden ? { trustForbidden } : {}),
+	};
 	switch (kind) {
 		case "chat-completions": {
 			leaf(node, [
@@ -300,6 +306,7 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 				"max-tokens-field",
 				"max-tokens",
 				"optional",
+				"trust-forbidden",
 			]);
 			const result: CompiledAuthValidation = {
 				kind,
@@ -319,10 +326,10 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 			return result;
 		}
 		case "anthropic-messages":
-			leaf(node, ["base-url", "model", "label", "optional"]);
+			leaf(node, ["base-url", "model", "label", "optional", "trust-forbidden"]);
 			return { kind, ...common, baseUrl: requiredProp(node, "base-url"), model: requiredProp(node, "model") };
 		case "models-endpoint": {
-			leaf(node, ["url", "base-url-env", "headers-hook", "label", "optional"]);
+			leaf(node, ["url", "base-url-env", "headers-hook", "label", "optional", "trust-forbidden"]);
 			const result: CompiledAuthValidation = { kind, ...common, url: requiredProp(node, "url") };
 			const baseUrlEnv = propString(node, "base-url-env");
 			if (baseUrlEnv !== undefined) result.baseUrlEnv = baseUrlEnv;
@@ -437,6 +444,12 @@ function oauthCodeLogin(node: KdlNodeView): CompiledOAuthCodeLogin {
 				break;
 			case "client-secret":
 				login.clientSecret = authValue(child);
+				break;
+			case "base-url":
+				login.baseUrl = authValue(child);
+				break;
+			case "auth-url":
+				login.authUrl = authValue(child);
 				break;
 			case "authorize-url":
 				login.authorizeUrl = authValue(child);
@@ -697,6 +710,23 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "allows-missing-api-key":
 				result.allowsMissingApiKey = singleBool(child);
 				break;
+			case "org-scoped-identity":
+				result.orgScopedIdentity = singleBool(child);
+				break;
+			case "oauth-token-env": {
+				leaf(child, []);
+				const vars = positionalStrings(child);
+				if (vars.length === 0 || vars.some(v => !v)) malformed(child);
+				result.oauthTokenEnv = vars;
+				break;
+			}
+			case "native-auth-api": {
+				leaf(child, []);
+				const apis = positionalStrings(child);
+				if (apis.length === 0 || apis.some(api => !api)) malformed(child);
+				result.nativeAuthApis = apis;
+				break;
+			}
 			case "available":
 				result.available = singleBool(child);
 				break;

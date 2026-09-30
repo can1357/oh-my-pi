@@ -73,6 +73,7 @@ describe("ModelRegistry default custom models config", () => {
 			// Reasoning-tier Bedrock stream-stall watchdog widening applies to
 			// overrides too (model compat generation).
 			streamIdleTimeoutMs: 900000,
+			streamRevision: "possible",
 		});
 	});
 
@@ -148,6 +149,7 @@ interface ModelSnapshot {
 		promptCacheMinimumTokens: number;
 		promptCacheMaximumCheckpoints: number;
 		streamIdleTimeoutMs?: number;
+		streamRevision?: "possible";
 	};
 }
 

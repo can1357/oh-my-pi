@@ -8,6 +8,7 @@ import {
 	isOpaqueStatusBody,
 	isUsageLimitOutcome,
 	isUsageLimitStatus,
+	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 
@@ -89,10 +90,6 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("Connect error resource_exhausted: Quota exceeded for this account")).toBe(
 			"QUOTA_EXHAUSTED",
 		);
-	});
-
-	it("classifies Too many requests as RATE_LIMIT_EXCEEDED", () => {
-		expect(parseRateLimitReason("Cloud Code Assist API error (429): Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
 	});
 
 	it("classifies per minute errors as RATE_LIMIT_EXCEEDED", () => {
@@ -201,6 +198,31 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, freeQuota)).toBe(true);
 	});
 
+	it("keeps rolling-window TPM/RPM throttles in the transient lane", () => {
+		// A per-minute token throttle reported with quota wording ("tpm
+		// exhausted", type=quota_exceeded_error, no Retry-After) used to fall
+		// through to QUOTA_EXHAUSTED: the session layer then invented a 30-min
+		// wait, blew past retry.maxDelayMs and terminated the turn (#13253).
+		const tpmExhausted =
+			"429 tpm exhausted\ntpm exhausted (type=quota_exceeded_error param=8)\ntpm exhausted (type=quota_exceeded_error param=8) (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(tpmExhausted)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(calculateRateLimitBackoffMs(parseRateLimitReason(tpmExhausted))).toBeLessThanOrEqual(60_000);
+		expect(matchesUsageLimitText(tpmExhausted)).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(tpmExhausted, 429, { code: "quota_exceeded_error" }))).toBe(false);
+		expect(isUsageLimitOutcome(429, tpmExhausted)).toBe(false);
+
+		// Other phrasings of the same rolling window.
+		expect(parseRateLimitReason("429 inference exceeds tpm/rpm limit")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 RPM limit reached for this endpoint")).toBe("RATE_LIMIT_EXCEEDED");
+		expect(parseRateLimitReason("429 (code=RateLimitExceeded.EndpointTPMExceeded)")).toBe("RATE_LIMIT_EXCEEDED");
+
+		// An account-scoped cap that merely quotes a TPM number keeps its quota
+		// verdict — the downgrade must not rescue a credential-rotating error.
+		const planQuota = "429 Your plan quota is exhausted; the plan TPM is 1000 (type=quota_exceeded_error)";
+		expect(parseRateLimitReason(planQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, planQuota)).toBe(true);
+	});
+
 	it("classifies Codex usage limit error as QUOTA_EXHAUSTED", () => {
 		expect(
 			parseRateLimitReason("Codex error event: The usage limit has been reached (code=usage_limit_reached)"),
@@ -305,6 +327,18 @@ describe("isUsageLimit", () => {
 			isUsageLimit("401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/demo"),
 		).toBe(true);
 	});
+	it("detects OpenCode Go window limits as credential-rotatable usage limits", () => {
+		// Upstream `GoUsageLimitError` wire shape: HTTP 429
+		// `{"type":"error","error":{"type":"GoUsageLimitError","message":"… Resets in …"},"metadata":{…}}`
+		// plus a `retry-after` header, flattened by `captureOpenAIHttpError` into
+		// "429 <message>". One window fixture pins the rotation branch; the
+		// distinct reset-duration formats are covered in `fetch-retry.test.ts`.
+		const message =
+			"429 5-hour usage limit reached. Resets in 2hr 15min. To continue using this model now, enable usage from your available balance: https://opencode.ai/workspace/wrk_1/go";
+		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, message)).toBe(true);
+		expect(isUsageLimit(message)).toBe(true);
+	});
 
 	it("detects Antigravity capacity-exhausted message as a usage-limit error", () => {
 		// Without this branch `markUsageLimitReached` is never invoked, so the
@@ -342,6 +376,17 @@ describe("isUsageLimit", () => {
 				'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s monthly spend limit. Please try again later."}}',
 			),
 		).toBe(true);
+	});
+
+	// Google phrases the same ceiling as a cap ("Your project has exceeded its
+	// monthly spending cap."), which `/spend.?limit/` missed, so a transport that
+	// flattens the body to prose left the 429 transient and retryable (#13090).
+	it("detects a monthly spending-cap 429 as a credential-rotatable usage limit", () => {
+		expect(isUsageLimit("Google API error (429): Your project has exceeded its monthly spending cap.")).toBe(true);
+	});
+
+	it("keeps 'spending capacity' throttle wording out of the billing-cap branch", () => {
+		expect(parseRateLimitReason("429 model spending capacity reached, slow down")).toBe("MODEL_CAPACITY_EXHAUSTED");
 	});
 
 	it("detects bare 'quota reached' phrasing", () => {
@@ -387,6 +432,16 @@ describe("isUsageLimit", () => {
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
 	});
 
+	it("detects Claude subscription extra-usage exhaustion as a credential-rotatable usage limit", () => {
+		// Anthropic OAuth (claude.ai) accounts answer HTTP 400 invalid_request_error with
+		// this wording once the plan window and the extra-usage balance are both spent.
+		// Without the match a multi-account pool stays sticky on the exhausted account.
+		const message =
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"You\'re out of extra usage. Add more at claude.ai/settings/usage and keep going."}}';
+		expect(isUsageLimit(message)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(message), { status: 400 }))).toBe(true);
+	});
+
 	it("detects OpenAI quota payload codes as credential-rotatable usage limits", () => {
 		for (const message of ["insufficient_quota", "usage_limit_exceeded", "usage_limit_reached"]) {
 			expect(isUsageLimit(message)).toBe(true);
@@ -412,6 +467,17 @@ describe("isUsageLimit", () => {
 		).toBe(false);
 		expect(isUsageLimit(new ProviderHttpError("Payment Required", 402))).toBe(true);
 		expect(isUsageLimit(new ProviderHttpError("A subscription is required for this endpoint", 402))).toBe(false);
+		expect(
+			isUsageLimit(
+				new ProviderHttpError("Upstream request failed: Insufficient account funds", 402, {
+					code: "server_error",
+				}),
+			),
+		).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError('{"error":{"code":"insufficient_account_funds"}}', 402))).toBe(true);
+		expect(
+			isUsageLimit(new ProviderHttpError("Upstream request failed", 402, { code: "insufficient-account-funds" })),
+		).toBe(true);
 	});
 	it("detects 402 Payment Required and Payment is required as credential-rotatable usage limit", () => {
 		expect(isUsageLimit(Object.assign(new Error("Payment Required"), { status: 402 }))).toBe(true);
@@ -627,6 +693,19 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(400, "invalid_request_error: model unsupported")).toBe(false);
 	});
 
+	it("classifies Kimi access_terminated_error as QUOTA_EXHAUSTED and rotates on 403", () => {
+		const fullError =
+			'{"error":{"message":"You\'ve reached your monthly usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: https://www.kimi.com/membership/subscription?tab=quota","type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(fullError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, fullError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(fullError, 403))).toBe(true);
+
+		const bareError = '{"error":{"type":"access_terminated_error"}}';
+		expect(parseRateLimitReason(bareError)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(403, bareError)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(bareError, 403))).toBe(true);
+	});
+
 	// Vertex returns "Online prediction concurrent requests quota exceeded" for a
 	// concurrent-request cap. The generic USAGE_LIMIT_PATTERN matches
 	// `quota.?exceeded`, but this is a concurrency cap (5s backoff, no rotation),
@@ -678,6 +757,27 @@ describe("isUsageLimitOutcome", () => {
 		// 429 concurrency cap: shed-and-backoff, do not rotate.
 		expect(isUsageLimitOutcome(429, message)).toBe(false);
 		expect(isUsageLimit(Object.assign(new Error(message), { status: 429 }))).toBe(false);
+	});
+
+	it("rotates Anthropic credits-required walls", () => {
+		const body =
+			'429 {"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","model":"claude-fable-5"}}}';
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	// The entitlement wall rotates, but "usage credits" also appears in
+	// unrelated diagnostics. Those must stay in their own lane: rotating on a
+	// 500 from a billing service blocks a credential that never hit a cap.
+	it("leaves non-entitlement usage-credits wording alone", () => {
+		const diagnostic = "500 Failed to fetch usage credits from billing service";
+		expect(parseRateLimitReason(diagnostic)).not.toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(500, diagnostic)).toBe(false);
+		expect(matchesUsageLimitText(diagnostic)).toBe(false);
+
+		const perMinute = "429 Usage credits are limited per minute for this workspace";
+		expect(parseRateLimitReason(perMinute)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
 	});
 });
 

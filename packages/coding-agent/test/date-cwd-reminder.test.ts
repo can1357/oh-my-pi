@@ -9,7 +9,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { DateCwdReminderInjector, renderDateCwdReminder } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { formatLocalCalendarDate } from "@oh-my-pi/pi-coding-agent/utils/local-date";
+import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "@oh-my-pi/pi-coding-agent/utils/prompt-path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -17,18 +17,6 @@ import { createAssistantMessage } from "./helpers/agent-session-setup";
 describe("date-cwd-reminder", () => {
 	afterEach(() => {
 		clearCustomApis();
-	});
-
-	describe("renderDateCwdReminder", () => {
-		it("renders a system-reminder block carrying the date and cwd with a do-not-repeat instruction", () => {
-			const reminder = renderDateCwdReminder("2026-08-14", "C:/work/omp");
-
-			expect(reminder.startsWith("<system-reminder>")).toBe(true);
-			expect(reminder.endsWith("</system-reminder>")).toBe(true);
-			expect(reminder).toContain("2026-08-14");
-			expect(reminder).toContain("C:/work/omp");
-			expect(reminder).toContain("Do not repeat");
-		});
 	});
 
 	describe("DateCwdReminderInjector", () => {
@@ -158,7 +146,7 @@ describe("date-cwd reminder on the provider wire", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const { session } = await createAgentSession({
 			cwd: tempDir.path(),

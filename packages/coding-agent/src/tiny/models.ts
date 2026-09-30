@@ -1,6 +1,4 @@
-/** Default session-title model: the online @smol path (no local download / on-device inference). */
-export const ONLINE_TINY_TITLE_MODEL_KEY = "online";
-/** Local model the `tiny-models` CLI downloads when none is named. Not the session-title default — that is {@link ONLINE_TINY_TITLE_MODEL_KEY}. */
+/** Local model the `tiny-models` CLI downloads when none is named. */
 export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2.5-230m";
 
 export interface TinyTitleLocalModelSpec {
@@ -49,41 +47,7 @@ export const TINY_TITLE_LOCAL_MODELS = [
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
-export const TINY_TITLE_MODEL_VALUES = [
-	ONLINE_TINY_TITLE_MODEL_KEY,
-	"lfm2.5-230m",
-	"lfm2.5-350m",
-	"falcon-h1-90m",
-] as const;
-
-export type TinyTitleModelKey = (typeof TINY_TITLE_MODEL_VALUES)[number];
 export type TinyTitleLocalModelKey = (typeof TINY_TITLE_LOCAL_MODELS)[number]["key"];
-
-type MissingTinyTitleModelValue = Exclude<
-	typeof ONLINE_TINY_TITLE_MODEL_KEY | TinyTitleLocalModelKey,
-	TinyTitleModelKey
->;
-type ExtraTinyTitleModelValue = Exclude<TinyTitleModelKey, typeof ONLINE_TINY_TITLE_MODEL_KEY | TinyTitleLocalModelKey>;
-const TINY_TITLE_MODEL_VALUES_MATCH_REGISTRY: MissingTinyTitleModelValue extends never
-	? ExtraTinyTitleModelValue extends never
-		? true
-		: never
-	: never = true;
-void TINY_TITLE_MODEL_VALUES_MATCH_REGISTRY;
-
-export const TINY_TITLE_MODEL_OPTIONS = [
-	{
-		value: ONLINE_TINY_TITLE_MODEL_KEY,
-		label: "Online (TINY role, else @smol)",
-		description:
-			"Online title generation: the TINY model role (set one in /models) when assigned, otherwise the online fallback (commit role, then @smol). No local download or on-device inference.",
-	},
-	...TINY_TITLE_LOCAL_MODELS.map(model => ({
-		value: model.key,
-		label: model.label,
-		description: model.description,
-	})),
-] satisfies ReadonlyArray<{ value: TinyTitleModelKey; label: string; description: string }>;
 
 export function isTinyTitleLocalModelKey(value: string): value is TinyTitleLocalModelKey {
 	return TINY_TITLE_LOCAL_MODELS.some(model => model.key === value);
@@ -95,8 +59,6 @@ export function getTinyTitleModelSpec(key: TinyTitleLocalModelKey): (typeof TINY
 	return spec;
 }
 
-/** Default memory model: the online path (the configured smol / remote LLM; no local download). */
-export const ONLINE_MEMORY_MODEL_KEY = "online";
 /** Recommended local model for memory tasks when none is named. */
 export const DEFAULT_MEMORY_LOCAL_MODEL_KEY = "lfm2-1.2b";
 
@@ -159,43 +121,7 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
-export const TINY_MEMORY_MODEL_VALUES = [
-	ONLINE_MEMORY_MODEL_KEY,
-	"qwen3-1.7b",
-	"llama3.2:3b",
-	"gemma-3-1b",
-	"qwen2.5-1.5b",
-	"lfm2-1.2b",
-] as const;
-
-export type TinyMemoryModelKey = (typeof TINY_MEMORY_MODEL_VALUES)[number];
 export type TinyMemoryLocalModelKey = (typeof TINY_MEMORY_LOCAL_MODELS)[number]["key"];
-
-type MissingTinyMemoryModelValue = Exclude<
-	typeof ONLINE_MEMORY_MODEL_KEY | TinyMemoryLocalModelKey,
-	TinyMemoryModelKey
->;
-type ExtraTinyMemoryModelValue = Exclude<TinyMemoryModelKey, typeof ONLINE_MEMORY_MODEL_KEY | TinyMemoryLocalModelKey>;
-const TINY_MEMORY_MODEL_VALUES_MATCH_REGISTRY: MissingTinyMemoryModelValue extends never
-	? ExtraTinyMemoryModelValue extends never
-		? true
-		: never
-	: never = true;
-void TINY_MEMORY_MODEL_VALUES_MATCH_REGISTRY;
-
-export const TINY_MEMORY_MODEL_OPTIONS = [
-	{
-		value: ONLINE_MEMORY_MODEL_KEY,
-		label: "Online (TINY role, else @smol)",
-		description:
-			"Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
-	},
-	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
-		value: model.key,
-		label: model.label,
-		description: model.description,
-	})),
-] satisfies ReadonlyArray<{ value: TinyMemoryModelKey; label: string; description: string }>;
 
 export function isTinyMemoryLocalModelKey(value: string): value is TinyMemoryLocalModelKey {
 	return TINY_MEMORY_LOCAL_MODELS.some(model => model.key === value);
@@ -233,28 +159,3 @@ export const TINY_LOCAL_MODELS = [
 	...TINY_TITLE_LOCAL_MODELS,
 	...TINY_MEMORY_LOCAL_MODELS,
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
-
-/**
- * Difficulty-classifier model for the `auto` thinking level. Defaults to the
- * online smol path; the local options reuse the memory-model registry because
- * the shared worker's `complete()` only accepts memory local keys, and the
- * 1B+ memory models classify coding difficulty far more reliably than the
- * sub-1B title models.
- */
-export const ONLINE_AUTO_THINKING_MODEL_KEY = ONLINE_MEMORY_MODEL_KEY;
-export const AUTO_THINKING_MODEL_VALUES = TINY_MEMORY_MODEL_VALUES;
-export type AutoThinkingModelKey = TinyMemoryModelKey;
-
-export const AUTO_THINKING_MODEL_OPTIONS = [
-	{
-		value: ONLINE_AUTO_THINKING_MODEL_KEY,
-		label: "Online (TINY role, else @smol)",
-		description:
-			"Classify prompt difficulty online with the TINY role model (set one in /models) or @smol; no local download or on-device inference.",
-	},
-	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
-		value: model.key,
-		label: model.label,
-		description: model.description,
-	})),
-] satisfies ReadonlyArray<{ value: AutoThinkingModelKey; label: string; description: string }>;

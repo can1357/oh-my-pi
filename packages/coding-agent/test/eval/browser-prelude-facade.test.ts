@@ -68,6 +68,7 @@ function makeSession(getPreludes?: () => readonly EvalPreludeDefinition[]): Tool
 			"browser.headless": true,
 			"browser.relay": false,
 			"browser.cmux": false,
+			"browser.tern": false,
 		}),
 		...(getPreludes === undefined ? {} : { getEvalPreludes: getPreludes }),
 	};
@@ -279,6 +280,29 @@ describe("browser facade in real Eval runtimes", () => {
 			],
 		});
 		expect(calls).toContainEqual({ action: "run", name: "real-py", code: "return 42;", timeout: 2 });
+	});
+
+	it("forwards Python open timeout and persist side by side (issue #8246 review)", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		definitions = [recorderDefinition(session, calls)];
+		const result = await executePython(
+			[
+				'tab = await browser.open(name="py-opts", timeout=7, persist=True)',
+				'plain = await browser.open(name="py-plain")',
+			].join("\n"),
+			{
+				cwd: process.cwd(),
+				sessionId: `browser-facade-py-open-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(calls).toContainEqual({ action: "open", name: "py-opts", timeout: 7, persist: true });
+		expect(calls).toContainEqual({ action: "open", name: "py-plain" });
 	});
 });
 

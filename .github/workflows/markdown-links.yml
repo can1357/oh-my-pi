@@ -1,0 +1,32 @@
+name: Markdown links
+
+on:
+   workflow_dispatch:
+   push:
+      branches:
+         - main
+      paths:
+         - "**/*.md"
+         - "**/*.mdx"
+         - "**/*.markdown"
+         - "lychee.toml"
+         - ".github/workflows/markdown-links.yml"
+   pull_request:
+      paths:
+         - "**/*.md"
+         - "**/*.mdx"
+         - "**/*.markdown"
+         - "lychee.toml"
+         - ".github/workflows/markdown-links.yml"
+
+permissions:
+   contents: read
+
+jobs:
+   check:
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+           with:
+              args: .

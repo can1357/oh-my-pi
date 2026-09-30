@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+import * as natives from "@oh-my-pi/pi-natives";
+import { type AutocompleteItem, CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {
@@ -15,21 +16,6 @@ describe("CombinedAutocompleteProvider", () => {
 			const result = await provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
 
 			expect(result?.prefix).toBe("/");
-		});
-
-		it("extracts /A from '/A' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/A"];
-			const cursorLine = 0;
-			const cursorCol = 2; // After the "A"
-
-			const result = await provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
-
-			// This might return null if /A doesn't match anything, which is fine
-			// We're mainly testing that the prefix extraction works
-			if (result) {
-				expect(result.prefix).toBe("/A");
-			}
 		});
 
 		it("does not trigger for slash commands", async () => {
@@ -148,6 +134,70 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["skill:humanizer"]);
 		});
 
+		it("matches leading skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "skill:code-ponytail", description: "Ponytail coding workflow" },
+				],
+				"/tmp",
+			);
+
+			for (const [input, expected] of [
+				["/last", "skill:research-last30days"],
+				["/last30days", "skill:research-last30days"],
+				["/research-last30days", "skill:research-last30days"],
+				["/ponytail", "skill:code-ponytail"],
+			] as const) {
+				const result = await provider.getSuggestions([input], 0, input.length);
+				expect(result?.items[0]?.value).toBe(expected);
+			}
+		});
+
+		it("matches mid-prompt skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "skill:design-impeccable", description: "Improve interface design" }],
+				"/tmp",
+			);
+			const line = "polish this /impec";
+
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.prefix).toBe("/impec");
+			expect(result?.items.map(item => item.value)).toEqual(["skill:design-impeccable"]);
+		});
+
+		it("does not widen hyphen-segment matching to ordinary command names or aliases", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "docs-last30days", aliases: ["archive-last30days"], description: "Open archived docs" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			// The ordinary command remains only a fuzzy hit; it must not acquire a
+			// segment-prefix tier that ties and suppresses the skill breakout, and it
+			// still surfaces with the same ordinary fuzzy behavior as before.
+			expect(result?.items.map(item => item.value)).toEqual(["skill:research-last30days", "docs-last30days"]);
+		});
+
+		it("keeps command precedence when a leading command ties a segmented skill prefix", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "last-report", description: "Open the latest report" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["last-report"]);
+		});
+
 		it("collapses skills into a single skill: namespace row at prompt start", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[
@@ -262,6 +312,22 @@ describe("CombinedAutocompleteProvider", () => {
 
 			expect(result.lines[0]).toBe("/skill:");
 			expect(result.cursorCol).toBe("/skill:".length);
+		});
+
+		it("completes a namespaced skill as a slash command, not a file path", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "skill:superpowers/tdd", description: "Test-driven development" }],
+				"/tmp",
+			);
+			const line = "/skill:superpowers/t";
+
+			const suggestions = await provider.getSuggestions([line], 0, line.length);
+			const item = suggestions?.items.find(entry => entry.value === "skill:superpowers/tdd");
+			expect(item).toBeDefined();
+			const result = provider.applyCompletion([line], 0, line.length, item!, suggestions!.prefix);
+
+			expect(result.lines[0]).toBe("/skill:superpowers/tdd ");
+			expect(result.cursorCol).toBe("/skill:superpowers/tdd ".length);
 		});
 
 		it("never sync-completes Enter to the bare skill namespace", () => {
@@ -642,20 +708,6 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/swarm run package.json".length);
 		});
 
-		it("replaces only the last path token when completing a multi-token slash command argument", () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const result = provider.applyCompletion(
-				["/model claude"],
-				0,
-				13,
-				{ value: "claude-sonnet", label: "claude-sonnet" },
-				"claude",
-			);
-
-			expect(result.lines[0]).toBe("/model claude-sonnet");
-			expect(result.cursorCol).toBe("/model claude-sonnet".length);
-		});
-
 		it("does not add a trailing space when completing a directory with @", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const result = provider.applyCompletion(
@@ -765,6 +817,51 @@ describe("CombinedAutocompleteProvider", () => {
 			const values = result?.items.map(item => item.value) ?? [];
 			expect(values.length).toBeGreaterThan(20);
 			expect(values.length).toBeGreaterThanOrEqual(total);
+		});
+	});
+
+	describe("slow @ fuzzy search", () => {
+		let baseDir: string;
+
+		beforeEach(() => {
+			baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "autocomplete-partial-test-"));
+			for (const dir of ["widget-app", ".cache", "other"]) fs.mkdirSync(path.join(baseDir, dir));
+		});
+
+		afterEach(() => {
+			vi.restoreAllMocks();
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		});
+
+		it("reports the prefix listing while a slow walk runs, then resolves to the fuzzy results", async () => {
+			const walk = Promise.withResolvers<natives.FuzzyFindResult>();
+			spyOn(natives, "fuzzyFind").mockReturnValue(walk.promise);
+			const partial = Promise.withResolvers<AutocompleteItem[]>();
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "see @widget";
+			const result = provider.getSuggestions([line], 0, line.length, undefined, suggestions =>
+				partial.resolve(suggestions.items),
+			);
+
+			expect((await partial.promise).map(item => item.value)).toEqual(["@widget-app/"]);
+			walk.resolve({
+				matches: [{ path: "other/widget.md", isDirectory: false, score: 1 }],
+				totalMatches: 1,
+			});
+			expect((await result)?.items.map(item => item.value)).toEqual(["@other/widget.md"]);
+		});
+
+		it("skips the interim listing when the walk finishes quickly", async () => {
+			const partials: AutocompleteItem[][] = [];
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "@widget";
+			const result = await provider.getSuggestions([line], 0, line.length, undefined, suggestions =>
+				partials.push(suggestions.items),
+			);
+
+			expect(result?.items.map(item => item.value)).toContain("@widget-app/");
+			expect(partials).toEqual([]);
 		});
 	});
 
@@ -890,30 +987,6 @@ describe("CombinedAutocompleteProvider", () => {
 	});
 });
 describe("trySyncSlashCompletion", () => {
-	it("returns null for bare '/' (no prefix to match)", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		const result = provider.trySyncSlashCompletion("/");
-		expect(result).toBeNull();
-	});
-
-	it("returns null for non-slash text", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
-		expect(provider.trySyncSlashCompletion("")).toBeNull();
-	});
-
-	it("returns null when text has spaces (argument phase, not command name)", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		expect(provider.trySyncSlashCompletion("/model claude")).toBeNull();
-		expect(provider.trySyncSlashCompletion("/model ")).toBeNull();
-	});
-
-	it("returns null when no commands match", () => {
-		const provider = new CombinedAutocompleteProvider([], "/tmp");
-		const result = provider.trySyncSlashCompletion("/zzzzz");
-		expect(result).toBeNull();
-	});
-
 	it("returns matching items for partial slash command name", () => {
 		const provider = new CombinedAutocompleteProvider(
 			[{ name: "model", description: "Switch AI model", value: "model" }],

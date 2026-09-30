@@ -7,10 +7,10 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CopySelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/copy-selector";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CopySelectorComponent, type CopyPickSource } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -29,13 +29,13 @@ function entry(id: string, parentId: string | null, message: AgentMessage): Sess
 }
 
 /** user → assistant(text + code fence + bash call) → bash result. */
-function makeEntries(): SessionMessageEntry[] {
+function makeEntries(assistantText = ASSISTANT_TEXT): SessionMessageEntry[] {
 	return [
 		entry("u1", null, { role: "user", content: "fix the logging", timestamp: 1 } as AgentMessage),
 		entry("a1", "u1", {
 			role: "assistant",
 			content: [
-				{ type: "text", text: ASSISTANT_TEXT },
+				{ type: "text", text: assistantText },
 				{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } },
 			],
 			api: "anthropic-messages",
@@ -128,12 +128,16 @@ function makeSelector(
 	onCancel = () => {},
 	opens?: Array<{ href: string; label: string }>,
 	entries: SessionMessageEntry[] = makeEntries(),
+	sources?: CopyPickSource[],
 ): CopySelectorComponent {
 	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label, source) => {
+			picks.push({ content, label });
+			sources?.push(source);
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -152,17 +156,64 @@ describe("CopySelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("copies the outlined turn's prose on Enter", () => {
+	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
+		const entries = makeEntries();
 		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
 		selector.render(100);
 
 		selector.handleInput(ENTER);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
 		selector.dispose();
 
-		// The newest item is the assistant turn (bash result folded into it);
-		// its item-level copy is the assistant prose, not tool noise.
-		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+		expect(picks).toEqual([
+			{ content: ASSISTANT_TEXT, label: "assistant message" },
+			{ content: "fix the logging", label: "user message" },
+		]);
+		expect(sources).toEqual([{ entry: entries[1] }, { entry: entries[0] }]);
+	});
+
+	it("keeps block content and metadata exact while retaining each block's source entry", () => {
+		const quote = "quoted first line\nquoted second line";
+		const assistantText = `${ASSISTANT_TEXT}\n> ${quote.replace("\n", "\n> ")}`;
+		const entries = makeEntries(assistantText);
+		const assistantEntry = entries[1]!;
+		const toolResultEntry = entries[2]!;
+		const picks: Array<{ content: string; label: string }> = [];
+		const sources: CopyPickSource[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, sources);
+		selector.render(100);
+		selector.handleInput(RIGHT);
+
+		for (let index = 0; index < 5; index++) {
+			selector.handleInput(ENTER);
+			if (index < 4) selector.handleInput("\x1b[B");
+		}
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: CODE, label: "ts code" },
+			{ content: quote, label: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR` },
+			{ content: "bun test", label: "bash command" },
+			{ content: "12 pass", label: "bash result" },
+		]);
+		expect(sources.map(source => source.entry)).toEqual([
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			toolResultEntry,
+		]);
+		expect(sources.map(source => source.block)).toEqual([
+			{ content: CODE, label: "ts code", entry: assistantEntry, language: "ts", kind: "code" },
+			{ content: quote, label: "quote", entry: assistantEntry, kind: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR`, entry: assistantEntry, href: LINK },
+			{ content: "bun test", label: "bash command", entry: assistantEntry, language: "bash", kind: "command" },
+			{ content: "12 pass", label: "bash result", entry: toolResultEntry },
+		]);
 	});
 
 	it("folds lazily created grouped reads into the assistant turn so Enter copies the yield", () => {
@@ -181,42 +232,6 @@ describe("CopySelectorComponent", () => {
 		selector.dispose();
 
 		expect(picks).toEqual([{ content: GROUPED_READ_YIELD, label: "assistant message" }]);
-	});
-
-	it("descends into inner blocks with Right and copies the block verbatim", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		// First block of the turn is the fenced code — copied without fences.
-		expect(picks).toEqual([{ content: CODE, label: "ts code" }]);
-	});
-
-	it("steps through command and tool-output blocks of the same turn", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput(ENTER);
-		selector.handleInput(RIGHT);
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput("\x1b[B");
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		// Block order within the turn: code fence, link, bash command, bash result.
-		expect(picks).toEqual([
-			{ content: "bun test", label: "bash command" },
-			{ content: "12 pass", label: "bash result" },
-		]);
 	});
 
 	it("lists the turn's links as blocks after code and commands; Enter copies the URL, o opens it", () => {
@@ -318,6 +333,22 @@ describe("CopySelectorComponent", () => {
 		expect(picks).toEqual([]);
 	});
 
+	it("keeps later caption click targets aligned after a multiline link label", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, makeEntries(`[line one\nline two](${LINK})`));
+		selector.render(100);
+		selector.handleInput(RIGHT);
+		// Split embedded newlines exactly as the terminal does before reporting an SGR mouse row.
+		const physicalFrame = selector.render(100).join("\n").split("\n");
+		const { row } = locate(physicalFrame, `2/3${theme.sep.dot}bash command`);
+		const copyCol = Bun.stripANSI(physicalFrame[row]!).indexOf(`${theme.cmd.copy} copy`);
+		expect(copyCol).toBeGreaterThan(0);
+		selector.handleInput(click(row, copyCol + 1));
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: "bun test", label: "bash command" }]);
+	});
+
 	it("click positions follow the scroll offset", () => {
 		const picks: Array<{ content: string; label: string }> = [];
 		const selector = makeSelector(picks);
@@ -351,23 +382,9 @@ describe("CopySelectorComponent", () => {
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
-	it("Left/Up navigate: user prompt copies its raw text", () => {
-		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks);
-		selector.render(100);
-
-		selector.handleInput(UP);
-		selector.handleInput(ENTER);
-		selector.dispose();
-
-		expect(picks).toEqual([{ content: "fix the logging", label: "user message" }]);
-	});
-
 	it("renders the descended block stack with captions and dotted outline", () => {
 		const selector = makeSelector([]);
-		const itemView = selector.render(100).map(line => Bun.stripANSI(line));
-		// The outline advertises the descent affordance before Right is pressed.
-		expect(itemView.join("\n")).toContain("4 blocks →");
+		selector.render(100);
 		selector.handleInput(RIGHT);
 		const lines = selector.render(100).map(line => Bun.stripANSI(line));
 		selector.handleInput(LEFT);
@@ -383,5 +400,183 @@ describe("CopySelectorComponent", () => {
 		const boxed = lines.filter(line => line.startsWith("┆")).join("\n");
 		expect(boxed).toContain("const answer = 42;");
 		expect(boxed).not.toContain("bun test");
+	});
+
+	/** A picker over `entries` with the harness deps, recording picks. */
+	function pickerOver(
+		entries: SessionMessageEntry[],
+		picks: Array<{ content: string; label: string }>,
+		onRender: () => void = () => {},
+	): CopySelectorComponent {
+		return new CopySelectorComponent(entries, {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: onRender,
+			onPick: (content, label) => picks.push({ content, label }),
+			onCancel: () => {},
+		});
+	}
+
+	/** `count` user turns, oldest first, chained by parent id. */
+	function promptChain(count: number): SessionMessageEntry[] {
+		const entries: SessionMessageEntry[] = [];
+		for (let index = 0; index < count; index++) {
+			entries.push(
+				entry(`u${index}`, index === 0 ? null : `u${index - 1}`, {
+					role: "user",
+					content: `prompt ${index}`,
+					timestamp: index,
+				} as AgentMessage),
+			);
+		}
+		return entries;
+	}
+
+	it("does not repaint for a wheel notch that cannot move the viewport", () => {
+		// The picker opens scrolled to the newest turn, so every wheel-down
+		// notch there used to repaint the whole frame and make it twitch.
+		let renders = 0;
+		const selector = pickerOver(promptChain(120), [], () => renders++);
+		const wheelDown = "\x1b[<65;1;10M";
+		const wheelUp = "\x1b[<64;1;10M";
+		try {
+			selector.render(100);
+
+			selector.handleInput(wheelDown);
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(0);
+
+			// A notch that moves the viewport still repaints, in both directions.
+			selector.handleInput(wheelUp);
+			expect(renders).toBe(1);
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(2);
+
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(2);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("replays only the recent tail of a long branch until `a` loads the earlier turns", () => {
+		// One component is built and rendered per entry, so a long session cost
+		// seconds before its first frame; the picker starts at the tail instead.
+		const entries = promptChain(900);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			expect(selector.targetCount).toBeLessThan(entries.length);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("a earlier turns");
+
+			// Step off the newest turn: the reload must restore this turn, not
+			// fall back to the last target of the fuller transcript.
+			selector.handleInput(UP);
+			selector.handleInput(UP);
+			selector.handleInput("a");
+			expect(selector.targetCount).toBe(entries.length);
+			const loaded = Bun.stripANSI(selector.render(100).join("\n"));
+			expect(loaded).not.toContain("a earlier turns");
+			expect(loaded).toContain(`${entries.length - 2}/${entries.length}`);
+
+			selector.handleInput(ENTER);
+			expect(picks).toEqual([{ content: "prompt 897", label: "user message" }]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("steps Up past the oldest replayed turn into the earlier history", () => {
+		const entries = promptChain(900);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			selector.render(100);
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+			expect(picks).toEqual([{ content: "prompt 0", label: "user message" }]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps a copyable target when the final turn is longer than the replay cap", () => {
+		// Cutting blindly at `length - limit` would start the tail inside the
+		// tool results, whose calls are gone: the builder drops them and the
+		// picker mounts with nothing to copy.
+		const entries: SessionMessageEntry[] = [
+			entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
+		];
+		for (let index = 0; index < 700; index++) {
+			const call = `call-${index}`;
+			entries.push(
+				entry(`a${index}`, entries.at(-1)!.id, {
+					role: "assistant",
+					content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					stopReason: "toolUse",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: 2 + index * 2,
+				} as unknown as AgentMessage),
+			);
+			entries.push(
+				entry(`t${index}`, entries.at(-1)!.id, {
+					role: "toolResult",
+					toolCallId: call,
+					toolName: "bash",
+					content: [{ type: "text", text: `output ${index}` }],
+					isError: false,
+					timestamp: 3 + index * 2,
+				} as unknown as AgentMessage),
+			);
+		}
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			// The single user turn is the only boundary, so the whole branch replays.
+			expect(selector.targetCount).toBeGreaterThan(0);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("a earlier turns");
+
+			selector.handleInput(ENTER);
+			expect(picks).toHaveLength(1);
+			expect(picks[0]!.content).toContain("output 699");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("cuts the tail at a directly invoked skill prompt, not only at a user message", () => {
+		// A `/skill:` prompt the user invoked starts a turn of its own, so a
+		// branch whose recent history is skill turns must not walk back to a
+		// far older user message and replay thousands of entries.
+		const entries = promptChain(50);
+		for (let index = 0; index < 900; index++) {
+			entries.push(
+				entry(`s${index}`, entries.at(-1)!.id, {
+					role: "custom",
+					customType: "skill-prompt",
+					attribution: "user",
+					content: `skill step ${index}`,
+					display: true,
+					timestamp: 1000 + index,
+				} as unknown as AgentMessage),
+			);
+		}
+		const selector = pickerOver(entries, []);
+		try {
+			expect(selector.targetCount).toBeLessThan(700);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("a earlier turns");
+		} finally {
+			selector.dispose();
+		}
 	});
 });

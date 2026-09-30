@@ -1,3 +1,4 @@
+import type { MCPContent, MCPImageContent, MCPResourceContent, MCPTextContent } from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP (Model Context Protocol) type definitions.
  *
@@ -80,6 +81,12 @@ interface MCPServerConfigBase {
 	 * tool's config do not, since the key is not part of those formats.
 	 */
 	requestIdFormat?: MCPRequestIdFormat;
+	/**
+	 * Include server-provided instructions in the system prompt (default: true).
+	 * OMP-specific: only native config, standalone `mcp.json`, and OMP plugins
+	 * parse this option; providers for other tools' formats ignore it.
+	 */
+	instructions?: boolean;
 	/** Authentication configuration (optional) */
 	auth?: MCPAuthConfig;
 	/** OAuth configuration for servers requiring explicit client credentials */
@@ -259,30 +266,6 @@ export interface MCPToolCallParams {
 	name: string;
 	arguments?: Record<string, unknown>;
 }
-
-/** Content types in tool results */
-export interface MCPTextContent {
-	type: "text";
-	text: string;
-}
-
-export interface MCPImageContent {
-	type: "image";
-	data: string; // base64
-	mimeType: string;
-}
-
-export interface MCPResourceContent {
-	type: "resource";
-	resource: {
-		uri: string;
-		mimeType?: string;
-		text?: string;
-		blob?: string;
-	};
-}
-
-export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
 
 /** Structured authentication challenge returned in a tool result. */
 export interface MCPAuthChallenge {

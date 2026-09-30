@@ -14,8 +14,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isPromise } from "node:util/types";
-import { getLogsDir } from "./dirs";
+import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
+import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
@@ -82,14 +83,10 @@ function pruneStaleProcessLogs(dir: string): void {
 		return;
 	}
 	const current = new Date();
-	const currentDate =
-		`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}-` +
-		String(current.getDate()).padStart(2, "0");
+	const currentDate = localDay(current);
 	const cutoff = new Date(current);
 	cutoff.setDate(cutoff.getDate() - (RETAINED_STALE_LOG_DAYS - 1));
-	const cutoffDate =
-		`${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-` +
-		String(cutoff.getDate()).padStart(2, "0");
+	const cutoffDate = localDay(cutoff);
 
 	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
 	for (const entry of entries) {
@@ -150,6 +147,19 @@ function pruneStaleProcessLogs(dir: string): void {
 			}
 		}
 	}
+}
+
+const scheduledPruneDirs = new Set<string>();
+
+/** Run shared retention only after logger construction has returned to the event loop. */
+function schedulePruneStaleProcessLogs(dir: string): void {
+	if (scheduledPruneDirs.has(dir)) return;
+	scheduledPruneDirs.add(dir);
+	const immediate = setImmediate(() => {
+		scheduledPruneDirs.delete(dir);
+		pruneStaleProcessLogs(dir);
+	});
+	immediate.unref();
 }
 
 /** Ensure a logs directory exists; return the resolved path. */
@@ -237,7 +247,7 @@ function formatLogInfo(info: NormalizedLogInfo): string {
 /** Build a rotating file sink with process-local rotation and shared retention. */
 function makeFileTransport(dir?: string): RotatingFileSink {
 	const logsDir = ensureDir(dir ?? getLogsDir());
-	pruneStaleProcessLogs(logsDir);
+	schedulePruneStaleProcessLogs(logsDir);
 	return new RotatingFileSink({
 		directory: logsDir,
 		filenamePrefix: "omp",
@@ -245,6 +255,8 @@ function makeFileTransport(dir?: string): RotatingFileSink {
 		maxBytes: 10 * 1024 * 1024,
 		maxFiles: 5,
 		auditFile: path.join(logsDir, `.omp.${process.pid}-audit.json`),
+		// Keep the stderr guard's fd 2 on the file this sink is writing.
+		onRotate: setStderrRedirectTarget,
 	});
 }
 
@@ -276,12 +288,11 @@ function getLocalTransports(): LocalTransports {
 
 function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	const transports = getLocalTransports();
-	const info = normalizeLogInfo(level, message, context);
 	if (!transports.file && !transports.console) return;
-
+	const info = normalizeLogInfo(level, message, context);
 	const line = formatLogInfo(info);
 	if (transports.file) transports.file.write(line);
-	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
+	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 
 /**
@@ -632,7 +643,9 @@ function printSpan(span: Span, depth: number, lines: string[]): void {
 	const tag = parallel ? " [parallel]" : "";
 	const self = selfTimeOf(span);
 	const selfStr = span.children.length > 0 && self > LOGGED_TIMING_THRESHOLD_MS ? ` (self ${fmtMs(self)})` : "";
-	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag}`);
+	// Start offset from process origin: gaps between consecutive siblings are
+	// the parent's own (unspanned) work, which duration alone cannot locate.
+	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag} @${span.start.toFixed(0)}ms`);
 
 	// Split children into work spans and module-load spans for summarization.
 	const work: Span[] = [];

@@ -1,4 +1,4 @@
-import { truncate } from "@oh-my-pi/pi-utils";
+import { isRecord, truncate } from "@oh-my-pi/pi-utils";
 
 /**
  * Connect-protocol end-stream error formatting.
@@ -20,10 +20,6 @@ const GENERIC_CONNECT_ERROR_MESSAGES = new Set(["", "error", "unknown", "unknown
 
 /** Upper bound for appended trailer context so errors stay log-line sized. */
 const MAX_EXTRA_DETAIL_CHARS = 400;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function safeJson(value: unknown): string | undefined {
 	try {

@@ -1084,6 +1084,8 @@ omp auth-broker logout             # interactive — pick a stored credential to
 
 Credentials are saved to `agent.db` in the agent directory. `/login qianfan` opens the Qianfan console and stores the pasted API key.
 
+If SQLite reports corruption during startup, the damaged database and remaining journal sidecars are preserved beside it as private `agent.db.corrupt-<timestamp>-<id>*` backups before a fresh database is created. The log records the backup path. This restores startup, not unreadable credentials: log in again; retain the backups for manual data recovery. Lock contention and other non-corruption errors never reset the database.
+
 `login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
 For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
@@ -1158,6 +1160,18 @@ const response = await complete(
 	{ apiKey: result.apiKey },
 );
 ```
+
+When an auth-broker client requests recovery after a provider rejects an OAuth
+bearer, the broker may reuse a still-fresh token that it minted in the previous
+five minutes instead of rotating the refresh token again. The process-local
+cache is bound to the credential ID and access token. Scheduled expiry refreshes,
+direct forced refreshes such as MCP recovery, ordinary hard-auth blocks, and
+sibling rotation keep their existing behavior. Cached refresh responses rebind
+by durable credential ID so concurrent row removal cannot switch a pinned
+session to another account.
+Generic `forceRefresh: true` requests do not opt into reuse. Provider-401 retry
+paths pass `refreshReason: "auth-recovery"` explicitly; expiry sentinels and
+usage polling do not imply that reason.
 
 ### Provider Notes
 

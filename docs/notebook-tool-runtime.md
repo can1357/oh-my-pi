@@ -12,7 +12,7 @@ The critical distinction: **notebook support is file conversion/editing, not not
 - [`src/tools/eval.ts`](../packages/coding-agent/src/tools/eval.ts)
 - [`src/eval/py/executor.ts`](../packages/coding-agent/src/eval/py/executor.ts)
 - [`src/eval/py/kernel.ts`](../packages/coding-agent/src/eval/py/kernel.ts)
-- [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts)
+- [`src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts)
 
 ## 1) Runtime boundary: editing vs executing
 
@@ -24,7 +24,7 @@ The critical distinction: **notebook support is file conversion/editing, not not
   - `# %% [markdown] cell:N`
   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
-The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
+- The edit pipeline round-trips virtual text back to notebook JSON through `serialize_edited_notebook_text(...)`.
 - Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
 - A missing notebook passed to the serializer starts from an empty nbformat 4.5 notebook.
 - The standalone `write` tool is not notebook-aware: it replaces the file with the supplied bytes. Use it only with valid notebook JSON, not the virtual marker representation.
@@ -153,7 +153,7 @@ Cancellation/timeout:
 
 ## 6) Truncation and artifact behavior
 
-`OutputSink` in `src/session/streaming-output.ts` is used by kernel execution paths:
+`OutputSink` in `packages/tui/src/tools/streaming-output.ts` is used by kernel execution paths:
 
 - sanitizes every chunk
 - tracks total/output lines and bytes

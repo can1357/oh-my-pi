@@ -1412,12 +1412,30 @@ pub fn stage_patch(
 			let diff = input
 				.diff
 				.ok_or_else(|| EditError::apply("Create operation requires diff (file content)"))?;
-			let read = files.try_read(&resolved)?;
-			if read.is_some() && !allow_create_overwrite {
-				return Err(EditError::apply(format!(
-					"Cannot create {}: file already exists. Use *** Update File to modify it in place.",
-					input.path
-				)));
+			// Existence must not decode, but the generated-file guard must
+			// still run: an undecodable file still exists, and a generated
+			// one still rejects on overwrite. try_read runs the guard before
+			// decoding, so only the undecodable-target error means it passed.
+			match files.try_read(&resolved) {
+				Ok(read) => {
+					if read.is_some() && !allow_create_overwrite {
+						return Err(EditError::apply(format!(
+							"Cannot create {}: file already exists. Use *** Update File to modify it in \
+							 place.",
+							input.path
+						)));
+					}
+				},
+				Err(err) if err.is_invalid_utf8() => {
+					if !allow_create_overwrite {
+						return Err(EditError::apply(format!(
+							"Cannot create {}: file already exists. Use *** Update File to modify it in \
+							 place.",
+							input.path
+						)));
+					}
+				},
+				Err(err) => return Err(err),
 			}
 			let normalized = normalize_create_content(diff);
 			let content = if normalized.ends_with('\n') {
@@ -1428,8 +1446,27 @@ pub fn stage_patch(
 			stage_from_parts(&input, resolved, None, Some(content), Vec::new(), None, true)
 		},
 		Operation::Delete => {
-			let read = files.read(input.path)?;
-			stage_from_parts(&input, read.resolved.clone(), Some(read), None, Vec::new(), None, false)
+			match files.try_read(&resolved) {
+				Ok(Some(read)) => stage_from_parts(
+					&input,
+					read.resolved.clone(),
+					Some(read),
+					None,
+					Vec::new(),
+					None,
+					false,
+				),
+				Ok(None) => Err(EditError::apply(format!("File not found: {}", resolved.display))),
+				// Deleting needs existence, not text: the failed read already
+				// proved the file exists.
+				Err(err) if err.is_invalid_utf8() => {
+					let mut staged =
+						stage_from_parts(&input, resolved, None, None, Vec::new(), None, false)?;
+					staged.existed = true;
+					Ok(staged)
+				},
+				Err(err) => Err(err),
+			}
 		},
 		Operation::Update => {
 			let diff = input
@@ -1561,12 +1598,22 @@ impl ModeEngine for PatchEngine {
 
 		let first = entry_input(path, entries[0])?;
 		let initial_resolved = files.resolve(path, first.op != Operation::Create)?;
-		let initial = files.try_read(&initial_resolved)?;
+		// After a create or delete, later updates use replacement text or fail
+		// the existence check; only an initial update needs the original text.
+		let needs_content = first.op == Operation::Update;
+		let (initial, initially_existed) = match files.try_read(&initial_resolved) {
+			Ok(initial) => {
+				let existed = initial.is_some();
+				(initial, existed)
+			},
+			Err(err) if err.is_invalid_utf8() && !needs_content => (None, true),
+			Err(err) => return Err(err),
+		};
 		let initial_before = initial
 			.as_ref()
 			.map_or_else(String::new, |read| read.text.clone());
 		let mut current = initial_before;
-		let mut exists = initial.is_some();
+		let mut exists = initially_existed;
 		let mut final_op = FileOp::Update;
 		let mut warnings = Vec::new();
 		let mut move_to = None;
@@ -1639,15 +1686,23 @@ impl ModeEngine for PatchEngine {
 			diff: None,
 		};
 		let after = exists.then_some(current);
-		Ok(vec![stage_from_parts(
-			&synthetic,
-			initial_resolved,
-			initial,
-			after,
-			warnings,
-			move_to,
-			use_new_encoding,
-		)?])
+		Ok(vec![{
+			let mut staged = stage_from_parts(
+				&synthetic,
+				initial_resolved,
+				initial,
+				after,
+				warnings,
+				move_to,
+				use_new_encoding,
+			)?;
+			if !needs_content && initially_existed {
+				// Existence-only sequence on an unreadable file stages without
+				// content, but the target did exist.
+				staged.existed = true;
+			}
+			staged
+		}])
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { postOpenAIStream } from "@oh-my-pi/pi-ai/utils/openai-http";
 import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
@@ -561,4 +562,127 @@ describe("OpenAI Responses transient stream retry", () => {
 			expect(result.stopReason).toBe("error");
 		});
 	}
+	it("keeps retrying an ordinary Responses 408", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? new Response(JSON.stringify({ error: { message: "Request timed out before processing." } }), {
+						status: 408,
+					})
+				: createCompletedTextResponse("recovered", "resp_ordinary_408");
+		}) as FetchImpl;
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.stopReason).toBe("stop");
+	});
+	it("keeps the exact 408 retryable for an Azure Responses transport caller", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? new Response(JSON.stringify({ error: { message: "Timed out reading request body." } }), { status: 408 })
+				: createCompletedTextResponse("Azure recovered", "resp_azure_408");
+		}) as FetchImpl;
+
+		const { response } = await postOpenAIStream({
+			url: "https://example.openai.azure.com/openai/v1/responses",
+			headers: {},
+			body: {},
+			signal: new AbortController().signal,
+			fetch: fetchMock,
+		});
+
+		expect(response.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("surfaces an explicit request-body-read 408 without an unchanged transport retry", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? new Response(
+						JSON.stringify({
+							error: {
+								code: "user_request_timeout",
+								message: "Timed out reading request body. Try again, or use a smaller request size.",
+							},
+						}),
+						{ status: 408, headers: { "content-type": "application/json" } },
+					)
+				: createCompletedTextResponse("must not be requested", "resp_body_timeout");
+		}) as FetchImpl;
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(408);
+		expect(result.errorMessage).toContain("Timed out reading request body");
+	});
+	it("keeps stateful delta retries on their existing transport path", async () => {
+		const bodies: Array<Record<string, unknown>> = [];
+		let attempt = 0;
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			bodies.push(parseBody(init));
+			attempt++;
+			if (attempt === 1) return createCompletedTextResponse("baseline", "resp_baseline");
+			if (attempt === 2) {
+				return new Response(
+					JSON.stringify({ error: { code: "user_request_timeout", message: "Timed out reading request body." } }),
+					{ status: 408 },
+				);
+			}
+			return createCompletedTextResponse("recovered", "resp_recovered");
+		}) as FetchImpl;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+			sessionId: "stateful-408-test",
+			statefulResponses: true,
+		};
+		const baseline = await streamOpenAIResponses(model, context, options).result();
+		const followup = { role: "user" as const, content: "Continue", timestamp: 1_001 };
+		const statefulContext = { messages: [firstUser, baseline, followup] };
+		const recovered = await streamOpenAIResponses(model, statefulContext, options).result();
+
+		expect(recovered).toMatchObject({ stopReason: "stop" });
+		expect(bodies).toHaveLength(3);
+		expect(bodies[1]).toHaveProperty("previous_response_id", "resp_baseline");
+		expect(bodies[2]).toHaveProperty("previous_response_id", "resp_baseline");
+	});
+	it("keeps transport retry when onPayload adds a previous-response delta", async () => {
+		let attempts = 0;
+		const bodies: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			bodies.push(parseBody(init));
+			attempts++;
+			return attempts === 1
+				? new Response(JSON.stringify({ error: { message: "Timed out reading request body." } }), { status: 408 })
+				: createCompletedTextResponse("recovered", "resp_payload_delta");
+		}) as FetchImpl;
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			onPayload: payload => ({ ...(payload as Record<string, unknown>), previous_response_id: "resp_from_payload" }),
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(bodies[0]).toHaveProperty("previous_response_id", "resp_from_payload");
+		expect(bodies[1]).toHaveProperty("previous_response_id", "resp_from_payload");
+	});
 });

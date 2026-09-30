@@ -1,6 +1,8 @@
 // Provider-wire compat for "google-gemini-cli"; Cloud Code Assist host contracts.
 
 provider "google-gemini-cli" {
+	default-model "gemini-3.1-pro-preview"
+
 	class "gemini" {
 		// Cloud Code Assist rejects an unsigned first function call; the bypass
 		// sentinel is required only on that first call (secondary parallel calls

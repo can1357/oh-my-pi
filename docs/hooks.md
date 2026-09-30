@@ -59,6 +59,15 @@ Default sessions load JS/TS hook factories discovered by `hookCapability` throug
 3. Append plugin extension entry points
 4. Append explicitly configured paths
 
+### Native discovery location
+
+The native provider scans only two subdirectories per config root — a factory placed **directly** in `hooks/` is not discovered:
+
+- Project: `<cwd>/.omp/hooks/pre/*.{ts,js}` and `<cwd>/.omp/hooks/post/*.{ts,js}`
+- User: `<agentDir>/hooks/pre/*.{ts,js}` and `<agentDir>/hooks/post/*.{ts,js}` (default `~/.omp/agent/hooks/...`; profile- and `PI_CODING_AGENT_DIR`-aware)
+
+So `<cwd>/.omp/hooks/psy-guards.ts` (no `pre/`/`post/` subdirectory) loads nothing and reports no error — move it into `pre/` or `post/`, e.g. `<cwd>/.omp/hooks/pre/psy-guards.ts`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js` factories are appended to the extension pipeline and bound through the extension runner. See [Extension Loading](./extension-loading.md) for the shared module pipeline these factories flow through (native `.omp/extensions/` roots, plugin entries, configured paths, load order, and disable controls).
+
 The legacy `discoverAndLoadHooks(configuredPaths, cwd)` helper still exists and does:
 
 1. Load discovered hooks from capability registry (`loadCapability("hooks")`)
@@ -110,8 +119,8 @@ Hook events are strongly typed in `types.ts`.
 
 ### Tool events (pre/post model)
 
-- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown> }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true.
-- `tool_result` (post-execution) → can return `{ content?; details?; isError? }`
+- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true. Distinct non-empty `additionalContext` values from all non-blocking handlers carry trusted handler-authored instructions delivered after the tool results and before the next provider request, with developer/system priority where the transport supports it; raw tool output and other untrusted data must stay in the tool result.
+- `tool_result` (post-execution) → can return `{ content?; details?; isError?; additionalContext?: string }`. Context is delivered outside tool output on both success and failure; check `event.isError` when guidance applies to only one outcome. Overrides merge per field across handlers, so a later return that omits a field (including a context-only return) never erases an earlier handler's value for it.
 
 This is the hook subsystem’s core pre/post interception model. Eval prelude invocations such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls, so they do not emit `tool_call` or `tool_result`.
 
@@ -128,8 +137,10 @@ tool_call handlers
    execute underlying tool
       │
       ├─ success ──> tool_result handlers can override { content, details }
+      │                    and attach passive additionalContext
       │
-      └─ error   ──> emit tool_result(isError=true) then rethrow original error
+      └─ error   ──> emit tool_result(isError=true), deliver returned
+                     additionalContext, then rethrow original error
 ```
 
 ## Execution model and mutation semantics
@@ -138,8 +149,9 @@ tool_call handlers
 
 `HookToolWrapper.execute()` emits `tool_call` before tool execution.
 
-- if any handler returns `{ block: true }`, execution stops
-- if handler throws, wrapper fails closed and blocks execution
+- if any handler returns `{ block: true }`, execution stops and context already collected for that call is discarded
+- if handler throws, wrapper fails closed, blocks execution, and discards collected context
+- collected context is forwarded only after the tool returns a non-error result; a throwing or `isError` result discards it
 - returned `reason` becomes the thrown error text
 
 ### 2) Tool execution
@@ -155,16 +167,18 @@ After success, wrapper emits `tool_result` with:
 - `details`
 - `isError: false`
 
-If handler returns overrides:
+If a handler returns overrides:
 
 - `content` can replace result content
 - `details` can replace result details
+- `additionalContext` carries trusted guidance outside the tool result; distinct non-blank values from every handler are joined in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before the call's `tool_call` context. A call whose joined context is identical to an earlier call's in the same batch is delivered once
 
-On tool failure, wrapper emits `tool_result` with `isError: true` and error text content, then rethrows original error.
+On tool failure, the wrapper emits `tool_result` with `isError: true` and error text content, delivers any returned `additionalContext`, then rethrows the original error. A handler that should run only after failure must test `event.isError`; a `PostToolUse`-equivalent handler must reject it.
 
 ### What hooks can mutate
 
 - LLM context for a single call via `context` (`messages` replacement chain)
+- passive context for the next provider request via `additionalContext` from `tool_call` or `tool_result`
 - raw tool execution arguments by returning `input` from `tool_call`
 - tool output content/details on successful tool calls (`tool_result` path)
 - pre-agent injected message via `before_agent_start`
@@ -197,8 +211,8 @@ Inside `HookRunner`, order is deterministic by registration sequence:
 
 Conflict behavior by event type:
 
-- `tool_call`: last returned result wins unless a handler blocks; first block short-circuits. A returned `input` (execution-argument override) follows the same last-wins rule; handlers do not observe each other's revisions
-- `tool_result`: last returned override wins (no short-circuit)
+- `tool_call`: every distinct non-empty `additionalContext` is preserved in handler order (a value identical to an earlier handler's on the same call is dropped, as is a call's joined context identical to an earlier call's in the same batch); `input` remains last-wins; first block short-circuits and discards context collected for that call. Handlers do not observe each other's input revisions
+- `tool_result`: `content`/`details`/`isError` overrides merge per field across handlers (no short-circuit): a later handler's defined field wins and a field it leaves unset keeps the earlier handler's value, so a details-only, isError-only, or context-only return never erases an earlier redaction. Every distinct non-empty `additionalContext` is preserved in handler order, with the same repeat-dropping as `tool_call`
 - `context`: chained; each handler receives prior handler’s message output
 - `before_agent_start`: first returned message is kept; later messages ignored
 - `session_before_*`: latest returned result is tracked; `cancel: true` short-circuits immediately

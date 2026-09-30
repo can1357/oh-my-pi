@@ -1,9 +1,7 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
-import type { Settings } from "../config/settings";
-import { IrcBus, type IrcMessage } from "../irc/bus";
+import { prompt } from "@oh-my-pi/pi-utils";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
-import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -14,21 +12,23 @@ import type { SessionManager } from "./session-manager";
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
-	settings: Settings;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
-	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
 }
 
-/** Owns incoming IRC queues, the session's non-interrupting aside queue, injection, and side-channel auto-replies. */
+/** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
 	#asides: AgentMessage[] = [];
-	/** In-flight replies owed to peers: side-channel auto-replies and wake-turn relays. */
+	/** Wake-intended records parked while a pooled yield contract owns the worker.
+	 *  Pooled turns must not flush these (no observer would reply to the sender);
+	 *  they resume into a monitored wake once the contract clears. */
+	#deferredWakes: AgentMessage[] = [];
+	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
 
 	constructor(host: IrcBridgeHost) {
@@ -42,15 +42,10 @@ export class IrcBridge {
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0;
+		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
-	/**
-	 * Waits until every reply this session still owes a peer has settled. A
-	 * peer awaiting an answer (`send await:true`) holds its "stopped without
-	 * replying" verdict on this, so a reply produced after the terminal
-	 * `agent_end` still resolves the waiter.
-	 */
+	/** Waits until every in-flight wake-turn relay has settled. */
 	async waitForReplies(): Promise<void> {
 		while (this.#pendingReplies.size > 0) {
 			await Promise.all(this.#pendingReplies);
@@ -74,12 +69,15 @@ export class IrcBridge {
 	/** Snapshots and discards every queued IRC record — used when a session-boundary transition
 	 *  (new/switch) begins, since an aborted turn skips its final aside poll and would otherwise
 	 *  leak the outgoing transcript's extension/peer content into the next session via the first
-	 *  ordinary prompt's `flushPending()`. Pass the snapshot to `restorePending` to undo the clear
+	 *  ordinary prompt's `flushPending()`. Deferred wakes ride along: without them a later
+	 *  contract clear could wake the new transcript with a peer message belonging to the
+	 *  previous session. Pass the snapshot to `restorePending` to undo the clear
 	 *  if the transition is rolled back. */
-	clearPending(): { interrupts: AgentMessage[]; asides: AgentMessage[] } {
-		const snapshot = { interrupts: this.#interrupts, asides: this.#asides };
+	clearPending(): { interrupts: AgentMessage[]; asides: AgentMessage[]; deferredWakes: AgentMessage[] } {
+		const snapshot = { interrupts: this.#interrupts, asides: this.#asides, deferredWakes: this.#deferredWakes };
 		this.#interrupts = [];
 		this.#asides = [];
+		this.#deferredWakes = [];
 		return snapshot;
 	}
 
@@ -88,15 +86,34 @@ export class IrcBridge {
 	 *  the rolled-back switch's async load/hooks were still running) instead of overwriting it, so
 	 *  those newly arrived records aren't silently discarded — snapshot records precede them since
 	 *  they arrived first. */
-	restorePending(snapshot: { interrupts: AgentMessage[]; asides: AgentMessage[] }): void {
+	restorePending(snapshot: {
+		interrupts: AgentMessage[];
+		asides: AgentMessage[];
+		deferredWakes: AgentMessage[];
+	}): void {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
+		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
 		this.#asides.push(...records);
+	}
+
+	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
+	 *  asides, these are invisible to turn injection (`flushPending`, the loop
+	 *  aside poll) and resume into a monitored wake once the contract clears. */
+	queueDeferredWake(records: AgentMessage[]): void {
+		this.#deferredWakes.push(...records);
+	}
+
+	/** Takes parked wake records for a post-clear monitored wake, oldest first. */
+	drainDeferredWakes(): AgentMessage[] {
+		const records = this.#deferredWakes;
+		this.#deferredWakes = [];
+		return records;
 	}
 
 	/** Surfaces and consumes queued incoming records before automatic injection. */
@@ -155,12 +172,10 @@ export class IrcBridge {
 	}
 
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
-	async deliver(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
+	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const autoReply =
-			(opts?.expectsReply ?? false) && ((streaming && !this.#host.settings.get("async.enabled")) || planModeIdle);
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent and mid-turn asides have no such relay.
@@ -172,7 +187,6 @@ export class IrcBridge {
 				from: msg.from,
 				message: msg.body,
 				replyTo: msg.replyTo ?? "",
-				autoReplied: autoReply,
 				interrupting: streaming,
 				relayOnStop,
 			}),
@@ -201,7 +215,6 @@ export class IrcBridge {
 			} else {
 				this.#interrupts.push(record);
 			}
-			if (autoReply) this.#startAutoReply(msg);
 			return "injected";
 		}
 		if (this.#host.planModeEnabled()) {
@@ -213,7 +226,6 @@ export class IrcBridge {
 				record.details,
 				record.attribution ?? "agent",
 			);
-			if (autoReply) this.#startAutoReply(msg);
 			return "injected";
 		}
 		this.#host.wakeForIrc([record]);
@@ -230,41 +242,6 @@ export class IrcBridge {
 		for (const record of this.drainPending()) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
-		}
-	}
-
-	#startAutoReply(msg: IrcMessage): void {
-		this.trackReply(this.#runAutoReply(msg));
-	}
-
-	async #runAutoReply(msg: IrcMessage): Promise<void> {
-		try {
-			const { replyText } = await this.#host.runEphemeralTurn({
-				promptText: prompt.render(ircAutoReplyTemplate, {
-					from: msg.from,
-					message: msg.body,
-					replyTo: msg.replyTo ?? "",
-				}),
-			});
-			const body = replyText.trim();
-			if (!body || this.#host.isDisposed()) return;
-			const record: CustomMessage = {
-				role: "custom",
-				customType: "irc:autoreply",
-				content: `[IRC you → \`${msg.from}\` (auto)]\n\n${body}`,
-				display: true,
-				details: { to: msg.from, body, replyTo: msg.id },
-				attribution: "agent",
-				timestamp: Date.now(),
-			};
-			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
-			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
-			if (receipt.outcome === "failed") {
-				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
-			}
-		} catch (error) {
-			logger.warn("IRC auto-reply turn failed", { from: msg.from, error: String(error) });
 		}
 	}
 }

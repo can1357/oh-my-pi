@@ -5,10 +5,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TraceSpanKind, TraceTrack } from "../types";
-import { useSystemTheme } from "../useSystemTheme";
 import type { TimelineViewport } from "./TimelineCanvas";
 import type { TraceScale } from "./time-scale";
-import { TRACE_THEMES } from "./trace-colors";
+import { useTraceTheme } from "./trace-colors";
 
 export interface MinimapProps {
 	tracks: TraceTrack[];
@@ -25,8 +24,7 @@ const MIN_WINDOW_U = 10;
 type DragMode = "move" | "left" | "right" | "create";
 
 export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapProps) {
-	const theme = useSystemTheme();
-	const colors = TRACE_THEMES[theme];
+	const colors = useTraceTheme();
 	const canvasRef = useRef<HTMLCanvasElement>(null);
 	const [width, setWidth] = useState(800);
 	const dragRef = useRef<{ mode: DragMode; startX: number; startViewport: TimelineViewport } | null>(null);
@@ -80,14 +78,14 @@ export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapPr
 		// Viewport brush.
 		const vx0 = toX(viewport.u0);
 		const vx1 = toX(viewport.u1);
-		ctx.fillStyle = theme === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)";
+		ctx.fillStyle = colors.brush;
 		ctx.fillRect(vx0, 0, vx1 - vx0, HEIGHT);
 		ctx.strokeStyle = colors.selection;
 		ctx.strokeRect(vx0 + 0.5, 0.5, vx1 - vx0 - 1, HEIGHT - 1);
 		ctx.fillStyle = colors.selection;
 		ctx.fillRect(vx0, 0, 2, HEIGHT);
 		ctx.fillRect(vx1 - 2, 0, 2, HEIGHT);
-	}, [tracks, scale, viewport, colors, theme, width, toX]);
+	}, [tracks, scale, viewport, colors, width, toX]);
 
 	const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
 		const rect = event.currentTarget.getBoundingClientRect();
@@ -145,15 +143,8 @@ export function Minimap({ tracks, scale, viewport, onViewportChange }: MinimapPr
 			ref={canvasRef}
 			width={Math.floor(width * devicePixelRatio)}
 			height={Math.floor(HEIGHT * devicePixelRatio)}
-			style={{
-				width: "100%",
-				height: HEIGHT,
-				display: "block",
-				cursor: "crosshair",
-				borderRadius: 4,
-				border: "1px solid var(--border)",
-				touchAction: "none",
-			}}
+			className="traces-minimap"
+			style={{ height: HEIGHT }}
 			role="slider"
 			aria-label="Timeline overview brush"
 			aria-valuemin={0}

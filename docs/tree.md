@@ -17,7 +17,7 @@ Primary implementation:
 - `src/slash-commands/builtin-registry.ts` (`/tree`, `/branch` command routing)
 - `src/modes/controllers/input-controller.ts` (keybinding wiring, double-escape behavior)
 - `src/modes/controllers/selector-controller.ts` (tree UI launch + summary prompt flow)
-- `src/modes/components/tree-selector.ts` (navigation, filters, search, labels, rendering)
+- `packages/tui/src/overlays/tree-selector.ts` (navigation, filters, search, labels, rendering)
 - `src/session/agent-session.ts` (`navigateTree` leaf switching + optional summary)
 - `src/session/session-manager.ts` (`getTree`, `branch`, `branchWithSummary`, `resetLeaf`, label persistence)
 
@@ -29,6 +29,8 @@ Any of the following opens the same selector:
 - configured keybinding for the `app.session.tree` action
 
 Double-escape on an empty editor opens the fullscreen transcript rewind selector instead (see `doubleEscapeAction`): it replays the transcript, outlines the block the rewind would land on, and rewinds via `branch()` for user prompts or `navigateTree()` for anything else.
+
+Rewind opens on the latest ~600 entries, keeping whole user turns (which may exceed the limit). Press `a` for all earlier history without changing the selected point or branch.
 
 ## Tree UI model
 

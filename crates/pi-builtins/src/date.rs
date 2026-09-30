@@ -762,7 +762,6 @@ use std::{
 	borrow::Cow,
 	collections::HashMap,
 	ffi::OsString,
-	fs::File,
 	io::{self, BufRead, BufReader, Read, Write},
 	path::{Path, PathBuf},
 	sync::LazyLock,
@@ -1459,7 +1458,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		// seconds since the epoch (BSD), i.e. GNU `-d @SECONDS`.
 		let digits = reference.strip_prefix('-').unwrap_or(reference);
 		let numeric = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
-		if numeric && !host.resolve(Path::new(reference)).exists() {
+		if numeric && !host.fs().exists(&host.resolve(Path::new(reference))) {
 			DateSource::Human(format!("@{reference}"))
 		} else {
 			DateSource::FileMtime(reference.into())
@@ -1687,13 +1686,13 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		DateSource::File(path) => {
 			// directory; `path` is kept for display.
 			let resolved = host.resolve(path);
-			if resolved.is_dir() {
+			if host.fs().is_dir(&resolved) {
 				return Err(DateError::new(
 					2,
 					format!("expected file, got directory {}", path.quote()),
 				));
 			}
-			let file = File::open(&resolved).map_err(|error| {
+			let file = host.fs().open(&resolved).map_err(|error| {
 				DateError::new(1, format!("{}: {error}", path.as_os_str().maybe_quote()))
 			})?;
 			parse_dates_from_reader(
@@ -1705,7 +1704,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		},
 		DateSource::FileMtime(path) => {
 			// directory; `path` is kept for display.
-			let metadata = std::fs::metadata(host.resolve(path)).map_err(|error| {
+			let metadata = host.fs().metadata(&host.resolve(path)).map_err(|error| {
 				DateError::new(1, format!("{}: {error}", path.as_os_str().maybe_quote()))
 			})?;
 			let mtime = metadata.modified()?;
@@ -2145,7 +2144,9 @@ fn try_parse_with_abbreviation<S: AsRef<str>>(date_str: S, now: &Zoned) -> Optio
 			if let Some(tz) = tz {
 				let date_part = s.trim_end_matches(last_word).trim();
 				// Parse in the target timezone so "10:30 EDT" means 10:30 in EDT
-				if let Ok(parsed) = parse_datetime::parse_datetime_at_date(now.clone(), date_part) {
+				if let Ok(parsed) = parse_datetime::parse_datetime_at_date(now.clone(), date_part)
+					&& let Some(parsed) = parsed.into_zoned()
+				{
 					let dt = parsed.datetime();
 					if let Ok(zoned) = dt.to_zoned(tz) {
 						return Some(zoned);
@@ -2212,9 +2213,11 @@ fn parse_date<S: AsRef<str> + Clone>(
 	}
 
 	match parse_datetime::parse_datetime_at_date(now.clone(), input_str) {
-		// Convert to system timezone for display
-		// (parse_datetime returns Zoned in the input's timezone)
+		// Convert in-range results to the system timezone for display.
 		Ok(date) => {
+			let Some(date) = date.into_zoned() else {
+				return Err((input_str.into(), parse_datetime::ParseDateTimeError::InvalidInput));
+			};
 			let result = date.timestamp().to_zoned(now.time_zone().clone());
 			if dbg_opts.debug {
 				// Show final parsed date and time

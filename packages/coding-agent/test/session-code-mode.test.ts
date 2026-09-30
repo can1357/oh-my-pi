@@ -18,7 +18,10 @@ import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
 import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mode";
 import { SessionManager } from "../src/session/session-manager";
-import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
+
+import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgProvidersOpenaiCodexCodeMode } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ENABLED = [
 	"eval",
@@ -314,7 +317,7 @@ describe("Code Mode session reconciliation", () => {
 	): { session: AgentSession; directModel: Model; codeModel: Model } {
 		const codeModel = model("openai-codex", "code_mode_only");
 		const directModel = model("openai");
-		const evalTool = evalOverride ?? { ...tool("eval"), supportsCodeModeTransport: () => settings.get("eval.js") };
+		const evalTool = evalOverride ?? { ...tool("eval"), supportsCodeModeTransport: () => cfgEvalJs.get(settings) };
 		const tools = [evalTool, tool("read"), ...extraTools];
 		const session = new AgentSession({
 			agent: new Agent({ initialState: { model: codeModel, systemPrompt: [], tools } }),
@@ -375,6 +378,15 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 	});
 
+	test("retains the startup tools array when reconciliation keeps the exact roster", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "off" }));
+		const startupTools = session.agent.state.tools;
+
+		await session.setActiveToolsByName(["eval", "read"]);
+
+		expect(session.agent.state.tools).toBe(startupTools);
+	});
+
 	test("startup reconcile survives a transiently narrow live tool set", async () => {
 		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
 		// Before the first apply, a startup-time mutation can shrink the live
@@ -431,30 +443,34 @@ describe("Code Mode session reconciliation", () => {
 
 	test("runtime setting changes immediately reconcile the Code Mode surface", async () => {
 		const settings = Settings.isolated();
-		settings.set("providers.openai-codex.codeMode", "auto");
+		cfgProvidersOpenaiCodexCodeMode.set(settings, "auto");
 		const { session } = createSession(settings);
 		await session.setActiveToolsByName(["eval", "read"]);
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
 
-		settings.set("providers.openai-codex.codeMode", "off");
+		cfgProvidersOpenaiCodexCodeMode.set(settings, "off");
+		// The listener queues its reconcile on the next microtask; the no-op mutation serializes behind it.
+		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval", "read"]);
 	});
 
 	test("runtime eval.js changes reconcile Code Mode transport availability", async () => {
 		const settings = Settings.isolated();
-		settings.set("eval.js", true);
-		settings.set("providers.openai-codex.codeMode", "auto");
+		cfgEvalJs.set(settings, true);
+		cfgProvidersOpenaiCodexCodeMode.set(settings, "auto");
 		const { session } = createSession(settings);
 		await session.setActiveToolsByName(["eval", "read"]);
 		expect(session.getActiveToolNames()).toEqual(["eval"]);
 
-		settings.set("eval.js", false);
+		cfgEvalJs.set(settings, false);
+		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 
-		settings.set("eval.js", true);
+		cfgEvalJs.set(settings, true);
+		await Promise.resolve();
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.getActiveToolNames()).toEqual(["eval"]);
 	});

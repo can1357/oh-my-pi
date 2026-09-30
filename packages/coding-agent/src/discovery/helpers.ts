@@ -27,7 +27,7 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
@@ -149,6 +149,7 @@ export function createSourceMeta(
 	filePath: string,
 	level: "user" | "project",
 	origin?: string,
+	pluginName?: string,
 ): SourceMeta {
 	return {
 		provider,
@@ -156,6 +157,7 @@ export function createSourceMeta(
 		path: path.resolve(filePath),
 		level,
 		...(origin !== undefined && { origin }),
+		...(pluginName !== undefined && { pluginName }),
 	};
 }
 
@@ -217,7 +219,7 @@ function buildRule(
 	source: SourceMeta,
 	options?: RuleMarkdownOptions,
 ): Rule {
-	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter);
+	const { condition, astCondition, question, scope } = parseRuleConditionAndScope(frontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -241,6 +243,7 @@ function buildRule(
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
 		astCondition,
+		question,
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
@@ -429,6 +432,13 @@ export interface ScanSkillsFromDirOptions {
 	 * installs (`omp`, `plugin-dir`) from the foreign Claude tree (`claude`).
 	 */
 	origin?: string;
+	/**
+	 * Plugin name supplying these skills, forwarded to {@link SourceMeta.pluginName}
+	 * so `skillNamespace` in `extensibility/skills.ts` can namespace by plugin
+	 * identity instead of parsing a path segment that may only hold a version
+	 * (Claude Code's own plugin cache layout).
+	 */
+	pluginName?: string;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -472,13 +482,19 @@ export async function scanSkillsFromDir(
 			const skillDirName = path.basename(path.dirname(skillPath));
 			const rawName = frontmatter.name;
 			const name = typeof rawName === "string" ? rawName.trim() || skillDirName : skillDirName;
+			// `/` is reserved for collision namespaces (`<namespace>/<name>`) and
+			// path resolution in skill:// URLs; a raw name must never claim one.
+			if (/[\\/]/.test(name)) {
+				warnings.push(`Skill name "${name}" contains a path separator, skipping: ${skillPath}`);
+				return;
+			}
 			items.push({
 				name,
 				path: skillPath,
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
-				_source: createSourceMeta(providerId, skillPath, level, options.origin),
+				_source: createSourceMeta(providerId, skillPath, level, options.origin, options.pluginName),
 			});
 		} catch {
 			warnings.push(`Failed to read skill file: ${skillPath}`);
@@ -576,6 +592,8 @@ export async function loadFilesFromDir<T>(
 		transform: (name: string, content: string, path: string, source: SourceMeta) => T | null;
 		/** Whether to recurse into subdirectories (default: false) */
 		recursive?: boolean;
+		/** Registry/CLI origin forwarded to {@link SourceMeta.origin} (see {@link createSourceMeta}). */
+		origin?: string;
 	},
 ): Promise<LoadResult<T>> {
 	const items: T[] = [];
@@ -628,7 +646,7 @@ export async function loadFilesFromDir<T>(
 		}
 
 		const name = path.basename(filePath);
-		const source = createSourceMeta(provider, filePath, level);
+		const source = createSourceMeta(provider, filePath, level, options.origin);
 
 		try {
 			const item = options.transform(name, content, filePath, source);

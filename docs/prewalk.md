@@ -47,13 +47,18 @@ The switch is one-shot: after the handoff, prewalk disarms itself. The target mo
 
 ## Arm from an active session
 
-Run the slash command to arm prewalk without restarting OMP or enabling it in config:
+Run either slash command without restarting OMP:
 
 ```text
 /prewalk
+/prewalk restart
 ```
 
-`/prewalk` always targets the `@smol` role. If prewalk is already armed, the command leaves the existing target in place. After a handoff is consumed, switch to another model and run `/prewalk` again to arm another one-shot handoff. To choose a different target at startup, use `--prewalk-into`.
+`/prewalk` arms a one-shot handoff from the active model to the current `@smol` assignment.
+
+After a handoff, `/prewalk restart` immediately returns the session to the current `@default` assignment and re-arms the handoff to `@smol`. Both roles are resolved when the command runs, so the cycle is independent of concrete model names and does not alter either role's persisted configuration.
+
+If prewalk is already armed, the command leaves the existing target in place. To choose a different target at startup, use `--prewalk-into`.
 
 ## Subagent prewalk
 

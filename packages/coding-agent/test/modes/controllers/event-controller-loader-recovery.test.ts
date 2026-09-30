@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+
+import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 /**
  * Faithful model of the shared `statusContainer` + working-loader invariant that
@@ -22,7 +24,7 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  */
 function createContext(options: { terminalProgress?: boolean } = {}) {
 	const streamState = { isStreaming: false };
-	if (options.terminalProgress) settings.set("terminal.showProgress", true);
+	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
 	const setProgress = vi.fn((_active: boolean) => {});
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },

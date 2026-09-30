@@ -56,13 +56,73 @@ function direnvBinary(): string | null {
 	return direnvLookup.bin;
 }
 
+// Per-directory `.envrc` walk-up cache (positive and negative): a repo
+// without `.envrc` pays the throwing-stat walk once per TTL window instead
+// of once per bash call. Entries are keyed on the resolved start dir with a
+// short TTL, so a created/deleted/moved `.envrc` is discovered within
+// seconds — the same staleness class as the export diff below, and far
+// cheaper than re-walking to the filesystem root on every call.
+const envrcCache = new Map<string, { found: string | null; atMs: number }>();
+const ENVRC_CACHE_MAX = 512;
+const ENVRC_CACHE_TTL_MS = 5_000;
+
+/** Test-only: filtered parent-env baseline (versioned against live Bun.env). */
+export function cleanSpawnEnvForTests(): Record<string, string> {
+	return cleanSpawnEnv();
+}
+
+export function clearDirenvCachesForTests(): void {
+	envrcCache.clear();
+	cleanSpawnEnvCache = undefined;
+}
+
+async function findEnvrcCached(startDir: string): Promise<string | null> {
+	const key = path.resolve(startDir);
+	const now = Date.now();
+	const cached = envrcCache.get(key);
+	if (cached !== undefined && now - cached.atMs < ENVRC_CACHE_TTL_MS) return cached.found;
+	const found = await findEnvrc(key);
+	if (envrcCache.size >= ENVRC_CACHE_MAX) envrcCache.clear();
+	envrcCache.set(key, { found, atMs: now });
+	return found;
+}
+
 /** direnv computes its diff relative to the spawning env; strip any inherited
  *  direnv state so it loads the target `.envrc` from a clean baseline. */
+// Filtered parent-env baseline, versioned against live Bun.env: production
+// code DOES mutate Bun.env mid-process (deferred MCP discovery sets
+// EXA_API_KEY in sdk.ts after the session is usable), so a permanently
+// cached baseline would spawn direnv with stale values. Key cheaply on size
+// + a rolling checksum; a mismatch rebuilds. DIRENV_* values are stripped
+// (direnv diffs relative to the spawning env), so they are excluded from
+// both the checksum and the output.
+let cleanSpawnEnvCache: { size: number; checksum: number; env: Record<string, string> } | undefined;
+
+function envChecksum(): { size: number; checksum: number } {
+	let size = 0;
+	let checksum = 0;
+	for (const key in Bun.env) {
+		if (key.startsWith("DIRENV_")) continue;
+		size++;
+		for (let i = 0; i < key.length; i++) checksum = (checksum * 31 + key.charCodeAt(i)) | 0;
+		const value = Bun.env[key];
+		if (typeof value === "string") {
+			checksum = (checksum * 31 + value.length) | 0;
+			for (let i = 0; i < value.length; i++) checksum = (checksum * 31 + value.charCodeAt(i)) | 0;
+		}
+	}
+	return { size, checksum };
+}
+
 function cleanSpawnEnv(): Record<string, string> {
+	const { size, checksum } = envChecksum();
+	const cached = cleanSpawnEnvCache;
+	if (cached !== undefined && cached.size === size && cached.checksum === checksum) return cached.env;
 	const out: Record<string, string> = {};
 	for (const [key, value] of Object.entries(Bun.env)) {
 		if (value !== undefined && !key.startsWith("DIRENV_")) out[key] = value;
 	}
+	cleanSpawnEnvCache = { size, checksum, env: out };
 	return out;
 }
 
@@ -117,7 +177,7 @@ export async function loadDirenvEnv(
 	cwd: string,
 	opts?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<DirenvExportDiff | null> {
-	const envrcPath = await findEnvrc(cwd);
+	const envrcPath = await findEnvrcCached(cwd);
 	if (!envrcPath) return null;
 	const bin = direnvBinary();
 	if (!bin) return null;

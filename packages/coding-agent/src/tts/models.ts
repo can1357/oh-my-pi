@@ -55,9 +55,6 @@ export const KOKORO_VOICES: readonly TtsLocalVoiceSpec[] = [
 /** Default voice within the default model — Kokoro's flagship grade-A voice. */
 export const DEFAULT_TTS_VOICE = "af_heart";
 
-/** Default local TTS model used when `tts.localModel` is unset. */
-export const DEFAULT_TTS_LOCAL_MODEL_KEY = "kokoro";
-
 /**
  * Local TTS model registry. Kokoro-82M is the on-device SoTA tiny TTS (tops the
  * TTS Arena leaderboard); the `onnx-community` ONNX export runs through
@@ -80,25 +77,6 @@ export const TTS_LOCAL_MODELS = [
 
 export type TtsLocalModelKey = (typeof TTS_LOCAL_MODELS)[number]["key"];
 
-export const TTS_LOCAL_MODEL_VALUES = ["kokoro"] as const;
-
-type MissingTtsModelValue = Exclude<TtsLocalModelKey, (typeof TTS_LOCAL_MODEL_VALUES)[number]>;
-type ExtraTtsModelValue = Exclude<(typeof TTS_LOCAL_MODEL_VALUES)[number], TtsLocalModelKey>;
-const TTS_LOCAL_MODEL_VALUES_MATCH_REGISTRY: MissingTtsModelValue extends never
-	? ExtraTtsModelValue extends never
-		? true
-		: never
-	: never = true;
-void TTS_LOCAL_MODEL_VALUES_MATCH_REGISTRY;
-
-export const TTS_LOCAL_MODEL_OPTIONS = [
-	{
-		value: "kokoro",
-		label: "Kokoro-82M",
-		description: "Kokoro-82M neural TTS — SoTA on-device quality, multi-voice, fully local",
-	},
-] as const satisfies ReadonlyArray<{ value: TtsLocalModelKey; label: string; description: string }>;
-
 /** Voice options for the `tts.localVoice` setting picker (default model's catalog). */
 export const TTS_LOCAL_VOICE_OPTIONS = KOKORO_VOICES.map(voice => ({
 	value: voice.id,
@@ -118,8 +96,9 @@ export function isTtsLocalModelKey(value: string): value is TtsLocalModelKey {
 
 /** Resolve a model key (or the default) to its Hugging Face repo id. */
 export function resolveTtsRepo(modelKey: string | undefined): string {
-	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(DEFAULT_TTS_LOCAL_MODEL_KEY);
-	if (!spec) throw new Error(`No local TTS model registered for key: ${modelKey ?? DEFAULT_TTS_LOCAL_MODEL_KEY}`);
+	const fallbackKey = TTS_LOCAL_MODELS[0].key;
+	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(fallbackKey);
+	if (!spec) throw new Error(`No local TTS model registered for key: ${modelKey ?? fallbackKey}`);
 	return spec.repo;
 }
 
@@ -129,7 +108,7 @@ export function resolveTtsRepo(modelKey: string | undefined): string {
  * legacy `"default"` sentinel. The returned id is always a valid Kokoro voice.
  */
 export function resolveTtsVoice(modelKey: string | undefined, voice: string | undefined): string {
-	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(DEFAULT_TTS_LOCAL_MODEL_KEY);
+	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(TTS_LOCAL_MODELS[0].key);
 	const fallback = spec?.voices[0]?.id ?? DEFAULT_TTS_VOICE;
 	if (!spec || !voice) return fallback;
 	const match = spec.voices.find(v => v.id === voice);

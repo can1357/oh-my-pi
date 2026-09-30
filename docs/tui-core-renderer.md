@@ -131,11 +131,34 @@ second visible frame.
 Terminal detection selects optimizations such as synchronized output, DECCARA,
 and image protocols; it does not change history semantics.
 
+Inside tmux, the pane environment identifies tmux rather than the attached
+emulator. At startup, terminal detection asks the local tmux server for
+`#{client_termtype}` and maps recognized client names through the normal
+capability table; an unavailable `tmux` command or missing terminal-type reply
+keeps the environment fallback. Modified keys still require tmux
+`extended-keys`, while OSC notifications require `allow-passthrough`.
+
 `ProcessTerminal` pairs capability queries with typed DA1 sentinel owners.
 Private CSI replies may be split across stdin flushes, so reassembly must retain
 partial replies until their terminator and must not leak probe bytes as user
 input. New probes need a typed sentinel owner and byte-by-byte split-reply
 coverage.
+
+### Native rendering (Tern Surface Protocol)
+
+`ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
+DA1 sentinel owner, except inside multiplexers or with `PI_TUI_NATIVE=0`. A
+reply switches `TUI` to `native/backend.ts` for the whole session: components
+are described (`describe()`, or `rows` fallback from `render()`), reconciled
+into document ops (`native/reconcile.ts`) and sent as frames, paced by the
+terminal's acknowledgements instead of the render cadence. None of this
+document's history, viewport, resize-replay or CPR machinery runs on that path;
+SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
+is live the nerd symbol preset is forced process-locally, and icon glyphs are
+sent as `icon` spans. Each surface receives omp's resolved theme (`t`: every
+theme token as hex, dark and light variants) after `o` and before its first
+frame, and again whenever the theme changes. The debug socket's `doc` op returns the reference document
+(every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 
 ## 6. Inline images and memory
 

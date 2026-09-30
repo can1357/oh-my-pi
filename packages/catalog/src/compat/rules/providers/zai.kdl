@@ -1,6 +1,38 @@
 // Provider-wire compat for "zai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "zai" {
+	default-model "glm-5.3"
+	env "ZAI_API_KEY"
+	discovery label="zAI"
+
+	// Seed GLM-5.3 because it is live on the Anthropic and coding endpoints but
+	// not yet advertised in `/v1/models`, which still tops out at glm-5.2. The
+	// zai provider is not authoritative, so the seed survives regeneration;
+	// thinking metadata is derived by rebakeModelThinking from the identity
+	// classifiers.
+	//
+	// The flash row's API/base URL mirror `api-routes provider="zai"` in
+	// runtime/behavior.kdl and ZAI_OPENAI_BASE_URL in openai-compat.ts.
+	seed bundle="always" {
+		model "glm-5.3" name="GLM-5.3" api="anthropic-messages" base-url="https://api.z.ai/api/anthropic" {
+			reasoning #true
+			input "text"
+			cost input=1.4 output=4.4 cache-read=0.26 cache-write=0
+			limits context=1000000 max-tokens=131072
+		}
+		// GLM-5.3-Flash is absent from `/v1/models`-derived upstream metadata. It
+		// is the first natively multimodal GLM coding SKU — its id carries no `v`
+		// marker — so it declares image input directly instead of inheriting the
+		// text-only default. Its documented list price is used rather than the
+		// 50%-off launch promotion, which expired on 2026-09-09.
+		model "glm-5.3-flash" name="GLM-5.3-Flash" api="openai-completions" base-url="https://api.z.ai/api/coding/paas/v4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.15 output=0.5 cache-read=0.03 cache-write=0
+			limits context=1000000 max-tokens=131072
+		}
+	}
+
 	// Replaces resolve.ts's ZAI provider baseline for Anthropic tool-result IDs.
 	requires-tool-result-id #true
 	class "glm" {

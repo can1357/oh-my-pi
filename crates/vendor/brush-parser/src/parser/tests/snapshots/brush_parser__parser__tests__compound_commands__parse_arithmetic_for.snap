@@ -1,0 +1,54 @@
+---
+source: brush-parser/src/parser/tests/compound_commands.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "for (( i = 0; i < 10; i++ )); do echo $i; done",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(ArithmeticForClause(ArithmeticForClauseCommand(
+                initializer: Some(UnexpandedArithmeticExpr(
+                  value: "i = 0",
+                )),
+                condition: Some(UnexpandedArithmeticExpr(
+                  value: "i < 10",
+                )),
+                updater: Some(UnexpandedArithmeticExpr(
+                  value: "i++",
+                )),
+                body: DoGroupCommand(
+                  list: CompoundList([
+                    CompoundListItem(AndOrList(
+                      first: Pipeline(
+                        seq: [
+                          Simple(SimpleCommand(
+                            word_or_name: Some(Word(
+                              value: "echo",
+                              loc: "[location]",
+                            )),
+                            suffix: Some(CommandSuffix([
+                              Word(Word(
+                                value: "$i",
+                                loc: "[location]",
+                              )),
+                            ])),
+                          )),
+                        ],
+                      ),
+                    ), Sequence),
+                  ]),
+                  loc: "[location]",
+                ),
+                loc: "[location]",
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

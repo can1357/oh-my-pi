@@ -17,9 +17,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -149,6 +150,16 @@ beforeEach(() => {
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
 	vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
 	vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
+	// Presentation now resolves a second handle: forward to the operational
+	// double's current implementation without recording an extra `repo` call,
+	// so these scenarios keep display == operational (pure git / pure jj)
+	// while call-count assertions on the operational detector keep meaning.
+	const operational = vi.spyOn(vcs, "repo") as unknown as {
+		getMockImplementation(): ((dir: string) => VcsRepo | null) | undefined;
+	};
+	vi.spyOn(vcs, "repoForDisplay").mockImplementation(
+		(dir: string) => operational.getMockImplementation()?.(dir) ?? null,
+	);
 });
 
 function useReftable(info: Partial<VcsGitRepoInfo> = {}): void {
@@ -182,7 +193,7 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		gitControls.statusSummary.mockReturnValue(status.promise);
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 
@@ -206,7 +217,7 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		jjControls.label.mockReturnValue(label.promise);
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 
@@ -231,7 +242,7 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		jjControls.statusSummary.mockReturnValue(status.promise);
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 
@@ -267,7 +278,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		resolveSpy.mockReturnValueOnce(r2.promise);
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 
@@ -321,7 +332,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 			return promise;
 		});
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.getTopBorder(80);
 		expect(gitControls.head).toHaveBeenCalledTimes(1);
@@ -354,7 +365,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 			return promise;
 		});
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(vi.fn());
 		component.getTopBorder(80);
@@ -391,7 +402,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 			.mockResolvedValueOnce({ ...fakeRefHead, branch: "before-change", refName: "refs/heads/before-change" })
 			.mockResolvedValueOnce({ ...fakeRefHead, branch: "after-change", refName: "refs/heads/after-change" });
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(vi.fn());
 		component.getTopBorder(80);
@@ -430,7 +441,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		setProjectDir(nestedGitCwd);
 
 		try {
-			const component = new StatusLineComponent(makeSession());
+			const component = new StatusLineComponent(makeSession(), statusLineHost);
 			component.updateSettings(gitSegment);
 			component.getTopBorder(80);
 			expect(gitControls.head).toHaveBeenCalledTimes(1);
@@ -454,7 +465,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		gitControls.head.mockResolvedValue(null);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.getTopBorder(80);
 		await Promise.resolve();
@@ -470,7 +481,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 	it("reuses one repository handle across repeated paints", () => {
 		const repoSpy = vi.spyOn(vcs, "repo");
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 
 		component.getTopBorder(80);
@@ -493,7 +504,7 @@ describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 		const head = Promise.withResolvers<VcsHeadState | null>();
 		gitControls.head.mockReturnValue(head.promise);
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(vi.fn());
 		component.getTopBorder(80);
@@ -544,7 +555,7 @@ describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 			return request.promise;
 		});
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.getTopBorder(80);
 		expect(labelRequests).toHaveLength(1);
@@ -653,7 +664,7 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 
 		const onBranchChange = vi.fn();
 		setProjectDir(dirA);
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 		expect(component.getTopBorder(80).content).toContain("branch-a");
@@ -696,7 +707,7 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 
 		const onBranchChange = vi.fn();
 		setProjectDir(dirA);
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 		component.getTopBorder(80);
@@ -749,7 +760,7 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		const watchFileSpy = vi.spyOn(nodeFs, "watchFile");
 
 		setProjectDir(repoDir);
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 
 		// Await the watcher's own #onBranchChange signal rather than a wall-clock

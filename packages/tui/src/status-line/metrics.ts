@@ -1,0 +1,73 @@
+import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+import type { Theme } from "../theme";
+
+export { normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+
+/** Inputs whose differences are intentionally preserved between current status segments and the legacy footer. */
+export interface BillingSummaryOptions {
+	readonly cost: number;
+	readonly usingSubscription: boolean;
+	readonly premiumRequests: number;
+	readonly fractionDigits: number;
+	readonly pricingPeriod?: "peak" | "off-peak";
+	readonly advisor?: {
+		readonly cost: number;
+		readonly usingSubscription: boolean;
+	};
+}
+
+function formatSpend(amount: number, usingSubscription: boolean, fractionDigits: number, uiTheme: Theme): string {
+	const formatted = amount.toFixed(fractionDigits);
+	if (!usingSubscription) return `$${formatted}`;
+	if (uiTheme.getSymbolPreset() === "nerd") {
+		const icon = uiTheme.icon.subscription;
+		return icon ? `${icon} ${formatted}` : `S${formatted}`;
+	}
+	return `S${formatted}`;
+}
+
+function formatAdvisorSpend(
+	amount: number,
+	usingSubscription: boolean,
+	fractionDigits: number,
+	uiTheme: Theme,
+): string {
+	const spend = formatSpend(amount, usingSubscription, fractionDigits, uiTheme);
+	const icon = uiTheme.icon.advisor;
+	return icon && icon !== "(adv)" ? `${icon} ${spend}` : `${spend} (adv)`;
+}
+
+/**
+ * Shared billing metric presentation. Callers select precision explicitly so
+ * the legacy footer keeps three decimals while current status segments keep two.
+ */
+export function formatBillingSummary(options: BillingSummaryOptions, uiTheme: Theme): string | undefined {
+	const premiumRequests = normalizePremiumRequests(options.premiumRequests);
+	const advisorCost = options.advisor?.cost ?? 0;
+	if (!options.cost && !advisorCost && !options.usingSubscription && !premiumRequests && !options.pricingPeriod) {
+		return undefined;
+	}
+
+	const parts: string[] = [];
+	if (options.cost || options.pricingPeriod) {
+		parts.push(formatSpend(options.cost, options.usingSubscription, options.fractionDigits, uiTheme));
+	} else if (options.usingSubscription) {
+		parts.push(
+			uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription ? uiTheme.icon.subscription : "(sub)",
+		);
+	}
+	if (options.pricingPeriod) parts.push(options.pricingPeriod === "peak" ? "↑" : "↓");
+	if (premiumRequests) parts.push(`★ ${formatNumber(premiumRequests)}`);
+	if (advisorCost && options.advisor) {
+		const prefix = parts.length > 0 ? "+ " : "";
+		parts.push(
+			`${prefix}${formatAdvisorSpend(
+				advisorCost,
+				options.advisor.usingSubscription,
+				options.fractionDigits,
+				uiTheme,
+			)}`,
+		);
+	}
+	return parts.length > 0 ? parts.join(" ") : undefined;
+}

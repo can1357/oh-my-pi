@@ -163,6 +163,10 @@ Custom tools and extension tools can return components from:
 - `isPartial: boolean`
 - `spinnerFrame?: number`
 
+For `renderCall`, the `options` argument also answers the `Theme` API (`fg`,
+`bold`, `symbol`, …), so renderers ported from upstream pi — declared
+`renderCall(args, theme, context)` — keep working unchanged.
+
 These renderers are mounted by `ToolExecutionComponent`.
 
 ## Lifecycle and cancellation
@@ -268,5 +272,5 @@ export default function extension(pi: ExtensionAPI): void {
 - `packages/coding-agent/src/extensibility/extensions/types.ts` — extension UI and renderer contracts.
 - `packages/coding-agent/src/extensibility/hooks/types.ts` — hook UI contract (legacy custom signature).
 - `packages/coding-agent/src/extensibility/custom-tools/types.ts` — custom tool execute/render contracts.
-- `packages/coding-agent/src/modes/components/tool-execution.ts` — mounting `renderCall`/`renderResult` components and partial-state options.
+- `packages/tui/src/chat/tool-execution.ts` — mounting `renderCall`/`renderResult` components and partial-state options.
 - `packages/coding-agent/src/tools/context.ts` — tool UI context propagation (`hasUI`, `ui`).

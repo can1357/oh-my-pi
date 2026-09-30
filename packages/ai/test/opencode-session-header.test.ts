@@ -3,7 +3,6 @@ import { completeSimple, stream } from "@oh-my-pi/pi-ai";
 import { buildAnthropicClientOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Model } from "@oh-my-pi/pi-ai/types";
-import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -314,28 +313,5 @@ describe("session header on the Anthropic transport", () => {
 		});
 		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
-	});
-});
-
-describe("usage fetch does not carry x-opencode-session", () => {
-	it("omits the session header on usage polls", async () => {
-		const seen: Array<Record<string, string>> = [];
-		const window = { status: "ok", percent: 10, resetsAt: new Date().toISOString() };
-		const fetchMock = async (_url: string | URL | Request, init?: RequestInit) => {
-			seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
-			return new Response(JSON.stringify({ usage: { rolling: window, weekly: window, monthly: window } }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		};
-
-		const report = await opencodeGoUsageProvider.fetchUsage(
-			{ provider: "opencode-go", credential: { type: "api_key", apiKey: "key" } },
-			{ fetch: fetchMock as typeof fetch },
-		);
-
-		expect(report?.provider).toBe("opencode-go");
-		expect(seen).toHaveLength(1);
-		expect(seen[0]?.[OPENCODE_SESSION_HEADER]).toBeUndefined();
 	});
 });

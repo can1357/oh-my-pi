@@ -79,6 +79,32 @@ export function hasCjk(text: string): boolean {
 
 export const containsSpacelessCjk = hasCjk;
 
+/** Endings that turn one form of a word into another: `backup`/`backups`, `deploy`/`deployment`. */
+const WORD_FORM_ENDINGS: readonly string[] = ["s", "es", "d", "ed", "ing", "er", "ers", "ment", "ments"];
+/** Endings that replace a final `e`: `cache`/`caching`, `create`/`creation`. */
+const SILENT_E_ENDINGS: readonly string[] = ["ing", "ion", "ions"];
+/** Endings that replace a final `y`: `story`/`stories`, `copy`/`copied`. */
+const FINAL_Y_ENDINGS: readonly string[] = ["ies", "ied"];
+
+/**
+ * Weak match between two forms of one word, in either direction: the longer token is the shorter
+ * one plus an inflectional or common derivational ending (`facts`/`fact`, `deploy`/`deployment`,
+ * `caching`/`cache`, `stories`/`story`). The shorter token needs at least four characters. Any
+ * other extension or fragment never matches, so `1password`, `password` and `passport` do not
+ * find `pass`, and `redis` does not find `redistribution`. This is deliberately not a stemmer.
+ */
+export function matchesWordForm(left: string, right: string): boolean {
+	const [shorter, longer] = left.length <= right.length ? [left, right] : [right, left];
+	if (shorter.length < 4 || longer.length === shorter.length) return false;
+	if (longer.startsWith(shorter) && WORD_FORM_ENDINGS.includes(longer.slice(shorter.length))) return true;
+	const stem = shorter.slice(0, -1);
+	if (!longer.startsWith(stem)) return false;
+	const ending = longer.slice(stem.length);
+	if (shorter.endsWith("e")) return SILENT_E_ENDINGS.includes(ending);
+	if (shorter.endsWith("y")) return FINAL_Y_ENDINGS.includes(ending);
+	return false;
+}
+
 export function recallTokens(text: string): string[] {
 	RECALL_TOKEN_RE.lastIndex = 0;
 	const tokens: string[] = [];
@@ -90,10 +116,6 @@ export function recallTokens(text: string): string[] {
 		match = RECALL_TOKEN_RE.exec(lower);
 	}
 	return tokens;
-}
-
-export function factMatchTokens(text: string): Set<string> {
-	return new Set(recallTokens(text));
 }
 
 export function expandedQueryTokens(tokens: readonly string[]): string[] {

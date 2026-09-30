@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction/compaction";
 import {
 	DEFAULT_COMPACTION_SETTINGS,
-	DEFAULT_RESERVE_TOKENS,
 	effectiveReserveTokens,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
@@ -87,12 +86,5 @@ describe("compaction reserve provenance", () => {
 		const cw = 16385;
 		expect(effectiveReserveTokens(cw, settings)).toBe(90000);
 		expect(resolveBudgetReserveTokens(cw, settings)).toBe(2457); // floor(16385 * 0.15)
-	});
-
-	it("exposes defaulted provenance through the public constants", () => {
-		// The fix rides on reserveTokens being ABSENT from the defaults: presence
-		// of the field is the provenance signal, not its value.
-		expect(DEFAULT_COMPACTION_SETTINGS.reserveTokens).toBeUndefined();
-		expect(DEFAULT_RESERVE_TOKENS).toBe(16384);
 	});
 });

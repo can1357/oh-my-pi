@@ -1,8 +1,17 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
-import { getSessionsDir, getTerminalSessionsDir, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
+import {
+	getCustomSessionFilesDir,
+	getSessionsDir,
+	getTerminalSessionsDir,
+	hashPath,
+	pathIsWithin,
+	resolveEquivalentPath,
+} from "@oh-my-pi/pi-utils/dirs";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -200,6 +209,85 @@ export function computeDefaultSessionDir(
 // Terminal breadcrumbs: maps terminal (TTY) -> last session file for --continue
 // =============================================================================
 
+/** Prefix for the optional cwd device+inode line in a terminal breadcrumb. */
+const CWDSTAT_PREFIX = "cwdstat ";
+
+export interface CwdIdentity {
+	dev: string;
+	ino: string;
+}
+
+/**
+ * Snapshot the directory identity of `cwd` for later move detection.
+ * A later path with the same device+inode is the same directory after rename.
+ */
+export function readCwdIdentity(cwd: string): CwdIdentity | undefined {
+	try {
+		const st = fs.statSync(path.resolve(cwd), { bigint: true });
+		if (!st.isDirectory()) return undefined;
+		return { dev: st.dev.toString(), ino: st.ino.toString() };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * True when `targetCwd` is the same directory that `cwdIdentity` was recorded
+ * from — i.e. the project was renamed or moved, not merely deleted/unmounted.
+ * Missing identity (legacy breadcrumb, or cwd absent at write time) is not evidence.
+ *
+ * Same-filesystem `mv` and `git worktree move` preserve `dev`+`ino` and qualify.
+ * A cross-filesystem `mv` is copy+unlink (new inode, possibly new `dev`) and
+ * therefore returns false — that is intentional. Absence is not a move; we
+ * would rather leave the session in the original bucket than steal it into an
+ * unrelated continue cwd (#11565).
+ */
+export function hasPositiveMovedProjectEvidence(cwdIdentity: CwdIdentity | undefined, targetCwd: string): boolean {
+	if (!cwdIdentity) return false;
+	const target = readCwdIdentity(targetCwd);
+	return target !== undefined && target.dev === cwdIdentity.dev && target.ino === cwdIdentity.ino;
+}
+
+function parseBreadcrumbExtras(lines: string[]): {
+	fresh: boolean;
+	cwdIdentity: CwdIdentity | undefined;
+} {
+	let fresh = false;
+	let cwdIdentity: CwdIdentity | undefined;
+	for (const extra of lines.slice(2)) {
+		if (extra === "fresh") {
+			fresh = true;
+			continue;
+		}
+		if (extra.startsWith(CWDSTAT_PREFIX)) {
+			const [dev, ino] = extra.slice(CWDSTAT_PREFIX.length).split(" ");
+			if (dev && ino) cwdIdentity = { dev, ino };
+		}
+	}
+	return { fresh, cwdIdentity };
+}
+
+/**
+ * Record a session's exact file in the persistent custom-files registry when
+ * the managed-root glob scan cannot fully account for it. Idempotent: the
+ * marker is keyed by a hash of the resolved file, and its content is the
+ * absolute path. Best-effort — a failure here must never break session
+ * creation.
+ *
+ * `sessionFile` may be relative (e.g. `--session .omp-sessions/work`); it is
+ * resolved against the recorded `cwd`, matching how the breadcrumb stores it.
+ */
+function recordCustomSessionFile(cwd: string, sessionFile: string): void {
+	try {
+		const resolvedSessionFile = path.resolve(cwd, sessionFile);
+		if (pathIsWithin(getSessionsDir(), resolvedSessionFile) && resolvedSessionFile.endsWith(".jsonl")) return;
+		const registryDir = getCustomSessionFilesDir();
+		fs.mkdirSync(registryDir, { recursive: true });
+		fs.writeFileSync(path.join(registryDir, hashPath(resolvedSessionFile)), resolvedSessionFile);
+	} catch (err) {
+		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });
+	}
+}
 /**
  * Write a breadcrumb linking the current terminal to a session file.
  * The breadcrumb contains the cwd and session path so --continue can
@@ -213,14 +301,27 @@ export function computeDefaultSessionDir(
  * survive relaunches whose terminal identity changed. Once any lazy session
  * materializes, the caller rewrites the breadcrumb with `fresh:false` so a later
  * external delete is still treated as a genuinely stale crumb.
+ *
+ * When `cwd` exists, the breadcrumb also records its device+inode so
+ * `--continue` can tell a rename/move from a deleted or unmounted path.
  */
 export function writeTerminalBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
+	// Persist session files the managed-root glob scan cannot fully account for,
+	// regardless of terminal identity. Storage GC needs the exact path after the
+	// per-terminal breadcrumb is overwritten by a later session.
+	recordCustomSessionFile(cwd, sessionFile);
+
 	const terminalId = getTerminalId();
 	if (!terminalId) return;
 
 	const breadcrumbDir = getTerminalSessionsDir();
 	const breadcrumbFile = path.join(breadcrumbDir, terminalId);
-	const content = fresh ? `${cwd}\n${sessionFile}\nfresh\n` : `${cwd}\n${sessionFile}\n`;
+	const extras: string[] = [];
+	if (fresh) extras.push("fresh");
+	const identity = readCwdIdentity(cwd);
+	if (identity) extras.push(`${CWDSTAT_PREFIX}${identity.dev} ${identity.ino}`);
+	const extraBlock = extras.length > 0 ? `${extras.join("\n")}\n` : "";
+	const content = `${cwd}\n${sessionFile}\n${extraBlock}`;
 	// Synchronous + best-effort. Infrequent (session create/switch/reset, never
 	// per-append), and writing in order matters: a lazy fresh-session crumb is
 	// re-stamped non-fresh the instant the session materializes, so an async
@@ -241,6 +342,8 @@ export interface TerminalBreadcrumb {
 	exists: boolean;
 	/** Recorded as a `/new` fresh-session boundary whose JSONL may not exist yet. */
 	fresh: boolean;
+	/** Device+inode of `cwd` when the breadcrumb was written, if that path existed. */
+	cwdIdentity?: CwdIdentity;
 }
 
 /**
@@ -266,13 +369,13 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 		const breadcrumbCwd = lines[0];
 		const sessionFile = lines[1];
-		const fresh = lines[2] === "fresh";
+		const { fresh, cwdIdentity } = parseBreadcrumbExtras(lines);
 
 		const stat = fs.statSync(sessionFile, { throwIfNoEntry: false });
 		const exists = stat?.isFile() === true;
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
-		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh };
+		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Terminal breadcrumb read failed", { err });
 		// Breadcrumb doesn't exist or is corrupt — fall through

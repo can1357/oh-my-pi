@@ -16,6 +16,8 @@ import { listSharpshooterDeltas, sharpshooterQueueDepth } from "./queue";
 import { startSharpshooterScheduler } from "./scheduler";
 import { SHARPSHOOTER_MEMORY_FILES } from "./types";
 
+import { cfgSharpshooterInjectionTokenLimit, cfgSharpshooterIntervalMinutes } from "./settings";
+
 interface SharpshooterSessionResources {
 	unsubscribe: () => void;
 	disposeScheduler: () => void;
@@ -122,11 +124,17 @@ export const sharpshooterBackend: MemoryBackend = {
 			"Project decision memory (sharpshooter). These are friction-earned decisions; follow them unless the user overrides.",
 		];
 		for (const file of populated) parts.push(`## ${file.name.slice(0, -3)}\n\n${file.content.trim()}`);
-		return truncateApproxTokens(parts.join("\n\n"), settings.get("sharpshooter.injectionTokenLimit"));
+		return truncateApproxTokens(parts.join("\n\n"), cfgSharpshooterInjectionTokenLimit.get(settings));
 	},
 
 	async clear(agentDir, cwd): Promise<void> {
 		await rm(sharpshooterBankDir(agentDir, cwd), { recursive: true, force: true });
+	},
+
+	// `model` and `intervalMinutes` are read per extraction/scheduler tick; only
+	// the prompt-injected budget needs a rebuild to take effect.
+	async applySettings(session, changed): Promise<void> {
+		if (changed.includes("sharpshooter.injectionTokenLimit")) await session.refreshBaseSystemPrompt();
 	},
 
 	async enqueue(agentDir, cwd, session): Promise<void> {
@@ -190,7 +198,9 @@ export const sharpshooterBackend: MemoryBackend = {
 
 	async diagnose(agentDir, cwd, session): Promise<string> {
 		const state = await readSharpshooterState(agentDir, cwd);
-		const intervalMinutes = session?.settings.get("sharpshooter.intervalMinutes") ?? 5;
+		const intervalMinutes = session
+			? cfgSharpshooterIntervalMinutes.get(session.settings)
+			: cfgSharpshooterIntervalMinutes.default;
 		const intervalMs = Math.max(0, intervalMinutes) * 60_000;
 		const dueInMs = Math.max(0, state.lastConsolidatedAt + intervalMs - Date.now());
 		const model = session ? await resolveSharpshooterModel(session.settings, session.modelRegistry) : undefined;

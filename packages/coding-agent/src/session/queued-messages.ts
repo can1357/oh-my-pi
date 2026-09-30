@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { MAGIC_KEYWORDS } from "../modes/magic-keywords";
 import type { RestoredQueuedMessage } from "./agent-session-types";
 import { type CustomMessage, readQueueChipText } from "./messages";
 
@@ -56,21 +57,31 @@ export function isTerminalTextAssistantAnswer(message: AgentMessage | undefined)
 	return hasText;
 }
 
-/** Whether queued content was authored by the user and can be restored to the editor. */
+/** Whether a queued message is a user prompt: any user-role turn, or a visible user-attributed custom prompt. */
 export function isUserQueuedMessage(message: AgentMessage): boolean {
 	if (message.role === "user") return true;
 	return message.role === "custom" && message.attribution === "user" && message.display !== false;
 }
 
-/** Hidden magic-keyword notices queued alongside a user prompt. */
-export const MAGIC_KEYWORD_NOTICE_TYPES: Record<string, true> = {
-	"ultrathink-notice": true,
-	"orchestrate-notice": true,
-	"workflow-notice": true,
-};
+/**
+ * Whether a queued user prompt was authored by the user rather than handed off by an
+ * agent. Queue editing (chips, removal, editor restore) only touches these.
+ */
+export function isUserAuthoredQueuedMessage(message: AgentMessage): boolean {
+	return isUserQueuedMessage(message) && !("attribution" in message && message.attribution === "agent");
+}
+
+/** Hidden magic-keyword notice types (`<id>-notice`) queued alongside a user prompt. */
+const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set(MAGIC_KEYWORDS.map(keyword => `${keyword.id}-notice`));
 
 /** Hidden companion carrying vision descriptions for a text-only model. */
 export const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
+
+/** Hidden companion carrying the source path of a video contact sheet. */
+export const VIDEO_ATTACHMENT_TYPE = "video-attachment";
+
+/** Hidden companion carrying the source path of a pasted or dropped image. */
+export const IMAGE_ATTACHMENT_TYPE = "image-attachment";
 
 /** Whether a hidden queued message is a companion of an adjacent user prompt. */
 export function isHiddenUserCompanion(message: AgentMessage): boolean {
@@ -78,8 +89,10 @@ export function isHiddenUserCompanion(message: AgentMessage): boolean {
 		message.role === "custom" &&
 		message.attribution === "user" &&
 		message.display === false &&
-		(MAGIC_KEYWORD_NOTICE_TYPES[message.customType] === true ||
-			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
+		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) ||
+			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
+			message.customType === VIDEO_ATTACHMENT_TYPE ||
+			message.customType === IMAGE_ATTACHMENT_TYPE)
 	);
 }
 

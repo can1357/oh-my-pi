@@ -28,8 +28,8 @@ const museCodeKeyResponseSchema = type({
 	"user_email?": "string",
 	"user_id?": "string",
 	"is_subs_active?": "boolean",
-	"subs_tier_id?": "string",
-	"subs_tier_name?": "string",
+	"subs_tier_id?": "string | null",
+	"subs_tier_name?": "string | null",
 	"subs_usage?": subscriptionUsageSchema.or("null"),
 });
 export type MuseCodeKeyResponse = typeof museCodeKeyResponseSchema.infer;

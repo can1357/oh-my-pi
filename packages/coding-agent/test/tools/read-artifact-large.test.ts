@@ -8,7 +8,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -74,34 +74,32 @@ describe("read tool large artifact handling", () => {
 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
 		const output = getTextOutput(result);
 
-		expect(output).toContain("Unbounded raw read blocked for artifact://0");
-		expect(output).toContain("artifact://0:raw:1-3000");
-		expect(output).toContain(artifactDir);
+		// The notice must name the artifact file so it can be searched or copied.
+		// Only the directory prefix varies by host (a Windows temp dir sits under
+		// `%USERPROFILE%` and is displayed shortened), so match the path tail.
+		expect(output).toMatch(/session[/\\]0\.mcp\.log/);
 		expect(output).not.toContain("line-001");
 	});
 
-	it("streams bounded artifact reads without materializing the whole artifact", async () => {
+	it("streams bounded artifact reads and points large artifacts at paging and search workflows", async () => {
 		const result = await tool.execute("call-range", { path: "artifact://0:1-3" });
 		const output = getTextOutput(result);
 
 		expect(output).toContain("line-001");
 		expect(output).toContain("line-003");
-		expect(output).toContain("Artifact storage:");
-		expect(output).toContain("artifact://0:raw:N-M");
 		expect(output).not.toContain("line-400");
+		// A large artifact page surfaces its backing file for search/copy workflows.
+		expect(output).toMatch(/session[/\\]0\.mcp\.log/);
+		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "artifact://0" });
 	});
 
 	it("keeps bounded raw artifact chunks verbatim (no workflow notice appended)", async () => {
 		const result = await tool.execute("call-raw-range", { path: "artifact://0:raw:1-2" });
 		const output = getTextOutput(result);
 
-		expect(output).toStartWith("line-001");
-		expect(output).toContain("line-002");
-		expect(output).not.toContain("line-400");
-		// Raw chunks must stay verbatim so copy/paste workflows do not eat the
-		// workflow notice into the artifact bytes.
-		expect(output).not.toContain("Artifact storage:");
-		expect(output).not.toContain("artifact://0:raw:N-M");
+		// Raw chunks stay verbatim so copy/paste workflows never absorb the notice.
+		expect(output.split("\n")).toEqual(largeArtifactText().split("\n").slice(0, 2));
+		expect(output).not.toMatch(/0\.mcp\.log/);
 	});
 
 	it("returns exactly the requested raw artifact range without context padding", async () => {
@@ -199,9 +197,11 @@ describe("read tool large artifact handling", () => {
 		try {
 			const result = await tool.execute("call-raw-home", { path: "artifact://0:raw" });
 			const output = getTextOutput(result);
-			// artifactDir sits under the (mocked) home, so shortenPath rewrites the
-			// prefix to `~` — the notice must NOT leak the absolute artifact path.
-			expect(output).toContain(`~${path.sep}session`);
+			// artifactDir sits under the (mocked) home, so the notice must display it
+			// as `~`-relative (with `/` separators) and must NOT leak the absolute
+			// artifact path. Assert the exact displayed path rather than recomputing
+			// it with the production shortener.
+			expect(output).toContain("~/session/0.mcp.log");
 			expect(output).not.toContain(artifactDir);
 		} finally {
 			homeSpy.mockRestore();

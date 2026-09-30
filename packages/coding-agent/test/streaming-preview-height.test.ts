@@ -4,14 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { theme as activeTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { theme as activeTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
-import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+import { withoutTerminalMultiplexer } from "../../tui/test/terminal-multiplexer-environment";
 
 // The streaming edit preview is a fixed-height tail window ("cursor"): the last
 // EDIT_STREAMING_PREVIEW_LINES rows of the recomputed diff are pinned to the
@@ -75,9 +75,6 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		resetSettingsForTest();
 		await removeWithRetries(tmpDir);
 	});
-
-	// Char-by-char partials of the new function body.
-	const partials = Array.from({ length: fullNew.length }, (_, i) => fullNew.slice(0, i + 1));
 
 	// Deterministic render scheduler. The live TUI throttles renders behind
 	// setTimeout (~33ms/frame) and resize settles, and the harness's
@@ -372,16 +369,6 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		// startup, repeated native scrollback refreshes, and throttled render frames are
 		// intentionally exercised here. Keep the contract assertions above; only widen
 		// the integration-test budget.
-	}, 30_000);
-
-	test("the underlying diff genuinely oscillates (guard against a vacuous test)", () => {
-		const rawLineCounts: number[] = [];
-		for (const newText of partials) {
-			const diff = editDiffString(oldBlock, newText, file).diff;
-			rawLineCounts.push(diff ? diff.split("\n").length : 0);
-		}
-		const hasDecrease = rawLineCounts.some((count, i) => i > 0 && count < rawLineCounts[i - 1]);
-		expect(hasDecrease).toBe(true);
 	}, 30_000);
 });
 

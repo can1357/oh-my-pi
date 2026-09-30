@@ -15,7 +15,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createVideoPreviewImage } from "@oh-my-pi/pi-coding-agent/utils/video";
+import { createVideoPreviewImage } from "@oh-my-pi/pi-tui/prompt/video";
 
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 const SOURCE_PATH = "/tmp/private-project/demo.mp4";
@@ -26,7 +26,7 @@ describe("AgentSession video attachments", () => {
 
 	beforeEach(async () => {
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const agent = new Agent({
@@ -86,5 +86,28 @@ describe("AgentSession video attachments", () => {
 			}
 		}
 		expect(modelText.join("\n")).toContain(SOURCE_PATH);
+	});
+
+	it("removes a queued video contact sheet and its private source path before delivery", async () => {
+		const target = session;
+		if (!target) throw new Error("Session was not initialized");
+		const preview = createVideoPreviewImage({ type: "image", data: TINY_PNG, mimeType: "image/png" }, SOURCE_PATH);
+		let injected = false;
+		let removed: boolean | undefined;
+		target.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await target.followUp("Review [Video #1]", [preview]);
+			removed = target.removeQueuedMessage("Review [Video #1]", "followUp");
+		});
+
+		await target.prompt("start");
+		await target.waitForIdle();
+
+		expect(removed).toBe(true);
+		expect(target.agent.hasQueuedMessages()).toBe(false);
+		expect(target.messages.filter(message => message.role === "user" || message.role === "custom")).toEqual([
+			expect.objectContaining({ role: "user", content: [{ type: "text", text: "start" }] }),
+		]);
 	});
 });

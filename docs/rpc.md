@@ -22,11 +22,12 @@ omp --mode rpc [regular CLI options]
 Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
+- `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and extension presentation updates are dropped. With `rpc-ui`, tool UI such as `ask` remains enabled. With `rpc`, no UI requests are emitted except for a host-issued `login`. See [Extension UI Sub-Protocol](#extension-ui-sub-protocol) for the exact boundaries.
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
 - RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, and the process exits with code `0`.
+- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and the process exits with code `0`.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
@@ -68,6 +69,10 @@ Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject inte
 
 Legacy clients may ignore the added ready fields and remain on v1. V1 retains its bounded fallback behavior for oversized output. Frames above the v2 reassembly ceiling still fail explicitly; large history APIs should use pagination rather than depending on arbitrarily large logical frames.
 
+Output goes directly to stdout while the reader keeps up. Under backpressure, the server spills pending bytes to a private temporary file and drains it in 64 KiB blocks, preserving frame order. This limits queued output memory at the cost of disk I/O and temporary disk usage, which can grow until the reader catches up. The file is removed when the backlog drains or the process shuts down. Output or spool failures are logged, dispose the session, and exit with code `1`.
+
+Clients MUST continue reading stdout after closing stdin. Normal EOF and extension-requested shutdown wait for pending output delivery; a client that keeps its stdout pipe open without reading can delay exit indefinitely.
+
 ### Outbound frame categories (stdout)
 
 1. Ready frame (`{ type: "ready" }`)
@@ -78,9 +83,10 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
-10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+9. Prompt completion (`{ type: "prompt_result", id?, agentInvoked, status, error?, sessionSettled }`), one per accepted prompt; see [`prompt` payload](#prompt-payload)
+10. Session quiescence (`{ type: "session_settled" }`); see [Yield vs settled](#yield-vs-settled)
+11. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Inbound frame categories (stdin)
 
@@ -98,11 +104,10 @@ All commands accept optional `id?: string`.
 
 Important edge behavior from runtime:
 
-- Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
+- Unknown command responses echo the request `id` when one was provided.
 - Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
 - `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
-- `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
-- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
+- An accepted `prompt` or `abort_and_prompt` completes exactly once: either its success response carries `data.agentInvoked: false` (finished locally), or a later `prompt_result` frame with the same `id` reports how its work ended. `prompt_result` is always written after the response for that `id`.
 
 ## Command Schema (canonical)
 
@@ -113,9 +118,11 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "remove_queued_message", message: string, queue: "steering" | "followUp" }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
+- `{ id?, type: "open_session", sessionDir: string }`
 
 ### Protocol
 
@@ -126,10 +133,13 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "get_entries", since?: string }`
+- `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
 - `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
 - `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
+- `{ id?, type: "set_event_filter", events: string[] | null, messageUpdates?: "full" | "delta" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
 
@@ -143,6 +153,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
 - `{ id?, type: "cycle_thinking_level" }`
+- `{ id?, type: "get_available_thinking_levels" }`
 
 ### Queue modes
 
@@ -154,6 +165,23 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "compact", customInstructions?: string }`
 - `{ id?, type: "set_auto_compaction", enabled: boolean }`
+
+### Cache warming
+
+- `{ id?, type: "set_cache_warming", mode: "off" | "streaming" | "idle" }`
+
+Sets `providers.cacheWarming` for the current session without writing `config.yml`.
+`off` clears scheduled refreshes and aborts any refresh in flight; `streaming`
+warms during active agent runs; `idle` also warms between runs. Enabling warming
+does not replay an old, cancelled run: the next real provider request arms it.
+Invalid modes return the usual `success: false` response. Success reports the
+effective mode after applying the override:
+
+```json
+{"id":"warming-off","type":"response","command":"set_cache_warming","success":true,"data":{"mode":"off"}}
+```
+
+The TypeScript client exposes `setCacheWarming(mode): Promise<CacheWarmingMode>`.
 
 ### Retry
 
@@ -197,6 +225,11 @@ The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messa
 - `{ id?, type: "get_login_providers" }`
 - `{ id?, type: "login", providerId: string }`
 
+Login forwards ordinary OAuth input prompts only after the provider emits an
+authorization URL. Prompts marked `secret: true` are always rejected with a
+failed `login` response directing the user to the terminal UI; no ordinary
+`input` request is emitted. RPC does not negotiate secret-input support.
+
 ## Response Schema
 
 All command results use `RpcResponse`:
@@ -220,15 +253,62 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 }
 ```
 
-`data.agentInvoked: false` is a completion signal for local-only prompts, including slash commands that produce output without starting an agent turn. `data.agentInvoked: true` means the prompt produced agent lifecycle events; those events can be emitted before or after the prompt response depending on the command path. Older runtimes may omit `data`; hosts should then rely on `agent_end`, custom message completion, or `prompt_result`.
-
-`prompt_result` is emitted when a prompt was accepted immediately but later resolves as local-only:
+`data.agentInvoked: false` is the completion signal for slash commands that finish synchronously without starting an agent turn; no `prompt_result` follows. Every other accepted `prompt` (and every `abort_and_prompt`) is completed by one `prompt_result` frame carrying the command `id`, emitted once all work the prompt caused has settled:
 
 ```json
-{ "type": "prompt_result", "id": "req_1", "agentInvoked": false }
+{ "type": "prompt_result", "id": "req_1", "agentInvoked": true, "status": "completed", "sessionSettled": true }
 ```
 
-Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+- `agentInvoked: false`: the prompt finished locally (an extension or custom command that started no turn) or failed before reaching the agent.
+- `agentInvoked: true`: the prompt reached the agent and the agent **yielded** — see [Yield vs settled](#yield-vs-settled). A prompt dispatched as a fresh turn reports the first run that started after it was accepted, so a late `agent_end` from an earlier run never completes it. A prompt queued into a live run (`streamingBehavior`) reports at the first yield after its message left the queue. An `agent_end` with `yielded: false` (the agent is retrying, compacting, or answering a stop-time reminder) never completes a prompt.
+- `status`: `"completed"`, `"aborted"` (interrupted by `abort`, `abort_and_prompt`, or a session transition, or dropped by an abort before dispatch), or `"error"`.
+- `error` (only with `status: "error"`): `{ message, provider?, model?, httpStatus?, retryable }`. `message` is the provider's error text with OMP-local diagnostics (such as saved request-dump paths) removed. `retryable` marks a transient failure; OMP's own automatic retries have already been exhausted. A prompt that fails before reaching the agent also gets the legacy error response with the same `id` before its `prompt_result`.
+- `sessionSettled`: whether the session is already done when the result is written — see [Yield vs settled](#yield-vs-settled). `false` means background work can still wake the agent; a `session_settled` frame follows once it has.
+
+A failed provider turn is not a failed command: the prompt response is still `success: true`, and the turn ends with a normal terminal `agent_end` whose last assistant message has `stopReason: "error"`. Use `prompt_result.status` rather than parsing that message.
+
+Local-only slash commands may emit `command_output` frames before completing. They do not emit `agent_end`.
+
+### Yield vs settled
+
+A prompt's `prompt_result` means the **agent yielded**: it finished its turn (`agent_end` with `yielded: true`). The **session is done** only when, in addition, nothing can wake it again — no run is live or admitted, no steer/follow-up is queued, and no background job (auto-backgrounded `bash`, async `task`, `eval`) or pending delivery will inject its result and start a follow-up turn.
+
+- `session_settled` is written once per stretch of agent activity, when the session becomes done. If background work was pending at the yield, OMP waits it out; any follow-up runs it triggers stream normally (`agent_start` … `agent_end`) before `session_settled`. It always follows the `prompt_result` frames of the final yield, and is not emitted for prompts that never reached the agent.
+- `prompt_result.sessionSettled` answers the same question at the yield, so a host can tear down immediately when it is `true`.
+- `get_state` reports `isSettled` (same predicate) and `hasPendingAsyncWork`, for hosts that attach mid-stream.
+
+Wait on `prompt_result` to present a turn's answer; wait on `session_settled` (or `isSettled`) before treating the conversation as finished, e.g. before pausing or recycling a sandbox.
+
+### `open_session` payload
+
+`open_session` binds the process to a host-keyed conversation directory — the runtime equivalent of `--session-dir <dir> --continue`, so a pre-spawned process can adopt a thread after startup. It continues the newest non-empty session in `sessionDir`, or starts a fresh session there when none exists. Reopening the session that is already active (including a still-empty fresh session in the same directory) is a no-op that does not interrupt a running turn; otherwise the current run is aborted as with `switch_session`, and open prompts complete with `status: "aborted"`.
+
+```json
+{ "cancelled": false, "resumed": true, "sessionId": "01a0...", "sessionFile": "/srv/threads/t1/2026-...jsonl" }
+```
+
+`resumed` is `false` when a fresh session was started. The command fails when the process runs without persistence (`--no-session`).
+
+### `remove_queued_message` payload
+
+Remove the first matching user-authored message from the selected pending queue:
+
+```json
+{"id":"req_2","type":"remove_queued_message","message":"Use the existing parser","queue":"steering"}
+{"id":"req_2","type":"response","command":"remove_queued_message","success":true,"data":{"removed":true}}
+```
+
+`message` matches the queue-chip text or its prompt-template expansion. Queued RPC skill commands retain their original `/skill:<name>` invocation as the chip text. Removal also drops that message's attachments and contiguous preceding hidden user companions (keyword notices, image descriptions, and video source paths), preserving other messages and the other queue.
+
+Companions and their prompt are enqueued and dequeued as a complete group, including in `one-at-a-time` mode. Once that group leaves the pending queue for delivery, a removal request cannot report success after only part of its context has been emitted.
+
+Agent-authored entries never match, including internal handoffs with `role: "user"` and `attribution: "agent"`. With duplicate text, each request removes only the first matching occurrence; repeating a successful request can remove another occurrence.
+
+The check and removal are synchronous: `data.removed: false` means no matching user message is pending in that queue at dispatch time. Already-dequeued messages and inputs still being preprocessed cannot be cancelled by this command. It does not resend input, abort a turn, or change interruption behavior. Non-string `message` values and missing or invalid `queue` values produce an error response.
+
+Clients must hide the chip or restore its draft only after `removed: true`. Older runtimes reject this command; clients must not fall back to aborting or resending queued messages. The TypeScript client exposes `removeQueuedMessage(message, queue): Promise<{ removed: boolean }>`.
+
+The official Python client exposes `remove_queued_message(message, queue) -> RemoveQueuedMessageResult`; inspect its `.removed` boolean rather than the result object's truthiness.
 
 ### `get_state` payload
 
@@ -263,6 +343,7 @@ is re-armed.
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
+  "queuedMessages": { "steering": [], "followUp": [] },
   "todoPhases": [
     {
       "id": "phase-1",
@@ -291,6 +372,13 @@ is re-armed.
   }
 }
 ```
+
+`queuedMessages` holds the same displayable queue-chip text as the `queue_update`
+event below — every entry is a `message` value that `remove_queued_message`
+will match against that queue. Clients should render the pending-message queue
+from these snapshots instead of tracking chips independently, and treat
+`remove_queued_message` responses as confirmation of the change rather than a
+second source of truth.
 
 ### `set_fast_mode` payload
 
@@ -465,8 +553,9 @@ Schemes are case-insensitive on the wire and normalized to lowercase before
 the response is sent. Re-sending `set_host_uri_schemes` replaces the entire
 previous set — schemes missing from the new list are unregistered.
 
-`security://` is reserved for OMP's producer-neutral software-security resource
-store. RPC hosts cannot register or shadow that scheme.
+Every built-in scheme (`local://`, `skill://`, `artifact://`, `security://`,
+`mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
+request fails with `Host URI scheme is reserved by OMP: <scheme>://`.
 
 ## Event Stream Schema
 
@@ -480,11 +569,31 @@ Common event types:
 - `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
 - `auto_compaction_start`, `auto_compaction_end`
 - `auto_retry_start`, `auto_retry_end`
+- `cache_warming_start`, `cache_warming_end`
 - `retry_fallback_applied`, `retry_fallback_succeeded`
 - `model_changed`, `thinking_level_changed`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
+- `queue_update`
+
+### `queue_update` event
+
+```json
+{ "type": "queue_update", "steering": ["Use the existing parser"], "followUp": [] }
+```
+
+Emitted whenever the displayable steering/follow-up queue changes: a `steer`,
+`follow_up`, or queued `prompt` adds to it; delivery at the start of the next
+turn, `remove_queued_message`, an abort that drops in-flight queued messages,
+or a session switch removes from or clears it. The server coalesces this
+against the last value sent — a mutation that leaves the snapshot unchanged
+(for example, an agent-authored aside that never renders as a chip) never
+re-emits. `steering`/`followUp` mirror `get_state`'s `queuedMessages` field and
+carry the exact `message` text `remove_queued_message` expects back. Render
+the queue from this event rather than tracking chips independently, and treat
+`remove_queued_message`/promotion replies as confirmation of a change this
+event will also report.
 
 Extension runner errors are emitted separately as:
 
@@ -499,6 +608,14 @@ Extension runner errors are emitted separately as:
 
 `message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
 
+`message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
+
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies only to the session events listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is always written. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+
+The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
+
+Each command replaces the whole filter state: omitting `messageUpdates` resets it to `"full"`, the default, which retains the original full snapshots. Invalid events or a mode other than `"full"` or `"delta"` return an error without changing either setting. Projection works in protocol v1 and v2, including with `events: null`. Detect support from the echoed `data.messageUpdates` field: older servers ignore the option and do not echo it. This opt-in is raw-protocol only; the TypeScript `RpcClient` and Python client keep their full-message listener contracts.
+
 `agent_end` has this session-level shape (in addition to optional telemetry fields):
 
 ```ts
@@ -506,13 +623,64 @@ Extension runner errors are emitted separately as:
   type: "agent_end";
   messages: AgentMessage[];
   isTerminal?: boolean;
+  yielded?: boolean;
 }
 ```
+
+`yielded` is `true` when the agent finished its turn: the end is terminal, or the session resumes only for queued input or background-job results. It is `false` while the agent continues its own work (retry, compaction continuation, stop-time reminders). Frames from older runtimes omit it; treat those as yielded only when terminal.
 
 `isTerminal: false` means maintenance or async delivery has scheduled more work,
 so the session will resume before its true final settle. Treat an `agent_end` as
 run completion only when `isTerminal !== false`; the field is optional so frames
 from older runtimes, where it is absent, remain terminal-compatible.
+
+### Cache warming events
+
+Each refresh handed to the provider stream emits one start and one matching end
+(a session disposed mid-refresh emits no end).
+Warm-or-stop decisions that do not send a request emit neither. These are
+session events, so **both types must be listed in `set_event_filter` when a filter
+is active** to observe complete refresh lifecycles:
+
+```ts
+{
+  type: "cache_warming_start";
+  phase: "streaming" | "idle";
+  provider: string;
+  model: string; // model id
+}
+{
+  type: "cache_warming_end";
+  phase: "streaming" | "idle"; // same phase as the matching start
+  provider: string;
+  model: string;
+  outcome: "hit" | "miss" | "error" | "aborted";
+  usage?: Usage;
+  warmingStopReason?: string;
+}
+```
+
+- `hit`: the refresh read cached tokens without writing a new cache entry.
+- `miss`: it read no cached tokens or wrote cache tokens; warming stops.
+- `error`: no response was available or the response reported an error; warming stops.
+- `aborted`: the run was cancelled or replaced while the refresh was in flight.
+
+`usage` is present only when the refresh was recorded as a `model_usage` entry
+(`purpose: "cache-warm"`, or `"cache-warm:extension-override"` when an extension
+forced it). This includes paid misses, errors, and `aborted` refreshes the
+provider had already accepted (usage reported before the cancellation); an
+abort before the provider responded has no usage. Summing `usage.cost.total`
+attributes the warming costs already included in `get_session_stats`, rather
+than adding another charge.
+
+These events are ordinary session events, so `--mode json` output includes them
+as well.
+
+`warmingStopReason` explains why warming stopped because of or during the
+refresh, for example `"refresh missed the cache"`, `"refresh failed"`,
+`"cache warming disabled"`, or `"conversation context changed"`. It is absent
+when warming continues: the refresh rescheduled, or a new request replaced the
+run.
 
 ### Available commands
 
@@ -520,6 +688,42 @@ from older runtimes, where it is absent, remain terminal-compatible.
 in `available_commands_update` frames at startup and after command metadata
 changes. Each command has `name`, `source`, and optional `aliases`,
 `description`, `input.hint`, and `subcommands`.
+
+Command discovery is intentionally an OMP dialect: Pi's `get_commands` (a
+`RpcSlashCommand[]` projection over extensions → prompt templates → skills) is
+not served because OMP's richer catalog (builtins/custom/MCP/file commands,
+broader `source` enum, no Pi `sourceInfo`) is not wire-compatible with it.
+
+### Pi-compatible history/tree commands with OMP-native entry payloads
+
+The commands and reconciliation semantics below are Pi-compatible, but the
+returned `SessionEntry` payload union is OMP-native, not wire-identical to
+Pi. Concretely: Pi `model_change` carries `provider` + `modelId` while OMP
+carries a combined `model` plus role/fallback metadata; Pi uses a `usage`
+entry where OMP uses `model_usage`; and OMP has additional entry types (for
+example service-tier, title, mode, credential, and reset records). A
+permissive client that consumes the common structural subset
+(`id`/`parentId` plus message entries) can share one durable-history
+algorithm across both, while a strict Pi `SessionEntry` decoder cannot assume
+identical payloads.
+
+`get_entries` reads the canonical append-history (not the active branch only)
+and returns `{ entries, leafId }`. Without `since` it returns all entries in
+append order; with `since` it returns entries strictly after the matching
+durable entry id. An unknown `since` fails explicitly with
+`code: "unknown_since"`. `get_tree` returns the raw session tree as
+`{ tree, leafId }` straight from `SessionManager`, not a UI projection.
+
+`get_available_thinking_levels` returns `{ levels }`: the selectable levels
+for the live model with `"off"` first (it is accepted by
+`set_thinking_level` but excluded from the effort-only model helper). OMP-only
+`auto`/`inherit` selectors are intentionally omitted from discovery.
+
+Lifecycle stays OMP: terminal settle is `agent_end` with
+`isTerminal !== false`, not Pi's `agent_settled`; `prompt_result`/
+`agentInvoked`, `open_session`, `set_event_filter`, `messageId`, `ready`,
+negotiation, chunking, host tools, and subagents are OMP extensions a
+Pi-family adapter must dialect around.
 
 ### Subagent subscriptions
 
@@ -551,8 +755,9 @@ This is the most important operational behavior.
 That means:
 
 - command acceptance != run completion
-- agent turns complete only on `agent_end` frames where `isTerminal !== false`
-- local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+- a prompt completes via `data.agentInvoked: false` on its response or via its own `prompt_result`
+- a run completes on an `agent_end` frame where `isTerminal !== false`; that frame carries no prompt identity, so correlate prompts through `prompt_result`
+- the session is done only at `session_settled`: background jobs can wake the agent after it yields
 
 ### While streaming
 
@@ -582,7 +787,17 @@ From `packages/agent/src/agent.ts` defaults:
 
 ## Extension UI Sub-Protocol
 
-Extensions in RPC mode use request/response UI frames.
+Extensions in RPC mode use request/response UI frames. `--no-ui` disables the extension runner's UI in both RPC modes: extensions see `ctx.hasUI === false`, dialogs resolve to their defaults without emitting frames, and presentation updates (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) are dropped.
+
+`--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
+
+- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`.
+- Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
+- Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
+- MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
+- A host-issued `login` is independent of both UI settings: it can emit `open_url`, progress `notify`, and non-secret `input` requests after the authorization URL. Secret input and prompts before an authorization URL remain unsupported.
+
+Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-ui --no-ui` to answer tool dialogs while keeping extensions headless. Plain `--mode rpc-ui` enables both extension and tool UI.
 
 ### Outbound request
 
@@ -802,8 +1017,10 @@ stdout sequence (typical):
 ```json
 { "id": "req_1", "type": "response", "command": "prompt", "success": true }
 { "type": "agent_start" }
-{ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": "..." }, "message": { "role": "assistant", "content": [] } }
+{ "type": "message_update", "messageId": "msg-2", "assistantMessageEvent": { "type": "text_delta", "delta": "..." }, "message": { "role": "assistant", "content": [] } }
 { "type": "agent_end", "messages": [], "isTerminal": true }
+{ "type": "prompt_result", "id": "req_1", "agentInvoked": true, "status": "completed", "sessionSettled": true }
+{ "type": "session_settled" }
 ```
 
 ### 2) Prompt during streaming with explicit queue policy

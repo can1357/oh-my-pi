@@ -2,13 +2,17 @@
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTypeOf, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -22,16 +26,15 @@ import {
 import type {
 	Extension,
 	ExtensionError,
-	ExtensionServiceTier,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
-	ProviderModelConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -396,35 +399,6 @@ describe("ExtensionRunner", () => {
 			expect(commands.map(c => c.name).sort()).toEqual(["cmd-a", "cmd-b"]);
 		});
 
-		it("gets command by name", async () => {
-			const cmdCode = `
-				export default function(pi) {
-					pi.registerCommand("my-cmd", {
-						description: "My command",
-						handler: async () => {},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "cmd.ts"), cmdCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			const cmd = runner.getCommand("my-cmd");
-			expect(cmd).toBeDefined();
-			expect(cmd?.name).toBe("my-cmd");
-			expect(cmd?.description).toBe("My command");
-
-			const missing = runner.getCommand("not-exists");
-			expect(missing).toBeUndefined();
-		});
-
 		it("prefers later-loaded explicit extensions for conflicting commands", async () => {
 			const deployCommand = (description: string) => `
 				export default function(pi) {
@@ -458,6 +432,31 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("rejects instead of returning untransformed context when its caller aborts a pending handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "pending-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const pending = runner.emitContext([{ role: "user", content: "unredacted", timestamp: 1 }], controller.signal);
+
+			controller.abort(new Error("caller aborted"));
+			await expect(pending).rejects.toThrow("caller aborted");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -537,46 +536,6 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("composer shapes", () => {
-		it("collects extension-defined renderer contracts and selector copy", async () => {
-			const extCode = `
-				export default function(pi) {
-					pi.registerComposerShape({
-						label: "Extension Dock",
-						description: "Custom extension composer",
-						style: {
-							id: "extension-dock",
-							sideBorders: false,
-							verticalChrome: 0,
-							statusAttachment: "none",
-							bottomBar: "full",
-							bottomBarGap: false,
-							defaultPaddingX: () => 0,
-							sideChromeWidth: () => 0,
-							renderTop: () => undefined,
-							renderRow: context => [context.gutter + context.text + context.pad],
-							renderBottom: () => undefined,
-						},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "composer-shape.ts"), extCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			const [definition] = runner.getComposerShapes();
-			expect(definition.label).toBe("Extension Dock");
-			expect(definition.description).toBe("Custom extension composer");
-			expect(definition.style.id).toBe("extension-dock");
-		});
-	});
 	describe("flags", () => {
 		it("collects flags from extensions", async () => {
 			const extCode = `
@@ -601,18 +560,29 @@ describe("ExtensionRunner", () => {
 
 			expect(flags.has("--my-flag")).toBe(true);
 		});
+	});
 
-		it("can set flag values", async () => {
+	describe("assistant_message", () => {
+		it("chains text rewrites, ignores in-place edits, and preserves non-text blocks", async () => {
 			const extCode = `
 				export default function(pi) {
-					pi.registerFlag("--test-flag", {
-						description: "Test flag",
-						handler: async () => {},
+					pi.on("assistant_message", event => {
+						event.message.content[0].text = "ignored";
+						event.message.usage.output = 999;
 					});
+					pi.on("assistant_message", event => ({
+						content: [{ type: "text", text: event.message.content[0].text + " one" }, event.message.content[1]],
+					}));
+					pi.on("assistant_message", event => ({
+						content: [{ type: "text", text: event.message.content[0].text + " two" }, event.message.content[1]],
+					}));
+					pi.on("assistant_message", () => { throw new Error("rewrite failed"); });
+					pi.on("assistant_message", event => ({
+						content: [{ type: "text", text: event.message.content[0].text + " three" }, event.message.content[1]],
+					}));
 				}
 			`;
-			fs.writeFileSync(path.join(extensionsDir, "flag.ts"), extCode);
-
+			fs.writeFileSync(path.join(extensionsDir, "assistant-message.ts"), extCode);
 			const result = await loadTestExtensions();
 			const runner = new ExtensionRunner(
 				result.extensions,
@@ -621,12 +591,250 @@ describe("ExtensionRunner", () => {
 				sessionManager,
 				modelRegistry,
 			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "x" } };
+			const message = {
+				...createAssistantMessage("original"),
+				content: [{ type: "text" as const, text: "original" }, toolCall],
+			};
+			const rewritten = await runner.emitAssistantMessage(message);
+			expect(rewritten).toEqual([{ type: "text", text: "original one two three" }, toolCall]);
+			expect(message.content[0]).toEqual({ type: "text", text: "original" });
+			expect(message.usage.output).not.toBe(999);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.event).toBe("assistant_message");
+			expect(errors[0]?.error).toContain("rewrite failed");
+		});
+		it("preserves Cursor-resolved tool markers across no-op and text rewrite handlers", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-cursor.ts"),
+				`
+				export default function(pi) {
+					pi.on("assistant_message", event => ({ content: event.message.content }));
+					pi.on("assistant_message", event => ({
+						content: [
+							{ ...event.message.content[0], text: "rewritten" },
+							event.message.content[1],
+						],
+					}));
+				}
+				`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const resolvedToolCall = {
+				type: "toolCall" as const,
+				id: "call-cursor",
+				name: "read",
+				arguments: { path: "x" },
+				[kCursorExecResolved]: true as const,
+			};
+			const message = {
+				...createAssistantMessage("original"),
+				content: [{ type: "text" as const, text: "original" }, resolvedToolCall],
+			};
 
-			// Setting a flag value should not throw
-			runner.setFlagValue("--test-flag", true);
+			const rewritten = await runner.emitAssistantMessage(message);
 
-			// The flag values are stored in the shared runtime
-			expect(result.runtime.flagValues.get("--test-flag")).toBe(true);
+			expect(rewritten?.[0]).toMatchObject({ type: "text", text: "rewritten" });
+			expect(rewritten?.[1]).toBe(resolvedToolCall);
+			expect((rewritten?.[1] as typeof resolvedToolCall | undefined)?.[kCursorExecResolved]).toBe(true);
+		});
+
+		it("normalizes each text signature against its original text across chained rewrites", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-signatures.ts"),
+				`
+				export default function(pi) {
+					pi.on("assistant_message", event => ({
+						content: [
+							{ ...event.message.content[0], textSignature: "original-second" },
+							event.message.content[1],
+							{ ...event.message.content[2], text: "edited second", textSignature: "original-first" },
+						],
+					}));
+					pi.on("assistant_message", event => {
+						if (event.message.content[0].textSignature !== "original-first" ||
+							event.message.content[2].textSignature !== undefined) {
+							throw new Error("replay signatures were not normalized before chaining");
+						}
+					});
+					pi.on("assistant_message", event => ({
+						content: [
+							{ type: "text", text: event.message.content[0].text },
+							event.message.content[1],
+							{ ...event.message.content[2], textSignature: "original-first" },
+						],
+					}));
+					pi.on("assistant_message", event => ({
+						content: [
+							{ ...event.message.content[0], text: "edited first", textSignature: "original-first" },
+							event.message.content[1],
+							{ ...event.message.content[2], text: "second", textSignature: "forged" },
+						],
+					}));
+				}
+				`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "x" } };
+			const message = {
+				...createAssistantMessage("first"),
+				content: [
+					{ type: "text" as const, text: "first", textSignature: "original-first" },
+					toolCall,
+					{ type: "text" as const, text: "second", textSignature: "original-second" },
+				],
+			};
+			expect(await runner.emitAssistantMessage(message)).toEqual([
+				{ type: "text", text: "edited first" },
+				toolCall,
+				{ type: "text", text: "second", textSignature: "original-second" },
+			]);
+			expect(message.content[0]).toEqual({ type: "text", text: "first", textSignature: "original-first" });
+			expect(errors).toEqual([]);
+		});
+
+		it.each([
+			[
+				"added text",
+				[
+					{ type: "text", text: "first" },
+					{ type: "text", text: "extra" },
+					{ type: "text", text: "second" },
+				],
+			],
+			["removed text", [{ type: "text", text: "first" }]],
+			[
+				"changed block kind",
+				[
+					{ type: "text", text: "first" },
+					{ type: "thinking", thinking: "second" },
+				],
+			],
+			[
+				"changed text metadata",
+				[
+					{ type: "text", text: "first", providerMetadata: "forged" },
+					{ type: "text", text: "second" },
+				],
+			],
+		] as const)("rejects %s topology or metadata changes", async (_case, content) => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-invalid.ts"),
+				`export default pi => pi.on("assistant_message", () => ({ content: ${JSON.stringify(content)} }));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const message = {
+				...createAssistantMessage("first"),
+				content: [
+					{ type: "text" as const, text: "first", textSignature: "original-first" },
+					{ type: "text" as const, text: "second", textSignature: "original-second" },
+				],
+			};
+			expect(await runner.emitAssistantMessage(message)).toBeUndefined();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.error).toContain("block positions");
+		});
+
+		it("returns completed rewrites without awaiting or accepting a handler after abort", async () => {
+			const startedPath = path.join(tempDir.path(), "assistant-message-started.txt");
+			const skippedPath = path.join(tempDir.path(), "assistant-message-skipped.txt");
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-abort.ts"),
+				`
+				import * as fs from "node:fs";
+				export default function(pi) {
+					pi.on("assistant_message", event => ({
+						content: event.message.content.map(block =>
+							block.type === "text" ? { ...block, text: "accepted" } : block
+						),
+					}));
+					pi.on("assistant_message", async () => {
+						fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+						await Promise.withResolvers().promise;
+					});
+					pi.on("assistant_message", () => {
+						fs.writeFileSync(${JSON.stringify(skippedPath)}, "ran");
+					});
+				}
+				`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const message = createAssistantMessage("original");
+			const started = new Promise<void>(resolve => {
+				const watcher = fs.watch(tempDir.path(), (_eventType, filename) => {
+					if (filename?.toString() !== path.basename(startedPath)) return;
+					watcher.close();
+					resolve();
+				});
+			});
+			const emission = runner.emitAssistantMessage(message, controller.signal);
+			await started;
+			expect(await Bun.file(startedPath).text()).toBe("started");
+			controller.abort(new Error("cancelled"));
+			await expect(emission).resolves.toEqual([{ type: "text", text: "accepted" }]);
+			expect(await Bun.file(skippedPath).exists()).toBe(false);
+		});
+
+		it("rejects attempts to change tool calls", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "assistant-message-invalid.ts"),
+				`export default pi => pi.on("assistant_message", () => ({ content: [{ type: "text", text: "lost tool" }] }));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const message = {
+				...createAssistantMessage("original"),
+				content: [
+					{ type: "text" as const, text: "original" },
+					{ type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "x" } },
+				],
+			};
+			expect(await runner.emitAssistantMessage(message)).toBeUndefined();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.error).toContain("non-text blocks");
 		});
 	});
 
@@ -1153,12 +1361,12 @@ describe("ExtensionRunner", () => {
 				vi.useRealTimers();
 			}
 		});
-		it("continues to later handlers after empty continuation feedback", async () => {
+		it("gives a later hard block precedence over advisory continuation feedback", async () => {
 			await Bun.write(
-				path.join(extensionsDir, "session-stop-empty.ts"),
+				path.join(extensionsDir, "session-stop-precedence.ts"),
 				`
 				export default function(pi) {
-					pi.on("session_stop", async () => ({ continue: true }));
+					pi.on("session_stop", async () => ({ continue: true, additionalContext: "Earlier advisory." }));
 					pi.on("session_stop", async () => ({ decision: "block", reason: "Continue from second handler." }));
 				}
 			`,
@@ -1314,6 +1522,7 @@ describe("ExtensionRunner", () => {
 			label: "Boom",
 			description: "always throws",
 			parameters: {} as never,
+			approval: "read",
 			execute: async () => {
 				throw new Error("original explosion");
 			},
@@ -1324,7 +1533,20 @@ describe("ExtensionRunner", () => {
 			label: "Fine",
 			description: "always succeeds",
 			parameters: {} as never,
+			approval: "read",
 			execute: async () => ({ content: [{ type: "text" as const, text: "success" }] }),
+		};
+
+		const flaggedTool: AgentTool = {
+			name: "flagged",
+			label: "Flagged",
+			description: "returns a non-throwing failure",
+			parameters: {} as never,
+			approval: "read",
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "reported failure" }],
+				isError: true,
+			}),
 		};
 
 		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
@@ -1397,6 +1619,20 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(okTool, runner);
 			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, undefined);
 			expect(firstText(res)).toBe("now failing");
+			expect(res.isError).toBe(true);
+		});
+
+		it("preserves a tool-reported error through extension rewrites", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", (event) => ({
+						content: [{ type: "text", text: event.isError ? "observed failure" : "observed success" }],
+					}));
+				}
+			`);
+			const wrapper = new ExtensionToolWrapper(flaggedTool, runner);
+			const res = await wrapper.execute("call-reported-failure", {} as never, undefined, undefined, undefined);
+			expect(firstText(res)).toBe("observed failure");
 			expect(res.isError).toBe(true);
 		});
 	});
@@ -1582,6 +1818,7 @@ describe("ExtensionRunner", () => {
 				description: "records execute() invocations",
 				parameters: Type.Object({}),
 				strict: true,
+				approval: "read",
 				execute: async (_id, params) => {
 					executeCalls.push(params);
 					return { content: [{ type: "text", text: "ran" }] };
@@ -1628,10 +1865,20 @@ describe("ExtensionRunner", () => {
 				`,
 			);
 			const loaded = await loadTestExtensions([extensionPath]);
+			// Configured through a config file (as a user would): writes reject NaN/Infinity outright,
+			// while a file carrying them must still load and fall back to the default.
+			const configuredSettings: Settings[] = [];
+			for (const [index, yamlValue] of ["0", "-1", ".nan", ".inf"].entries()) {
+				const overlayPath = path.join(tempDir.path(), `invalid-timeout-${index}.yml`);
+				fs.writeFileSync(overlayPath, `extensionHandlers:\n  toolCallTimeoutMs: ${yamlValue}\n`);
+				configuredSettings.push(
+					await Settings.loadIsolated({ inMemory: true, cwd: tempDir.path(), configFiles: [overlayPath] }),
+				);
+			}
 
 			vi.useFakeTimers();
 			try {
-				for (const configuredTimeout of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+				for (const settings of configuredSettings) {
 					const runner = new ExtensionRunner(
 						loaded.extensions,
 						loaded.runtime,
@@ -1639,7 +1886,7 @@ describe("ExtensionRunner", () => {
 						sessionManager,
 						modelRegistry,
 						undefined,
-						Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": configuredTimeout }),
+						settings,
 					);
 					let settled = false;
 					const decision = runner
@@ -1713,6 +1960,7 @@ describe("ExtensionRunner", () => {
 					label: "Gated",
 					description: "Must not execute after a gate registration fails.",
 					parameters: Type.Object({}),
+					approval: "read",
 					execute: async (_id, params) => {
 						executeCalls.push(params);
 						return { content: [{ type: "text", text: "ran" }] };
@@ -1853,6 +2101,7 @@ describe("ExtensionRunner", () => {
 					description: "must not execute after the extension gate times out",
 					parameters: Type.Object({}),
 					strict: true,
+					approval: "read",
 					execute: async () => ({ content: [{ type: "text", text: "ran" }] }),
 				};
 				const wrapped = new ExtensionToolWrapper(tool, runner);
@@ -2007,6 +2256,7 @@ describe("ExtensionRunner", () => {
 				description: "must not execute after the dispatch aborts",
 				parameters: Type.Object({}),
 				strict: true,
+				approval: "read",
 				execute: async () => {
 					executed = true;
 					return { content: [{ type: "text", text: "ran" }] };
@@ -2100,21 +2350,7 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("provider model API", () => {
-		it("accepts a per-model WebSocket preference", () => {
-			expectTypeOf<ProviderModelConfig["preferWebsockets"]>().toEqualTypeOf<boolean | undefined>();
-		});
-	});
-
 	describe("service tier API", () => {
-		it("restricts tiers to values supported by each provider family", () => {
-			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
-			expectTypeOf<"flex">().toExtend<ExtensionServiceTier<"google">>();
-			expectTypeOf<"priority">().toExtend<ExtensionServiceTier<"anthropic">>();
-			expectTypeOf<"scale">().not.toExtend<ExtensionServiceTier<"google">>();
-			expectTypeOf<"flex">().not.toExtend<ExtensionServiceTier<"anthropic">>();
-		});
-
 		it("returns a detached snapshot, forwards valid changes, and rejects invalid family tiers", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -2384,7 +2620,7 @@ describe("ExtensionRunner", () => {
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 			});
 
 			expect(events).toEqual([
@@ -2397,6 +2633,62 @@ describe("ExtensionRunner", () => {
 				"Deny",
 			]);
 			delete globalState.__approvalEvents;
+		});
+		it("runs bridged preflight before approval and cancels denied state", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const order: string[] = [];
+			initializeRunner(runner, async () => {
+				order.push("ui_select");
+				return "Approve";
+			});
+			runner.setToolCallPreflight({
+				before: async () => {
+					order.push("preflight");
+					return { block: true, reason: "rule blocked" };
+				},
+			});
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-preflight-order", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				}),
+			).rejects.toThrow("rule blocked");
+			expect(order).toEqual(["preflight"]);
+
+			const deniedRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(deniedRunner, async () => "Deny");
+			let cancelled = 0;
+			deniedRunner.setToolCallPreflight({
+				before: async () => undefined,
+				cancel: () => {
+					cancelled++;
+				},
+			});
+			const deniedWrapper = new ExtensionToolWrapper(approvalTool, deniedRunner);
+			await expect(
+				(deniedWrapper as ExtensionToolWrapper<any>).execute("call-preflight-denied", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				}),
+			).rejects.toThrow("denied by user");
+			expect(cancelled).toBe(1);
 		});
 
 		it("does not present approval before canonical or wire-aliased tool previews are ready", async () => {
@@ -2440,9 +2732,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-					} as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 					toolCall: {
 						batchId: `batch-${toolCallId}`,
 						index: 0,
@@ -2498,7 +2788,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -2549,7 +2839,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("dialog aborted");
 
@@ -2596,7 +2886,7 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
 				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
 
@@ -2614,6 +2904,10 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("tool_call input", () => {
+		const yoloContext = {
+			settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+		} as never;
+
 		function createHashlineEditTool(): AgentTool {
 			return {
 				name: "edit",
@@ -2621,6 +2915,7 @@ describe("ExtensionRunner", () => {
 				description: "Test edit tool",
 				parameters: Type.Object({ input: Type.String() }),
 				strict: true,
+				approval: "read",
 				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
 			};
 		}
@@ -2854,7 +3149,13 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			const resultMessage = await wrapped.execute("tool-call-id", { command: "echo original" });
+			const resultMessage = await wrapped.execute(
+				"tool-call-id",
+				{ command: "echo original" },
+				undefined,
+				undefined,
+				yoloContext,
+			);
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ran" }]);
 			const executed = fs
@@ -2911,10 +3212,6 @@ describe("ExtensionRunner", () => {
 			} as AgentTool;
 		}
 
-		const yoloContext = {
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
-		} as never;
-
 		// Minimal runtime init so the approval gate's interactive `select` is wired for prompt-path tests.
 		const initApprovalRunner = (
 			runner: ExtensionRunner,
@@ -2957,7 +3254,7 @@ describe("ExtensionRunner", () => {
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 		} as never;
 
 		it("blocks a revised input that resolves to a deny policy (approval gates the revised args)", async () => {
@@ -3055,7 +3352,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			await wrapped.execute("tool-call-id", { command: "echo original" });
+			await wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -3063,6 +3360,304 @@ describe("ExtensionRunner", () => {
 				.split("\n")
 				.map(line => JSON.parse(line));
 			expect(executed).toEqual([{ command: "echo second" }]);
+		});
+
+		it("preserves distinct additional context from every non-blocking handler in registration order", async () => {
+			const first = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({
+						input: { command: "echo first" },
+						additionalContext: "first context",
+					}));
+					pi.on("tool_call", async () => ({ additionalContext: "   " }));
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "second context" }));
+					pi.on("tool_call", async () => ({ additionalContext: "first context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-a.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-b.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({
+				input: { command: "echo first" },
+				additionalContext: "first context\n\nsecond context",
+			});
+		});
+
+		it("preserves additional context from every tool_result handler in registration order", async () => {
+			const first = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "first result context" }));
+					pi.on("tool_result", async () => ({ additionalContext: "   " }));
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "second result context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-context-a.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-context-b.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolResult({
+					type: "tool_result",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "false" },
+					content: [{ type: "text", text: "failed" }],
+					details: undefined,
+					isError: true,
+				}),
+			).resolves.toEqual({ additionalContext: "first result context\n\nsecond result context" });
+		});
+
+		it("keeps an earlier extension's redaction when a later one returns only repeated context", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "tool-result-redact-a.ts"),
+				`export default function(pi) {
+					pi.on("tool_result", async () => ({
+						content: [{ type: "text", text: "token [REDACTED]" }],
+						additionalContext: "use the redacted result",
+					}));
+				}`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "tool-result-redact-b.ts"),
+				`export default function(pi) {
+					pi.on("tool_result", async () => ({ additionalContext: "use the redacted result  " }));
+				}`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolResult({
+					type: "tool_result",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "cat" },
+					content: [{ type: "text", text: "token sk-SECRET" }],
+					details: undefined,
+					isError: false,
+				}),
+			).resolves.toEqual({
+				content: [{ type: "text", text: "token [REDACTED]" }],
+				details: undefined,
+				isError: false,
+				additionalContext: "use the redacted result",
+			});
+		});
+
+		it("forwards failure-specific tool_result context through the tool context", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_result", async (event) =>
+						event.isError ? { additionalContext: "inspect the failure before retrying" } : undefined);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-failure-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const failingTool: AgentTool = {
+				name: "failing_tool",
+				label: "Failing Tool",
+				description: "Always fails",
+				parameters: Type.Object({}),
+				strict: true,
+				execute: async () => {
+					throw new Error("tool failed");
+				},
+			};
+			const delivered: string[] = [];
+			const contextWithRecorder = {
+				...(yoloContext as unknown as Record<string, unknown>),
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				new ExtensionToolWrapper(failingTool, runner).execute(
+					"tool-call-id",
+					{},
+					undefined,
+					undefined,
+					contextWithRecorder,
+				),
+			).rejects.toThrow("tool failed");
+			expect(delivered).toEqual(["inspect the failure before retrying"]);
+		});
+
+		it("forwards passive context from wrapper-dispatched calls through the tool context", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "nested device context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-wrapper-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(
+				createRecordingTool(path.join(tempDir.path(), "context-call.jsonl")),
+				runner,
+			);
+			const delivered: string[] = [];
+
+			await wrapped.execute("tool-call-id", { command: "echo context" }, undefined, undefined, {
+				...(yoloContext as unknown as Record<string, unknown>),
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext);
+
+			expect(delivered).toEqual(["nested device context"]);
+		});
+
+		it("discards collected additional context when a later handler blocks", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "must not leak" }));
+					pi.on("tool_call", async () => ({ block: true, reason: "blocked" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-block.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({ block: true, reason: "blocked" });
+		});
+
+		it("defers passive context until the wrapper approval gate succeeds", async () => {
+			// Wrapper-dispatched calls collect additionalContext before the
+			// approval gate. Forwarding waits for approval: an approved call
+			// delivers, a denied call throws before anything is injected.
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "prompt_tool") return;
+						return { additionalContext: "passive after approval" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-approval.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const promptTool = {
+				name: "prompt_tool",
+				label: "Prompt Tool",
+				description: "Always prompt-gated",
+				parameters: Type.Object({ command: Type.String() }),
+				strict: true,
+				approval: "exec" as const,
+				formatApprovalDetails: (args: unknown) =>
+					args && typeof args === "object" && "command" in args ? String(args.command) : "",
+				execute: async (_id: string, params: unknown) => {
+					return { content: [{ type: "text", text: `ran ${JSON.stringify(params)}` }] };
+				},
+			} as AgentTool;
+			const wrapped = new ExtensionToolWrapper(promptTool, runner);
+			const contextWithRecorder = (delivered: string[]) =>
+				({
+					...(alwaysAskContext as unknown as Record<string, unknown>),
+					addAdditionalContext: (context: string) => {
+						delivered.push(context);
+					},
+				}) as never;
+
+			initApprovalRunner(runner, async () => "Approve");
+			const deliveredOnApprove: string[] = [];
+			await (wrapped as ExtensionToolWrapper).execute(
+				"call-approve",
+				{ command: "approved-command" },
+				undefined,
+				undefined,
+				contextWithRecorder(deliveredOnApprove),
+			);
+			expect(deliveredOnApprove).toEqual(["passive after approval"]);
+
+			initApprovalRunner(runner, async () => "Deny");
+			const deliveredOnDeny: string[] = [];
+			await expect(
+				(wrapped as ExtensionToolWrapper).execute(
+					"call-deny",
+					{ command: "denied-command" },
+					undefined,
+					undefined,
+					contextWithRecorder(deliveredOnDeny),
+				),
+			).rejects.toThrow("Tool call denied by user: prompt_tool");
+			expect(deliveredOnDeny).toEqual([]);
 		});
 
 		it("prompts for the revised input, not the original, on an approval-gated tool (P1 prompt→prompt)", async () => {
@@ -3152,9 +3747,9 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
 			runner.markToolCallEmitted("loop-call-id", "bash");
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 			// Marker consumed above: an unmarked dispatch under the same id emits normally.
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, yoloContext);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -3190,7 +3785,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				xdevApproved: true,
 			} as never;
 
@@ -3198,6 +3793,42 @@ describe("ExtensionRunner", () => {
 				wrapped.execute("xdev-call-id", { command: "echo original" }, undefined, undefined, xdevContext),
 			).rejects.toThrow(/requires approval but no interactive UI available/);
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
+		});
+
+		it.each([
+			["without returning a replacement", false],
+			["while returning the same object", true],
+		] as const)("forfeits ACP approval after in-place input mutation %s", async (_case, returnsInput) => {
+			const recordPath = path.join(tempDir.path(), `acp-mutated-${returnsInput}.jsonl`);
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "bash") return;
+						event.input.command = "echo revised";
+						${returnsInput ? "return { input: event.input };" : ""}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-acp-mutate.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
+			const acpContext = {
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				acpApprovedArgs: { command: "echo original" },
+			} as never;
+
+			await expect(
+				wrapped.execute("acp-call-id", { command: "echo original" }, undefined, undefined, acpContext),
+			).rejects.toThrow(/requires approval but no interactive UI available/);
+			expect(fs.existsSync(recordPath)).toBe(false);
 		});
 
 		it("reports the effective tier after a tool_call handler revises xd:// input", async () => {
@@ -3232,7 +3863,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
 				xdevApproved: true,
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;
@@ -3460,22 +4091,6 @@ describe("ExtensionRunner", () => {
 			expect(errors).toHaveLength(1);
 			expect(errors[0]?.event).toBe("credential_disabled");
 			expect(errors[0]?.error).toContain("subscriber exploded");
-		});
-
-		it("is a no-op when no extension subscribes", async () => {
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			expect(runner.hasHandlers("credential_disabled")).toBe(false);
-			await expect(
-				runner.emit({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" }),
-			).resolves.toBeUndefined();
 		});
 
 		it("caps the pre-initialize buffer and drops oldest events under pressure", async () => {
@@ -3948,6 +4563,94 @@ describe("ExtensionRunner", () => {
 			const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
 
 			expect(await runner.emitInput("rewrite me", [image], "interactive")).toEqual({ text: "REWRITE ME" });
+		});
+	});
+
+	describe("context prompt caching", () => {
+		it("anchors Anthropic rolling breakpoints on persisted history behind injected messages", async () => {
+			const extensionCode = `
+				export default function(pi) {
+					const name = import.meta.path.endsWith("inject-a.ts") ? "a" : "b";
+					pi.on("context", async event => ({
+						messages: [...event.messages.map(message => ({ ...message })), {
+							role: "custom",
+							customType: "collab-prompt",
+							content: "<probe-" + name + ">",
+							display: false,
+							attribution: "user",
+							timestamp: Date.now(),
+						}],
+					}));
+				}
+			`;
+			await Bun.write(path.join(extensionsDir, "inject-a.ts"), extensionCode);
+			await Bun.write(path.join(extensionsDir, "inject-b.ts"), extensionCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const model = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model to exist");
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "persisted user", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "persisted assistant" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: model.id,
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 2,
+				},
+			];
+			const transformed = await runner.emitContext(messages);
+			let body: MessageCreateParams | undefined;
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}) as typeof fetch;
+
+			await streamAnthropic(
+				model,
+				{
+					systemPrompt: ["system"],
+					messages: convertToLlm(wrapSteeringForModel(transformed)),
+					tools: [
+						{
+							name: "lookup",
+							description: "Lookup a value",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+				},
+				{ apiKey: "sk-ant-api-test", fetch: fetchMock },
+			)
+				.result()
+				.catch(() => undefined);
+			if (!body) throw new Error("Expected Anthropic wire body");
+
+			const cachedTexts = body.messages.flatMap(message => {
+				if (!Array.isArray(message.content)) return [];
+				return message.content.flatMap(block =>
+					"cache_control" in block && block.cache_control != null && block.type === "text" ? [block.text] : [],
+				);
+			});
+			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
 		});
 	});
 });

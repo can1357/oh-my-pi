@@ -2,16 +2,19 @@ use std::{
 	collections::BTreeMap,
 	fs,
 	path::PathBuf,
-	sync::atomic::{AtomicU64, Ordering},
+	sync::{
+		LazyLock,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use anyhow::{Result, bail};
-use parking_lot::Mutex as TestMutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TestMutex;
 
 use super::*;
 
-static TEST_SERIAL: TestMutex<()> = TestMutex::new(());
+static TEST_SERIAL: LazyLock<TestMutex<()>> = LazyLock::new(|| TestMutex::new(()));
 static TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) mod backend {
@@ -114,7 +117,7 @@ fn active(result: StartOutcome) -> Box<Registration> {
 
 #[test]
 fn invalid_scheme_is_rejected_before_filesystem_access() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	assert!(validate_scheme("../another-handler").is_err());
 	assert!(validate_scheme("OMP").is_err());
 	assert!(validate_scheme("omp+oauth.test").is_ok());
@@ -122,7 +125,7 @@ fn invalid_scheme_is_rejected_before_filesystem_access() {
 
 #[test]
 fn remote_start_is_unsupported_without_creating_storage() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("remote");
 	let core = core(home.clone(), environment(&[("SSH_CONNECTION", "remote")]));
 	assert!(matches!(
@@ -133,9 +136,23 @@ fn remote_start_is_unsupported_without_creating_storage() {
 	fs::remove_dir_all(home).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn wsl_env_is_unsupported_without_creating_storage() {
+	let _serial = TEST_SERIAL.lock();
+	let home = temp_home("wsl");
+	let core = core(home.clone(), environment(&[("WSL_DISTRO_NAME", "Ubuntu")]));
+	assert!(matches!(
+		start_blocking(&core, CancelToken::default()).unwrap(),
+		StartOutcome::Unsupported
+	));
+	assert!(!home.join(".omp").exists());
+	fs::remove_dir_all(home).unwrap();
+}
+
 #[test]
 fn prepare_failure_releases_lease_and_removes_private_artifacts() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("prepare");
 	let failing = core(home.clone(), environment(&[("TEST_PREPARE_FAIL", "1")]));
 	assert!(start_blocking(&failing, CancelToken::default()).is_err());
@@ -147,7 +164,7 @@ fn prepare_failure_releases_lease_and_removes_private_artifacts() {
 
 #[test]
 fn activation_failure_restores_even_after_mutating_os_state() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("activation");
 	let core = core(home.clone(), environment(&[("TEST_ACTIVATE_FAIL", "1")]));
 	let error = start_blocking(&core, CancelToken::default())
@@ -165,7 +182,7 @@ fn activation_failure_restores_even_after_mutating_os_state() {
 
 #[test]
 fn uncertain_restore_retains_journal_and_ownership() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("restore");
 	let core =
 		core(home.clone(), environment(&[("TEST_ACTIVATE_FAIL", "1"), ("TEST_RESTORE_FAIL", "1")]));
@@ -184,7 +201,7 @@ fn uncertain_restore_retains_journal_and_ownership() {
 
 #[test]
 fn stale_journal_is_recovered_before_successor_activation() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("stale");
 	let root = storage_root(&home, "omp-test");
 	ensure_storage_root(&root).unwrap();
@@ -224,7 +241,7 @@ fn stale_journal_is_recovered_before_successor_activation() {
 
 #[test]
 fn lease_excludes_competing_receivers_in_same_process() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	let home = temp_home("compete");
 	let first = core(home.clone(), environment(&[]));
 	let second = core(home.clone(), environment(&[]));
@@ -242,7 +259,7 @@ fn lease_excludes_competing_receivers_in_same_process() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancellation_prevents_start_and_wait_claims_once() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.lock().await;
 	let home = temp_home("cancel");
 	let core = core(home.clone(), environment(&[]));
 	let mut cancel = CancelToken::default();
@@ -283,7 +300,7 @@ async fn cancellation_prevents_start_and_wait_claims_once() {
 
 #[test]
 fn journal_rejects_traversal_and_unknown_fields() {
-	let _serial = TEST_SERIAL.lock();
+	let _serial = TEST_SERIAL.blocking_lock();
 	assert!(validate_transaction_id("../escape").is_err());
 	let json = br#"{
 		"version":1,
@@ -294,4 +311,57 @@ fn journal_rejects_traversal_and_unknown_fields() {
 		"extra":true
 	}"#;
 	assert!(serde_json::from_slice::<Journal>(json).is_err());
+}
+
+#[test]
+fn darwin_compiler_selection_respects_cc_and_wrappers() {
+	use std::ffi::OsStr;
+
+	let single = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("clang-18")));
+	assert_eq!(single.get_program(), "clang-18");
+	assert_eq!(single.get_args().count(), 0);
+
+	let wrapped = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("ccache clang")));
+	assert_eq!(wrapped.get_program(), "ccache");
+	let args: Vec<_> = wrapped.get_args().collect();
+	assert_eq!(args, vec![OsStr::new("clang")]);
+
+	let quoted = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new(
+		r#"ccache "/Applications/Xcode 16.app/Contents/Developer/usr/bin/clang""#,
+	)));
+	assert_eq!(quoted.get_program(), "ccache");
+	let quoted_args: Vec<_> = quoted.get_args().collect();
+	assert_eq!(quoted_args, vec![OsStr::new(
+		"/Applications/Xcode 16.app/Contents/Developer/usr/bin/clang"
+	)]);
+
+	let escaped = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new(
+		r"/path\ with\ spaces/clang -fuse-ld=lld",
+	)));
+	assert_eq!(escaped.get_program(), "/path with spaces/clang");
+	let escaped_args: Vec<_> = escaped.get_args().collect();
+	assert_eq!(escaped_args, vec![OsStr::new("-fuse-ld=lld")]);
+
+	let fallback = super::darwin_compiler::darwin_compiler_command(None);
+	assert_eq!(fallback.get_program(), "/usr/bin/xcrun");
+	let fallback_args: Vec<_> = fallback.get_args().collect();
+	assert_eq!(fallback_args, vec![OsStr::new("clang")]);
+
+	let empty = super::darwin_compiler::darwin_compiler_command(Some(OsStr::new("   ")));
+	assert_eq!(empty.get_program(), "/usr/bin/xcrun");
+	let empty_args: Vec<_> = empty.get_args().collect();
+	assert_eq!(empty_args, vec![OsStr::new("clang")]);
+}
+
+#[test]
+fn darwin_sdk_root_prefers_explicit_sdkroot() {
+	use std::{ffi::OsStr, path::Path};
+
+	let explicit = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("/custom/MacOSX.sdk")));
+	assert_eq!(explicit.as_deref(), Some(Path::new("/custom/MacOSX.sdk")));
+
+	// Empty SDKROOT must not pin an empty sysroot; it falls through to xcrun
+	// discovery.
+	let empty = super::darwin_compiler::darwin_sdk_root(Some(OsStr::new("")));
+	assert_ne!(empty.as_deref(), Some(Path::new("")));
 }

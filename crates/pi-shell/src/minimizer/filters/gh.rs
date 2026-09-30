@@ -113,12 +113,13 @@ fn filter_pr_checks(input: &str) -> Option<String> {
 
 	for line in input.lines() {
 		let trimmed = line.trim_start();
-		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status glyph
-		// followed by at least one TAB-delimited field. Requiring the tab shape
-		// keyed off the row's first glyph — NOT the leading char alone — rejects
-		// separators (`---`), blank-glyph lines, and bulleted annotation detail
-		// (`- ...`, `* ...`) that gh/CI tools emit, any of which would otherwise be
-		// miscounted as a phantom skipping/pending check and inflate the summary.
+		// A real check row is `<symbol>\t<name>\t<duration>\t<url>`: a status
+		// glyph followed by at least one TAB-delimited field. Requiring the tab
+		// shape keyed off the row's first glyph — NOT the leading char alone —
+		// rejects separators (`---`), blank-glyph lines, and bulleted
+		// annotation detail (`- ...`, `* ...`) that gh/CI tools emit, any of
+		// which would otherwise be miscounted as a phantom skipping/pending
+		// check and inflate the summary.
 		if !trimmed.contains('\t') {
 			continue;
 		}
@@ -341,8 +342,8 @@ mod tests {
 		// `--watch` re-renders the whole table each interval; the captured buffer
 		// is many concatenated frames. Summarizing it would count every row once
 		// per frame (counts x frames) and let duplicate failed rows exhaust the
-		// FAILED_ROW_CAP, hiding distinct later failures. A watch must pass through
-		// raw so the live frames survive intact.
+		// FAILED_ROW_CAP, hiding distinct later failures. A watch must pass
+		// through raw so the live frames survive intact.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("pr"), "gh pr checks 123 --watch", &cfg);
 		// Three frames of the same 1-pass/1-fail PR (what a watch concatenates).
@@ -397,7 +398,8 @@ mod tests {
 
 	#[test]
 	fn pr_checks_falls_back_when_no_rows() {
-		// No recognizable glyph rows -> generic pr/issue path, not a bogus summary.
+		// No recognizable glyph rows -> generic pr/issue path, not a bogus
+		// summary.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("pr"), "gh pr checks 123", &cfg);
 		let input = "no checks reported on this pull request\n";

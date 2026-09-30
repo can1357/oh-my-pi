@@ -22,7 +22,9 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
@@ -36,6 +38,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -721,6 +724,7 @@ describe("remote compaction input forwarding", () => {
 		expect(result.input).toEqual(input);
 		expect(result.input[3].output).toBe("useful latest result");
 		expect(result.estimatedTokensAfter).toBe(result.estimatedTokensBefore);
+		expect(result.fits).toBe(false);
 	});
 
 	test("charges inline images by the maximum vision budget instead of serialized base64 size", () => {
@@ -741,6 +745,32 @@ describe("remote compaction input forwarding", () => {
 		expect(result.input).toEqual(input);
 		expect(result.estimatedTokensAfter).toBeGreaterThan(12_000);
 		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(15_000);
+	});
+
+	test("excludes opaque encrypted reasoning and compaction state from the fit estimate (#13611)", () => {
+		// Base64 ciphertext tokenizes far above what the provider bills for it;
+		// counting it refused Codex histories that the server accepts.
+		const encrypted = Buffer.from(Array.from({ length: 3_000 }, (_, index) => (index * 131 + 7) % 256)).toString(
+			"base64",
+		);
+		const input: Array<Record<string, unknown>> = [{ type: "compaction", encrypted_content: encrypted }];
+		for (let turn = 0; turn < 20; turn++) {
+			input.push({
+				type: "reasoning",
+				id: `rs_${turn}`,
+				summary: [{ type: "summary_text", text: "Inspecting the module." }],
+				encrypted_content: encrypted,
+			});
+			input.push({ type: "function_call", call_id: `call_${turn}`, name: "read", arguments: "{}" });
+			input.push({ type: "function_call_output", call_id: `call_${turn}`, output: `result ${turn}` });
+		}
+
+		const result = trimRemoteCompactionInputToContextWindow(input, new Tokenizer(), 5_000, "compact");
+
+		expect(result.fits).toBe(true);
+		expect(result.rewrittenOutputs).toBe(0);
+		expect(result.input).toEqual(input);
+		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(5_000);
 	});
 
 	test("uses conservative token accounting for token-dense trailing output", () => {
@@ -908,6 +938,71 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
+	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
+		"retries a transient socket closure: %s",
+		async socketCloseMessage => {
+			const model = makeOpenAiModel({
+				remoteCompaction: {
+					enabled: true,
+					v2StreamingEnabled: true,
+					v2Endpoint: "https://compact.example/v1/responses",
+				},
+			});
+			const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+			const request = buildCompactionV2Request(model, [userItem], "instructions");
+			const compactionItem = { type: "compaction", encrypted_content: "enc_123" };
+			let attempts = 0;
+			const fetchMock: FetchImpl = async () => {
+				attempts++;
+				if (attempts === 1) {
+					throw new Error(socketCloseMessage);
+				}
+				return sseResponse([
+					{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+					{ type: "response.completed" },
+				]);
+			};
+
+			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				fetch: fetchMock,
+				retryWait: async () => {},
+			});
+
+			expect(attempts).toBe(2);
+			expect(result.compactionItem).toEqual(compactionItem);
+		},
+	);
+	test("does not select Codex's unsupported V1 compact endpoint by default", () => {
+		const model = makeOpenAiModel({
+			provider: "openai-codex",
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
+	test("requires explicit opt-in for custom Codex API compaction", () => {
+		const model = buildModel({
+			id: "custom-gpt-5",
+			name: "Custom GPT-5",
+			api: "openai-codex-responses",
+			provider: "custom-provider",
+			baseUrl: "https://compact.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+			remoteCompaction: {
+				api: "openai-codex-responses",
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
 
 	test("negotiates Codex V2 compaction for an explicit Responses endpoint", async () => {
 		const model = buildModel({
@@ -1030,6 +1125,46 @@ describe("requestCompactionV2Streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
 		expect(AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)).toBe(true);
+	});
+
+	test("surfaces a standalone error event as a terminal failure without retrying", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
+			"instructions",
+		);
+		const fetchMock = vi.fn(async () =>
+			sseResponse([
+				{
+					type: "error",
+					status: 400,
+					error: {
+						message:
+							"Your input exceeds the context window of this model. Please adjust your input and try again.",
+						type: "invalid_request_error",
+						code: "context_too_large",
+					},
+				},
+			]),
+		);
+
+		const error = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock,
+			retryWait: async () => {},
+		}).catch(cause => cause);
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(error).toBeInstanceOf(AIError.ProviderHttpError);
+		expect(error).toMatchObject({ status: 400 });
+		expect(error.message).toContain("context_too_large");
+		expect(AIError.is(AIError.classify(error), AIError.Flag.ContextOverflow)).toBe(true);
 	});
 });
 
@@ -1948,6 +2083,87 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test.each(["v1", "v2", "codex-v2"])(
+		"preserves local summary history when entering native replay (%s)",
+		async protocol => {
+			const streaming = protocol !== "v1";
+			const preparation = makePreparation();
+			preparation.previousSummary = "Archived decision: use port 4242.";
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+			const baseModel = makeOpenAiModel({
+				remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const item = { type: "compaction", encrypted_content: `history-${requests.length}` };
+				return streaming
+					? sseResponse([
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: { usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 } },
+							},
+						])
+					: new Response(JSON.stringify({ output: [item] }));
+			};
+			const first = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+			const firstInput = JSON.stringify(requests[0].input);
+			expect(firstInput.match(/Archived decision: use port 4242\./g)).toHaveLength(1);
+			expect(firstInput).toContain("long history");
+			expect(firstInput).toContain("recent");
+
+			await compact(
+				{ ...preparation, previousSummary: first.summary, previousPreserveData: first.preserveData },
+				model,
+				"test-key",
+				undefined,
+				undefined,
+				{ fetch: fetchMock },
+			);
+			const secondInput = JSON.stringify(requests[1].input);
+			expect(secondInput.match(/history-1/g)).toHaveLength(1);
+			expect(secondInput).not.toContain(first.summary);
+			expect(secondInput).not.toContain(preparation.previousSummary);
+		},
+	);
+
+	test.each(["v1", "v2"])("does not dispatch a native request that cannot fit the window (%s)", async protocol => {
+		const streaming = protocol === "v2";
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+		preparation.messagesToSummarize = [{ role: "user", content: "re-expanded history ".repeat(4_000), timestamp: 1 }];
+		const model: Model = {
+			...makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: streaming } }),
+			contextWindow: 2_000,
+		};
+		const fetchMock = vi.fn<FetchImpl>(async () => {
+			throw new Error("native compaction must not reach the network");
+		});
+
+		const error = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock }).catch(
+			cause => cause,
+		);
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(error).toBeInstanceOf(NativeCompactionError);
+		// Overflow is deterministic: callers must advance to the next method, not retry.
+		const id = AIError.classify(error.cause);
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
@@ -2117,8 +2333,10 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestInput.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 
-	test("re-expands a prior V2 compaction's originals when no candidate can reuse the replay", async () => {
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("re-expanded local summary"));
+	test("re-expands native history for local preparation when new native compaction is disabled", async () => {
+		const localComplete = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(localSummaryMessage("re-expanded local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
 		const v2Model = makeOpenAiModel({
 			remoteCompaction: {
@@ -2142,8 +2360,6 @@ describe("compact() remote compaction failure handling", () => {
 					},
 				]),
 		});
-		// V2 success persists only the opaque placeholder — no second local summarization round.
-		expect(v2Result.summary).toContain("Remote compaction preserved provider-native history");
 
 		// Session branch after that V2 compaction: originals + compaction boundary + new turns.
 		const ts = (n: number) => new Date(n).toISOString();
@@ -2182,11 +2398,23 @@ describe("compact() remote compaction failure handling", () => {
 		];
 		const baseSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
 
-		// Remote disabled → the V2 replay is unusable → re-expand the pre-V2 original.
-		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, v2Model);
-		expect(reexpanded).toBeDefined();
-		const reexpandedText = JSON.stringify(reexpanded?.messagesToSummarize ?? []);
-		expect(reexpandedText).toContain("ORIGINAL ALPHA port 4242");
+		// Normal replay still works, but local preparation must re-expand the
+		// originals rather than send an opaque placeholder to its summarizer.
+		for (const { model, settings } of [
+			{ model: v2Model, settings: { ...baseSettings, remoteEnabled: false } },
+			{
+				model: { ...v2Model, remoteCompaction: { ...v2Model.remoteCompaction, enabled: false } },
+				settings: baseSettings,
+			},
+		]) {
+			const reexpanded = prepareCompaction(entries, settings, model);
+			if (!reexpanded) throw new Error("Expected local compaction preparation");
+			localComplete.mockClear();
+			await compact(reexpanded, model, "k");
+			expect(JSON.stringify(localComplete.mock.calls.map(([, context]) => context.messages))).toContain(
+				"ORIGINAL ALPHA port 4242",
+			);
+		}
 
 		// Remote + V2 still enabled, same provider → reuse the replay, don't re-summarize originals.
 		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, v2Model);
@@ -2460,5 +2688,259 @@ describe("compact() remote compaction failure handling", () => {
 			}),
 		).rejects.toThrow("Remote compaction failed");
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("Amazon Bedrock OpenAI routes", () => {
+	const AWS_ENV_KEYS = [
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
+		"AWS_BEARER_TOKEN_BEDROCK",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"AWS_CONFIG_FILE",
+		"AWS_SHARED_CREDENTIALS_FILE",
+		"AWS_EC2_METADATA_DISABLED",
+	] as const;
+
+	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
+		const previous = new Map(AWS_ENV_KEYS.map(key => [key, Bun.env[key]]));
+		try {
+			for (const key of AWS_ENV_KEYS) {
+				const value = env[key];
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+			return await run();
+		} finally {
+			for (const [key, value] of previous) {
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+		}
+	}
+
+	function makeBedrockModel(
+		baseUrl: string,
+		overrides: Partial<ModelSpec<"openai-responses">> = {},
+	): Model<"openai-responses"> {
+		return makeOpenAiModel({ id: "us.openai.gpt-6-astra", provider: "bedrock-openai", baseUrl, ...overrides });
+	}
+
+	test.each([
+		["bedrock-runtime", "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", true],
+		["templated bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/openai/v1", true],
+		["non-Bedrock custom host", "https://llm.example.com/openai/v1", false],
+		[
+			"proxy embedding the Bedrock host",
+			"https://proxy.example.com/bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			false,
+		],
+		["Bedrock Anthropic route", "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic", false],
+		["Bedrock root", "https://bedrock-runtime.us-east-1.amazonaws.com", false],
+		["bedrock-runtime FIPS", "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/openai/v1", true],
+		["bedrock-mantle documented /v1 base", "https://bedrock-mantle.us-east-1.api.aws/v1", true],
+		// Only Mantle serves the OpenAI APIs at `/v1`; runtime keeps them under `/openai`.
+		["bedrock-runtime /v1", "https://bedrock-runtime.us-east-1.amazonaws.com/v1", false],
+		[
+			"bedrock-runtime PrivateLink",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234.bedrock-runtime.us-east-1.vpce.amazonaws.com/openai/v1",
+			true,
+		],
+		[
+			"bedrock-mantle zonal PrivateLink",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234-us-east-1a.bedrock-mantle.us-east-1.vpce.amazonaws.com/v1",
+			true,
+		],
+		[
+			"PrivateLink endpoint for another service",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234.bedrock-agent-runtime.us-east-1.vpce.amazonaws.com/openai/v1",
+			false,
+		],
+		["plain HTTP", "http://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", false],
+	] as const)(
+		"enables native V1 and V2 compaction without opt-in only on OpenAI routes: %s",
+		(_route, baseUrl, expected) => {
+			const model = makeBedrockModel(baseUrl);
+			expect(shouldUseOpenAiRemoteCompaction(model)).toBe(expected);
+			expect(shouldUseCompactionV2Streaming(model)).toBe(expected);
+		},
+	);
+
+	test("does not enable the Chat Completions API on Bedrock's OpenAI route", () => {
+		const model = buildModel({
+			id: "chat-model",
+			name: "Chat model",
+			api: "openai-completions",
+			provider: "bedrock-openai",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 32000,
+		});
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(model)).toBe(false);
+	});
+
+	test("lets explicit disables win over the Bedrock default", () => {
+		const url = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
+		const disabled = makeBedrockModel(url, { remoteCompaction: { enabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(disabled)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(disabled)).toBe(false);
+
+		const v1Only = makeBedrockModel(url, { remoteCompaction: { v2StreamingEnabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(v1Only)).toBe(true);
+		expect(shouldUseCompactionV2Streaming(v1Only)).toBe(false);
+	});
+
+	function makeMantleModel(): Model<"openai-responses"> {
+		return makeOpenAiModel({
+			id: "openai.gpt-6-sol",
+			provider: "bedrock-mantle",
+			baseUrl: "https://bedrock-mantle.{region}.api.aws/openai/v1",
+		});
+	}
+
+	test("sends V1 compaction for a templated Mantle model to the regional endpoint with the bearer token", async () => {
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+		};
+
+		await withAwsEnv({ AWS_REGION: "eu-west-2" }, () =>
+			requestOpenAiRemoteCompaction(
+				makeMantleModel(),
+				"mantle-token",
+				[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+				"instructions",
+				undefined,
+				{ fetch: fetchMock },
+			),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.eu-west-2.api.aws/openai/v1/responses/compact");
+		expect(authorization).toBe("Bearer mantle-token");
+	});
+
+	test("signs V2 compaction for a templated Mantle model with SigV4 when no bearer token exists", async () => {
+		const model = makeMantleModel();
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			"instructions",
+		);
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed" },
+			]);
+		};
+
+		await withAwsEnv(
+			{
+				AWS_REGION: "us-west-2",
+				AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+				AWS_SECRET_ACCESS_KEY: "secret",
+				AWS_CONFIG_FILE: "/nonexistent/aws-config",
+				AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/aws-credentials",
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			() => requestCompactionV2Streaming(model, NO_AUTH_SENTINEL, request, undefined, { fetch: fetchMock }),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1/responses");
+		expect(authorization).toContain("/us-west-2/bedrock-mantle/aws4_request");
+	});
+});
+
+describe("Amazon Bedrock compaction request preparation", () => {
+	const nativeInput = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+	const runtimeUrl = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
+
+	function compactionResponse(): Response {
+		return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+	}
+
+	function v2Response(): Response {
+		return sseResponse([
+			{ type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "enc" } },
+			{ type: "response.completed" },
+		]);
+	}
+
+	test("sends lazily resolved configured headers instead of a keyless bearer", async () => {
+		const model: Model<"openai-responses"> = {
+			...makeOpenAiModel({ id: "us.openai.gpt-6-astra", provider: "bedrock-lazy-headers", baseUrl: runtimeUrl }),
+			resolveHeaders: async () => ({ Authorization: "Bearer lazy-token" }),
+		};
+		const authorizations: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			authorizations.push(new Headers(init?.headers).get("authorization"));
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+
+		await requestOpenAiRemoteCompaction(model, NO_AUTH_SENTINEL, nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			NO_AUTH_SENTINEL,
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(authorizations).toEqual(["Bearer lazy-token", "Bearer lazy-token"]);
+	});
+
+	test("routes compaction through the provider proxy", async () => {
+		const model = makeOpenAiModel({
+			id: "us.openai.gpt-6-astra",
+			provider: "compaction-proxy-test",
+			baseUrl: runtimeUrl,
+		});
+		const previous = Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+		Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = "http://proxy.example.test:8080";
+		__resetProxyCache();
+		const proxies: unknown[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			proxies.push((init as { proxy?: unknown } | undefined)?.proxy);
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+		try {
+			await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
+				fetch: fetchMock,
+			});
+			await requestCompactionV2Streaming(
+				model,
+				"test-key",
+				buildCompactionV2Request(model, nativeInput, "instructions"),
+				undefined,
+				{ fetch: fetchMock },
+			);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+			else Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = previous;
+			__resetProxyCache();
+		}
+
+		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
 	});
 });

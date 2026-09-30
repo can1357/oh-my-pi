@@ -1,16 +1,12 @@
 /**
  * Shared foreground-wait helpers for tools that auto-background long-running
  * work as {@link AsyncJobManager} jobs (bash commands, eval cells): the
- * LLM-facing background notice, the threshold-vs-timeout wait budget, and the
+ * threshold-vs-timeout wait budget and the
  * settlement race against abort/steering signals.
  */
 
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
-/** LLM-facing footer appended when a tool call is converted into a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
-}
 
 /**
  * How long a tool foreground-waits before backgrounding. Bounded by the call's

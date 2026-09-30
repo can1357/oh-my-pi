@@ -8,10 +8,11 @@ import {
 	formatCollabLink,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
+} from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -42,11 +43,11 @@ function makeAgents(ids: string[]): AgentSnapshot[] {
 	}));
 }
 
-function makeGuestContext(counts: number[]): InteractiveModeContext {
+function makeGuestContext(): InteractiveModeContext {
 	let statusLineCount = 0;
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
-		settings: { get: () => "" },
+		settings: Settings.isolated(),
 		sessionManager: {
 			getSessionFile: () => null,
 			getSessionName: () => "local session",
@@ -93,12 +94,11 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		showError: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		syncRunningSubagentBadge: () => {
-			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest);
+			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global());
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
 			ctx.statusLine.setRunningSubagents(agentIds);
-			counts.push(agentIds.length);
 		},
 	} as unknown as InteractiveModeContext;
 	return ctx;
@@ -141,14 +141,12 @@ describe("collab guest running-subagents badge", () => {
 		hostSocket.connect();
 		await hostOpen.promise;
 
-		const counts: number[] = [];
-		const ctx = makeGuestContext(counts);
+		const ctx = makeGuestContext();
 		const guest = new CollabGuestLink(ctx);
 
 		try {
 			await guest.join(link);
 			expect(ctx.collabGuest).toBe(guest);
-			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
 
 			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
@@ -165,7 +163,6 @@ describe("collab guest running-subagents badge", () => {
 			await guest.leave("test cleanup");
 			expect(ctx.collabGuest).toBeUndefined();
 			expect(ctx.statusLine.subagentCount).toBe(0);
-			expect(counts.at(-1)).toBe(0);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
@@ -12,18 +12,27 @@ async function runPrelude(
 		"from __future__ import annotations\n__omp_display = lambda *args, **kwargs: None",
 	);
 	const script = `${prelude}\n${code}`;
-	const proc = Bun.spawn([pythonPath, "-c", script], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, ...env },
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	// Python's text-mode stdout emits \r\n on Windows.
-	return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	// The full prelude exceeds Windows' ~32k `python -c` command-line limit
+	// (ENAMETOOLONG); a script file behaves identically on every platform.
+	const dir = await TempDir.create("omp-py-prelude-");
+	try {
+		const scriptPath = dir.join("script.py");
+		await Bun.write(scriptPath, script);
+		const proc = Bun.spawn([pythonPath, scriptPath], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, ...env },
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		// Python's text-mode stdout emits \r\n on Windows.
+		return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	} finally {
+		await dir.remove();
+	}
 }
 
 describe("python prelude", () => {

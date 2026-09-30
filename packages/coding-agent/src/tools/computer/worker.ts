@@ -24,7 +24,8 @@ import {
 	type WaitPredicateOptions,
 	waitForRun,
 } from "../run-scope";
-import { ToolAbortError, ToolError, throwIfAborted } from "../tool-errors";
+import { ToolAbortError, throwIfAborted } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
 	ComputerScreenshot,
 	ComputerSessionSnapshot,
@@ -73,14 +74,16 @@ export interface NativeDesktopSession {
 }
 
 /** Creates the native session co-located with the computer worker runtime. */
-export type NativeDesktopSessionFactory = (options: DesktopSessionOptions) => NativeDesktopSession;
+export type NativeDesktopSessionFactory = (
+	options: DesktopSessionOptions,
+) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { app?: string; title?: string };
-type DeliveryOptions = { delivery?: string };
+type WindowFilter = { id?: string | number; app?: string; title?: string };
+type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
-type ClickOptions = DeliveryOptions & { button?: string; count?: number; modifiers?: string[] };
-type DragOptions = DeliveryOptions & { modifiers?: string[] };
-type ScrollOptions = DeliveryOptions & { dx?: number; dy?: number };
+type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
+type DragOptions = InputOptions & { modifiers?: string[] };
+type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -143,13 +146,13 @@ async function nativeCall<T>(signal: AbortSignal, call: () => Promise<T>): Promi
 	}
 }
 
-function pointerOptions(options?: ClickOptions | DragOptions | DeliveryOptions): PointerOptions | undefined {
+function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions | undefined {
 	if (!options) return undefined;
 	const mapped: PointerOptions = {};
 	if ("button" in options && options.button !== undefined) mapped.button = options.button;
 	if ("count" in options && options.count !== undefined) mapped.count = options.count;
 	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
-	if (options.delivery !== undefined) mapped.deliveryMode = options.delivery;
+	if (options.takeover !== undefined) mapped.takeover = options.takeover;
 	return mapped;
 }
 
@@ -167,6 +170,7 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
+		(filter.id === undefined || window.id === String(filter.id)) &&
 		(!app || window.app.toLocaleLowerCase().includes(app)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
@@ -283,7 +287,7 @@ class El {
 		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, "press"));
 	}
 
-	async click(options?: DeliveryOptions): Promise<void> {
+	async click(options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "click");
 		await nativeCall(context.signal, () => this.#session.axClick(this.ref, pointerOptions(options)));
@@ -374,13 +378,13 @@ class Win {
 		);
 	}
 
-	async type(text: string, options?: DeliveryOptions): Promise<void> {
+	async type(text: string, options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "type");
 		await nativeCall(context.signal, () => this.#session.typeText(this.id, text, pointerOptions(options)));
 	}
 
-	async press(chord: string | string[], options?: DeliveryOptions): Promise<void> {
+	async press(chord: string | string[], options?: InputOptions): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "press");
 		await nativeCall(context.signal, () =>
@@ -418,6 +422,8 @@ export class ComputerWorkerCore {
 	readonly #createSession?: NativeDesktopSessionFactory;
 	readonly #unsubscribe: () => void;
 	#session?: NativeDesktopSession;
+	/** In-flight lazy session creation, shared so concurrent run/capabilities requests never double-create. */
+	#sessionInit?: Promise<NativeDesktopSession>;
 	#runtime?: JsRuntime;
 	#active: ActiveRun | null = null;
 	/**
@@ -444,6 +450,9 @@ export class ComputerWorkerCore {
 			case "run":
 				void this.#run(message);
 				return;
+			case "capabilities":
+				void this.#capabilities(message);
+				return;
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
 				return;
@@ -457,15 +466,27 @@ export class ComputerWorkerCore {
 
 	async #ensureSession(snapshot: ComputerSessionSnapshot): Promise<NativeDesktopSession> {
 		if (this.#session) return this.#session;
+		// Single-flight: share one creation promise so a run and a capabilities
+		// request racing on a cold worker cannot each build (and leak) a session.
+		this.#sessionInit ??= (async () => {
+			try {
+				// The worker must answer its readiness handshake without loading the native
+				// addon; normal CLI startup and selector pings never execute desktop code.
+				const createSession =
+					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
+				const session = await createSession({ display: snapshot.display });
+				this.#session = session;
+				return session;
+			} catch (error) {
+				throw nativeError(error);
+			}
+		})();
 		try {
-			// The worker must answer its readiness handshake without loading the native
-			// addon; normal CLI startup and selector pings never execute desktop code.
-			const createSession =
-				this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-			this.#session = createSession({ display: snapshot.display });
-			return this.#session;
+			return await this.#sessionInit;
 		} catch (error) {
-			throw nativeError(error);
+			// A failed attempt must not pin the rejection; let the next request retry.
+			this.#sessionInit = undefined;
+			throw error;
 		}
 	}
 
@@ -599,6 +620,34 @@ export class ComputerWorkerCore {
 		}
 	}
 
+	/**
+	 * Answers a direct capabilities request without executing a script. Unlike a
+	 * run, this never touches `#active`, so it resolves even while a run is in
+	 * flight and always reports the session's current permission/backend state.
+	 */
+	async #capabilities(message: Extract<ComputerWorkerInbound, { type: "capabilities" }>): Promise<void> {
+		if (this.#closed) {
+			this.#transport.send({
+				type: "capabilities",
+				id: message.id,
+				ok: false,
+				error: errorPayload(new ToolError("Computer worker is closed")),
+			});
+			return;
+		}
+		try {
+			const session = await this.#ensureSession(message.session);
+			this.#transport.send({ type: "capabilities", id: message.id, ok: true, capabilities: session.capabilities });
+		} catch (error) {
+			this.#transport.send({
+				type: "capabilities",
+				id: message.id,
+				ok: false,
+				error: errorPayload(error instanceof ToolAbortError ? error : nativeError(error)),
+			});
+		}
+	}
+
 	#runtimeHooks(active: ActiveRun, output: RunOutput): RuntimeHooks {
 		return {
 			onText: chunk => {
@@ -672,12 +721,12 @@ export class ComputerWorkerCore {
 					matchesFilter(window, filter),
 				);
 			},
-			window: async (selector: string | WindowFilter): Promise<Win> => {
+			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
 				const windows = await nativeCall(signal, () => session.listWindows());
 				const matches =
-					typeof selector === "string"
-						? windows.filter(window => window.id === selector)
+					typeof selector === "string" || typeof selector === "number"
+						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
 				if (matches.length === 0) throw new ToolError(`no window matches ${JSON.stringify(selector)}`);
 				if (matches.length > 1) {
@@ -749,6 +798,7 @@ export class ComputerWorkerCore {
 			// Closing is best-effort; the worker is exiting and has no request to report this against.
 		} finally {
 			this.#session = undefined;
+			this.#sessionInit = undefined;
 			this.#unsubscribe();
 			this.#transport.send({ type: "closed" });
 			this.#transport.close();

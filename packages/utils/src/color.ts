@@ -239,7 +239,7 @@ const ANSI_16: readonly (readonly [number, number, number])[] = [
 const CUBE_STEPS = [0, 95, 135, 175, 215, 255] as const;
 
 /** Parse a 256-color palette index (0–255) to RGB (0..255). */
-function paletteToRgb(index: number): RGB | undefined {
+export function paletteToRgb(index: number): RGB | undefined {
 	if (!Number.isInteger(index) || index < 0 || index > 255) return undefined;
 	if (index < 16) {
 		const rgb = ANSI_16[index];

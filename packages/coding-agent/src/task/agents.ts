@@ -12,9 +12,10 @@ import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
-import { AUTO_THINKING } from "../thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
-import type { AgentDefinition, AgentSource } from "./types";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentDefinition } from "./types";
 
 interface AgentFrontmatter {
 	name: string;

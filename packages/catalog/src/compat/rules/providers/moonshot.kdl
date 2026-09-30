@@ -1,6 +1,12 @@
 // Provider-wire compat for "moonshot"; regenerated from the frozen census using deployment contract selectors.
 
 provider "moonshot" {
+	default-model "kimi-k2.7-code"
+	// KIMI_API_KEY is the most intuitive name for a Kimi/Moonshot key; accept it
+	// as a fallback so China users need not learn MOONSHOT_API_KEY. (#2883)
+	env "MOONSHOT_API_KEY" "KIMI_API_KEY"
+	discovery label="Moonshot"
+
 	class "kimi" {
 		// Replaces the Moonshot Kimi thinking-format branch.
 		thinking-format "zai"

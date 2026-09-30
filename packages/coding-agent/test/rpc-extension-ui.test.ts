@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type PendingExtensionRequest,
 	requestRpcDialog,
@@ -21,6 +23,91 @@ function resolveSelection(pendingRequests: Map<string, PendingExtensionRequest>,
 }
 
 describe("RPC extension UI", () => {
+	it("keeps extension dialogs headless while tool selections round-trip", async () => {
+		await using temp = await TempDir.create("@rpc-headless-tool-ui-");
+		const fixturePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		await Bun.write(
+			fixturePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+globalThis.fetch = async () => { throw new Error("Offline UI fixture refuses network"); };
+let extensionState;
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  toolNames: [],
+  enableMCP: false,
+  enableLsp: false,
+  disableExtensionDiscovery: true,
+  settings: Settings.isolated({ "compaction.enabled": false }),
+  extensions: [pi => {
+    pi.on("session_start", async (_event, ctx) => {
+      const confirmed = await ctx.ui.confirm("Extension confirm", "Must not reach the host");
+      ctx.ui.notify("Extension notification");
+      extensionState = { hasUI: ctx.hasUI, confirmed };
+    });
+  }],
+});
+await runRpcMode(session, {
+  headless: true,
+  setToolUIContext(ui, hasUI) {
+    void ui.select("Tool choice", ["Keep", "Deploy"]).then(selected => {
+      ui.notify(JSON.stringify({ toolHasUI: hasUI, selected, extension: extensionState }));
+    });
+  },
+});
+`,
+		);
+		const child = Bun.spawn([process.execPath, fixturePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 20_000,
+		});
+		const stderr = new Response(child.stderr).text();
+		const requests: Record<string, unknown>[] = [];
+		let result: unknown;
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame) || frame.type !== "extension_ui_request") continue;
+				requests.push(frame);
+				if (frame.method === "select") {
+					child.stdin.write(
+						`${JSON.stringify({ type: "extension_ui_response", id: frame.id, value: "Deploy" })}\n`,
+					);
+					await child.stdin.flush();
+				} else if (frame.method === "notify") {
+					if (typeof frame.message === "string") result = JSON.parse(frame.message);
+					break;
+				} else {
+					throw new Error(`Unexpected extension UI: ${JSON.stringify(frame)}`);
+				}
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+		}
+		expect(result, await stderr).toEqual({
+			toolHasUI: true,
+			selected: "Deploy",
+			extension: { hasUI: false, confirmed: false },
+		});
+		expect(requests.map(frame => frame.method)).toEqual(["select", "notify"]);
+		expect(requests[0]).toMatchObject({ title: "Tool choice", options: ["Keep", "Deploy"] });
+	}, 30_000);
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -99,4 +186,129 @@ describe("RPC extension UI", () => {
 		});
 		expect(pendingRequests.size).toBe(0);
 	});
+
+	it("rejects secret login input without emitting ordinary input while ordinary OAuth input works", async () => {
+		await using temp = await TempDir.create("@rpc-login-");
+		const extensionPath = temp.join("login.mjs");
+		await Bun.write(
+			extensionPath,
+			`
+export default function(pi) {
+  globalThis.fetch = async () => { throw new Error("Offline login fixture refuses network"); };
+  for (const secret of [true, false]) {
+    const id = secret ? "rpc-secret" : "rpc-ordinary";
+    pi.registerProvider(id, {
+      baseUrl: "http://127.0.0.1:9/v1",
+      api: "openai-completions",
+      models: [{
+        id: "fixture",
+        name: "Offline fixture",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 4096,
+        maxTokens: 512,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }],
+      oauth: {
+        name: id,
+        login: async callbacks => {
+          callbacks.onAuth({ url: "https://example.invalid/authorize" });
+          return callbacks.onPrompt({ message: id, ...(secret ? { secret: true } : {}) });
+        }
+      }
+    });
+  }
+}
+`,
+		);
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "..", "src", "cli.ts"),
+				"--trusted-extension",
+				extensionPath,
+				"--mode",
+				"rpc",
+				"--provider",
+				"anthropic",
+				"--model",
+				"claude-sonnet-4-5",
+			],
+			{
+				cwd: temp.path(),
+				env: {
+					PATH: Bun.env.PATH,
+					HOME: temp.join("home"),
+					PI_CODING_AGENT_DIR: temp.join("agent"),
+					XDG_CONFIG_HOME: temp.join("config"),
+					XDG_DATA_HOME: temp.join("data"),
+					XDG_CACHE_HOME: temp.join("cache"),
+					CI: "true",
+					PI_NO_TITLE: "1",
+				},
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: 20_000,
+			},
+		);
+		const stdout = new Response(child.stdout).body;
+		if (!stdout) throw new Error("RPC login fixture did not expose stdout");
+		const stderr = new Response(child.stderr).text();
+		const inputTitles: string[] = [];
+		let secretResponse: unknown;
+		let ordinaryResponse: unknown;
+		let providersResponse: unknown;
+		const send = async (frame: object) => {
+			child.stdin.write(`${JSON.stringify(frame)}\n`);
+			await child.stdin.flush();
+		};
+
+		try {
+			await send({ type: "login", providerId: "rpc-secret", id: "secret" });
+			for await (const frame of readJsonl<unknown>(stdout)) {
+				if (!isRecord(frame)) continue;
+				if (frame.type === "extension_ui_request" && frame.method === "input") {
+					if (typeof frame.id !== "string" || typeof frame.title !== "string") {
+						throw new Error("RPC input request did not carry string id and title");
+					}
+					inputTitles.push(frame.title);
+					await send({ type: "extension_ui_response", id: frame.id, value: crypto.randomUUID() });
+				} else if (frame.type === "response" && frame.id === "secret") {
+					secretResponse = frame;
+					await send({ type: "login", providerId: "rpc-ordinary", id: "ordinary" });
+				} else if (frame.type === "response" && frame.id === "ordinary") {
+					ordinaryResponse = frame;
+					await send({ type: "get_login_providers", id: "providers" });
+				} else if (frame.type === "response" && frame.id === "providers") {
+					providersResponse = frame;
+					break;
+				}
+			}
+		} finally {
+			child.stdin.end();
+			child.kill();
+			await child.exited;
+		}
+
+		if (!providersResponse) throw new Error(`RPC login fixture did not finish: ${await stderr}`);
+		await stderr;
+		expect(secretResponse).toMatchObject({
+			type: "response",
+			command: "login",
+			success: false,
+			error: expect.stringContaining("requires secret input"),
+		});
+		expect(inputTitles).toEqual(["rpc-ordinary"]);
+		expect(ordinaryResponse).toMatchObject({ type: "response", command: "login", success: true });
+		expect(providersResponse).toMatchObject({
+			success: true,
+			data: {
+				providers: expect.arrayContaining([
+					expect.objectContaining({ id: "rpc-secret", authenticated: false }),
+					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+				]),
+			},
+		});
+	}, 30_000);
 });

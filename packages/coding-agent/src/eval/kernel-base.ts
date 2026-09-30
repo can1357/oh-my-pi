@@ -1,11 +1,28 @@
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./py/display";
+import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
+
+const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
+
+async function raceControlTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
+	const signal = AbortSignal.timeout(timeoutMs);
+	const { promise: timeout, reject } = Promise.withResolvers<never>();
+	const onAbort = (): void => reject(new Error(reason));
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
 
 export type KernelRuntimeEnv = Record<string, string | null>;
 
 export interface KernelExecuteOptions {
 	id?: string;
+	/** Source filename for file-backed execution and tracebacks. */
+	filename?: string;
 	/** Runtime working directory applied immediately before this request executes. */
 	cwd?: string;
 	/** Managed runtime environment variables applied immediately before this request executes. */
@@ -26,6 +43,8 @@ export interface KernelExecuteResult {
 	cancelled: boolean;
 	timedOut: boolean;
 	stdinRequested: boolean;
+	/** True when an atomic retained-runtime admission check rejected this execution before user code ran. */
+	admissionRejected?: boolean;
 	/**
 	 * True when the kernel subprocess was killed as part of settling this
 	 * execution (e.g. SIGINT was ignored and we escalated to shutdown, or the
@@ -69,7 +88,16 @@ export interface BaseKernelOptions<TExecuteOptions extends KernelExecuteOptions 
 	buildPayload: (code: string, msgId: string, options?: TExecuteOptions) => string;
 }
 
-export type FrameType = "started" | "stdout" | "stderr" | "display" | "result" | "error" | "done";
+export type FrameType =
+	| "started"
+	| "stdout"
+	| "stderr"
+	| "display"
+	| "result"
+	| "error"
+	| "done"
+	| "shadow_snapshot"
+	| "shadow_plan";
 
 export interface Frame {
 	type: FrameType;
@@ -80,8 +108,17 @@ export interface Frame {
 	evalue?: string;
 	traceback?: string[];
 	status?: "ok" | "error";
+	operations?: ShadowOperation[];
+	controls?: ShadowControlNode[];
+	barrier?: ShadowBarrier | null;
 	executionCount?: number;
 	cancelled?: boolean;
+	eligible?: boolean;
+	reason?: string;
+	revision?: number;
+	digest?: string;
+	admissionRejected?: boolean;
+	values?: Record<string, unknown>;
 }
 
 interface PendingExecution {
@@ -92,6 +129,7 @@ interface PendingExecution {
 	error?: { name: string; value: string; traceback: string[] };
 	cancelled: boolean;
 	timedOut: boolean;
+	admissionRejected?: boolean;
 	stdinRequested: boolean;
 	kernelKilled: boolean;
 	settled: boolean;
@@ -182,6 +220,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#shutdownConfirmed = false;
 	#exitedPromise: Promise<number> | null = null;
 	#pending = new Map<string, PendingExecution>();
+	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
 	#readBuffer = "";
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
 
@@ -254,6 +293,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				cancelled: pending.cancelled,
 				timedOut: pending.timedOut,
 				stdinRequested: pending.stdinRequested,
+				admissionRejected: pending.admissionRejected,
 				kernelKilled: pending.kernelKilled,
 			});
 		};
@@ -332,6 +372,25 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		return promise;
 	}
+	async requestControl(
+		payload: string,
+		id = Snowflake.next(),
+		timeoutMs = STARTUP_CONTROL_TIMEOUT_MS,
+	): Promise<Frame> {
+		if (!this.isAlive()) throw new Error(`${this.#options.languageName} kernel is not running`);
+		const deferred = Promise.withResolvers<Frame>();
+		this.#pendingControls.set(id, deferred);
+		try {
+			await this.#writeLine(payload);
+			return await raceControlTimeout(
+				deferred.promise,
+				timeoutMs,
+				`${this.#options.languageName} control request timed out`,
+			);
+		} finally {
+			this.#pendingControls.delete(id);
+		}
+	}
 
 	async interrupt(): Promise<void> {
 		if (!this.#proc || this.#disposed) return;
@@ -372,7 +431,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const exited = this.#waitForExitWithTimeout(timeoutMs);
 		let result = await exited;
-		if (!result) {
+		if (result === null) {
 			try {
 				proc.kill("SIGTERM");
 			} catch {
@@ -382,20 +441,20 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			// signal above never reaches anything it spawned. Sweep the group too.
 			killProcessGroup(proc.pid, "SIGTERM");
 			result = await this.#waitForExitWithTimeout(timeoutMs);
-			if (!result) {
+			if (result === null) {
 				try {
 					proc.kill("SIGKILL");
 				} catch {
 					/* ignore */
 				}
 			}
-			// The leader exiting after SIGTERM does not prove its descendants did.
-			// Always finish an attempted group shutdown with a SIGKILL sweep.
-			killProcessGroup(proc.pid, "SIGKILL");
-			if (!result) result = await this.#waitForExitWithTimeout(timeoutMs);
 		}
+		// A confirmed leader exit does not prove its descendants exited, even
+		// when the runner honored the shutdown request without any signals.
+		killProcessGroup(proc.pid, "SIGKILL");
+		if (result === null) result = await this.#waitForExitWithTimeout(timeoutMs);
 
-		const confirmed = !!result;
+		const confirmed = result !== null;
 		if (!confirmed) {
 			// Nothing acknowledged the exit. Record the pid so an operator can find
 			// the survivor; the group SIGKILL above is our last automatic recourse.
@@ -410,6 +469,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	#abortPendingExecutions(reason: string, options?: { kernelKilled?: boolean }): void {
+		for (const pending of this.#pendingControls.values()) {
+			pending.reject(new Error(reason));
+		}
+		this.#pendingControls.clear();
 		if (this.#pending.size === 0) return;
 		const pending = Array.from(this.#pending.values());
 		this.#pending.clear();
@@ -522,6 +585,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	async #handleFrame(frame: Frame): Promise<void> {
 		const rid = frame.id;
 		if (!rid) return;
+		const control = this.#pendingControls.get(rid);
+		if (control) {
+			control.resolve(frame);
+			return;
+		}
 		const pending = this.#pending.get(rid);
 		if (!pending) return;
 
@@ -574,6 +642,9 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 				if (frame.cancelled) {
 					pending.cancelled = true;
+				}
+				if (frame.admissionRejected) {
+					pending.admissionRejected = true;
 				}
 				pending.finalize?.();
 				return;

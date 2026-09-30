@@ -98,13 +98,25 @@ fn mismatch(
 ) -> EditError {
 	let actual = file_hash(normalized);
 	store.record(canonical, normalized, None);
+	// When the tag isn't from this exact path, list the other paths in this
+	// session that *did* issue the same tag — so the rejection can name the
+	// file the tag was actually for and the model doesn't follow a wrong-tree
+	// suggestion.
+	let tag_origin_paths: Vec<String> = store
+		.find_by_hash(expected)
+		.into_iter()
+		.map(|snapshot| snapshot.path)
+		.filter(|path| path != canonical)
+		.map(|path| path.to_string_lossy().into_owned())
+		.collect();
 	mismatch_error(&MismatchDetails {
-		path:               Some(section.path.clone()),
+		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
-		actual_file_hash:   actual,
-		file_lines:         normalized.split('\n').map(str::to_owned).collect(),
-		anchor_lines:       section.collect_anchor_lines().unwrap_or_default(),
-		hash_recognized:    store.by_hash(canonical, expected).is_some(),
+		actual_file_hash: actual,
+		file_lines: normalized.split('\n').map(str::to_owned).collect(),
+		anchor_lines: section.collect_anchor_lines().unwrap_or_default(),
+		hash_recognized: store.by_hash(canonical, expected).is_some(),
+		tag_origin_paths,
 	})
 }
 
@@ -306,6 +318,40 @@ pub(crate) fn recover_target(
 	let display = path.to_string_lossy().into_owned();
 	(section.with_path(&display), Resolved { absolute: path, display })
 }
+/// Stage a whole-file delete for a target whose bytes cannot be decoded:
+/// existence is proven, but there is no content to diff or snapshot.
+#[allow(
+	clippy::too_many_arguments,
+	reason = "delete staging threads section, resolution, dedup, and clipboard state"
+)]
+fn undecodable_delete_staged(
+	section: &PatchSection,
+	resolved: &Resolved,
+	original_path: &str,
+	tag: &str,
+	mut warnings: Vec<String>,
+	canonical_paths: &mut HashMap<std::path::PathBuf, String>,
+	clipboard: &Clipboard,
+) -> Result<StagedFile, EditError> {
+	if section.path != original_path {
+		warnings.push(path_recovered_from_tag_message(original_path, &section.path, tag));
+	}
+	if let Some(previous) = canonical_paths
+		.insert(crate::path_policy::canonical_key(&resolved.absolute), original_path.to_owned())
+	{
+		return Err(EditError::apply(format!(
+			"Multiple hashline sections resolve to the same file ({previous} and {original_path}). \
+			 Merge their ops under one header before applying."
+		)));
+	}
+	let mut item =
+		StagedFile::new(section.path.clone(), resolved.absolute.clone(), EngineFileOp::Delete);
+	item.header = HeaderKind::HashlineTag;
+	item.warnings = warnings;
+	item.record_snapshot = true;
+	item.clipboard_after = Some(clipboard.fork());
+	Ok(item)
+}
 
 /// Stage every parsed hashline section atomically.
 pub fn stage_patch(
@@ -325,12 +371,32 @@ pub fn stage_patch(
 		};
 		let initial = files.resolve(&original.path, false)?;
 		let (section, resolved) = recover_target(original, &initial, files, store);
-		let read = files.try_read(&resolved)?.ok_or_else(|| {
-			EditError::apply(format!(
+		// Whole-file delete needs existence, not text, so an undecodable file
+		// stages without its content; anything else still rejects.
+		let undecodable_delete = matches!(parsed.file_op, Some(FileOp::Rem));
+		let read = match files.try_read(&resolved) {
+			Ok(read) => read,
+			Err(err) if err.is_invalid_utf8() && undecodable_delete => None,
+			Err(err) => return Err(err),
+		};
+		let Some(read) = read else {
+			if undecodable_delete && files.exists(&resolved.absolute) {
+				staged.push(undecodable_delete_staged(
+					&section,
+					&resolved,
+					&original.path,
+					tag,
+					parsed.warnings.clone(),
+					&mut canonical_paths,
+					&clipboard.fork(),
+				)?);
+				continue;
+			}
+			return Err(EditError::apply(format!(
 				"File not found: {}. Use the write tool to create new files.",
 				section.path
-			))
-		})?;
+			)));
+		};
 		if section.path != original.path {
 			// Warning is attached below once parser/apply warnings are collected.
 		}

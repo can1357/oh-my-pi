@@ -6,7 +6,7 @@ import { applyChangelogProposals } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
 import { parseUnreleasedSection } from "../../commit/changelog/parse";
 import { formatCommitMessage } from "../../commit/message";
-import { resolvePrimaryModel, resolveSmolModel } from "../../commit/model-selection";
+import { resolvePrimaryModel } from "../../commit/model-selection";
 import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../../commit/types";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
@@ -29,7 +29,8 @@ interface CommitExecutionContext {
 export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedFallback: boolean }> {
 	const cwd = getProjectDir();
 	const repo = vcs.requireGit(cwd);
-	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	const settings = await Settings.init({ cwd });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 
 	process.stdout.write("● Resolving model...\n");
 	const modelRegistry = new ModelRegistry(authStorage);
@@ -47,15 +48,8 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 
 	const primaryModelPromise = resolvePrimaryModel(args.model, settings, modelRegistry);
 	const [primaryModelResult, stagedFiles] = await Promise.all([primaryModelPromise, stagedFilesPromise]);
-	const { model: primaryModel, apiKey: primaryApiKey } = primaryModelResult;
+	const { model: primaryModel, thinkingLevel: primaryThinkingLevel } = primaryModelResult;
 	process.stdout.write(`  └─ ${primaryModel.name}\n`);
-
-	const { model: agentModel, thinkingLevel: agentThinkingLevel } = await resolveSmolModel(
-		settings,
-		modelRegistry,
-		primaryModel,
-		primaryApiKey,
-	);
 
 	if (stagedFiles.length === 0) {
 		if (args.push) {
@@ -143,8 +137,8 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	try {
 		await runCommitAgentSession({
 			cwd,
-			model: agentModel,
-			thinkingLevel: agentThinkingLevel,
+			model: primaryModel,
+			thinkingLevel: primaryThinkingLevel,
 			settings,
 			modelRegistry,
 			authStorage,

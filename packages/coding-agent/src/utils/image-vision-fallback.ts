@@ -18,6 +18,7 @@ import {
 	instrumentedCompleteSimple,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { Api, completeSimple, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
@@ -25,6 +26,8 @@ import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
+import { cfgImagesBlockImages } from "../modes/settings";
+import { cfgImagesDescribeForTextModels } from "../session/settings";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
 
@@ -40,6 +43,19 @@ const DESCRIPTION_UNAVAILABLE_NOTE =
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
 export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
+
+/** Whether user images sent to `model` should be replaced by a vision-model description. */
+export function shouldDescribeImagesForTextModel(
+	model: Model<Api> | undefined,
+	settings: Settings,
+): model is Model<Api> {
+	return (
+		!!model &&
+		!sendsImageInputOnWire(model) &&
+		!cfgImagesBlockImages.get(settings) &&
+		cfgImagesDescribeForTextModels.get(settings)
+	);
+}
 
 export interface DescribeAttachedImagesDeps {
 	/** Active (text-only) model the prompt is destined for. */
@@ -108,13 +124,13 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, deps.settings);
 		const model = resolveModelFromString(expanded, available, preferences);
-		return model?.input.includes("image") ? model : undefined;
+		return model && sendsImageInputOnWire(model) ? model : undefined;
 	};
 	return (
 		resolvePattern("@vision") ??
 		resolvePattern("@default") ??
 		resolvePattern(deps.activeModelString) ??
-		available.find(model => model.input.includes("image"))
+		available.find(model => sendsImageInputOnWire(model))
 	);
 }
 

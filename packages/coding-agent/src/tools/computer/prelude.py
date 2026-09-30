@@ -41,6 +41,8 @@ def _make_computer():
                 "action": action,
             },
         )
+        if isinstance(response, str):
+            return {}
         if not isinstance(response, dict):
             raise RuntimeError("computer returned an invalid response")
         text = response.get("text")
@@ -206,7 +208,7 @@ def _make_computer():
             return await self._method("press", args, kwargs)
 
         async def window(self, *args, **kwargs):
-            """Resolve one window by opaque id or by `app`/`title` filter keywords."""
+            """Resolve one window by id ("74" or 74) or by `app`/`title` filter keywords."""
             snapshot = await self._method("window", args, kwargs)
             return _Window(snapshot) if isinstance(snapshot, dict) else None
 

@@ -134,4 +134,12 @@ describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
 		expect(parallelCalls[1]?.thoughtSignature).toBe(SENTINEL);
 		expect(parallelCalls[2]?.thoughtSignature).toBe(SENTINEL);
 	});
+
+	it("uses the public Gemini bypass for custom google-generative-ai providers", () => {
+		const model = buildGeminiModel("google-generative-ai", "build", "gemini-3.7-flash");
+		const unsigned = unsignedFirstCall("google-generative-ai", "build", "gemini-3.7-flash");
+
+		expect(model.identity.class).toBe("gemini");
+		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
+	});
 });

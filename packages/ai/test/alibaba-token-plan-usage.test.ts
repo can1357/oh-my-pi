@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import {
@@ -159,7 +159,6 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 					protocol: "V2",
 					console: "ONE_CONSOLE",
 					productCode: "p_efm",
-					switchAgent: 12608464,
 					switchUserType: 3,
 					domain: "bailian.console.aliyun.com",
 					consoleSite: "BAILIAN_ALIYUN",
@@ -170,6 +169,7 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 			},
 			V: "1.0",
 		});
+		expect(gatewayParams).not.toHaveProperty("Data.cornerstoneParam.switchAgent");
 		expect(report).toMatchObject({
 			provider: "alibaba-token-plan",
 			limits: [
@@ -183,6 +183,43 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(report?.limits).toHaveLength(1);
 	});
 
+	test("warns with the gateway error code when China quota access is rejected", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? new Response('<script>window.ALIYUN_CONSOLE_CONFIG = { SEC_TOKEN: "cn-sec-token" };</script>')
+					: Response.json({
+							code: "200",
+							data: {
+								success: false,
+								httpStatus: 200,
+								errorCode: "BailianGateway.Workspace.NotAuthorised",
+							},
+							successResponse: true,
+						}),
+			);
+		};
+		const warn = mock(() => {});
+		const credential = serializeAlibabaTokenPlanCredential(
+			"sk-sp-beijing",
+			"session_id=test",
+			ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+		);
+
+		expect(
+			await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), {
+				fetch: fetchMock,
+				logger: { warn, debug: () => {} },
+			}),
+		).toBeNull();
+		expect(warn).toHaveBeenCalledWith("Alibaba Token Plan usage request rejected", {
+			provider: "alibaba-token-plan",
+			errorCode: "BailianGateway.Workspace.NotAuthorised",
+		});
+	});
+
 	test("does not claim quota support for API-key-only credentials", async () => {
 		let fetched = false;
 		const fetchMock: FetchImpl = () => {
@@ -194,6 +231,50 @@ describe("QwenCloud Token Plan opt-in usage", () => {
 		expect(alibabaTokenPlanUsageProvider.supports?.(request)).toBe(false);
 		expect(await alibabaTokenPlanUsageProvider.fetchUsage(request, { fetch: fetchMock })).toBeNull();
 		expect(fetched).toBe(false);
+	});
+
+	test("reports the monthly window when the plan exposes only that bucket", async () => {
+		let requestCount = 0;
+		const fetchMock: FetchImpl = () => {
+			requestCount++;
+			return Promise.resolve(
+				requestCount === 1
+					? Response.json({ code: "200", data: { secToken: "sec-token", accountId: "account-1" } })
+					: Response.json({
+							data: {
+								DataV2: {
+									data: {
+										data: {
+											per1MonthPercentage: 0.0104,
+											per1MonthResetTime: 1_800_200_000_000,
+										},
+									},
+								},
+							},
+						}),
+			);
+		};
+		const credential = serializeAlibabaTokenPlanCredential("sk-sp-test", "session_id=test");
+
+		const report = await alibabaTokenPlanUsageProvider.fetchUsage(params(credential), { fetch: fetchMock });
+
+		expect(report).toMatchObject({
+			provider: "alibaba-token-plan",
+			limits: [
+				{
+					id: "credits:monthly",
+					scope: { windowId: "monthly" },
+					window: { id: "monthly", label: "Monthly Credits", resetsAt: 1_800_200_000_000 },
+					amount: { usedFraction: 0.0104, unit: "percent" },
+				},
+			],
+		});
+		// The console never states the monthly span, so the window must not claim one.
+		expect(report?.limits[0]?.window?.durationMs).toBeUndefined();
+		// Monthly is display-only: ranking still drives off the burst/weekly windows.
+		const windows = alibabaTokenPlanRankingStrategy.findWindowLimits(report!, { modelId: "qwen3.7-plus" });
+		expect(windows.primary).toBeUndefined();
+		expect(windows.secondary).toBeUndefined();
 	});
 
 	test("fails closed when the stored console session has expired", async () => {

@@ -32,7 +32,8 @@ interface NormalizedConfig {
 	idleTimeoutMs?: number;
 }
 
-function parseConfigContent(content: string, filePath: string): unknown {
+/** Parse a config file as YAML (`.yaml`/`.yml`) or JSON. */
+export function parseConfigContent(content: string, filePath: string): unknown {
 	const extension = path.extname(filePath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml") {
 		return YAML.parse(content) as unknown;
@@ -518,6 +519,18 @@ export function loadConfig(cwd: string): LspConfig {
 	selectTypescriptServer(servers);
 
 	return { servers, idleTimeoutMs };
+}
+
+// Cache config per cwd to avoid repeated file I/O
+export const configCache = new Map<string, LspConfig>();
+
+export function getConfig(cwd: string): LspConfig {
+	let config = configCache.get(cwd);
+	if (!config) {
+		config = loadConfig(cwd);
+		configCache.set(cwd, config);
+	}
+	return config;
 }
 
 // =============================================================================

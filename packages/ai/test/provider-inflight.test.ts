@@ -28,6 +28,11 @@ afterEach(async () => {
 	__providerInFlightForTesting.setHeartbeatWriter(undefined);
 	__providerInFlightForTesting.setLeaseRemover(undefined);
 	__providerInFlightForTesting.setWaitObserver(undefined);
+	__providerInFlightForTesting.setLockCreatedObserver(undefined);
+	__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+	__providerInFlightForTesting.setLockMkdirOverride(undefined);
+	__providerInFlightForTesting.setLockPlatformOverride(undefined);
+	__providerInFlightForTesting.setLockRetryTimings(undefined);
 	if (limiterRoot !== undefined) {
 		await fs.rm(limiterRoot, { recursive: true, force: true });
 		limiterRoot = undefined;
@@ -486,6 +491,79 @@ describe("provider in-flight request limits", () => {
 
 		const remaining = JSON.parse(await Bun.file(path.join(lockDir, "info.json")).text()) as { token: string };
 		expect(remaining.token).toBe("fresh-lock");
+	});
+
+	test("retries when another process removes a newly created lock", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockCreatedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockCreatedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries when another process removes an identified lock before its info write", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockIdentifiedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries transient EPERM from the win32 lock mkdir until the lease is acquired", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async lockDir => {
+			mkdirAttempts++;
+			if (mkdirAttempts <= 2) {
+				throw Object.assign(new Error("simulated delete-pending lock mkdir"), { code: "EPERM" });
+			}
+			await fs.mkdir(lockDir);
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+		expect(mkdirAttempts).toBe(3);
+	});
+
+	test("rethrows a persistent EPERM lock mkdir failure after the retry budget elapses", async () => {
+		registerMockApi();
+		__providerInFlightForTesting.setLockPlatformOverride("win32");
+		__providerInFlightForTesting.setLockRetryTimings({ budgetMs: 100, initialDelayMs: 5, maxDelayMs: 10 });
+		let mkdirAttempts = 0;
+		__providerInFlightForTesting.setLockMkdirOverride(async () => {
+			mkdirAttempts++;
+			throw Object.assign(new Error("simulated persistent lock mkdir denial"), { code: "EPERM" });
+		});
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+
+		const startedAt = Date.now();
+		const request = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+		const outcome = await request.then(
+			() => undefined,
+			(error: unknown) => error as NodeJS.ErrnoException,
+		);
+
+		expect(outcome?.code).toBe("EPERM");
+		expect(outcome?.message).toBe("simulated persistent lock mkdir denial");
+		expect(mkdirAttempts).toBeGreaterThan(1);
+		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(mock.calls).toHaveLength(0);
 	});
 
 	test("does not dispatch when aborted immediately after slot acquisition", async () => {

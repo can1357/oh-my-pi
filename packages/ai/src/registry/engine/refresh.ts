@@ -31,7 +31,8 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 			redirectUri: login.callback.redirectUri
 				? await resolveValue(login.callback.redirectUri, signal)
 				: `http://${login.callback.hostname}:${login.callback.port}${login.callback.path}`,
-			base: undefined,
+			base: login.baseUrl ? (await resolveValue(login.baseUrl, signal)).replace(/\/+$/, "") : undefined,
+			auth: login.authUrl ? (await resolveValue(login.authUrl, signal)).replace(/\/+$/, "") : undefined,
 		};
 	}
 	if (login?.kind === "device-code") {
@@ -40,9 +41,10 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 			clientSecret: undefined,
 			redirectUri: undefined,
 			base: login.baseUrl ? await resolveValue(login.baseUrl, signal) : undefined,
+			auth: undefined,
 		};
 	}
-	return { clientId: undefined, clientSecret: undefined, redirectUri: undefined, base: undefined };
+	return { clientId: undefined, clientSecret: undefined, redirectUri: undefined, base: undefined, auth: undefined };
 }
 
 function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
@@ -66,6 +68,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			client_secret: client.clientSecret,
 			redirect_uri: client.redirectUri,
 			base: client.base,
+			auth: client.auth,
 			claude_code_sdk_version: claudeCodeSdkVersion,
 		};
 		const { body } = await postTokenRequest(

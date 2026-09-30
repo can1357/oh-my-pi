@@ -29,6 +29,8 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 
+import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 /** Method name of the last step in a facade call chain, or "" when the chain is malformed. */
 function terminalMethod(chain: unknown): string {
 	if (!Array.isArray(chain) || chain.length === 0) return "";
@@ -44,7 +46,7 @@ const capabilities: DesktopCapabilities = {
 	input: true,
 	ax: true,
 	backgroundWindowInput: true,
-	deliveryModes: ["background", "foreground"],
+	takeover: true,
 	capturePermission: "granted",
 	inputPermission: "granted",
 	axPermission: "granted",
@@ -644,7 +646,7 @@ describe("computer prelude", () => {
 				"print(repr(el))",
 				"await el.press()",
 				"await win.raise_()",
-				"await win.click(10, 20, button='right', delivery=None)",
+				"await win.click(10, 20, button='right', takeover=None)",
 			].join("\n"),
 			{
 				cwd: process.cwd(),
@@ -698,6 +700,44 @@ describe("computer prelude", () => {
 		]);
 	});
 
+	it("treats text-only Python host responses as unavailable capabilities", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = {
+			...toolSession(),
+			getEvalPreludes: () => definitions,
+		};
+		const shipped = createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		}));
+		definitions = [
+			{
+				...shipped,
+				async invoke(parameters) {
+					calls.push(parameters);
+					return { content: [{ type: "text", text: "Computer capabilities unavailable" }] };
+				},
+			},
+		];
+
+		const result = await executePython("print(await computer.capabilities())", {
+			cwd: process.cwd(),
+			sessionId: `computer-unavailable-py-${crypto.randomUUID()}`,
+			toolSession: session,
+			kernelMode: "per-call",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("None");
+		expect(calls).toEqual([{ action: "capabilities" }]);
+	});
+
 	it("reflects the live enabled setting", () => {
 		const session = toolSession();
 		const prelude = createComputerPrelude(session, () => ({
@@ -711,7 +751,7 @@ describe("computer prelude", () => {
 		}));
 
 		expect(prelude.enabled?.()).toBe(true);
-		session.settings.override("computer.enabled", false);
+		cfgComputerEnabled.override(session.settings, false);
 		expect(prelude.enabled?.()).toBe(false);
 	});
 });
@@ -863,6 +903,36 @@ describe("computer worker round trips", () => {
 		if (result.ok) expect(result.payload.returnValue).toEqual({ role: "button", count: 1 });
 	});
 
+	describe("numeric window ids", () => {
+		class TwoWindowSession extends FakeNativeSession {
+			override async listWindows(): Promise<DesktopWindow[]> {
+				return [windowFixture, { ...windowFixture, id: "7", app: "Numbers", title: "99", focused: false }];
+			}
+		}
+
+		it.each([
+			["a number", "desktop.window(42)"],
+			["an { id } number", "desktop.window({ id: 42 })"],
+		])("resolves %s as that window id", async (_label, selector) => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new TwoWindowSession());
+			const result = await runWorker(transport, "numeric-id", `(await ${selector}).id`);
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.payload.returnValue).toBe("42");
+		});
+
+		it.each([
+			["a missing id", 404],
+			["a number that is another window's title", 99],
+		])("throws a miss for %s", async (_label, id) => {
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => new TwoWindowSession());
+			const result = await runWorker(transport, "numeric-miss", `await desktop.window(${id})`);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.message).toBe(`no window matches ${id}`);
+		});
+	});
+
 	it("returns plain identity snapshots for rendered handle calls and enforces the derived read-only tier", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
@@ -1007,6 +1077,42 @@ describe("computer worker round trips", () => {
 		expect(second.ok).toBe(true);
 		if (second.ok) expect(second.payload.returnValue).toEqual({ x: 7, y: 8, width: 9, height: 10 });
 	});
+
+	it("answers a direct capabilities request without a prior run", async () => {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		transport.inbound({ type: "capabilities", id: "caps", session: snapshot(true) });
+		const reply = await transport.waitFor(message => message.type === "capabilities" && message.id === "caps");
+		expect(reply.type).toBe("capabilities");
+		if (reply.type !== "capabilities" || !reply.ok) throw new Error("expected a successful capabilities reply");
+		expect(reply.capabilities).toEqual(capabilities);
+	});
+
+	it("creates the native session once when a run and capabilities race a cold worker", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		let creations = 0;
+		const release = Promise.withResolvers<void>();
+		// Async factory reproduces the real `import(...)` suspension so both
+		// handlers reach session creation before it resolves.
+		new ComputerWorkerCore(transport, async () => {
+			creations += 1;
+			await release.promise;
+			return native;
+		});
+
+		transport.inbound({ type: "run", id: "race-run", code: "42", timeoutMs: 2_000, session: snapshot(true) });
+		transport.inbound({ type: "capabilities", id: "race-caps", session: snapshot(true) });
+		release.resolve();
+
+		const runReply = await transport.waitFor(message => message.type === "result" && message.id === "race-run");
+		const capsReply = await transport.waitFor(
+			message => message.type === "capabilities" && message.id === "race-caps",
+		);
+		expect(runReply.type === "result" && runReply.ok).toBe(true);
+		expect(capsReply.type === "capabilities" && capsReply.ok).toBe(true);
+		expect(creations).toBe(1);
+	});
 });
 
 class SupervisorWorker implements ComputerWorkerHandle {
@@ -1027,6 +1133,8 @@ class SupervisorWorker implements ComputerWorkerHandle {
 					payload: { displays: [], returnValue: "fresh", screenshots: [], capabilities },
 				}),
 			);
+		} else if (message.type === "capabilities" && this.#respond) {
+			queueMicrotask(() => this.#emit({ type: "capabilities", id: message.id, ok: true, capabilities }));
 		} else if (message.type === "close") {
 			queueMicrotask(() => this.#emit({ type: "closed" }));
 		}
@@ -1064,6 +1172,18 @@ describe("computer supervisor recovery", () => {
 		const result = await supervisor.run("41 + 1", 1_000, snapshot());
 		expect(result.returnValue).toBe("fresh");
 		expect(workers).toBe(2);
+		await supervisor.close();
+	});
+
+	it("resolves direct capabilities before any run instead of a stale cache", async () => {
+		const supervisor = new ComputerSupervisor(toolSession(), () => new SupervisorWorker(true), {
+			startMs: 200,
+			closeMs: 200,
+		});
+		// Regression (#11169): capabilities() used to return the run-populated
+		// cache, so a fresh session yielded undefined until a run happened.
+		const direct = await supervisor.capabilities(snapshot(true));
+		expect(direct).toEqual(capabilities);
 		await supervisor.close();
 	});
 });
