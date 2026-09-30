@@ -93,14 +93,14 @@ interface TranscriptEntry {
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number; lead: boolean }
-	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; dropped: number | undefined; lead: boolean }
+	| ({ batch: HistoryBatch; kind: "commit"; end: number } & FlushTail)
 	| { batch: HistoryBatch; kind: "replay" };
 
 /**
- * Where a shutdown flush starts, the older block a cap measured and left out,
- * if any, and whether the batch opens with a blank: the separator owed by a
- * fully emitted head that already retired, or by a partly emitted frontier
- * head whose rest the cap leaves out.
+ * Where a commit batch starts, the older block a capped flush measured and
+ * left out, if any, and whether the batch opens with a blank: the separator
+ * owed by a fully emitted head that already retired, or by a partly emitted
+ * frontier head whose rest the cap leaves out.
  */
 interface FlushTail {
 	start: number;
@@ -168,6 +168,11 @@ export function trimBlankEdges(rows: readonly string[]): readonly string[] {
 	while (start < end && isPlainBlank(rows[start]!)) start++;
 	while (end > start && isPlainBlank(rows[end - 1]!)) end--;
 	return start === 0 && end === rows.length ? rows : rows.slice(start, end);
+}
+
+/** `rows` opened with the blank a batch owes; a batch that writes no row writes no blank. */
+function withLeadingBlank(rows: readonly string[], lead: boolean): readonly string[] {
+	return lead && rows.length > 0 ? ["", ...rows] : rows;
 }
 
 /** One live block's row span in the last `renderViewport` output (half-open `[start, end)`). */
@@ -610,15 +615,14 @@ export class TranscriptContainer extends Container {
 			if (entry === undefined) return undefined;
 			const before = this.#renderStablePrefix(entry, entry.emitted, width);
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			rows = offered.lead ? ["", ...after.slice(before.length)] : after.slice(before.length);
+			rows = withLeadingBlank(after.slice(before.length), offered.lead);
 		} else if (offered.kind === "commit") {
 			// A capped #peekBatch measured the frontier head and the block the cap
 			// left out, neither of them in the batch; measure them again so an
 			// image-budget retry counts the images the first pass did.
 			if (offered.start > this.#frontier) this.#measuredRows(this.#entries[this.#frontier]!, width);
 			if (offered.dropped !== undefined) this.#measuredRows(this.#entries[offered.dropped]!, width);
-			rows = this.#renderRange(offered.start, offered.end, width, true).rows;
-			if (offered.lead && rows.length > 0) rows = ["", ...rows];
+			rows = withLeadingBlank(this.#renderRange(offered.start, offered.end, width, true).rows, offered.lead);
 		} else {
 			rows = this.#renderReplay(width);
 		}
@@ -696,7 +700,7 @@ export class TranscriptContainer extends Container {
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
-					rows: this.#separatorOwed ? ["", ...rows] : rows,
+					rows: withLeadingBlank(rows, this.#separatorOwed),
 					kind: "append",
 				};
 				this.#offered = {
@@ -751,17 +755,10 @@ export class TranscriptContainer extends Container {
 		}
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: tail.lead && retirement.rows.length > 0 ? ["", ...retirement.rows] : retirement.rows,
+			rows: withLeadingBlank(retirement.rows, tail.lead),
 			kind: "append",
 		};
-		this.#offered = {
-			batch,
-			start: tail.start,
-			end: retirement.end,
-			dropped: tail.dropped,
-			lead: tail.lead,
-			kind: "commit",
-		};
+		this.#offered = { batch, kind: "commit", end: retirement.end, ...tail };
 		return batch;
 	}
 
