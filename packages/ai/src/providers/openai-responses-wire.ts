@@ -791,7 +791,7 @@ export interface Response {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * The status of the response generation. One of `completed`, `failed`,
 	 * `in_progress`, `cancelled`, `queued`, or `incomplete`.
@@ -5986,7 +5986,7 @@ export interface ResponseCreateParamsBase {
 	 * When this parameter is set, the response body will include the `service_tier`
 	 * utilized.
 	 */
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
 	/**
 	 * Whether to store the generated model response for later retrieval via API.
 	 */

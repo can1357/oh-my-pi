@@ -582,6 +582,18 @@ export const cfgComputerEnabled = register({
 	},
 });
 
+export const cfgRatchetEnabled = register({
+	id: "ratchet.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Ratchet",
+		description: "Enable the ratchet eval/hillclimb prelude; /ratchet turns it on for the current session",
+	},
+});
+
 export const cfgComputerDisplay = register({
 	id: "computer.display",
 	type: "string",

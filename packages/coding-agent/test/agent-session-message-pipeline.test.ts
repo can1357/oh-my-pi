@@ -745,6 +745,36 @@ describe("AgentSession message pipeline", () => {
 		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
 	});
 
+	it("resolves attachment://N to images pasted into a newer ask answer", () => {
+		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
+		const answerImage: ImageContent = { type: "image", data: "answer-image", mimeType: "image/png" };
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+
+		session.agent.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "inspect this" }, userImage],
+			timestamp: Date.now(),
+		});
+		session.agent.appendMessage({
+			role: "toolResult",
+			toolCallId: "ask-1",
+			toolName: "ask",
+			content: [{ type: "text", text: "User selected: A\nUser added note: see [Image #1]" }, answerImage],
+			timestamp: Date.now(),
+			isError: false,
+		});
+
+		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image])).toEqual([
+			["attachment://1", answerImage],
+		]);
+	});
+
 	it("normalizes historical WebP on the main provider request path", async () => {
 		using tempDir = TempDir.createSync("@pi-stb-main-path-");
 		const api = "test-stb-main-path";

@@ -81,6 +81,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -200,6 +201,8 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	acceptImages?: boolean;
 }
 
 /** Raw terminal input listener for extensions. */
@@ -701,6 +704,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+
+	/** Semantic call view for TSP terminals (the native counterpart of {@link renderCall}). */
+	describeCall?: (args: Static<TParams>, options: ToolRenderResultOptions) => NativeToolView | undefined;
+
+	/** Semantic result view for TSP terminals (the native counterpart of {@link renderResult}). */
+	describeResult?: (
+		result: AgentToolResult<TDetails>,
+		options: ToolRenderResultOptions,
+		args?: Static<TParams>,
+	) => NativeToolView | undefined;
 }
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
@@ -1662,7 +1675,13 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
-	/** API key or environment variable name. Required when defining models unless oauth is provided. */
+	/**
+	 * API key or environment variable name. Required when defining models unless oauth is provided.
+	 *
+	 * Without `oauth`, this overrides stored OAuth and `/login` credentials for the provider. With
+	 * `oauth`, it is a fallback: a key saved by `/login` wins, and this value is used only when no
+	 * stored login credential exists.
+	 */
 	apiKey?: string;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;

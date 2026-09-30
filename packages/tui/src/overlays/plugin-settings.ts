@@ -22,8 +22,76 @@ import { shortenPath } from "../render/render-utils";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField, SelectFormField, TextFormField } from "../components/form";
 import { formTheme } from "../chrome/form-theme";
-import { SettingsFormField } from "../components/settings-list";
+import { type PrefsEditing, SettingsFormField, type SettingsList } from "../components/settings-list";
 import { editorKey } from "../chrome/keybinding-hints";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { col, node, span, text } from "../native/describe";
+import type { TspPrefsControl, TspPrefsSection } from "@oh-my-pi/pi-wire";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+
+const PLUGIN_SETTINGS_ROLE = "omp.overlay.plugin-settings";
+/** A plugin row's control on the native settings page: open the plugin's settings. */
+const PLUGIN_CONFIGURE: TspPrefsControl = { k: "action", label: "Configure", act: "open" };
+
+/** The plugins tab as a native settings page draws it (the settings selector puts it in its `prefs` node). */
+export interface PluginPrefsPage {
+	lead: string;
+	sections: TspPrefsSection[];
+	focus: string | null;
+	editing: PrefsEditing | null;
+	/** An open value editor without a native control, shown over the page. */
+	editor?: NativeChild;
+}
+
+/**
+ * A plugin detail list as native page sections: on/off rows as switches,
+ * value rows as an edit button showing the value (the row's editor opens
+ * over the page, see {@link prefsDetailEvent}).
+ */
+function prefsDetailPage(title: string, lead: string, list: SettingsList | undefined): PluginPrefsPage {
+	if (!list) return { lead, sections: [], focus: null, editing: null };
+	const sections = list.prefsSections(
+		() => ({ id: "plugin", title }),
+		(item): TspPrefsControl =>
+			item.values?.length === 2 && item.values.includes("true") && item.values.includes("false")
+				? { k: "switch", on: item.currentValue === "true" }
+				: { k: "action", label: item.currentValue.trim() || "Edit…", act: "edit" },
+	);
+	const open = list.openSubmenu;
+	return {
+		lead,
+		sections: sections.map(section => ({
+			...section,
+			rows: section.rows.map(row => ({ ...row, label: row.label.trim() })),
+		})),
+		focus: list.prefsFocus().row ?? null,
+		editing: null,
+		editor: open ? col([open.component], { role: "omp.prefs.editor" }) : undefined,
+	};
+}
+
+/** A native page event on a plugin detail list, through the keys' code paths. */
+function prefsDetailEvent(list: SettingsList | undefined, event: NativeUiEvent): void {
+	if (!list) return;
+	switch (event.type) {
+		case "change":
+			if (typeof event.value === "boolean") list.applyValue(event.item, String(event.value));
+			return;
+		case "select":
+			list.selectItem(event.item);
+			return;
+		case "activate":
+			list.openSubmenuFor(event.item);
+			return;
+		case "action":
+			if (event.act === "edit" && event.value) list.openSubmenuFor(event.value);
+			else if (event.act === "close" && event.value && list.openSubmenu?.id === event.value)
+				list.handleInput("\x1b");
+			return;
+		case "toggle":
+			return;
+	}
+}
 
 /** Setting metadata consumed by the plugin settings UI. */
 export type PluginSettingSchema = {
@@ -227,12 +295,13 @@ function findEntryByValue(entries: ReadonlyArray<PluginListEntry>, value: string
  */
 export class PluginListComponent extends OverlayPanel {
 	readonly #selectList: SelectList;
+	#native: NativeNode | undefined;
 
 	constructor(
 		private readonly entries: ReadonlyArray<PluginListEntry>,
 		callbacks: PluginListCallbacks,
 	) {
-		super("Plugins");
+		super("Plugins", PLUGIN_SETTINGS_ROLE);
 		this.addChild(new Spacer(1));
 
 		if (entries.length === 0) {
@@ -281,6 +350,74 @@ export class PluginListComponent extends OverlayPanel {
 				0,
 			),
 		);
+	}
+
+	/** The installed plugins as one native page section: a row per plugin with its status and a Configure button. */
+	prefsPage(): PluginPrefsPage {
+		const rows = this.entries.map(entry => {
+			const id = entryValue(entry);
+			if (entry.kind === "npm") {
+				const p = entry.plugin;
+				const features = p.manifest.features ? Object.keys(p.manifest.features).length : 0;
+				const parts = [p.enabled ? "Enabled" : "Disabled", "npm", `v${p.version}`];
+				if (features > 0) parts.push(`${p.enabledFeatures?.length ?? features}/${features} features`);
+				return { id, label: p.name, hint: parts.join(" · "), control: PLUGIN_CONFIGURE };
+			}
+			const s = entry.plugin;
+			const parts = [marketplaceEnabled(s) ? "Enabled" : "Disabled", "marketplace", s.scope];
+			parts.push(`v${s.entries[0]?.version ?? "?"}`);
+			return {
+				id,
+				label: s.id,
+				hint: parts.join(" · "),
+				warning: s.shadowedBy ? `Shadowed by the ${s.shadowedBy} install` : undefined,
+				control: PLUGIN_CONFIGURE,
+			};
+		});
+		return {
+			lead:
+				rows.length > 0
+					? "Plugins installed for you and this project. Configure one to turn it or its features on and off."
+					: "No plugins installed. Install one with omp plugin install <package>, or <name>@<marketplace>.",
+			sections: rows.length > 0 ? [{ id: "installed", title: "Installed", rows }] : [],
+			focus: this.#selectList.getSelectedItem()?.value ?? null,
+			editing: null,
+		};
+	}
+
+	/** A native page event: a row click moves the selection, Configure (or a double click) opens the plugin. */
+	handlePrefsEvent(event: NativeUiEvent): void {
+		if (event.type === "select") this.#selectList.setSelectedValue(event.item);
+		else if (event.type === "activate") this.#selectList.handleNativeEvent(event);
+		else if (event.type === "action" && event.act === "open" && event.value) {
+			this.#selectList.handleNativeEvent({ type: "activate", key: event.key, item: event.value });
+		}
+	}
+
+	/** The plugin list (the select list describes itself) and its hints, or install guidance when empty. */
+	override describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const body =
+			this.entries.length === 0
+				? [
+						text([span("No plugins installed", "muted")]),
+						node("kv", {
+							items: [
+								{ k: "Install npm plugins", v: [span("omp plugin install <package>", "code")] },
+								{
+									k: "Install marketplace plugins",
+									v: [span("omp plugin install <name>@<marketplace>", "code")],
+								},
+							],
+						}),
+						hintsRow([actionHint("tui.select.cancel", "go back")]),
+					]
+				: [
+						this.#selectList,
+						hintsRow([actionHint("tui.select.confirm", "configure"), actionHint("tui.select.cancel", "go back")]),
+					];
+		this.#native = overlayCard(PLUGIN_SETTINGS_ROLE, this.title, body);
+		return this.#native;
 	}
 
 	#renderItem(entry: PluginListEntry): SelectItem {
@@ -357,7 +494,7 @@ export class PluginDetailComponent extends OverlayPanel {
 		private readonly manager: PluginSettingsManager,
 		private readonly callbacks: PluginDetailCallbacks,
 	) {
-		super(plugin.name);
+		super(plugin.name, PLUGIN_SETTINGS_ROLE);
 
 		void this.#rebuild();
 	}
@@ -452,6 +589,20 @@ export class PluginDetailComponent extends OverlayPanel {
 		if (!this.#settingsList) return;
 		this.#settingsList.handleInput(data);
 	}
+
+	/** This plugin's settings as a native page section. */
+	prefsPage(): PluginPrefsPage {
+		return prefsDetailPage(
+			this.plugin.name,
+			this.plugin.manifest.description || "Turn the plugin and its features on and off, and change its settings.",
+			this.#settingsList?.settingsList,
+		);
+	}
+
+	/** A native page event on this plugin's settings. */
+	handlePrefsEvent(event: NativeUiEvent): void {
+		prefsDetailEvent(this.#settingsList?.settingsList, event);
+	}
 }
 
 // =============================================================================
@@ -479,7 +630,7 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 		private readonly manager: PluginSettingsManager,
 		private readonly callbacks: MarketplacePluginDetailCallbacks,
 	) {
-		super(plugin.id);
+		super(plugin.id, PLUGIN_SETTINGS_ROLE);
 		this.#render(undefined, []);
 		void this.#loadConfig();
 	}
@@ -575,6 +726,20 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 	handleInput(data: string): void {
 		this.#settingsList.handleInput(data);
 	}
+
+	/** This plugin's settings as a native page section, with its install facts as the lead. */
+	prefsPage(): PluginPrefsPage {
+		const entry = this.plugin.entries[0];
+		const facts = [`${this.plugin.scope} install`, `v${entry?.version ?? "?"}`];
+		if (entry?.installPath) facts.push(shortenPath(entry.installPath));
+		if (this.plugin.shadowedBy) facts.push(`shadowed by the ${this.plugin.shadowedBy} install`);
+		return prefsDetailPage(this.plugin.id, facts.join(" · "), this.#settingsList?.settingsList);
+	}
+
+	/** A native page event on this plugin's settings. */
+	handlePrefsEvent(event: NativeUiEvent): void {
+		prefsDetailEvent(this.#settingsList?.settingsList, event);
+	}
 }
 
 // =============================================================================
@@ -589,7 +754,7 @@ class ConfigFieldPanel extends OverlayPanel {
 	#field: FormField;
 
 	constructor(key: string, field: FormField) {
-		super(key);
+		super(key, `${PLUGIN_SETTINGS_ROLE}.field`);
 		this.#field = field;
 		this.addChild(field);
 	}
@@ -763,6 +928,31 @@ export class PluginSettingsComponent extends Container {
 		// otherwise the tab stays blank until an unrelated event forces a
 		// render, e.g. reopening /settings (issue #9526).
 		this.callbacks.requestRender?.();
+	}
+
+	/** The current view (list or a plugin's settings) as a native settings page. */
+	prefsPage(): PluginPrefsPage {
+		const view = this.#viewComponent;
+		if (
+			view instanceof PluginListComponent ||
+			view instanceof PluginDetailComponent ||
+			view instanceof MarketplacePluginDetailComponent
+		) {
+			return view.prefsPage();
+		}
+		return { lead: "Loading installed plugins…", sections: [], focus: null, editing: null };
+	}
+
+	/** Routes a native page event to the current view. */
+	handlePrefsEvent(event: NativeUiEvent): void {
+		const view = this.#viewComponent;
+		if (
+			view instanceof PluginListComponent ||
+			view instanceof PluginDetailComponent ||
+			view instanceof MarketplacePluginDetailComponent
+		) {
+			view.handlePrefsEvent(event);
+		}
 	}
 
 	#showPluginDetail(plugin: InstalledPlugin): void {

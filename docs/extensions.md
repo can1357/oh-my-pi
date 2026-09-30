@@ -129,7 +129,7 @@ Core methods:
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
 
-`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
 ### Provider registration
 
@@ -181,6 +181,8 @@ extension source cleanup) removes only that runtime override, restoring the buil
 or configured usage resolver.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
+
+A provider's `apiKey` (a literal key or an environment variable name) normally overrides any stored OAuth or `/login` credential for that provider. When the registration also supplies `oauth`, `apiKey` becomes a fallback instead: the key the user saved with `/login` wins, and `apiKey` is used only when no stored login credential exists. This keeps an unset env-var name from being sent as the literal key. Registering a built-in provider id with both `oauth` and a gateway `apiKey` therefore lets a stored upstream credential take precedence over the gateway key.
 
 Provider login callbacks can request masked entry with
 `callbacks.onPrompt({ message: "Consumer key", secret: true })`. Native `/login`
@@ -755,7 +757,7 @@ Unsupported/no-op in RPC implementation:
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. `--mode rpc --no-ui` takes this path too, for RPC hosts that cannot answer dialogs.
+When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. Both `--mode rpc --no-ui` and `--mode rpc-ui --no-ui` take this path for extensions; `rpc-ui` tool dialogs remain enabled.
 
 ### ACP mode
 
@@ -968,7 +970,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 Use the right surface:
 
 - **Extensions** (`src/extensibility/extensions/*`): unified system (events + tools + commands + renderers + provider registration).
-- **Hooks** (`src/extensibility/hooks/*`): separate legacy event API.
+- **Hooks** (`src/extensibility/hooks/*`): legacy `HookAPI` event API. Hook files load through the extension runner, so they run with extension semantics (see [hooks](./hooks.md)).
 - **Custom-tools** (`src/extensibility/custom-tools/*`): tool-focused modules; when loaded alongside extensions they are adapted and still pass through extension interception wrappers.
 
 If you need one package that owns policy, tools, command UX, and rendering together, use extensions.

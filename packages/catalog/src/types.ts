@@ -597,6 +597,13 @@ export interface AnthropicCompat {
 	 */
 	supportsThinkingBindingControls?: boolean;
 	/**
+	 * Whether the model replaces `thinking: { type: "disabled" }` with
+	 * `thinking: { type: "between_tools" }` (Claude Sonnet 5.5). The disabled
+	 * form is rejected with a 400; `between_tools` skips up-front thinking and
+	 * only allows progress updates between tool calls.
+	 */
+	supportsBetweenToolsThinking?: boolean;
+	/**
 	 * Whether the model accepts a forced `tool_choice` (`{ type: "any" }` or
 	 * `{ type: "tool", name }`). Claude Fable/Mythos 5 reject forced tool use
 	 * outright ("tool_choice forces tool use is not compatible with this model");
@@ -1375,6 +1382,12 @@ export interface Model<TApi extends Api = Api> {
 	useResponsesLite?: boolean;
 	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
 	toolMode?: "code_mode_only";
+	/**
+	 * Service-tier ids the provider advertises for this model (Codex discovery
+	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). Absent when the
+	 * provider publishes no per-model tier list.
+	 */
+	serviceTiers?: readonly string[];
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */

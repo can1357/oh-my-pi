@@ -188,7 +188,6 @@ import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with {
 import anthropicUsageWrapUpPrompt from "../prompts/system/anthropic-usage-wrap-up.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
-import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
@@ -198,7 +197,6 @@ import sessionStopBlockedPrompt from "../prompts/system/session-stop-blocked.md"
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
-import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -254,7 +252,6 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { TokenRateMeter } from "../utils/token-rate";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
@@ -288,6 +285,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -377,7 +375,6 @@ import {
 	type PrewalkRestartResult,
 } from "./prewalk";
 import {
-	IMAGE_ATTACHMENT_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -385,7 +382,6 @@ import {
 	isUserQueuedMessage,
 	queueChipText,
 	toRestoredQueuedMessage,
-	VIDEO_ATTACHMENT_TYPE,
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
@@ -396,7 +392,7 @@ import {
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels, isTranscriptEntry } from "./session-context";
-import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer";
+import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
@@ -479,6 +475,7 @@ import {
 import { cfgTitleRefreshOnReplan } from "../goals/settings";
 import {
 	cfgComputerEnabled,
+	cfgRatchetEnabled,
 	cfgDevAutoqa,
 	cfgDevAutoqaConsent,
 	cfgTodoEnabled,
@@ -1584,6 +1581,8 @@ export class AgentSession implements SettingsScope {
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
 			warmer.onWarmed = (message, extensionOverride) => this.#recordCacheWarmUsage(message, extensionOverride);
+			warmer.onRefreshStart = refresh => void this.#emitSessionEvent({ type: "cache_warming_start", ...refresh });
+			warmer.onRefreshEnd = refresh => void this.#emitSessionEvent({ type: "cache_warming_end", ...refresh });
 			this.subscribeRunState(state => {
 				if (state === "idle") warmer.onAgentSettled();
 			});
@@ -2208,6 +2207,7 @@ export class AgentSession implements SettingsScope {
 		cfgExtendedContext.listen(this, () => this.#reapplyExtendedContextPolicy());
 		cfgBrowserEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("browser.enabled", enabled));
 		cfgComputerEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("computer.enabled", enabled));
+		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
@@ -2247,13 +2247,16 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * `browser.enabled` / `computer.enabled` change the live eval preludes; the browser toggle also
+	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` change the live eval preludes; the browser toggle also
 	 * re-filters its MCP tools first. An empty transcript rebuilds the system prompt to advertise
 	 * them; mid-session the cached prompt stays byte-stable and the next user prompt carries a
 	 * hidden prelude notice instead (see {@link SessionTools.takeEvalPreludeNotice}).
 	 * A failed browser switch-on reverts to off.
 	 */
-	async #reconcileEvalPreludeSetting(path: "browser.enabled" | "computer.enabled", enabled: boolean): Promise<void> {
+	async #reconcileEvalPreludeSetting(
+		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled",
+		enabled: boolean,
+	): Promise<void> {
 		try {
 			if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
 				const tools = await this.#reconcileBrowserMcpFilter(enabled);
@@ -5331,6 +5334,8 @@ export class AgentSession implements SettingsScope {
 		// closing session writer.
 		if (this.#cacheWarmer) {
 			this.#cacheWarmer.onWarmed = undefined;
+			this.#cacheWarmer.onRefreshStart = undefined;
+			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
 		this.#recordSessionExit(options.reason ?? "dispose");
@@ -6162,6 +6167,12 @@ export class AgentSession implements SettingsScope {
 		await this.#maintenance.runIdleCompaction();
 	}
 
+	/** Override cache warming for this session only, never writing config.yml; returns the effective mode. */
+	setCacheWarmingMode(mode: CacheWarmingMode): CacheWarmingMode {
+		cfgProvidersCacheWarming.override(this.settings, mode);
+		return cfgProvidersCacheWarming.get(this.settings);
+	}
+
 	/** Toggle automatic compaction. `persist` saves it to global config; the default applies a session-scoped override. */
 	setAutoCompactionEnabled(enabled: boolean, persist = false): void {
 		this.#maintenance.setAutoCompactionEnabled(enabled, persist);
@@ -6760,16 +6771,12 @@ export class AgentSession implements SettingsScope {
 		if (!images?.length) return [];
 		const notices: CustomMessage[] = [];
 		for (let index = 0; index < images.length; index++) {
-			const source = imageAttachmentSource(images[index]!);
-			if (!source) continue;
-			const isVideo = source.kind === "video";
+			const notice = renderAttachmentSourceNotice(images[index]!, index + 1);
+			if (!notice) continue;
 			notices.push({
 				role: "custom",
-				customType: isVideo ? VIDEO_ATTACHMENT_TYPE : IMAGE_ATTACHMENT_TYPE,
-				content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
-					index: String(index + 1),
-					path: source.path,
-				}),
+				customType: notice.customType,
+				content: notice.content,
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -9419,6 +9426,16 @@ export class AgentSession implements SettingsScope {
 	/** Toggles priority service for the active model family. */
 	toggleFastMode(): boolean {
 		return this.#models.toggleFastMode();
+	}
+
+	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */
+	isUltrafastModeEnabled(): boolean {
+		return this.#models.isUltrafastModeEnabled();
+	}
+
+	/** Enables or disables the OpenAI `ultrafast` tier; `false` when the active model does not offer it. */
+	setUltrafastMode(enabled: boolean): boolean {
+		return this.#models.setUltrafastMode(enabled);
 	}
 
 	/**

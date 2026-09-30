@@ -12,13 +12,12 @@ import {
 	type UsageLimit,
 	type UsageProvider,
 	type UsageReport,
-	type UsageStatus,
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
 import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
-import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
@@ -416,13 +415,6 @@ function buildUsageAmount(utilization: number | undefined): UsageAmount | undefi
 	};
 }
 
-function buildUsageStatus(usedFraction: number | undefined): UsageStatus | undefined {
-	if (usedFraction === undefined) return undefined;
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function parseDollarAmount(
 	amountMinor: unknown,
 	exponent: unknown,
@@ -500,12 +492,13 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 
 	const amount = buildExtraUsageAmount(parsed.used, parsed.limit);
 	if (!amount) return null;
+	// A defined limit makes `buildExtraUsageAmount` set `usedFraction`.
 	const status =
 		parsed.limit === undefined
 			? undefined
 			: parsed.used >= parsed.limit
 				? "exhausted"
-				: (buildUsageStatus(amount.usedFraction) ?? "ok");
+				: usageStatus(amount.usedFraction);
 	return {
 		id: "anthropic:extra",
 		label: "Claude Extra Usage",
@@ -549,7 +542,7 @@ function buildUsageLimit(args: {
 		},
 		window,
 		amount,
-		status: buildUsageStatus(amount.usedFraction),
+		status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 	};
 }
 

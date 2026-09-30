@@ -1,6 +1,8 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -11,12 +13,19 @@ import type { Settings } from "../config/settings";
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
+import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
-import { cfgComputerDisplay, cfgComputerEnabled, cfgComputerMaxHeight, cfgComputerMaxWidth } from "../tools/settings";
+import {
+	cfgComputerDisplay,
+	cfgComputerEnabled,
+	cfgComputerMaxHeight,
+	cfgComputerMaxWidth,
+	cfgRatchetEnabled,
+} from "../tools/settings";
 import { cfgSkillful } from "../session/settings";
 import { formatSlowModeResetClock } from "../session/anthropic-slow-mode";
 import { cfgExtendedContext } from "../session/context-settings";
@@ -92,9 +101,40 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
+	if (session.isUltrafastModeEnabled()) return "ultra";
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
+
+/**
+ * `/fast [on|ultra|off|status]` for the active model: `on` selects the
+ * family's `priority` tier, `ultra` the OpenAI `ultrafast` tier, `off` clears
+ * either. Bare invocation toggles between off and priority. Returns the
+ * user-facing reply, or `undefined` for an unknown argument.
+ */
+function runFastCommand(arg: string, session: AgentSession): string | undefined {
+	switch (arg) {
+		case "":
+		case "toggle":
+			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "on":
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		case "ultra":
+		case "ultrafast":
+			return session.setUltrafastMode(true)
+				? "Ultrafast mode enabled."
+				: "Ultrafast is unavailable for the current model.";
+		case "off":
+			session.setFastMode(false);
+			return "Fast mode disabled.";
+		case "status":
+			return `Fast mode is ${formatFastModeStatus(session)}.`;
+		default:
+			return undefined;
+	}
 }
 
 const SLOW_UNSUPPORTED =
@@ -186,6 +226,27 @@ function applyComputerUseToggle(session: AgentSession, enable: boolean): string 
 	return enable
 		? `Computer use enabled for this session. ${formatComputerUseStatus(session)}`
 		: "Computer use disabled for this session.";
+}
+
+/** Tools the ratchet loop needs: the eval kernel hosts `ratchet()`, `task` runs its analyzer. */
+const RATCHET_REQUIRED_TOOLS = ["eval", "task"] as const;
+
+/**
+ * Arm `/ratchet`: enable the ratchet prelude for this session (override, never persisted) and
+ * render the kickoff prompt carrying the user's request as data.
+ */
+function prepareRatchet(session: AgentSession, request: string): { kickoff: string } | { error: string } {
+	const tools = session.getEnabledToolNames();
+	const missing = RATCHET_REQUIRED_TOOLS.filter(tool => !tools.includes(tool));
+	if (missing.length > 0) return { error: `/ratchet needs the ${missing.join(" and ")} tool active.` };
+	const previous = cfgRatchetEnabled.get(session.settings);
+	if (!previous) cfgRatchetEnabled.override(session.settings, true);
+	if (!session.getEvalPreludes().some(definition => definition.name === "ratchet")) {
+		if (!previous) cfgRatchetEnabled.override(session.settings, previous);
+		return { error: "The ratchet eval prelude is unavailable in this session." };
+	}
+	const kickoff = prompt.render(ratchetKickoffPrompt, { request: request.trim() || undefined, tools }).trim();
+	return { kickoff };
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -474,70 +535,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "fast",
 		icon: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description:
+			"Toggle fast service (OpenAI service_tier=priority or ultrafast, Anthropic speed=fast, Google priority)",
 		acpDescription: "Toggle fast mode",
-		acpInputHint: "[on|off|status]",
+		acpInputHint: "[on|ultra|off|status]",
 		subcommands: [
-			{ name: "on", description: "Enable fast mode" },
+			{ name: "on", description: "Enable fast mode (priority tier)" },
+			{ name: "ultra", description: "Enable Ultrafast (OpenAI API, or Codex models that offer it)" },
 			{ name: "off", description: "Disable fast mode" },
 			{ name: "status", description: "Show fast mode status" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		handle: async (command, runtime) => {
-			const arg = command.args.toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.session.toggleFastMode();
-				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				return commandConsumed();
-			}
-			if (arg === "on") {
-				const supported = runtime.session.setFastMode(true);
-				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
-				return commandConsumed();
-			}
-			if (arg === "off") {
-				runtime.session.setFastMode(false);
-				await runtime.output("Fast mode disabled.");
-				return commandConsumed();
-			}
-			if (arg === "status") {
-				await runtime.output(`Fast mode is ${formatFastModeStatus(runtime.session)}.`);
-				return commandConsumed();
-			}
-			return usage("Usage: /fast [on|off|status]", runtime);
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.session);
+			if (message === undefined) return usage(FAST_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
 		},
 		handleTui: (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle") {
-				const enabled = runtime.ctx.session.toggleFastMode();
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "on") {
-				const supported = runtime.ctx.session.setFastMode(true);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus(
-					supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.",
-				);
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "off") {
-				runtime.ctx.session.setFastMode(false);
-				refreshStatusLine(runtime.ctx);
-				runtime.ctx.showStatus("Fast mode disabled.");
-				clearSubmittedText(runtime);
-				return;
-			}
-			if (arg === "status") {
-				runtime.ctx.showStatus(`Fast mode is ${formatFastModeStatus(runtime.ctx.session)}.`);
-				clearSubmittedText(runtime);
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			const message = runFastCommand(command.args.trim().toLowerCase(), runtime.ctx.session);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(message ?? FAST_USAGE);
 			clearSubmittedText(runtime);
 		},
 	},
@@ -695,6 +714,40 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "ratchet",
+		icon: "loop",
+		description: "Build (or reuse) an eval for an LLM flow, then hillclimb it unattended",
+		inlineHint: "[flow and goal]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			const armed = prepareRatchet(runtime.session, command.args);
+			if ("error" in armed) return usage(armed.error, runtime);
+			return { prompt: armed.kickoff };
+		},
+		handleTui: async (command, runtime) => {
+			const { session } = runtime.ctx;
+			const armed = prepareRatchet(session, command.args);
+			clearSubmittedText(runtime);
+			if ("error" in armed) {
+				runtime.ctx.showWarning(armed.error);
+				return;
+			}
+			// Same delivery as /guided-goal: the kickoff is a hidden developer message queued behind
+			// any in-flight run; the agent's batched `ask` is the first thing the user sees.
+			const images = runtime.input?.images?.length ? runtime.input.images : undefined;
+			if (session.isStreaming) {
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+				return;
+			}
+			try {
+				await session.prompt(armed.kickoff, images ? { synthetic: true, images } : { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await session.followUp(armed.kickoff, images, { synthetic: true });
+			}
 		},
 	},
 	{

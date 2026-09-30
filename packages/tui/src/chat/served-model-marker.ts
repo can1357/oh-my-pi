@@ -86,6 +86,14 @@ export class ServedModelMarkerComponent extends MessageDividerComponent {
 			labelColor: "warning",
 			ruleColor: "dim",
 			ruleWidth: 10,
+			role: "omp.marker.served-model",
+			native: {
+				icon: "warn",
+				label: () => {
+					const via = info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider;
+					return `Served ${info.served} · requested ${info.requested} · via ${via}`;
+				},
+			},
 		});
 	}
 }

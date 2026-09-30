@@ -19,7 +19,6 @@ Key integration points:
 - `packages/coding-agent/src/capability/index.ts`
 - `packages/coding-agent/src/discovery/index.ts`
 - `packages/coding-agent/src/extensibility/skills.ts`
-- `packages/coding-agent/src/extensibility/hooks/loader.ts`
 - `packages/coding-agent/src/extensibility/custom-tools/loader.ts`
 - `packages/coding-agent/src/extensibility/extensions/loader.ts`
 
@@ -327,8 +326,8 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 
 ## Hooks subsystem
 
-- `discoverAndLoadHooks()` resolves hook paths from hook capability + explicit configured paths.
-- Then loads modules via Bun import.
+- `discoverExtensionPaths()` (in `extensibility/extensions/loader.ts`) appends `.ts`/`.js` hook paths from the hook capability to the extension module list.
+- Those modules then load and run through the extension loader and runner, like any other extension.
 
 ## Tools subsystem
 

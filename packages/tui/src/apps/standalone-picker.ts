@@ -9,6 +9,8 @@
  */
 import type { SelectItem } from "../components/select-list";
 import { Form, SelectFormField, TextFormField, type FormFieldTheme } from "../components/form";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { SelectListSheet, type SelectPickerOptions } from "../native/picker";
 import { ProcessTerminal } from "../terminal";
 import { TUI, type Component, type OverlayOptions } from "../tui";
 import { getSelectListTheme } from "../theme/tui-adapters";
@@ -64,6 +66,52 @@ export async function runStandaloneTui<T>(
 export interface StandaloneSelectOptions {
 	currentValue?: string;
 	maxVisible?: number;
+	/** How the native picker sheet names and marks its items (`noun`, `icon`). */
+	picker?: Pick<SelectPickerOptions, "noun" | "icon" | "subtitle" | "confirm">;
+}
+
+/**
+ * A standalone choice: the form's list in ANSI, and in Tern a `picker md`
+ * sheet (NATIVE_REDESIGN §10) over the pane, whatever the item count. Keys
+ * stay the form's; pointer events drive the same list.
+ */
+class StandaloneSelect implements Component {
+	readonly #form: Form;
+	readonly #sheet: SelectListSheet;
+
+	constructor(form: Form, field: SelectFormField, picker: SelectPickerOptions) {
+		this.#form = form;
+		this.#sheet = new SelectListSheet(field.selectList, picker);
+	}
+
+	get focused(): boolean {
+		return this.#form.focused;
+	}
+
+	set focused(value: boolean) {
+		this.#form.focused = value;
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		return cx.supports("picker") ? this.#sheet.describe() : this.#form.describe(cx);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#sheet.handle(event);
+	}
+
+	handleInput(data: string): void {
+		this.#form.handleInput(data);
+	}
+
+	render(width: number): readonly string[] {
+		return this.#form.render(width);
+	}
+
+	invalidate(): void {
+		this.#sheet.invalidate();
+		this.#form.invalidate();
+	}
 }
 
 /**
@@ -88,7 +136,13 @@ export async function selectStandaloneItem(
 			onSubmit: value => finish(value),
 			onCancel: () => finish(null),
 		});
-		return new Form({ fields: [field], onCancel: () => finish(null) });
+		const form = new Form({ fields: [field], onCancel: () => finish(null) });
+		return new StandaloneSelect(form, field, {
+			title: title.replace(/:\s*$/, ""),
+			searchable: true,
+			...(options?.currentValue !== undefined ? { current: [options.currentValue] } : {}),
+			...options?.picker,
+		});
 	});
 }
 

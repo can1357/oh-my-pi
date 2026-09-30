@@ -68,6 +68,10 @@ class "anthropic" {
 	family "sonnet" {
 		revision ">=5.5 <6" {
 			supports-forced-tool-choice #false
+			// `thinking: {type: "disabled"}` is a 400; `between_tools` is the
+			// lowest thinking setting.
+			// https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide#turn-off-up-front-thinking
+			supports-between-tools-thinking #true
 			// Signed thinking is bound to the exact preceding conversation.
 			thinking-prefix-binding #true
 		}
