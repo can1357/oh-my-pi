@@ -841,6 +841,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it.each([
+		["healthy", "reserve", true],
 		["reserve", "reserve", false],
 		["reserve", "depleted", true],
 		["depleted", "reserve", false],
@@ -880,7 +881,12 @@ describe("AgentSession retry fallback", () => {
 					{
 						credentialId: 2,
 						credentialType: "oauth",
-						state: provider === primaryModel.provider && state === "depleted" ? "depleted" : "reserve",
+						state:
+							provider === primaryModel.provider && state === "depleted"
+								? "depleted"
+								: state === "healthy" && selectedState === "reserve"
+									? "healthy"
+									: "reserve",
 					},
 				],
 			}));

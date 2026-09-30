@@ -305,19 +305,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 #### Spend reserve for one launch
 
-For a bounded session, use an untracked `--config` overlay:
-
-```yaml
-retry:
-  usageAwareFallback: true
-  usageReservePct: 0
-```
-
-This keeps depleted-account preflight enabled while allowing remaining quota below the global reserve margin. The overlay does not change persisted settings or other launches. SDK callers can use `settings.overlay({ "retry.usageReservePct": 0 })` to keep the change local to a child settings scope.
-
-An explicit OAuth account `auth.accountPolicies[].reservePct` still takes precedence. The zero threshold is not an override for those account policies. Native account ranking, configured fallback chains, and model/provider restrictions remain in effect. Disabling `usageAwareFallback` is different: it also disables proactive depleted-account preflight.
-
-To allow reserve spending regardless of the global or explicit account reserve margin, use the existing reserve-policy setting instead:
+For a bounded session, set the new reserve policy in an untracked `--config` overlay:
 
 ```yaml
 retry:
@@ -325,7 +313,7 @@ retry:
   usageReservePolicy: spend
 ```
 
-`spend` retains reserve measurements and native account ranking, but reserve alone does not trigger model fallback or confirmation during startup or prompt preflight. Depleted models still trigger the configured fallback behavior; a fallback inside reserve remains eligible, while a depleted fallback does not. This does not change the existing behavior when no eligible fallback exists.
+`spend` retains reserve measurements and native account ranking, but reserve alone does not trigger model fallback or confirmation during startup or prompt preflight. Depleted models still trigger the configured fallback behavior; a fallback inside reserve remains eligible, while a depleted fallback does not. This does not change the existing behavior when no eligible fallback exists. Unlike `usageReservePct: 0`, `spend` also applies when an explicit OAuth account `auth.accountPolicies[].reservePct` marks the account as reserve.
 
 For an SDK child, use `settings.overlay({ "retry.usageReservePolicy": "spend" })`. Parent and sibling settings retain their policy. Changes made through persistent config or `/settings` are not session-local; use a one-shot overlay for a bounded experiment.
 
@@ -598,7 +586,7 @@ providers:
 | `retry.waitForUsageReset` | boolean | `false` | Allow provider-stated usage-limit waits past `retry.maxDelayMs` when a reset hint or complete usage report supplies authoritative timing. Waits are abortable but can also hold subagents. |
 | `retry.usageAwareFallback` | boolean | `false` | Before a turn, use reliable coding-plan quota reports to prefer healthy same-provider accounts and then configured fallback models. Unknown usage keeps the current model; ordinary API keys are excluded. |
 | `retry.usageReservePct` | number | `10` | Remaining quota percentage protected by usage-aware fallback. |
-| `retry.usageReservePolicy` | enum | `confirm` | `confirm`, `auto`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `fail-closed` blocks known reserve/depleted quota rather than spending it. |
+| `retry.usageReservePolicy` | enum | `confirm` | `confirm`, `auto`, `spend`, `fail-closed`. At reserve, `confirm` asks when an interactive confirmer is available and otherwise auto-falls back; exhausted quota can fall back without confirmation. `spend` uses reserve quota without asking or falling back, but depleted quota still falls back. `fail-closed` blocks known reserve/depleted quota rather than spending it. |
 | `providers.anthropic.serverSideFallback` | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta for eligible direct Claude Fable/Mythos requests. The catalog-owned server-side chain currently targets `claude-opus-5`, not `claude-opus-5-5`; unsupported models and hosts have no chain.                                                                                                                                          |
 | `providers.openai-codex.codeMode`           | enum    | `off`             | Codex Code Mode for `code_mode_only` models, mirroring codex-rs: the direct tool surface collapses to `eval`/`ask`/`todo` and every other session tool is invoked from `eval` cells via its `tool.<name>()` bridge, collapsing multi-step tool work into one model round trip. `auto` follows the model catalog's `tool_mode` flag; `on` forces it for any Codex model; `off` (default) leaves the full direct surface. The turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active. |
 | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |

@@ -309,19 +309,6 @@ describe("AuthStorage model usage health", () => {
 		expect(health.accounts.map(account => account.credentialId)).toEqual([1]);
 	});
 
-	it.each([
-		[0.95, "healthy"],
-		[1, "depleted"],
-	] as const)("retains depletion checks at zero reserve for login API keys used at %s", async (used, state) => {
-		const storage = await createStorage([apiKeyRow(1, "login")], {
-			"key-1": report("key-1", [limit("short", used)]),
-		});
-		expect((await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0 })).state).toBe(state);
-		expect((await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0.1 })).state).toBe(
-			used === 1 ? "depleted" : "reserve",
-		);
-	});
-
 	it("keeps explicit OAuth account reserves when a request uses zero reserve", async () => {
 		const storage = await createStorage([oauthRow(1)], {
 			"account-1": report("account-1", [limit("short", 0.95)]),

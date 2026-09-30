@@ -1818,6 +1818,8 @@ export class TurnRecovery {
 		}
 		if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
+		const rankQuota = (state: ModelUsageHealth["state"]) =>
+			state === "healthy" ? 2 : state === "reserve" ? 1 : state === "depleted" ? 0 : -1;
 		const canUseQuota = (state: ModelUsageHealth["state"]) =>
 			state === "healthy" || (reservePolicy === "spend" && state === "reserve");
 		const selectedAccount = health.accounts.find(account => account.selected);
@@ -1825,8 +1827,8 @@ export class TurnRecovery {
 			this.#usageReserveApprovedSelector = undefined;
 			if (
 				selectedAccount &&
-				!canUseQuota(selectedAccount.state) &&
-				health.accounts.some(account => canUseQuota(account.state))
+				rankQuota(selectedAccount.state) >= 0 &&
+				health.accounts.some(account => rankQuota(account.state) > rankQuota(selectedAccount.state))
 			) {
 				this.#host.modelRegistry.authStorage.sessions.release(currentModel.provider, this.#host.sessionId());
 			}
@@ -1888,8 +1890,8 @@ export class TurnRecovery {
 						const selected = candidateHealth.accounts.find(account => account.selected);
 						if (
 							selected &&
-							!canUseQuota(selected.state) &&
-							candidateHealth.accounts.some(account => canUseQuota(account.state))
+							rankQuota(selected.state) >= 0 &&
+							candidateHealth.accounts.some(account => rankQuota(account.state) > rankQuota(selected.state))
 						) {
 							this.#host.modelRegistry.authStorage.sessions.release(
 								candidateModel.provider,

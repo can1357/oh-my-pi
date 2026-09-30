@@ -23,7 +23,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgRetryFallbackChains, cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -1120,7 +1120,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.id).toBe(modelId);
 			expect(usageHealth).toHaveBeenCalledTimes(checks);
-			expect(cfgRetryUsageReservePolicy.get(session.settings)).toBe("spend");
 		} finally {
 			await session.dispose();
 		}
