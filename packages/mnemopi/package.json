@@ -45,7 +45,7 @@
     "@oh-my-pi/pi-utils": "catalog:"
   },
   "peerDependencies": {
-    "fastembed": "2.1.0",
+    "fastembed": "3.0.0",
     "onnxruntime-node": "1.21.0"
   },
   "peerDependenciesMeta": {
