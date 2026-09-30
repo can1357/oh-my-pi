@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { CustomProviderForm } from "@oh-my-pi/pi-tui/setup/scenes/custom-provider";
+import { CustomProviderForm, type CustomProviderFormOptions } from "@oh-my-pi/pi-tui/setup/scenes/custom-provider";
 import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
 import type { SetupSceneHost, SetupSceneResult, SetupSceneController } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -14,7 +14,10 @@ afterEach(async () => {
 	await initTheme(false, "unicode", false, "titanium", "light");
 });
 
-function createForm(addCustomProvider: SetupSceneHost["ctx"]["addCustomProvider"]) {
+function createForm(
+	addCustomProvider: SetupSceneHost["ctx"]["addCustomProvider"],
+	options?: CustomProviderFormOptions,
+) {
 	const finished: SetupSceneResult[] = [];
 	let focusTarget: Component | null = null;
 	const host = {
@@ -31,7 +34,7 @@ function createForm(addCustomProvider: SetupSceneHost["ctx"]["addCustomProvider"
 		},
 	} as unknown as SetupSceneHost;
 	return {
-		form: new CustomProviderForm(host, addCustomProvider!),
+		form: new CustomProviderForm(host, addCustomProvider!, undefined, options),
 		finished,
 		get focusTarget() {
 			return focusTarget;
@@ -151,5 +154,80 @@ describe("CustomProviderForm", () => {
 		expect(message).toContain("Press Esc to return to the provider list");
 		form.handleInput("\x1b");
 		expect(finished).toEqual(["skipped"]);
+	});
+
+	describe("edit mode", () => {
+		const edit = { id: "my-gw", baseUrl: "https://gateway.example/v1", hasKey: true };
+
+		it("prefills the URL and never exposes the ID input", async () => {
+			const submit = vi.fn(async () => {});
+			const { form, finished } = createForm(submit, { edit: { ...edit, hasKey: false } });
+			form.onActivate?.();
+
+			const shown = Bun.stripANSI(form.render(120).join("\n"));
+			expect(shown).toContain("Edit provider my-gw");
+			expect(shown).toContain("https://gateway.example/v1");
+			expect(shown).not.toContain("Provider ID");
+
+			for (const char of "/x") form.handleInput(char);
+			form.handleInput("\n");
+			form.handleInput("\n");
+			await waitForSubmit();
+
+			expect(submit).toHaveBeenCalledWith({ id: "my-gw", baseUrl: "https://gateway.example/v1/x", apiKey: "" });
+			expect(finished).toEqual(["done"]);
+		});
+
+		it("says a blank key keeps the current key", () => {
+			const { form } = createForm(async () => {}, { edit });
+			form.onActivate?.();
+			form.handleInput("\n");
+			expect(Bun.stripANSI(form.render(120).join("\n"))).toContain("API key (blank keeps current key)");
+		});
+
+		it("ctrl+x on the key field clears the stored key on save", async () => {
+			const submit = vi.fn(async () => {});
+			const { form } = createForm(submit, { edit });
+			form.onActivate?.();
+			form.handleInput("\n");
+			form.handleInput("\x18");
+
+			const shown = Bun.stripANSI(form.render(120).join("\n"));
+			expect(shown).toContain("Stored key will be cleared on save.");
+			expect(shown).toContain("Ctrl+X clear key");
+
+			form.handleInput("\n");
+			await waitForSubmit();
+			expect(submit).toHaveBeenCalledWith({
+				id: "my-gw",
+				baseUrl: "https://gateway.example/v1",
+				apiKey: "",
+				clearApiKey: true,
+			});
+		});
+
+		it("typing a new key cancels a pending clear", async () => {
+			const submit = vi.fn(async () => {});
+			const { form } = createForm(submit, { edit });
+			form.onActivate?.();
+			form.handleInput("\n");
+			form.handleInput("\x18");
+			for (const char of "new-key") form.handleInput(char);
+
+			expect(Bun.stripANSI(form.render(120).join("\n"))).not.toContain("Stored key will be cleared");
+			form.handleInput("\n");
+			await waitForSubmit();
+			expect(submit).toHaveBeenCalledWith({ id: "my-gw", baseUrl: "https://gateway.example/v1", apiKey: "new-key" });
+		});
+
+		it("offers no key clearing when no key is stored", () => {
+			const { form } = createForm(async () => {}, { edit: { ...edit, hasKey: false } });
+			form.onActivate?.();
+			form.handleInput("\n");
+			form.handleInput("\x18");
+			const shown = Bun.stripANSI(form.render(120).join("\n"));
+			expect(shown).not.toContain("Ctrl+X");
+			expect(shown).not.toContain("Stored key will be cleared");
+		});
 	});
 });
