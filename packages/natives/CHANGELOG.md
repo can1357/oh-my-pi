@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Wayland capture including only the first monitor selected in the ScreenCast picker; shared monitors now appear in `computer.displays()` and the `all` composite ([#13842](https://github.com/can1357/oh-my-pi/issues/13842)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Fixed

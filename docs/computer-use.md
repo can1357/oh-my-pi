@@ -23,7 +23,7 @@ tools:
 | Key                  | Default | Meaning                                                                                                           |
 | -------------------- | ------: | ----------------------------------------------------------------------------------------------------------------- |
 | `computer.enabled`   | `false` | Expose the `computer` Eval prelude.                                                                               |
-| `computer.display`   |   `all` | Composite every display, or select one native display ID. On Wayland the portal display ID is `wayland-portal-0`. |
+| `computer.display`   |   `all` | Composite every shared display, or select one native display ID. On Wayland, use the portal's `mapping_id` (for example, `DP-1`) when available, otherwise `wayland-portal-0`, `wayland-portal-1`, etc. |
 | `computer.maxWidth`  |  `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                  |
 | `computer.maxHeight` |  `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                  |
 
@@ -151,6 +151,8 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 X11 background input uses an independent XI2 pointer/keyboard and requires writable `/dev/uinput`, working udev/libinput hotplug, and a compatible toolkit/window manager. Core-only clients and popup grabs may require AX or takeover. Windows uses physical screen coordinates throughout capture, AX and input, converting only at the target window's DPI-aware message boundary; mixed-DPI monitor origins are never divided by individual display scales.
 
 Inspect `computer.capabilities()` rather than assuming capture, input, AX, or permission state. On Wayland, input reports `prompt-or-granted` before first native input without opening a RemoteDesktop session. Released builds are compiled without the `wayland-pipewire` feature, so `capabilities()` reports `capture: false`; where the feature is present, a missing portal/PipeWire feature or denied RemoteDesktop portal is reported as a capture/input/permission failure rather than falling back to X11.
+
+With `wayland-pipewire` enabled, the ScreenCast picker controls which monitors omp can capture. After a capture, `computer.displays()` lists the shared monitors; `computer.display: all` composites them at a common pixel scale so clicks map back to each monitor's logical coordinates.
 
 ## Safety and troubleshooting
 

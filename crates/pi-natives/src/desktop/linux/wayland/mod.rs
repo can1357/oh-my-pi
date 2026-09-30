@@ -5,7 +5,11 @@ mod portal;
 mod xkb;
 
 use image::RgbaImage;
+#[cfg(any(feature = "wayland-pipewire", test))]
+use image::{Rgba, imageops};
 
+#[cfg(any(feature = "wayland-pipewire", test))]
+use crate::desktop::frame::MAX_COMPOSITE_PIXELS;
 use crate::desktop::{
 	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
 	error::{CoreResult, DesktopError},
@@ -56,13 +60,13 @@ impl PortalGeometry {
 		Self { logical_x, logical_y, logical_width, logical_height, pixel_width, pixel_height }
 	}
 
-	/// Synthetic single-monitor display describing the captured buffer, with
-	/// logical bounds and scale derived from the portal geometry.
-	fn display(&self) -> DesktopDisplay {
+	/// Describe the captured monitor in logical coordinates and screenshot
+	/// pixels.
+	fn display(&self, id: &str, is_primary: bool) -> DesktopDisplay {
 		let scale = f64::from(self.pixel_width) / f64::from(self.logical_width.max(1));
 		DesktopDisplay {
-			id: "wayland-portal-0".to_string(),
-			name: "Wayland portal monitor".to_string(),
+			id: id.to_string(),
+			name: id.to_string(),
 			x: self.logical_x,
 			y: self.logical_y,
 			width: self.logical_width.max(1),
@@ -72,7 +76,7 @@ impl PortalGeometry {
 			pixel_y: 0,
 			pixel_width: self.pixel_width,
 			pixel_height: self.pixel_height,
-			is_primary: true,
+			is_primary,
 		}
 	}
 
@@ -101,6 +105,109 @@ impl PortalGeometry {
 		}
 		Some((px_x, px_y, width, height))
 	}
+}
+
+#[cfg(any(feature = "wayland-pipewire", test))]
+struct MonitorCapture {
+	id:       String,
+	image:    RgbaImage,
+	geometry: PortalGeometry,
+}
+
+// Lay out logical monitor rectangles at a common pixel scale so mixed-DPI
+// buffers stay aligned with the compositor's global coordinate space.
+#[cfg(any(feature = "wayland-pipewire", test))]
+fn monitor_layout(monitors: &[MonitorCapture]) -> CoreResult<(u32, u32, Vec<DesktopDisplay>)> {
+	let left = monitors
+		.iter()
+		.map(|m| m.geometry.logical_x)
+		.min()
+		.ok_or_else(|| DesktopError::capture_failed("ScreenCast returned no monitor stream"))?;
+	let top = monitors
+		.iter()
+		.map(|m| m.geometry.logical_y)
+		.min()
+		.unwrap_or(0);
+	let scale_x = monitors
+		.iter()
+		.map(|m| f64::from(m.geometry.pixel_width) / f64::from(m.geometry.logical_width))
+		.fold(0.0_f64, f64::max);
+	let scale_y = monitors
+		.iter()
+		.map(|m| f64::from(m.geometry.pixel_height) / f64::from(m.geometry.logical_height))
+		.fold(0.0_f64, f64::max);
+	let scaled = |offset: i64, scale: f64| -> CoreResult<u32> {
+		let pixels = (offset as f64 * scale).round();
+		if pixels > f64::from(u32::MAX) {
+			return Err(DesktopError::capture_failed("Wayland composite dimension overflow"));
+		}
+		Ok(pixels as u32)
+	};
+	let mut width = 0;
+	let mut height = 0;
+	let mut displays = Vec::with_capacity(monitors.len());
+	for (index, monitor) in monitors.iter().enumerate() {
+		let geometry = &monitor.geometry;
+		let x = i64::from(geometry.logical_x) - i64::from(left);
+		let y = i64::from(geometry.logical_y) - i64::from(top);
+		let pixel_x = scaled(x, scale_x)?;
+		let pixel_y = scaled(y, scale_y)?;
+		let right = scaled(x + i64::from(geometry.logical_width), scale_x)?;
+		let bottom = scaled(y + i64::from(geometry.logical_height), scale_y)?;
+		let mut display = geometry.display(&monitor.id, index == 0);
+		display.pixel_x = pixel_x;
+		display.pixel_y = pixel_y;
+		display.pixel_width = right.saturating_sub(pixel_x).max(1);
+		display.pixel_height = bottom.saturating_sub(pixel_y).max(1);
+		width = width.max(pixel_x.saturating_add(display.pixel_width));
+		height = height.max(pixel_y.saturating_add(display.pixel_height));
+		displays.push(display);
+	}
+	if u64::from(width) * u64::from(height) > MAX_COMPOSITE_PIXELS {
+		return Err(DesktopError::capture_failed(format!(
+			"composite {width}x{height} exceeds the native safety limit"
+		)));
+	}
+	Ok((width, height, displays))
+}
+
+#[cfg(any(feature = "wayland-pipewire", test))]
+fn composite_monitors(
+	monitors: Vec<MonitorCapture>,
+	width: u32,
+	height: u32,
+	displays: &[DesktopDisplay],
+) -> RgbaImage {
+	if monitors.len() == 1 {
+		return monitors.into_iter().next().unwrap().image;
+	}
+	let mut composite = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+	for (monitor, display) in monitors.into_iter().zip(displays) {
+		if monitor.image.width() == display.pixel_width
+			&& monitor.image.height() == display.pixel_height
+		{
+			imageops::replace(
+				&mut composite,
+				&monitor.image,
+				display.pixel_x.into(),
+				display.pixel_y.into(),
+			);
+		} else {
+			let resized = imageops::resize(
+				&monitor.image,
+				display.pixel_width,
+				display.pixel_height,
+				imageops::FilterType::Triangle,
+			);
+			imageops::replace(
+				&mut composite,
+				&resized,
+				display.pixel_x.into(),
+				display.pixel_y.into(),
+			);
+		}
+	}
+	composite
 }
 
 pub struct WaylandBackend {
@@ -155,17 +262,6 @@ impl WaylandBackend {
 				"RemoteDesktop portal or LIBEI_SOCKET is required for Wayland input",
 			)
 		}))
-	}
-
-	#[cfg(feature = "wayland-pipewire")]
-	fn selected_display_allowed(&self) -> CoreResult<()> {
-		match &self.display {
-			DisplaySelector::All => Ok(()),
-			DisplaySelector::Id(id) if id == "wayland-portal-0" => Ok(()),
-			DisplaySelector::Id(id) => Err(DesktopError::invalid_target(format!(
-				"Wayland portal display '{id}' is unavailable; use 'all' or 'wayland-portal-0'"
-			))),
-		}
 	}
 }
 
@@ -233,11 +329,14 @@ impl Backend for WaylandBackend {
 		}
 		#[cfg(feature = "wayland-pipewire")]
 		{
-			self.selected_display_allowed()?;
-			let (image, geometry) = capture::capture()?;
-			self.displays = vec![geometry.display()];
+			let monitors = capture::capture(&self.display)?;
+			let (width, height, displays) = monitor_layout(&monitors)?;
+			self.displays = displays;
 			match target {
-				Target::Desktop => Ok((image, FrameGeometry::for_displays(&self.displays))),
+				Target::Desktop => {
+					let frame = FrameGeometry::for_displays(&self.displays);
+					Ok((composite_monitors(monitors, width, height, &self.displays), frame))
+				},
 				Target::Window(id) => {
 					let window = self
 						.windows()?
@@ -246,12 +345,20 @@ impl Backend for WaylandBackend {
 						.ok_or_else(|| {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})?;
-					let (x, y, width, height) = geometry.window_crop(&window).ok_or_else(|| {
-						DesktopError::capture_failed(format!(
-							"Wayland window {id} is outside the selected portal monitor"
-						))
-					})?;
-					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
+					let (monitor, (x, y, width, height)) = monitors
+						.iter()
+						.find_map(|monitor| {
+							monitor
+								.geometry
+								.window_crop(&window)
+								.map(|crop| (monitor, crop))
+						})
+						.ok_or_else(|| {
+							DesktopError::capture_failed(format!(
+								"Wayland window {id} is outside the shared portal monitors"
+							))
+						})?;
+					let cropped = imageops::crop_imm(&monitor.image, x, y, width, height).to_image();
 					let frame = FrameGeometry::for_window(&window, cropped.width(), cropped.height());
 					Ok((cropped, frame))
 				},
@@ -439,7 +546,7 @@ mod tests {
 		// 2560x2880 buffer for a 1280x1440 logical region at scale 2 (issue
 		// #11540).
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
-		let display = geometry.display();
+		let display = geometry.display("wayland-portal-0", true);
 		assert_eq!((display.width, display.height), (1280, 1440));
 		assert!((display.scale - 2.0).abs() < f64::EPSILON);
 		let frame = FrameGeometry::for_displays(&[display]);
@@ -454,20 +561,20 @@ mod tests {
 	#[test]
 	fn monitor_offset_is_added_to_logical_point() {
 		let geometry = PortalGeometry::new(Some((100, 50)), Some((1280, 1440)), 2560, 2880);
-		let frame = FrameGeometry::for_displays(&[geometry.display()]);
+		let frame = FrameGeometry::for_displays(&[geometry.display("wayland-portal-0", true)]);
 		assert_eq!(frame.map_point(1280.0, 1440.0, None).unwrap(), (740.0, 770.0));
 	}
 
 	#[test]
 	fn missing_portal_size_falls_back_to_buffer_scale_one() {
 		let geometry = PortalGeometry::new(None, None, 1920, 1080);
-		let display = geometry.display();
+		let display = geometry.display("wayland-portal-0", true);
 		assert_eq!((display.x, display.y), (0, 0));
 		assert_eq!((display.width, display.height), (1920, 1080));
 		assert!((display.scale - 1.0).abs() < f64::EPSILON);
 		// Degenerate (zero) portal dimensions take the same fallback.
 		let degenerate = PortalGeometry::new(Some((0, 0)), Some((0, 0)), 1920, 1080);
-		assert_eq!(degenerate.display().width, 1920);
+		assert_eq!(degenerate.display("wayland-portal-0", true).width, 1920);
 	}
 
 	#[test]
@@ -492,5 +599,29 @@ mod tests {
 				.window_crop(&portal_window("w", -10, 0, 100, 100))
 				.is_none()
 		);
+	}
+	#[test]
+	fn multiple_portal_monitors_composite_at_logical_positions() {
+		let monitors = vec![
+			MonitorCapture {
+				id:       "DP-1".into(),
+				image:    RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255])),
+				geometry: PortalGeometry::new(Some((-2, 0)), Some((2, 2)), 4, 4),
+			},
+			MonitorCapture {
+				id:       "DP-2".into(),
+				image:    RgbaImage::from_pixel(2, 2, Rgba([0, 0, 255, 255])),
+				geometry: PortalGeometry::new(Some((0, 1)), Some((2, 2)), 2, 2),
+			},
+		];
+		let (width, height, displays) = monitor_layout(&monitors).unwrap();
+		assert_eq!((width, height), (8, 6));
+		assert_eq!(displays.len(), 2);
+		let frame = FrameGeometry::for_displays(&displays);
+		let screenshot = composite_monitors(monitors, width, height, &displays);
+		assert_eq!(screenshot.get_pixel(1, 1).0, [255, 0, 0, 255]);
+		assert_eq!(screenshot.get_pixel(6, 4).0, [0, 0, 255, 255]);
+		assert_eq!(frame.map_point(6.0, 4.0, None).unwrap(), (1.0, 2.0));
+		assert!(frame.map_point(6.0, 1.0, None).is_err());
 	}
 }
