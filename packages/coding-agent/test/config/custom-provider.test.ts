@@ -78,6 +78,48 @@ describe("addCustomProvider", () => {
 		expect(refreshProvider).not.toHaveBeenCalled();
 	});
 
+	it("keeps comments and other providers byte-for-byte when adding", async () => {
+		const seed =
+			"# top\nproviders:\n  # keep me\n  other:\n    baseUrl: http://o.example/v1 # inline\n    auth: none\n";
+		await fs.writeFile(configPath, seed);
+		await addCustomProvider(input, context);
+		const written = await fs.readFile(configPath, "utf8");
+		expect(written.startsWith(seed.trimEnd())).toBe(true);
+		expect(written).toContain("# top");
+		expect(written).toContain("# keep me");
+		expect(written).toContain("# inline");
+		expect(written).toContain("my-gateway:");
+	});
+
+	it("edits a flow-style providers map and stays valid", async () => {
+		await fs.writeFile(configPath, 'providers: {other: {baseUrl: "http://o.example/v1", auth: none}}\n');
+		await addCustomProvider(input, context);
+		const loaded = ModelsConfigFile.relocate(configPath).tryLoad();
+		expect(loaded.status).toBe("ok");
+		if (loaded.status !== "ok") return;
+		expect(Object.keys(loaded.value.providers ?? {}).sort()).toEqual(["my-gateway", "other"]);
+	});
+
+	it("aborts when models.yml changes between read and publish", async () => {
+		const concurrent = "providers:\n  concurrent:\n    baseUrl: http://c.example/v1\n    auth: none\n";
+		await fs.writeFile(configPath, "providers:\n  other:\n    baseUrl: http://o.example/v1\n    auth: none\n");
+		const realReadFile = fs.readFile;
+		let reads = 0;
+		const spy = vi.spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+			reads += 1;
+			if (reads === 2) await fs.writeFile(configPath, concurrent);
+			return realReadFile(...args);
+		});
+		try {
+			await expect(addCustomProvider(input, context)).rejects.toThrow("models.yml changed on disk; retry");
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await fs.readFile(configPath, "utf8")).toBe(concurrent);
+		expect(authStorage.credentials.has(input.id)).toBe(false);
+		expect(refreshProvider).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		[{ ...input, id: "Invalid ID" }, "Provider ID"],
 		[{ ...input, baseUrl: "not a url" }, "valid provider endpoint"],
