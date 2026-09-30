@@ -123,7 +123,7 @@ test.skipIf(process.platform === "win32")("a timed-out !command kills the descen
 		// `sleep 10` still keeps the shell alive until the timeout fires.
 		const command = `"${worker}" & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
 		const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
-		expect(result).toBeUndefined();
+		expect(result).toMatchObject({ ok: false, failure: expect.stringContaining("timed out") });
 
 		// The kill is the contract. Comparing its latency against a write the
 		// descendant performs after a delay only measured how fast the runner
@@ -155,7 +155,7 @@ test.skipIf(process.platform === "win32")(
 			// so it competes with the very budget it must finish within (#10259).
 			const command = `sh -c '"${worker}" &' & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
 			const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
-			expect(result).toBeUndefined();
+			expect(result).toMatchObject({ ok: false, failure: expect.stringContaining("timed out") });
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			escaped = Process.fromPid(pid);
@@ -183,7 +183,7 @@ test.skipIf(process.platform !== "linux")(
 			// Same yielding wait as the reparented oracle above (#10259).
 			const command = `setsid sh -c '"${worker}" &' </dev/null >/dev/null 2>&1 & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
 			const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
-			expect(result).toBeUndefined();
+			expect(result).toMatchObject({ ok: false, failure: expect.stringContaining("timed out") });
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			escaped = Process.fromPid(pid);
@@ -215,7 +215,7 @@ test.skipIf(process.platform === "win32")(
 			// command, so it needs the same budget as the other escape cases (#10259).
 			const command = `"${worker}" & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
 			const result = await runShellCommand(command, ESCAPE_TIMEOUT_MS);
-			expect(result).toBeUndefined();
+			expect(result).toMatchObject({ ok: false, failure: expect.stringContaining("timed out") });
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			descendant = Process.fromPid(pid);
@@ -231,8 +231,8 @@ test.skipIf(process.platform === "win32")("resolves !commands when PATH omits th
 	// find the OS shell. Probing in a subprocess so the stripped PATH cannot
 	// affect this test process's own spawns.
 	const script = `import { runShellCommand } from ${JSON.stringify(resolverUrl)};
-const value = await runShellCommand("echo pathless-ok", 5_000);
-console.log(value === "pathless-ok" ? "PATHLESS-OK" : "PATHLESS-BAD:" + value);`;
+const run = await runShellCommand("echo pathless-ok", 5_000);
+console.log(run.ok && run.value === "pathless-ok" ? "PATHLESS-OK" : "PATHLESS-BAD:" + JSON.stringify(run));`;
 	const emptyPathDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-no-sh-in-path-"));
 	roots.push(emptyPathDir);
 	const proc = Bun.spawn({

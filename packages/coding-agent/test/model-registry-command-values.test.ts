@@ -3,12 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
-import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -29,9 +31,12 @@ function trackedTokenCommand(tokenFile: string, counterFile: string): string {
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
-function failedTrackingCommand(counterFile: string): string {
-	if (process.platform !== "win32") return `printf 1 >> ${shellQuote(counterFile)}; exit 1`;
-	const script = `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");process.exit(1);`;
+/** Command whose first run exits 1 with no output; later runs print `<key>-<run number>`. */
+function failOnceCommand(counterFile: string, key: string): string {
+	if (process.platform !== "win32") {
+		return `printf 1 >> ${shellQuote(counterFile)}; n=$(wc -c < ${shellQuote(counterFile)}); [ $n -le 1 ] && exit 1; printf %s ${shellQuote(key)}-$n`;
+	}
+	const script = `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(counterFile)}, "1");const n=fs.readFileSync(${JSON.stringify(counterFile)}, "utf8").length;if(n<=1)process.exit(1);process.stdout.write(${JSON.stringify(key)}+"-"+n);`;
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
@@ -244,10 +249,58 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer fresh-key");
 	});
 
-	test("failed 401 refresh discards the rejected command-backed key", async () => {
+	test("a failed refresh keeps the previous command-backed key and re-runs the command on the next lookup", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "stale-key");
+		fs.writeFileSync(tokenFile, "previous-key");
+		fs.writeFileSync(counterFile, "");
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						authHeader: true,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("previous-key");
+		// The helper now exits 0 and prints nothing, like a mint that overran its budget.
+		fs.writeFileSync(tokenFile, "");
+
+		const refreshed = await registry.resolver(model)({
+			lastChance: false,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			previousKey: "previous-key",
+		});
+		expect(resolvedApiKeyBearer(refreshed)).toBe("previous-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+		// Still unrefreshed: every later lookup runs the command again and keeps the
+		// previous key, for the API key and the header derived from it alike.
+		expect(await registry.getApiKey(model)).toBe("previous-key");
+		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer previous-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1111");
+
+		fs.writeFileSync(tokenFile, "fresh-key");
+		expect(await registry.getApiKey(model)).toBe("fresh-key");
+		expect(await registry.getApiKey(model)).toBe("fresh-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11111");
+	});
+
+	test("a key command that has never succeeded names itself and its exit status, then runs again", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
 		fs.writeFileSync(counterFile, "");
 		const command = trackedTokenCommand(tokenFile, counterFile);
 
@@ -259,46 +312,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 						baseUrl: "https://custom-proxy.example.com/v1",
 						api: "openai-completions",
 						apiKey: `!${command}`,
-						authHeader: true,
 						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBe("stale-key");
-		fs.writeFileSync(tokenFile, "FAIL");
-
-		const refreshed = await registry.resolver(model)({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: "stale-key",
-		});
-
-		expect(refreshed).toBeUndefined();
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-		expect(await registry.getApiKey(model)).toBeUndefined();
-		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
-	});
-
-	test("command resolution backs off after failed executions", async () => {
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(counterFile, "");
-
-		// Command increments a counter and then fails (exit 1).
-		const trackingCommand = failedTrackingCommand(counterFile);
-
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${trackingCommand}`,
 					},
 				},
 			}),
@@ -307,29 +321,80 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		// Catalog construction records the command without executing it.
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
 
-		const dummyModel: Model<Api> = buildModel({
-			id: "foo",
-			name: "foo",
-			api: "openai-completions",
-			provider: "custom-proxy",
-			baseUrl: "a",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		});
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		// The request-time resolver re-runs the command and reports why it has no key.
+		let failure: unknown;
+		try {
+			await registry.resolver(model)({ lastChance: false, error: undefined });
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain(command);
+		expect((failure as Error).message).toContain("status 1");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 
-		// Trigger the fallback resolver which also calls resolveConfigValue.
-		await registry.getApiKey(dummyModel);
-
-		// Another call to ensure it hits cache multiple times.
-		await registry.getApiKey(dummyModel);
-
-		// The command should have only run once.
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+		fs.writeFileSync(tokenFile, "recovered-key");
+		expect(await registry.getApiKey(model)).toBe("recovered-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 	});
+
+	test("a key command that fails once still sends the turn's request with the next minted key", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${failOnceCommand(counterFile, "minted-key")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry: registry,
+			model,
+			sessionManager: SessionManager.inMemory(tempDir),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: [],
+		});
+		const authorizations: Array<string | undefined> = [];
+		const recordingFetch: FetchImpl = async (_url, init) => {
+			authorizations.push(((init?.headers ?? {}) as Record<string, string>).Authorization);
+			return okChatCompletionStream();
+		};
+		session.agent.streamFn = (streamModel, context, options) =>
+			streamSimple(streamModel, context, { ...options, fetch: recordingFetch });
+		try {
+			await session.prompt("hi");
+		} finally {
+			await session.dispose();
+		}
+
+		// Run 1 failed; the turn's request carries the key run 2 printed.
+		expect(authorizations).toEqual(["Bearer minted-key-2"]);
+	}, 20_000);
 
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
@@ -556,45 +621,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		const refreshed = registry.find("custom-proxy", "custom-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.Authorization).toBe("Bearer fresh-key");
-	});
-
-	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
-		fs.writeFileSync(tokenFile, "FAIL");
-		fs.writeFileSync(counterFile, "");
-		const command = trackedTokenCommand(tokenFile, counterFile);
-
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"custom-proxy": {
-						baseUrl: "https://custom-proxy.example.com/v1",
-						api: "openai-completions",
-						apiKey: `!${command}`,
-						authHeader: true,
-						models: [{ id: "custom-model", name: "Custom Model" }],
-					},
-				},
-			}),
-		);
-
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
-		if (!model) throw new Error("Expected custom model");
-		expect(await registry.getApiKey(model)).toBeUndefined();
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-
-		// Helper is healthy again, but the 30s failure backoff would still block
-		// getApiKey until process restart — unless online refresh clears it.
-		fs.writeFileSync(tokenFile, "recovered-key");
-		expect(await registry.getApiKey(model)).toBeUndefined();
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-
-		await registry.refresh("online", { refreshCommandCredentials: true });
-		expect(await registry.getApiKey(model)).toBe("recovered-key");
-		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	});
 
 	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {

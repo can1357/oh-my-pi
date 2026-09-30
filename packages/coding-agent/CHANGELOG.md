@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A `!command` API key or header whose command fails or prints nothing no longer leaves the provider without a key for 30 seconds: the previous value keeps working, the command runs again on the next request, and a command that has never succeeded is named with its exit status in the request error instead of "No API key"
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

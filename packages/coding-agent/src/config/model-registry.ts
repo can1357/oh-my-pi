@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -62,6 +63,7 @@ import {
 } from "./custom-models";
 import {
 	createConfigHeaderResolver,
+	describeCommandConfigFailure,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
@@ -2920,20 +2922,30 @@ export class ModelRegistry {
 	 * policy. Accepts a provider id with options, or a model with an optional
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
-	 * `resolveApiKeyOnce(resolver)`.
+	 * `resolveApiKeyOnce(resolver)`. When the initial resolve finds no key because
+	 * the provider's `!command` API key has never succeeded, it throws an error
+	 * naming the command and how its latest run failed.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
-		}
-		return createApiKeyResolver(this, target.provider, {
-			...options,
-			baseUrl: target.baseUrl,
-			modelId: target.id,
-		});
+		const provider = typeof target === "string" ? target : target.provider;
+		const resolve =
+			typeof target === "string"
+				? createApiKeyResolver(this, target, options)
+				: createApiKeyResolver(this, target.provider, {
+						...options,
+						baseUrl: target.baseUrl,
+						modelId: target.id,
+					});
+		return async context => {
+			const resolved = await resolve(context);
+			if (context.error !== undefined || resolvedApiKeyBearer(resolved) !== undefined) return resolved;
+			const failure = describeCommandConfigFailure(this.#customProviderApiKeys.get(provider));
+			if (failure) throw new Error(`API key command ${failure}`);
+			return resolved;
+		};
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {

@@ -205,7 +205,7 @@ the V1 `/responses/compact` request. See [compaction](./compaction.md).
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout and stdout is trimmed. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -215,7 +215,7 @@ providers:
       X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. A run that fails, times out, or prints nothing is never cached: the next request runs the command again, and until a run succeeds the command's previous output keeps serving. A command that has never succeeded yields no value: a header it backs is omitted, and a request that needs it as the `apiKey` runs it again (the pre-send key check does not stop that request) and, if that run fails too, fails with an error naming the command and its exit status. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery make the relevant API keys and headers run their commands again on the next resolve; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 
