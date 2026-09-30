@@ -1367,17 +1367,11 @@ function hasRefDefAnywhere(text: string): boolean {
 	return false;
 }
 
-/** Whether `text` holds anything but whitespace from `start` on. */
-function hasContentFrom(text: string, start: number): boolean {
-	for (let last = text.length - 1; last >= start; last--) if (!/\s/.test(text[last])) return true;
-	return false;
-}
-
 /** The leading rendered rows of a Markdown document. */
 export interface MarkdownHead {
 	/** Leading rows; each equals the same row of a full render. */
 	lines: readonly string[];
-	/** Whether the document goes on past the rows' source unrendered, so a full render may have more rows. */
+	/** Whether the document was cut: the source past the cut went unrendered, so a full render may have more rows. */
 	truncated: boolean;
 }
 
@@ -1407,7 +1401,7 @@ export function renderMarkdownHead(text: string, width: number, theme: MarkdownT
 			// matches.
 			if (repairOrphanClosingFence(head) !== head) break;
 			const lines = new Markdown(head, 0, 0, theme).render(width);
-			if (lines.length > minRows) return { lines, truncated: hasContentFrom(normalized, end) };
+			if (lines.length > minRows) return { lines, truncated: true };
 		}
 	}
 	return { lines: new Markdown(text, 0, 0, theme).render(width), truncated: false };

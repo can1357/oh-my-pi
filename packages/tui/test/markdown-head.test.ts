@@ -54,6 +54,19 @@ describe("renderMarkdownHead", () => {
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
 
+	it("marks a cut head truncated when only no-break spaces follow the cut", () => {
+		// A fence holds no blank line, so the first cut past `Intro.` is right
+		// after it. The no-break spaces past the cut are no blank line to marked:
+		// a full render gives them a row of their own.
+		const code = Array.from({ length: 400 }, (_, i) => `const value${i} = ${i};`).join("\n");
+		const doc = `Intro.\n\n\`\`\`ts\n${code}\n\`\`\`\n\n\u00a0\u00a0\u00a0`;
+
+		const head = renderMarkdownHead(doc, 80, defaultMarkdownTheme, 12);
+		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(80);
+		expect(full.length).toBeGreaterThan(head.lines.length);
+		expect(head.truncated).toBe(true);
+	});
+
 	for (const [name, doc] of [
 		["CRLF line endings", `${paragraphs(600)}\n`.replaceAll("\n", "\r\n")],
 		["a document under 4 KB", `${paragraphs(80)}\n`],
