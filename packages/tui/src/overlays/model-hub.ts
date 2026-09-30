@@ -3021,6 +3021,16 @@ export class ModelHubComponent implements Component {
 			: "^E edit · ^D delete · ^N add provider · ";
 	}
 
+	/** Native counterpart of {@link #providerEditorHint}. */
+	#nativeProviderEditorHints(entry: SidebarEntry): NativeHint[] {
+		if (!this.#callbacks.providerEditor || this.#focus !== "scope" || entry.kind === "addProvider") return [];
+		const add: NativeHint = { keys: ["ctrl+n"], label: "add provider" };
+		const provider = this.#editableProvider(entry);
+		if (!provider) return [add];
+		const remove: NativeHint = { keys: ["ctrl+d"], label: "delete" };
+		return provider.baseUrl.trim() === "" ? [remove, add] : [{ keys: ["ctrl+e"], label: "edit" }, remove, add];
+	}
+
 	#footerHint(width: number): string {
 		const enter = formatKeyHint("enter");
 		const cancel = editorKey("tui.select.cancel");
@@ -3045,7 +3055,7 @@ export class ModelHubComponent implements Component {
 			if (strip.kind === "scope") return `${leftRight} save scope · ${enter} choose · ${cancel} cancel`;
 			return `${leftRight} thinking level · ${enter} apply · ${cancel} keep`;
 		}
-		if (this.#providerForm) return "Enter continue · Esc cancel";
+		if (this.#providerForm) return `${enter} continue · ${cancel} cancel`;
 		if (this.#assigning !== null) {
 			if (this.#focus === "scope") {
 				return `${enterRight} models · ${upDown} providers · type to search · ${altLeftRight} kind · ${cancel} cancel`;
@@ -3065,7 +3075,13 @@ export class ModelHubComponent implements Component {
 	}
 
 	#entryFooterHint(entry: SidebarEntry): string {
-		if (entry.kind === "addProvider") return "Enter add provider · ↑/↓ scopes · Esc close";
+		const enter = formatKeyHint("enter");
+		const cancel = editorKey("tui.select.cancel");
+		const upDown = editorKeys("tui.select.up", "tui.select.down");
+		const left = formatKeyHint("left");
+		const enterRight = formatKeyHints(["enter", "right"]);
+		const altLeftRight = formatKeyHints(["alt+left", "alt+right"]);
+		if (entry.kind === "addProvider") return `${enter} add provider · ${upDown} scopes · ${cancel} close`;
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
 				const presets =
@@ -3200,7 +3216,9 @@ export class ModelHubComponent implements Component {
 		return cx.supports("picker");
 	}
 
-	describe(cx: DescribeContext): NativeNode {
+	describe(cx: DescribeContext): NativeNode | null {
+		// The provider form and the add-provider view have no native description; use their rendered rows.
+		if (this.#providerForm || (this.#activeEntry().kind === "addProvider" && this.#assigning === null)) return null;
 		const usePicker = cx.supports("picker");
 		const cached = this.#nativeCache;
 		if (cached?.version === this.#nativeVersion && cached.picker === usePicker) return cached.node;
@@ -3274,7 +3292,8 @@ export class ModelHubComponent implements Component {
 					// A chip click picks and applies it, like the footer mouse path.
 					const strip = this.#strip;
 					const index = Number(event.item);
-					if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
+					if (!strip || strip.kind === "name" || strip.kind === "deleteProvider") return;
+					if (!Number.isInteger(index) || !strip.chips[index]) return;
 					strip.index = index;
 					this.#activateStripChip();
 					break;
@@ -3907,6 +3926,11 @@ export class ModelHubComponent implements Component {
 
 	/** The open strip as the picker's chip strip (role assignment, save scope, thinking level, new role name). */
 	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
+		if (strip.kind === "deleteProvider") {
+			// Native pickers wrap their own label; no footer width to fit.
+			const prompt = this.#deleteProviderPrompt(strip, Number.MAX_SAFE_INTEGER);
+			return { label: [span(prompt, strip.error === undefined ? "warning" : "error")], items: [] };
+		}
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
 				const notice = compactionNotice(strip, this.#callbacks.previewCompactionPoint);
@@ -4227,7 +4251,8 @@ export class ModelHubComponent implements Component {
 			case "strip": {
 				const strip = this.#strip;
 				const index = Number(value);
-				if (!strip || strip.kind === "name" || !Number.isInteger(index) || !strip.chips[index]) return;
+				if (!strip || strip.kind === "name" || strip.kind === "deleteProvider") return;
+				if (!Number.isInteger(index) || !strip.chips[index]) return;
 				strip.index = index;
 				this.#activateStripChip();
 				return;
@@ -4293,6 +4318,15 @@ export class ModelHubComponent implements Component {
 	#describeStrip(): NativeNode | undefined {
 		const strip = this.#strip;
 		if (!strip) return undefined;
+		if (strip.kind === "deleteProvider") {
+			const prompt = this.#deleteProviderPrompt(strip, Number.MAX_SAFE_INTEGER);
+			return node(
+				"row",
+				{ gap: "sm", align: "center" },
+				[text([span(prompt, strip.error === undefined ? "warning" : "error")])],
+				"deleteProvider",
+			);
+		}
 		if (strip.kind === "name") {
 			if (strip.purpose === "compaction") {
 				const notice = compactionNotice(strip, this.#callbacks.previewCompactionPoint);
@@ -4377,6 +4411,9 @@ export class ModelHubComponent implements Component {
 					return [keys("save scope", "left", "right"), keys("choose", "enter"), cancel("cancel")];
 				case "thinking":
 					return [keys("thinking level", "left", "right"), keys("apply", "enter"), cancel("keep")];
+				case "deleteProvider":
+					if (strip.pending) return [];
+					return [keys(strip.error === undefined ? "confirm" : "retry", "enter"), cancel("cancel")];
 			}
 		}
 		if (this.#assigning !== null) {
@@ -4393,9 +4430,11 @@ export class ModelHubComponent implements Component {
 		}
 		const presetHint = this.#presets().names.length > 0 ? keys("preset", "ctrl+left", "ctrl+right") : undefined;
 		const entry = this.#activeEntry();
+		const editor = this.#nativeProviderEditorHints(entry);
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
 				return [
+					...editor,
 					upDown("providers"),
 					keys("roles", "enter", "right"),
 					keys("tabs", "alt+left", "alt+right"),
@@ -4459,12 +4498,20 @@ export class ModelHubComponent implements Component {
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth
-				? [keys("log in", "enter"), upDown("providers"), cancel("close")]
-				: [upDown("providers"), cancel("close")];
+				? [...editor, keys("log in", "enter"), upDown("providers"), cancel("close")]
+				: [...editor, upDown("providers"), cancel("close")];
 		}
 		const refresh = entry.kind === "provider" ? keys("refresh", "f5") : undefined;
 		if (this.#focus === "scope") {
-			return [keys("models", "enter", "right"), upDown("providers"), search, kind, refresh, cancel("close")];
+			return [
+				...editor,
+				keys("models", "enter", "right"),
+				upDown("providers"),
+				search,
+				kind,
+				refresh,
+				cancel("close"),
+			];
 		}
 		return [
 			keys("assign roles", "enter"),
