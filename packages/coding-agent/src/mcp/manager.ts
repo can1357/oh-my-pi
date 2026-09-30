@@ -332,9 +332,10 @@ export class MCPManager {
 	}
 
 	/**
-	 * Waits only for the first discovery's initial `tools/list` attempts; a hung
-	 * attempt can wait indefinitely until discovery settles. Later retries do not
-	 * change its snapshot. A signal cancels only this caller's wait.
+	 * Waits for the first discovery's initial `tools/list` attempts, which may
+	 * hang indefinitely. A reload before settlement replaces that discovery while
+	 * keeping existing waiters; terminal disconnect rejects them. Once settled,
+	 * the snapshot never changes. A signal cancels only this caller's wait.
 	 */
 	waitForInitialConnections(options?: { signal?: AbortSignal }): Promise<McpConnectionStatusSnapshot> {
 		const { signal } = options ?? {};
@@ -355,6 +356,7 @@ export class MCPManager {
 	#resolveInitialConnections(snapshot: McpConnectionStatusSnapshot): void {
 		if (this.#initialConnectionsSettled) return;
 		this.#initialConnectionsSettled = true;
+		this.#initialAttemptFailures.clear();
 		this.#initialConnectionsReady.resolve(
 			Object.freeze({
 				pendingServers: Object.freeze([...snapshot.pendingServers]),
@@ -367,6 +369,7 @@ export class MCPManager {
 	#rejectInitialConnections(error: Error): void {
 		if (this.#initialConnectionsSettled) return;
 		this.#initialConnectionsSettled = true;
+		this.#initialAttemptFailures.clear();
 		this.#initialConnectionsReady.reject(error);
 	}
 
@@ -603,7 +606,9 @@ export class MCPManager {
 				extensionRoots: options?.extensionRoots,
 			});
 		} catch (error) {
-			if (this.#epoch !== discoveryEpoch) throw new Error("MCP initial discovery cancelled: manager disconnected");
+			if (isInitialDiscovery && this.#epoch !== discoveryEpoch) {
+				throw new Error("MCP initial discovery cancelled: manager disconnected");
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			this.#startupServers.add(".mcp.json");
 			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
@@ -617,7 +622,9 @@ export class MCPManager {
 			}
 			throw error;
 		}
-		if (this.#epoch !== discoveryEpoch) throw new Error("MCP initial discovery cancelled: manager disconnected");
+		if (isInitialDiscovery && this.#epoch !== discoveryEpoch) {
+			throw new Error("MCP initial discovery cancelled: manager disconnected");
+		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
 		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs, {
 			isInitialDiscovery,
@@ -736,6 +743,7 @@ export class MCPManager {
 		options?: { isInitialDiscovery?: boolean },
 	): Promise<MCPLoadResult> {
 		const isInitialDiscovery = options?.isInitialDiscovery ?? false;
+		const initialDiscoveryEpoch = this.#epoch;
 
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
@@ -774,7 +782,11 @@ export class MCPManager {
 			// Skip if already connected
 			if (this.#connections.has(name)) {
 				const pendingToolLoad = this.#pendingToolLoads.get(name);
-				if (isInitialDiscovery && pendingToolLoad) initialToolLoads.push({ name, promise: pendingToolLoad });
+				if (isInitialDiscovery) {
+					const previousFailure = this.#initialAttemptFailures.get(name);
+					if (previousFailure) initialFailures.set(name, previousFailure);
+					else if (pendingToolLoad) initialToolLoads.push({ name, promise: pendingToolLoad });
+				}
 				connectedServers.add(name);
 				continue;
 			}
@@ -918,7 +930,11 @@ export class MCPManager {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const message = error instanceof Error ? error.message : String(error);
-					if (!this.#initialAttemptFailures.has(name)) {
+					if (
+						!this.#initialConnectionsSettled &&
+						this.#epoch === connectionEpoch &&
+						!this.#initialAttemptFailures.has(name)
+					) {
 						this.#initialAttemptFailures.set(
 							name,
 							toMcpConnectionFailure(createMcpStartupFailure(name, message, sources[name])),
@@ -985,6 +1001,7 @@ export class MCPManager {
 			// after `allowBackgroundLogging` flips below.
 
 			for (const task of connectionTasks) {
+				if (isInitialDiscovery && this.#epoch !== initialDiscoveryEpoch) break;
 				const { name } = task;
 				if (task.tracked.status === "fulfilled") {
 					const value = task.tracked.value;
@@ -1011,16 +1028,19 @@ export class MCPManager {
 				}
 			}
 		}
-		if (isInitialDiscovery) {
+		if (isInitialDiscovery && this.#epoch === initialDiscoveryEpoch) {
 			const initialConnected = new Set(connectedServers);
+			for (const name of initialFailures.keys()) initialConnected.delete(name);
 			for (const { name, message } of validationFailures) {
 				initialFailures.set(name, toMcpConnectionFailure(createMcpStartupFailure(name, message, sources[name])));
 			}
 			void Promise.allSettled(initialToolLoads.map(task => task.promise)).then(results => {
+				if (this.#epoch !== initialDiscoveryEpoch) return;
 				for (const [index, result] of results.entries()) {
 					const task = initialToolLoads[index]!;
 					if (result.status === "fulfilled") initialConnected.add(task.name);
 					else {
+						initialConnected.delete(task.name);
 						const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
 						initialFailures.set(
 							task.name,
@@ -1387,15 +1407,23 @@ export class MCPManager {
 	}
 
 	/**
-	 * Disconnect from all servers.
+	 * Disconnect from all servers. Reload keeps pending initial-readiness waiters
+	 * for the next discovery; other teardown rejects them. Settled snapshots stay frozen.
 	 */
-	async disconnectAll(): Promise<void> {
+	async disconnectAll(options?: { forReload?: boolean }): Promise<void> {
 		// Invalidate any in-flight reconnection attempts that outlive this call.
 		// They captured the old epoch; after increment they'll detect staleness.
 		// A scheduled retry that fired during the teardown below would sample
 		// the new epoch and survive it, so end every schedule first.
 		this.#epoch++;
-		this.#rejectInitialConnections(new Error("MCP initial discovery cancelled: manager disconnected"));
+		if (options?.forReload) {
+			if (!this.#initialConnectionsSettled) {
+				this.#initialConnectionsStarted = false;
+				this.#initialAttemptFailures.clear();
+			}
+		} else {
+			this.#rejectInitialConnections(new Error("MCP initial discovery cancelled: manager disconnected"));
+		}
 		for (const name of this.#lostRemoteServers.keys()) this.#forgetLostServer(name);
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);

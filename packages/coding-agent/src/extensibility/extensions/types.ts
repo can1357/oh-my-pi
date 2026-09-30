@@ -468,7 +468,8 @@ export interface ExtensionContext {
 	/**
 	 * Await only the first discovery's configured MCP `tools/list` attempts. The
 	 * snapshot is initial-only; later retries do not change it, and a hung
-	 * discovery may wait indefinitely. Abort cancels only this caller's wait;
+	 * discovery may wait indefinitely. Reload before settlement replaces discovery
+	 * without cancelling existing waiters. Abort cancels only this caller's wait;
 	 * manager disposal rejects all pending waiters.
 	 */
 	waitForInitialMCPConnections(options?: { signal?: AbortSignal }): Promise<McpConnectionStatusSnapshot>;

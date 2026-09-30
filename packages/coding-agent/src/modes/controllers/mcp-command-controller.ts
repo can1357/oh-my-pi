@@ -2228,7 +2228,7 @@ export class MCPCommandController {
 		}
 
 		// Disconnect all existing servers
-		await this.ctx.mcpManager.disconnectAll();
+		await this.ctx.mcpManager.disconnectAll({ forReload: true });
 		// Prompt enrichment is asynchronous. Clear commands before rediscovery so
 		// removed/disabled servers cannot leave stale `/server:prompt` entries;
 		// newly loaded prompts repopulate them through the manager callback.
