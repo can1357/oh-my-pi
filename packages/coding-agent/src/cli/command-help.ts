@@ -81,6 +81,10 @@ export const loginHelp = {
 	description: "Log in to a model provider (terminal counterpart of /login)",
 } satisfies CommandMetadata;
 
+export const mcpHelp = {
+	description: "Manage MCP servers",
+} satisfies CommandMetadata;
+
 export const imagesHelp = {
 	description: "Inspect, diagnose, probe, and purge image publication backends",
 } satisfies CommandMetadata;
