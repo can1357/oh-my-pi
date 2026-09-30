@@ -277,6 +277,44 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(reports[0]?.metadata?.source).toBe("custom-provider");
 	});
 
+	it("keys reports by a runtime usage provider's cache version, not the configured resolver's", async () => {
+		const base = makeReport("a@example.com");
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue({
+			...base,
+			metadata: { ...base.metadata, source: "built-in" },
+		});
+		// A second process on the same agent.db, without the extension provider.
+		const extensionless = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		await extensionless.credentials.reload();
+		let overrideCalls = 0;
+		storage.usage.setProvider("anthropic", {
+			...claudeUsage.claudeUsageProvider,
+			cacheVersion: 2564,
+			async fetchUsage() {
+				overrideCalls += 1;
+				return { ...base, metadata: { ...base.metadata, source: "override" } };
+			},
+		});
+
+		try {
+			const shared = anthropicReports(await extensionless.usage.reports());
+			const overridden = anthropicReports(await storage.usage.reports());
+
+			expect(shared[0]?.metadata?.source).toBe("built-in");
+			expect(overrideCalls).toBe(1);
+			expect(overridden[0]?.metadata?.source).toBe("override");
+
+			// Removing the override restores the configured provider's cached rows.
+			storage.usage.removeProvider("anthropic");
+			await extensionless.usage.reports();
+			expect(anthropicReports(await storage.usage.reports())[0]?.metadata?.source).toBe("built-in");
+		} finally {
+			extensionless.close();
+		}
+	});
+
 	it("caches null on a cold failure for the backoff window, then retries after it expires", async () => {
 		let calls = 0;
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {

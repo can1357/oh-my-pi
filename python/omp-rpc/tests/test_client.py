@@ -411,6 +411,10 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "set_auto_retry":
             auto_retry_enabled = command["enabled"]
             respond(request_id, "set_auto_retry", {})
+        elif command_type == "set_cache_warming":
+            # "streaming" answers with a mode outside the protocol to exercise response validation.
+            effective = "always" if command["mode"] == "streaming" else command["mode"]
+            respond(request_id, "set_cache_warming", {"mode": effective})
         elif command_type == "abort_retry":
             respond(request_id, "abort_retry", {})
         elif command_type == "bash":
@@ -1467,6 +1471,9 @@ class RpcClientTests(unittest.TestCase):
             client.set_interrupt_mode("wait")
             client.set_auto_compaction(False)
             client.set_auto_retry(False)
+            self.assertEqual(client.set_cache_warming("off"), "off")
+            with self.assertRaisesRegex(ValueError, "set_cache_warming.mode"):
+                client.set_cache_warming("streaming")
             client.set_session_name("Renamed")
 
             state = client.get_state()

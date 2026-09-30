@@ -93,6 +93,8 @@ Runtime precedence:
 2. theme JSON `symbols.preset`
 3. fallback `"unicode"`
 
+When `symbolPreset` is unset, a successful Glyph Protocol handshake upgrades the session's Unicode fallback to Nerd Font icons without changing the saved setting. An explicit preset, including `unicode`, is not upgraded.
+
 Invalid override keys are ignored and logged (`logger.debug`).
 
 #### Box-drawing borders
