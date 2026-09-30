@@ -33,6 +33,8 @@ import type { MessageCreateParams } from "./anthropic-wire";
 const DEFAULT_TIMEOUT_MS = 600_000;
 /** Default retry budget, matching the SDK's default. */
 const DEFAULT_MAX_RETRIES = 2;
+/** Endpoint every request targets when the caller supplies no `baseURL`. */
+const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const INITIAL_RETRY_DELAY_S = 0.5;
 const MAX_RETRY_DELAY_S = 8;
 
@@ -186,12 +188,23 @@ export class AnthropicMessages {
 export interface AnthropicMessagesClientLike {
 	messages: { create(params: MessageCreateParams, options?: AnthropicRequestOptions): unknown };
 	beta?: { messages: { create(params: MessageCreateParams, options?: AnthropicRequestOptions): unknown } };
+	/**
+	 * Endpoint the client targets, when it exposes one. SDK-style clients
+	 * (`Anthropic`, `AnthropicVertex`) and {@link AnthropicMessagesClient}
+	 * publish it; a client that exposes none keeps its transport opaque, and the
+	 * provider must not assume the model's own routing on its behalf.
+	 */
+	baseURL?: string;
 }
 
 export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 	readonly messages: AnthropicMessages;
 	readonly beta: { readonly messages: AnthropicMessages };
 	#http: AnthropicHttpClient;
+	/** Endpoint shared with the HTTP transport. */
+	get baseURL(): string {
+		return this.#http.baseURL;
+	}
 
 	constructor(options: AnthropicClientOptions) {
 		this.#http = new AnthropicHttpClient(options);
@@ -207,9 +220,11 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 /** Shared Anthropic HTTP transport for Messages and resource APIs. */
 export class AnthropicHttpClient {
 	#options: AnthropicClientOptions;
+	readonly baseURL: string;
 
 	constructor(options: AnthropicClientOptions) {
 		this.#options = options;
+		this.baseURL = options.baseURL ?? DEFAULT_BASE_URL;
 	}
 
 	#buildHeaders(requestHeaders?: Record<string, string>): Record<string, string> {
@@ -246,7 +261,7 @@ export class AnthropicHttpClient {
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
 		const maxRetryDelayMs = options?.maxRetryDelayMs ?? opts.maxRetryDelayMs ?? 60_000;
-		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
+		const url = `${this.baseURL}${path}`;
 		const headers = this.#buildHeaders(options?.headers);
 		const body = params === undefined ? undefined : JSON.stringify(params);
 

@@ -157,6 +157,7 @@ import {
 } from "./anthropic-identity";
 import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import {
+	ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY,
 	anthropicProviderSessionStateKey,
 	clearAnthropicFastModeFallback,
 	isAnthropicFastModeFallbackDisabled,
@@ -229,12 +230,13 @@ const contextManagementBeta = "context-management-2025-06-27";
 const structuredOutputsBeta = "structured-outputs-2025-12-15";
 const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
 const fallbackCreditBeta = "fallback-credit-2026-06-01";
+const promptCachingScopeBeta = "prompt-caching-scope-2026-01-05";
 const claudeCodeUtilityBetaDefaults = [
 	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
+	promptCachingScopeBeta,
 	structuredOutputsBeta,
 ] as const;
 const claudeCodeAgentBetaDefaults = [
@@ -243,7 +245,7 @@ const claudeCodeAgentBetaDefaults = [
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
-	"prompt-caching-scope-2026-01-05",
+	promptCachingScopeBeta,
 	midConversationSystemBeta,
 ] as const;
 const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
@@ -253,6 +255,47 @@ const fastModeBeta = "fast-mode-2026-02-01";
 const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
+
+/**
+ * The two betas that only make sense alongside a `cache_control` breakpoint.
+ * A breakpoint-free replay must advertise neither: an endpoint that refused the
+ * field would refuse the replay too, and an endpoint that merely ignores it is
+ * left with a header that contradicts the body.
+ */
+const promptCacheBetas: Record<string, true> = {
+	[extendedCacheTtlBeta]: true,
+	[promptCachingScopeBeta]: true,
+};
+
+/**
+ * Remove the prompt-cache betas from every `anthropic-beta` entry in a header
+ * record. Header names are case-insensitive and the value is a comma-separated
+ * list, so each matching key keeps its own casing and its remaining tokens;
+ * an entry left with no token is deleted rather than sent empty. The input is
+ * returned untouched when it advertises no cache beta.
+ *
+ * `model.headers` and `options.headers` are caller-controlled channels that
+ * reach the wire through `buildAnthropicHeaders` (as `modelHeaders`, which an
+ * override-enabled endpoint lets replace our own beta header outright), the
+ * GitHub Copilot default headers, and the per-request beta override built for
+ * injected clients — each of which must go through here once breakpoints drop.
+ */
+function stripPromptCacheBetas(headers: Record<string, string>): Record<string, string> {
+	let stripped: Record<string, string> | undefined;
+	for (const key in headers) {
+		if (key.toLowerCase() !== "anthropic-beta") continue;
+		const betas = normalizeExtraBetas(headers[key]);
+		const kept = betas.filter(beta => promptCacheBetas[beta] !== true);
+		if (kept.length === betas.length) continue;
+		stripped ??= { ...headers };
+		if (kept.length === 0) {
+			delete stripped[key];
+		} else {
+			stripped[key] = kept.join(",");
+		}
+	}
+	return stripped ?? headers;
+}
 
 function resolveAnthropicControlBetas(
 	model: Model<"anthropic-messages">,
@@ -271,22 +314,34 @@ function buildClaudeCodeBetas({
 	thinkingRequest,
 	disableStrictTools = false,
 	supportsContextManagement = true,
+	dropPromptCacheBetas = false,
 }: {
 	agentRequest: boolean;
 	thinkingRequest: boolean;
 	disableStrictTools?: boolean;
 	supportsContextManagement?: boolean;
+	/**
+	 * Withhold the prompt-cache betas: this endpoint rejected `cache_control`,
+	 * so a request that carries no breakpoint must not advertise caching it
+	 * cannot use. This deviates from Claude Code's header fingerprint, which is
+	 * acceptable here precisely because an endpoint that refuses the field is
+	 * not the first-party API the fingerprint exists to match.
+	 */
+	dropPromptCacheBetas?: boolean;
 }): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools && supportsContextManagement) return claudeCodeUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement && !dropPromptCacheBetas) {
+		return claudeCodeUtilityBetaDefaults;
+	}
 	const betas: string[] = [];
 	for (const beta of agentRequest ? claudeCodeAgentBetaDefaults : claudeCodeUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
 		if (!supportsContextManagement && beta === contextManagementBeta) continue;
+		if (dropPromptCacheBetas && beta === promptCachingScopeBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -465,6 +520,16 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
 	/**
+	 * Value of {@link AnthropicOpaqueClientAnchor.fastModeRearmGeneration} this
+	 * state last observed. Only anchored (opaque-client) states are stamped:
+	 * they are the ones {@link clearAnthropicFastModeFallback} cannot reach, so
+	 * a stamp that is not the anchor's current generation is how the next
+	 * request through that client learns a re-arm happened and lowers
+	 * `fastModeDisabled`. Endpoint-keyed states are cleared by the sweep itself
+	 * and never read it.
+	 */
+	fastModeRearmGeneration: number;
+	/**
 	 * Runtime-learned: this endpoint rejected a replayed unsigned thinking
 	 * block, so it must be treated as a signing proxy from now on. All
 	 * subsequent requests demote unsigned thinking to text for this (baseUrl,
@@ -481,6 +546,22 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * this (baseUrl, modelId). Cleared on session close.
 	 */
 	thinkingReplayDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint rejected `cache_control`, so prompt-cache
+	 * breakpoints are omitted from every later request for this (baseUrl,
+	 * modelId). Cleared on session close.
+	 */
+	cacheControlUnsupported: boolean;
+	/**
+	 * Runtime-learned: this endpoint took a `cache_control` breakpoint but
+	 * refused the `ttl`/`scope` options on it, so every later request for this
+	 * (baseUrl, modelId) sends breakpoints without them — short-lived caching
+	 * keeps working. The narrow half of {@link cacheControlUnsupported}: a 400
+	 * about `cache_control` cannot say which of the two it is, so the retry
+	 * ladder tries this rung first and only escalates if it is refused too.
+	 * Cleared on session close.
+	 */
+	cacheControlOptionsUnsupported: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
 };
@@ -489,35 +570,123 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	const state: AnthropicProviderSessionState = {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
+		fastModeRearmGeneration: 0,
 		replayUnsignedThinkingDisabled: false,
 		thinkingReplayDisabled: false,
+		cacheControlUnsupported: false,
+		cacheControlOptionsUnsupported: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.thinkingReplayDisabled = false;
+			state.cacheControlUnsupported = false;
+			state.cacheControlOptionsUnsupported = false;
 			state.prefixDroppedThinkingBlocks.clear();
 		},
 	};
 	return state;
 }
 
+/**
+ * Private per-client state maps for opaque injected clients, anchored in the
+ * caller's session. Closing the anchor resets all its clients without keeping
+ * those clients alive or leaking learned settings across sessions.
+ */
+type AnthropicOpaqueClientAnchor = ProviderSessionState & {
+	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
+	/**
+	 * Bumped once per `/fast on` re-arm. Anchored states carry the value they
+	 * last observed in `fastModeRearmGeneration`; a mismatch is a re-arm they
+	 * have not picked up yet. Never reset by `close()`: the sweep discards the
+	 * states themselves, so a monotone counter needs no second reset path.
+	 */
+	fastModeRearmGeneration: number;
+};
+
+function isAnthropicOpaqueClientAnchor(state: ProviderSessionState | undefined): state is AnthropicOpaqueClientAnchor {
+	if (state === undefined) return false;
+	return (
+		"stores" in state &&
+		state.stores instanceof WeakMap &&
+		"fastModeRearmGeneration" in state &&
+		typeof state.fastModeRearmGeneration === "number"
+	);
+}
+
+function anthropicOpaqueClientAnchor(
+	providerSessionState: Map<string, ProviderSessionState>,
+): AnthropicOpaqueClientAnchor {
+	const existing = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
+	if (isAnthropicOpaqueClientAnchor(existing)) return existing;
+	const freshAnchor: AnthropicOpaqueClientAnchor = {
+		stores: new WeakMap(),
+		fastModeRearmGeneration: 0,
+		close: () => {
+			freshAnchor.stores = new WeakMap();
+		},
+	};
+	providerSessionState.set(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY, freshAnchor);
+	return freshAnchor;
+}
+
+function opaqueInjectedClientStore(
+	anchor: AnthropicOpaqueClientAnchor,
+	client: AnthropicMessagesClientLike,
+): Map<string, ProviderSessionState> {
+	const store = anchor.stores.get(client);
+	if (store !== undefined) return store;
+	const created = new Map<string, ProviderSessionState>();
+	anchor.stores.set(client, created);
+	return created;
+}
+
+/**
+ * Picks up a fast-mode re-arm the anchored state could not be swept by. A stamp
+ * other than the anchor's current generation means a re-arm landed since this
+ * state was last resolved, so the sticky fast-mode fallback is lowered — and
+ * nothing else, so the client keeps the rest of what it learned. The comparison
+ * is for inequality rather than ordering: the stamp claims only "this state has
+ * observed that generation", which needs no assumption about how the counter
+ * moved.
+ */
+function observeAnthropicFastModeRearm(state: AnthropicProviderSessionState, generation: number): void {
+	if (state.fastModeRearmGeneration === generation) return;
+	state.fastModeRearmGeneration = generation;
+	state.fastModeDisabled = false;
+}
 function getAnthropicProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
+	client: AnthropicMessagesClientLike | undefined,
 	baseUrl: string,
 	modelId: string,
 ): AnthropicProviderSessionState | undefined {
+	// No map means the caller opted out of session state entirely — an injected
+	// client does not opt back in on their behalf.
 	if (!providerSessionState) return undefined;
-	const key = anthropicProviderSessionStateKey(baseUrl, modelId);
-	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
+	const clientBaseUrl = client !== undefined ? injectedClientBaseUrl(client) : undefined;
+	let store = providerSessionState;
+	let anchor: AnthropicOpaqueClientAnchor | undefined;
+	if (client !== undefined && clientBaseUrl === undefined) {
+		anchor = anthropicOpaqueClientAnchor(providerSessionState);
+		store = opaqueInjectedClientStore(anchor, client);
+	}
+	const key = anthropicProviderSessionStateKey(clientBaseUrl ?? baseUrl, modelId);
+	const existing = store.get(key) as AnthropicProviderSessionState | undefined;
+	const state = existing ?? createAnthropicProviderSessionState();
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
-		return existing;
+		existing.cacheControlUnsupported ??= false;
+		existing.cacheControlOptionsUnsupported ??= false;
+	} else {
+		store.set(key, state);
 	}
-	const created = createAnthropicProviderSessionState();
-	providerSessionState.set(key, created);
-	return created;
+	// Every request for an opaque client resolves its state here and nowhere
+	// else, so this is where the re-arm it cannot be swept by has to land. A
+	// fresh state has nothing to lower and only takes the stamp.
+	if (anchor !== undefined) observeAnthropicFastModeRearm(state, anchor.fastModeRearmGeneration);
+	return state;
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
@@ -1074,6 +1243,13 @@ export type AnthropicClientOptionsArgs = {
 	thinkingEnabled?: boolean;
 	thinkingDisplay?: AnthropicThinkingDisplay;
 	disableStrictTools?: boolean;
+	/**
+	 * Withhold the prompt-cache betas (see `buildClaudeCodeBetas`). Set when the
+	 * request carries no breakpoint at all, and also when it carries breakpoints
+	 * stripped of `ttl`/`scope`: both betas govern those options, so a body
+	 * without them must advertise neither.
+	 */
+	dropPromptCacheBetas?: boolean;
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
@@ -2042,6 +2218,7 @@ const streamAnthropicOnce = (
 				: supportsAnthropicCompaction(model, baseUrl);
 			const providerSessionState = getAnthropicProviderSessionState(
 				options?.providerSessionState,
+				options?.client,
 				baseUrl,
 				model.id,
 			);
@@ -2050,6 +2227,31 @@ const streamAnthropicOnce = (
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
 			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
+			// Seeded from the session so a `cache_control` rejection learned on an
+			// earlier turn is honored on this turn's first attempt. Whichever of the
+			// two flags the session latched decides where this turn's ladder starts,
+			// so a session that learned only the narrow one keeps sending
+			// breakpoints — without `ttl`/`scope` — rather than none.
+			let dropCacheControl = providerSessionState?.cacheControlUnsupported ?? false;
+			let dropCacheControlOptions = providerSessionState?.cacheControlOptionsUnsupported ?? false;
+			// Set when this turn replayed because the endpoint refused
+			// `cache_control`. The endpoint-level latch is written from the turn's
+			// success path rather than from the parsed 400, so a misparsed error
+			// message costs one wasted retry instead of a whole session of
+			// suppressed prompt caching. Two flags, one per rung, because the
+			// success path records which rung carried the turn.
+			let cacheControlRejectionReplayed = false;
+			let cacheControlOptionRejectionReplayed = false;
+			// Whether this request's breakpoints carry an option a nested refusal
+			// could be about. `getCacheControl` is the only source of the breakpoint
+			// every call site applies, so asking it is asking the wire body. False
+			// means no nested refusal is possible — `type` is mandatory and its only
+			// legal value is constant — and the ladder skips its first rung.
+			// Re-read per rung because `isOAuthToken` is resolved with the client.
+			const requestCarriesCacheControlOptions = (): boolean => {
+				const cacheControl = getCacheControl(model, options?.cacheRetention, isOAuthToken).cacheControl;
+				return cacheControl !== undefined && (cacheControl.ttl !== undefined || cacheControl.scope !== undefined);
+			};
 			let dropAllThinking = droppedAllThinkingForSignature;
 			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
@@ -2059,6 +2261,17 @@ const streamAnthropicOnce = (
 			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior);
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
+			// Base for the per-request beta override an injected client needs.
+			// `mergeAnthropicBetaHeader` seeds from the caller's own
+			// `anthropic-beta` value, so once breakpoints are dropped an unstripped
+			// base would re-attach the very cache beta the replay abandoned. Both
+			// prompt-cache betas govern `ttl`/`scope`, so the options rung has to
+			// strip them too. Read through a closure because both flags flip
+			// mid-turn.
+			const callerBetaBaseHeaders = (): Record<string, string> =>
+				dropCacheControl || dropCacheControlOptions
+					? stripPromptCacheBetas(mergedCallerHeaders)
+					: mergedCallerHeaders;
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
 			// no nested effort field means the fallback scan cannot re-add its beta.
 			let fallbacks = options?.fallbacks;
@@ -2077,18 +2290,18 @@ const streamAnthropicOnce = (
 				});
 			}
 
-			let client: AnthropicMessagesClientLike;
-			let isOAuthToken: boolean;
-			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
 			let clientArgs: AnthropicClientOptionsArgs | undefined;
 			let requestExtraBetas: readonly string[] = [];
 			let clientDefaultHeaders: Record<string, string> | undefined;
-
-			if (options?.client) {
-				client = options.client;
-				isOAuthToken = false;
-			} else {
-				const extraBetas = normalizeExtraBetas(options?.betas);
+			// Rebuild headers when a retry changes the advertised beta set.
+			const resolveClient = (): { client: AnthropicMessagesClientLike; isOAuthToken: boolean } => {
+				if (options?.client) {
+					return { client: options.client, isOAuthToken: false };
+				}
+				let extraBetas = normalizeExtraBetas(options?.betas);
+				if (dropCacheControl || dropCacheControlOptions) {
+					extraBetas = extraBetas.filter(beta => promptCacheBetas[beta] !== true);
+				}
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
@@ -2163,9 +2376,18 @@ const streamAnthropicOnce = (
 				// `ttl: "1h"` on the OAuth path without it (verified against live
 				// traffic: writes land in the `ephemeral_1h` bucket), and utility
 				// requests must not deviate from CC's header fingerprint.
+				// `dropCacheControl` short-circuits it for the same reason the
+				// fast-mode beta is skipped above: a request that carries no
+				// breakpoint must not advertise a cache beta, and
+				// `dropCacheControlOptions` short-circuits it because the breakpoint
+				// it does carry has no `ttl` left to authorize. Both this gate and
+				// buildParams resolve the breakpoint behind the same flags so the
+				// header and the body can never disagree.
 				const isOAuth = options?.isOAuth ?? isAnthropicOAuthToken(apiKey);
 				if (
 					!isOAuth &&
+					!dropCacheControl &&
+					!dropCacheControlOptions &&
 					getCacheControl(model, options?.cacheRetention, isOAuth).cacheControl?.ttl === "1h" &&
 					!extraBetas.includes(extendedCacheTtlBeta)
 				) {
@@ -2229,13 +2451,14 @@ const streamAnthropicOnce = (
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
 					disableStrictTools,
+					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
 				};
 				const created = createClient(model, clientArgs);
-				client = created.client;
-				isOAuthToken = created.isOAuthToken;
 				clientDefaultHeaders = created.defaultHeaders;
 				requestExtraBetas = extraBetas;
-			}
+				return created;
+			};
+			let { client, isOAuthToken } = resolveClient();
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
@@ -2246,6 +2469,8 @@ const streamAnthropicOnce = (
 					supportsEagerToolInputStreaming,
 					prefixMismatchBehavior,
 					dropAllThinking,
+					dropCacheControl,
+					dropCacheControlOptions,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
 					fallbacks,
 					effectiveBaseUrl: baseUrl,
@@ -2486,19 +2711,19 @@ const streamAnthropicOnce = (
 				if (options?.client !== undefined && !isVertexRawPredictUrl(injectedBetaRouteUrl)) {
 					for (const beta of controlBetas) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							beta,
 						);
 					}
 					if ((params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							effortBeta,
 						);
 					}
 					if (carriesSignedCompaction(params)) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							injectedClientBetaHeaders ?? callerBetaBaseHeaders(),
 							COMPACTION_BETA,
 						);
 					}
@@ -3349,6 +3574,46 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					// First rung, and only when the failing request carried an option a
+					// nested refusal could be about: keep every breakpoint, drop
+					// `ttl`/`scope`, withhold the betas that govern them. The 400 cannot
+					// say whether the field or one of its options was refused, so ask.
+					// If this rung carries the turn, the field is supported and an
+					// option was not; if it is refused the same way, the rung below
+					// strips everything.
+					if (
+						!dropCacheControl &&
+						!dropCacheControlOptions &&
+						firstTokenTime === undefined &&
+						AIError.isCacheControlUnsupported(streamFailure) &&
+						requestCarriesCacheControlOptions()
+					) {
+						logger.warn(
+							"anthropic: endpoint rejected cache_control, retrying with breakpoints but no ttl/scope",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						cacheControlOptionRejectionReplayed = true;
+						dropCacheControlOptions = true;
+						// Rebuild the client too: the retry must stop advertising the
+						// extended-cache-ttl beta, and that lives in the default headers.
+						({ client, isOAuthToken } = resolveClient());
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					if (
 						slowMode &&
 						firstTokenTime === undefined &&
@@ -3388,6 +3653,34 @@ const streamAnthropicOnce = (
 							resetStreamOutputState();
 							continue;
 						}
+					}
+					if (
+						!dropCacheControl &&
+						firstTokenTime === undefined &&
+						AIError.isCacheControlUnsupported(streamFailure)
+					) {
+						logger.warn("anthropic: endpoint rejected cache_control, retrying without prompt-cache breakpoints", {
+							provider: model.provider,
+							model: model.id,
+							baseUrl,
+							error: streamFailureMessage,
+						});
+						cacheControlRejectionReplayed = true;
+						dropCacheControl = true;
+						// Rebuild the client too: the retry must stop advertising the
+						// extended-cache-ttl beta, and that lives in the default headers.
+						({ client, isOAuthToken } = resolveClient());
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
 					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
@@ -3457,6 +3750,31 @@ const streamAnthropicOnce = (
 			if (droppedAllThinkingForSignature) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "thinking-replay"];
 			}
+			if (dropCacheControl) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prompt-cache"];
+			} else if (dropCacheControlOptions) {
+				// Not `prompt-cache`: the breakpoints still went out and the endpoint
+				// still reads and writes the 5m cache. What this turn gave up is the
+				// extended retention / global scope the options ask for, and a
+				// consumer syncing a toggle off `prompt-cache` here would switch off
+				// a feature that is working.
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prompt-cache-retention"];
+			}
+			// Latch the refusal only now that the breakpoint-free replay has
+			// actually carried a turn to completion. `isCacheControlUnsupported`
+			// classifies a free-text 400, so a misparse must not outlive the one
+			// request it cost.
+			if (providerSessionState) {
+				if (cacheControlRejectionReplayed) {
+					providerSessionState.cacheControlUnsupported = true;
+				} else if (cacheControlOptionRejectionReplayed) {
+					// The narrow latch, so the rest of the session keeps sending
+					// breakpoints. Exclusive with the one above: when both rungs ran,
+					// the field refusal is what carried the turn and what the next turn
+					// must start from.
+					providerSessionState.cacheControlOptionsUnsupported = true;
+				}
+			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -3502,27 +3820,42 @@ type SystemBlockOptions = {
 	extraInstructions?: string[];
 	/** Text of the first user message — used as fingerprint seed for the billing header. */
 	firstUserMessageText?: string;
-	/** Cache lifetime shared by the OAuth system breakpoint and later message breakpoints. */
+	/**
+	 * Cache lifetime shared by the OAuth system breakpoint and later message
+	 * breakpoints. Omitted → the identity block keeps its default `ephemeral`
+	 * breakpoint; see `dropCacheControl` to emit none at all.
+	 */
 	cacheControl?: AnthropicCacheControl;
+	/**
+	 * Emit no `cache_control` on any block: the endpoint rejected the field.
+	 * Distinct from an undefined `cacheControl`, which only means "default".
+	 */
+	dropCacheControl?: boolean;
 };
 
 export function buildAnthropicSystemBlocks(
 	systemPrompt: readonly string[] | undefined,
 	options: SystemBlockOptions = {},
 ): AnthropicSystemBlock[] | undefined {
-	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText, cacheControl } = options;
+	const {
+		includeClaudeCodeInstruction = false,
+		extraInstructions = [],
+		firstUserMessageText,
+		cacheControl,
+		dropCacheControl = false,
+	} = options;
 	const sanitizedPrompts = normalizeSystemPrompts(systemPrompt);
 	const trimmedInstructions = extraInstructions.map(instruction => instruction.trim()).filter(Boolean);
 	const hasBillingHeader = sanitizedPrompts.some(prompt => prompt.startsWith(CLAUDE_BILLING_HEADER_PREFIX));
 
 	if (includeClaudeCodeInstruction && !hasBillingHeader) {
+		const identityBlock: AnthropicSystemBlock = { type: "text", text: claudeCodeSystemInstruction };
+		if (!dropCacheControl) {
+			identityBlock.cache_control = cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" };
+		}
 		const blocks: AnthropicSystemBlock[] = [
 			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "") },
-			{
-				type: "text",
-				text: claudeCodeSystemInstruction,
-				cache_control: cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" },
-			},
+			identityBlock,
 		];
 
 		for (const instruction of trimmedInstructions) {
@@ -3566,6 +3899,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
+		dropPromptCacheBetas = false,
 		copilotCacheKey,
 		copilotCacheSnapshot,
 	} = args;
@@ -3616,7 +3950,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
-		const defaultHeaders = mergeHeaders(
+		const mergedCopilotHeaders = mergeHeaders(
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
 				"Content-Type": "application/json",
@@ -3629,6 +3963,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			dynamicHeaders,
 			headers,
 		);
+		// Unlike the generic builder below, this branch has no enforced-key
+		// filter: a caller-supplied `anthropic-beta` lands in the default
+		// headers verbatim, cache betas included.
+		const defaultHeaders = dropPromptCacheBetas ? stripPromptCacheBetas(mergedCopilotHeaders) : mergedCopilotHeaders;
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
 			protocol: "anthropic",
@@ -3662,13 +4000,20 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		betaFeatures.push(interleavedThinkingBeta);
 	}
 
-	const requestModelHeaders = mergeHeaders(
+	const mergedRequestHeaders = mergeHeaders(
 		model.headers,
 		foundryCustomHeaders,
 		getUmansWebSearchHeader(model, mergeHeaders(model.headers, headers)),
 		headers,
 		dynamicHeaders,
 	);
+	// `anthropic-beta` is an enforced key, so most endpoints drop a caller's
+	// value outright — but `allowAnthropicHeaderOverrides` lets it replace our
+	// built beta header wholesale, which would put a cache beta back on a
+	// breakpoint-free request.
+	const requestModelHeaders = dropPromptCacheBetas
+		? stripPromptCacheBetas(mergedRequestHeaders)
+		: mergedRequestHeaders;
 	const defaultHeaders = buildAnthropicHeaders({
 		apiKey,
 		baseUrl,
@@ -3685,6 +4030,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 					thinkingRequest: thinkingEnabled,
 					disableStrictTools,
 					supportsContextManagement: model.compat.supportsContextManagement,
+					dropPromptCacheBetas,
 				})
 			: [],
 	});
@@ -4482,6 +4828,20 @@ type AnthropicParamBuildOptions = {
 	supportsEagerToolInputStreaming: boolean;
 	prefixMismatchBehavior?: "drop_block" | "error";
 	dropAllThinking: boolean;
+	/**
+	 * Drop every prompt-cache breakpoint: the endpoint rejected `cache_control`
+	 * with a 400. `applyHeadCaching` / `applyPromptCaching` no-op on an
+	 * undefined breakpoint, and `buildAnthropicSystemBlocks` is told
+	 * explicitly, because an undefined `cacheControl` there means "default
+	 * ephemeral" on the OAuth identity block, not "none".
+	 */
+	dropCacheControl?: boolean;
+	/**
+	 * Keep every breakpoint but emit no `ttl` and no `scope` on any of them: the
+	 * endpoint refused a nested option rather than the field. Ignored when
+	 * `dropCacheControl` already removes the breakpoints outright.
+	 */
+	dropCacheControlOptions?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
@@ -4513,6 +4873,8 @@ function buildParams(
 		supportsEagerToolInputStreaming,
 		prefixMismatchBehavior,
 		dropAllThinking,
+		dropCacheControl = false,
+		dropCacheControlOptions = false,
 		droppedThinkingBlocks,
 		fallbacks = options?.fallbacks,
 		compactionSupported = supportsAnthropicCompaction(model),
@@ -4526,7 +4888,11 @@ function buildParams(
 		forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking
 			? { ...model, compat: { ...model.compat, replayUnsignedThinking: false } }
 			: model;
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention, isOAuthToken);
+	const resolvedCacheControl = dropCacheControl
+		? undefined
+		: getCacheControl(model, options?.cacheRetention, isOAuthToken).cacheControl;
+	const cacheControl =
+		dropCacheControlOptions && resolvedCacheControl ? { type: resolvedCacheControl.type } : resolvedCacheControl;
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
@@ -4537,6 +4903,7 @@ function buildParams(
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
+		dropCacheControl,
 	});
 
 	// Controls earlier requests recorded on their responses fix the declared
