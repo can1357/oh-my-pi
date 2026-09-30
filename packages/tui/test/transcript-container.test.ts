@@ -382,8 +382,28 @@ describe("TranscriptContainer", () => {
 		expect(transcript.emittedStableRows()).toEqual([0]);
 
 		transcript.beginReplay();
-		expect(transcript.peekReplayBatch(80)).toBeUndefined();
+		const replay = transcript.peekReplayBatch(80);
+		expect(replay).toBeUndefined();
 		expect(transcript.renderViewport(80, 5, frame)).toEqual(["answer"]);
+	});
+
+	it("does not offer an empty replay for a plain-session width resize", () => {
+		const transcript = new TranscriptContainer();
+		transcript.renderViewport(80, 5, frame);
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(60)).toBeUndefined();
+		expect(transcript.renderViewport(60, 5, frame)).toEqual([]);
+	});
+
+	it("offers an acknowledged empty replay when cursor-overlay repair requests it", () => {
+		const transcript = new TranscriptContainer();
+
+		transcript.beginReplay(true);
+		const replay = transcript.peekReplayBatch(80);
+
+		expect(replay).toEqual({ id: 1, rows: [], kind: "replay" });
+		transcript.acknowledgeFinalizedBatch(replay!.id);
+		expect(transcript.peekReplayBatch(80)).toBeUndefined();
 	});
 
 	beforeAll(async () => {

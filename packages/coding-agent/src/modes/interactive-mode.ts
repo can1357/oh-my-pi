@@ -152,6 +152,7 @@ import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
 import { resolveToCwd } from "../tools/path-utils";
+import { fetchReferenceTitle, lookupCachedReferenceTitle, warmReferenceRepo } from "../tools/github-reference-title";
 import { StreamPublisher } from "../stream/publisher";
 import { newRecordingPath, SessionRecorder } from "../stream/recording";
 import { StreamRedactor } from "../stream/redactor";
@@ -321,10 +322,15 @@ import { UiHelpers } from "./utils/ui-helpers";
 
 import {
 	cfgAutocompleteMaxVisible,
+	cfgDisplayCommandSuggestionsPopup,
+	cfgDisplayAutocompleteSuggestionsPopup,
+	cfgDisplayContextualTokenPopup,
+	cfgDisplayPopupFill,
 	cfgComposerShape,
 	cfgComposerTokenRate,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
+	cfgDisplayContextualTokenPopupStyle,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
@@ -396,6 +402,11 @@ const cfgLiveUiSettings = combine({
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
 	"tui.imeSafeCursor": cfgTuiImeSafeCursor,
 	autocompleteMaxVisible: cfgAutocompleteMaxVisible,
+	"display.commandSuggestionsPopup": cfgDisplayCommandSuggestionsPopup,
+	"display.autocompleteSuggestionsPopup": cfgDisplayAutocompleteSuggestionsPopup,
+	"display.contextualTokenPopup": cfgDisplayContextualTokenPopup,
+	"display.contextualTokenPopupStyle": cfgDisplayContextualTokenPopupStyle,
+	"display.popupFill": cfgDisplayPopupFill,
 	"spelling.typoDetection": cfgSpellingTypoDetection,
 	"spelling.autocomplete": cfgSpellingAutocomplete,
 	"spelling.autocorrect": cfgSpellingAutocorrect,
@@ -1484,6 +1495,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Commands (not components) queued while streaming, for the deferral hint. */
 	#pendingCommandOutputCommands = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
+	/**
+	 * Title source for the `#N` card. A fresh session has not resolved the checkout's repository, so the first card
+	 * starts that; a number missing from the local cache is then fetched once, after typing settles, through the
+	 * shared view cache. Each step repaints when it lands, so nothing is requested while digits are still changing.
+	 */
+	#referenceTitleResolver = (kind: "pr" | "issue", number: string): string | undefined => {
+		const cwd = this.viewSession.sessionManager.getCwd();
+		const repaint = () => this.ui.requestRender();
+		warmReferenceRepo(cwd, repaint);
+		const cached = lookupCachedReferenceTitle(cwd, kind, number);
+		if (cached === undefined) fetchReferenceTitle(cwd, kind, number, repaint, this.settings);
+		return cached;
+	};
 	/** Symbol preset the slash-command picker icons were resolved under. */
 	#slashIconPreset: string | undefined;
 	/** Built-in editor autocomplete provider, before extension wrapping. */
@@ -1818,6 +1842,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 		this.#applyVimMode(this.editor);
+		this.editor.commandSuggestionsPopup = cfgDisplayCommandSuggestionsPopup.get(this.settings);
+		this.editor.autocompleteSuggestionsPopup = cfgDisplayAutocompleteSuggestionsPopup.get(this.settings);
+		this.editor.contextualTokenPopup = cfgDisplayContextualTokenPopup.get(this.settings);
+		this.editor.referenceCardStyle = cfgDisplayContextualTokenPopupStyle.get(this.settings);
+		this.editor.popupFill = cfgDisplayPopupFill.get(this.settings);
+		this.editor.onAutocompleteRender = (render, offset, rows, anchor) =>
+			this.ui.setCursorOverlay(render, offset, rows, "auto", anchor);
+		this.editor.referenceTitle = this.#referenceTitleResolver;
 		this.editor.viewportRowsProvider = () => this.ui.terminal.rows;
 		this.editor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
@@ -3426,6 +3458,22 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.composer.setPreferences(this.#liveComposerPreferences());
 			// setPreferences re-themes the editor, which resets its mode-tinted border.
 			this.updateEditorBorderColor();
+		}
+		if (
+			any(
+				"display.commandSuggestionsPopup",
+				"display.autocompleteSuggestionsPopup",
+				"display.contextualTokenPopup",
+				"display.contextualTokenPopupStyle",
+				"display.popupFill",
+			)
+		) {
+			this.editor.commandSuggestionsPopup = cfgDisplayCommandSuggestionsPopup.get(this.settings);
+			this.editor.autocompleteSuggestionsPopup = cfgDisplayAutocompleteSuggestionsPopup.get(this.settings);
+			this.editor.contextualTokenPopup = cfgDisplayContextualTokenPopup.get(this.settings);
+			this.editor.referenceCardStyle = cfgDisplayContextualTokenPopupStyle.get(this.settings);
+			this.editor.popupFill = cfgDisplayPopupFill.get(this.settings);
+			this.ui.requestRender();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
 		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
@@ -6950,12 +6998,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setImeSafeCursorLayout(cfgTuiImeSafeCursor.get(this.settings));
 		this.#applyVimMode(nextEditor);
 		nextEditor.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
+		nextEditor.commandSuggestionsPopup = cfgDisplayCommandSuggestionsPopup.get(this.settings);
+		nextEditor.autocompleteSuggestionsPopup = cfgDisplayAutocompleteSuggestionsPopup.get(this.settings);
+		nextEditor.contextualTokenPopup = cfgDisplayContextualTokenPopup.get(this.settings);
+		nextEditor.popupFill = cfgDisplayPopupFill.get(this.settings);
+		nextEditor.onAutocompleteRender = (render, offset, rows, anchor) =>
+			this.ui.setCursorOverlay(render, offset, rows, "auto", anchor);
 		nextEditor.setSpellingFeatures({
 			typoDetection: cfgSpellingTypoDetection.get(this.settings),
 			autocomplete: cfgSpellingAutocomplete.get(this.settings),
 			autocorrect: cfgSpellingAutocorrect.get(this.settings),
 		});
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
+		nextEditor.referenceCardStyle = cfgDisplayContextualTokenPopupStyle.get(this.settings);
+		nextEditor.referenceTitle = this.#referenceTitleResolver;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
 		nextEditor.composerState = () => this.#composerNativeState();

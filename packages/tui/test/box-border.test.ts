@@ -74,4 +74,39 @@ describe("Box border", () => {
 			for (const line of plain(rows)) expect(line).not.toContain("+");
 		}
 	});
+
+	it("sets a label into the top rule without changing the width and leaves the bottom rule plain", () => {
+		const rows = plain(borderedBox({ topLabel: "GITHUB" }).render(30));
+		const interior = 30 - 2;
+		// The label is centered: equal rule on both sides, a space around the text.
+		const spare = interior - "GITHUB".length - 2;
+		const left = Math.floor(spare / 2);
+		expect(rows[0]).toBe(`+${"-".repeat(left)} GITHUB ${"-".repeat(spare - left)}+`);
+		expect(rows[2]).toBe(`+${"-".repeat(interior)}+`);
+		for (const w of widths(rows)) expect(w).toBe(30);
+	});
+
+	it("truncates a label that does not fit and marks the cut", () => {
+		const rows = plain(borderedBox({ topLabel: "a very long pull request title that cannot fit" }).render(20));
+		expect(Bun.stringWidth(rows[0]!)).toBe(20);
+		expect(rows[0]!.startsWith("+-")).toBe(true);
+		expect(rows[0]).toContain("…");
+	});
+
+	it("strips escape sequences and control characters from a label so remote text cannot reach the terminal", () => {
+		const row = borderedBox({ topLabel: "ok\x1b[31mred\x07\tend" }).render(30)[0]!;
+		const flat = Bun.stripANSI(row);
+		// The whole SGR sequence and the bell go; the tab becomes spaces like all other untrusted text.
+		expect(flat).toMatch(/^\+-+ okred\s+end -+\+$/);
+		expect(row).not.toContain("\x07");
+		expect(row).not.toContain("\t");
+		// The only escapes left are the border colorizer's own opening and closing sequences.
+		expect(row.match(/\x1b/g)?.length).toBe(2);
+		expect(Bun.stringWidth(flat)).toBe(30);
+	});
+
+	it("keeps a plain rule when the box is too narrow to hold a label", () => {
+		const rows = plain(borderedBox({ topLabel: "GITHUB" }).render(6));
+		expect(rows[0]).toBe(`+${"-".repeat(4)}+`);
+	});
 });

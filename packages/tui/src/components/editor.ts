@@ -14,14 +14,19 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import { getGithubRefContext } from "../prompt/github-ref-autocomplete";
 import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
-import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
+import { type Component, CURSOR_MARKER, type CursorOverlayRenderer, type Focusable } from "../tui";
+import { Box } from "./box";
+import { ReferenceCaption } from "./reference-caption";
+import { ReferenceOptionsRow } from "./reference-options-row";
 import {
+	applyBackgroundToLine,
 	getSegmenter,
 	getWidthConfigEpoch,
 	getWordNavKind,
@@ -93,6 +98,27 @@ const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
 };
+
+/** Cursor cell (2) + frame (2) + the list's own safety margin (2) around the widest label of the contextual card. */
+const CONTEXTUAL_CARD_CHROME_WIDTH = 6;
+/** Narrowest contextual card: wide enough to wrap a typical PR title onto two rows under its options. */
+const CONTEXTUAL_CARD_MIN_WIDTH = 46;
+
+/**
+ * Width of the contextual card for a `#N` token. The options set the floor: the wider of `Issue #N` (stacked) or
+ * both labels on one row (compact), plus cursor cell, frame and margin. A host that can supply titles raises it
+ * to a width where a typical title wraps onto two rows. It depends only on the token, the layout and whether
+ * titles are possible, never on whether one is cached, so the card does not change shape when the cache warms.
+ */
+function contextualCardWidth(token: string, style: "compact" | "stacked", hasTitles: boolean): number {
+	// Compact: frame (2) + inset (2) + a cursor cell on each of the two options (4) + the divider, around both labels.
+	// Stacked: the list's own cursor cell and safety margin plus the frame, around the widest label.
+	const floor =
+		style === "compact"
+			? 8 + visibleWidth(`PR ${token}`) + visibleWidth(" | ") + visibleWidth(`Issue ${token}`)
+			: CONTEXTUAL_CARD_CHROME_WIDTH + visibleWidth(`Issue ${token}`);
+	return hasTitles ? Math.max(CONTEXTUAL_CARD_MIN_WIDTH, floor) : floor;
+}
 
 /**
  * `@` file lists are narrowed in place (`setFilter(liveToken)`) while a fresh
@@ -679,6 +705,7 @@ export class Editor implements Component, Focusable {
 		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
 		| undefined;
 	#autocompletePrefix: string = "";
+	#autocompleteCommandArgument = false;
 	#autocompleteRequestId: number = 0;
 	#autocompletePendingRequest: AutocompleteRequest | undefined;
 	#autocompleteRequestRunning = false;
@@ -686,6 +713,32 @@ export class Editor implements Component, Focusable {
 	#autocompleteWaiters: Array<() => void> = [];
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
+	/** Opt in to passive slash suggestions when a host supplies a popup renderer. */
+	commandSuggestionsPopup = false;
+	/** Opt in to file mentions, prompt actions/references, and emoji in the same popup. */
+	autocompleteSuggestionsPopup = false;
+	/** Anchor `#<number>` popup suggestions to the typed token instead of a full-width band. */
+	contextualTokenPopup = false;
+	/** How the anchored `#N` card lays out its options: on one row (`compact`) or one per row (`stacked`). */
+	referenceCardStyle: "compact" | "stacked" = "compact";
+	popupFill = false;
+	/**
+	 * A frame host may paint suggestions over existing cells instead of allocating layout rows.
+	 * `anchor` places the box at the token being completed: `col` is its visible start column and `width`
+	 * the width its content needs; hosts that ignore it keep a full-width band.
+	 */
+	onAutocompleteRender?: (
+		render: CursorOverlayRenderer | undefined,
+		cursorOffset: number,
+		editorRows: number,
+		anchor?: { col: number; width: number },
+	) => void;
+	/**
+	 * Resolve the title of a GitHub reference for the contextual card's caption. Called on every frame the
+	 * card is drawn, so it MUST be synchronous and local (a cache read): never start a network request here.
+	 * Return `undefined` when the title is not known; the card then shows the token instead.
+	 */
+	referenceTitle?: (kind: "pr" | "issue", number: string) => string | undefined;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
 	onTextAssistApplied?: () => void;
 	/** Terminal height source for clamping the autocomplete dropdown. Hosts wire this to their Terminal's rows. */
@@ -852,6 +905,72 @@ export class Editor implements Component, Focusable {
 	isAutocompleteActive(): boolean {
 		return this.#autocompleteState !== null;
 	}
+
+	#autocompleteBox = new Box(0, 0).setIgnoreTight(true);
+
+	#referenceOptionsRow = new ReferenceOptionsRow();
+	#referenceCaption = new ReferenceCaption();
+
+	/**
+	 * Fill the contextual `#N` card for the reference being typed: the two options, then the title of the
+	 * selected one when the host already knows it. `compact` draws the options on one row, `stacked` one
+	 * per row; either way the list still owns the selection, so the keys behave the same. Read per frame, so
+	 * moving between `PR` and `Issue` changes the title without a new suggestion request. Returns false
+	 * when the popup is not the contextual card, which then keeps its plain list.
+	 */
+	#fillReferenceCard(box: Box, list: SelectList): boolean {
+		const ref = this.#contextualReferenceToken();
+		if (ref === undefined) return false;
+		const selected = list.getSelectedItem();
+		const scheme = selected?.value.split("://", 1)[0];
+		const title = scheme === "pr" || scheme === "issue" ? this.referenceTitle?.(scheme, ref.slice(1)) : undefined;
+		this.#referenceCaption.set(title);
+		if (this.referenceCardStyle === "compact") {
+			// The list is relabelled to the live token on every key (see `#relabelReferenceList`), so its labels
+			// already match the text; it also says which option is selected.
+			const options = list
+				.pickerView()
+				.items.map(item => ({ label: item.label, selected: item.value === selected?.value }));
+			this.#referenceOptionsRow.set(options, this.#theme.symbols.cursor, {
+				selected: text => this.#theme.selectList.selectedText(text),
+				plain: text => text,
+			});
+			box.addChild(this.#referenceOptionsRow);
+		} else {
+			box.addChild(list);
+		}
+		box.addChild(this.#referenceCaption);
+		return true;
+	}
+
+	#renderAutocompleteOverlay: CursorOverlayRenderer = (width, maxRows) => {
+		if (!this.#visibleAutocompleteList() || !this.#autocompleteList || maxRows < 1) return [];
+		const framed = maxRows >= 3 && width >= 3;
+		this.#autocompleteList.setMaxVisible(Math.min(this.#autocompleteMaxVisible, maxRows - (framed ? 2 : 0)), true);
+
+		if (!framed) {
+			return this.popupFill
+				? this.#autocompleteList
+						.render(width)
+						.map(line => applyBackgroundToLine(line, width, this.#theme.surfaceColor ?? PASSTHROUGH_COLOR))
+				: this.#autocompleteList.render(width);
+		}
+		const contextual = this.#contextualReferenceToken() !== undefined;
+		this.#autocompleteBox.setBorder({
+			chars: this.#theme.symbols.boxRound,
+			color: this.#theme.accentColor ?? this.borderColor,
+			topLabel: contextual ? "GITHUB" : undefined,
+		});
+		this.#autocompleteBox.clear();
+		if (!this.#fillReferenceCard(this.#autocompleteBox, this.#autocompleteList)) {
+			this.#autocompleteBox.addChild(this.#autocompleteList);
+		}
+		return this.popupFill
+			? this.#autocompleteBox
+					.render(width)
+					.map(line => applyBackgroundToLine(line, width, this.#theme.surfaceColor ?? PASSTHROUGH_COLOR))
+			: this.#autocompleteBox.render(width);
+	};
 
 	/**
 	 * Get the available width for top border content given a total terminal width.
@@ -1059,6 +1178,9 @@ export class Editor implements Component, Focusable {
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
 		this.#undoStack.length = 0;
+		// Replacing the whole buffer (clear, submit, history recall) makes any open suggestion list stale:
+		// it was computed for text that no longer exists, and would otherwise keep painting.
+		this.#cancelAutocomplete(true);
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
 		// A single-row entry's top and bottom are the same row, so the directional
@@ -1596,16 +1718,53 @@ export class Editor implements Component, Focusable {
 		if (bottomRow !== undefined) result.push(bottomRow);
 
 		// Add autocomplete list if active
-		const autocompleteList = this.#visibleAutocompleteList();
-		if (autocompleteList) {
-			// Clamp the dropdown to the terminal viewport: the editor rows already
-			// rendered above plus a small reserve must stay visible.
-			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
-			autocompleteList.setMaxVisible(
-				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
-			);
-			result.push(...autocompleteList.render(width));
+		if (this.#visibleAutocompleteList() && this.#autocompleteList) {
+			const commandPopup =
+				this.commandSuggestionsPopup &&
+				(this.#autocompleteCommandArgument ||
+					(findLeadingSlashCommandStart(this.#autocompletePrefix) !== null && !this.#selectedCompletionIsPath()));
+			const genericTrigger = this.#autocompletePrefix.trimStart()[0];
+			const genericPopup =
+				this.autocompleteSuggestionsPopup &&
+				!this.#autocompleteCommandArgument &&
+				genericTrigger !== undefined &&
+				"@#:".includes(genericTrigger);
+			if ((commandPopup || genericPopup) && this.onAutocompleteRender) {
+				const cursorRow = result.findIndex(row => row.includes(CURSOR_MARKER));
+				// The caret ends the token being completed, so the token starts `tokenWidth` cells before it.
+				// `#12` is one word and never wraps mid-token, so it stays on the caret's visual row.
+				const contextualRef = genericPopup ? this.#contextualReferenceToken() : undefined;
+				const anchor =
+					contextualRef !== undefined && cursorRow >= 0
+						? {
+								col: Math.max(
+									0,
+									visibleWidth(result[cursorRow]!.slice(0, result[cursorRow]!.indexOf(CURSOR_MARKER))) -
+										visibleWidth(contextualRef),
+								),
+								width: contextualCardWidth(
+									contextualRef,
+									this.referenceCardStyle,
+									this.referenceTitle !== undefined,
+								),
+							}
+						: undefined;
+				this.onAutocompleteRender(
+					this.focused ? this.#renderAutocompleteOverlay : undefined,
+					Math.max(0, cursorRow),
+					result.length,
+					anchor,
+				);
+			} else {
+				this.onAutocompleteRender?.(undefined, 0, result.length);
+				const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
+				this.#autocompleteList.setMaxVisible(
+					Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
+				);
+				result.push(...this.#autocompleteList.render(width));
+			}
 		}
+		if (!this.#visibleAutocompleteList()) this.onAutocompleteRender?.(undefined, 0, result.length);
 
 		return result;
 	}
@@ -1834,6 +1993,24 @@ export class Editor implements Component, Focusable {
 				const visible = this.isShowingAutocomplete();
 				this.#cancelAutocomplete(true);
 				if (visible) return;
+			}
+			// The compact card lays its options out side by side, so the horizontal keys are the natural way to
+			// move between them. Right would otherwise accept at the end of the token (it always is, there), so
+			// here it selects the next option; Tab and Enter still accept. The stacked card keeps the vertical keys.
+			if (
+				this.referenceCardStyle === "compact" &&
+				this.#contextualReferenceToken() !== undefined &&
+				this.isShowingAutocomplete() &&
+				(kb.matchesCanonical(canonical, "tui.editor.cursorLeft") ||
+					kb.matchesCanonical(canonical, "tui.editor.cursorRight"))
+			) {
+				const list = this.#autocompleteList;
+				const step = kb.matchesCanonical(canonical, "tui.editor.cursorRight") ? 1 : -1;
+				const next = list.getSelectedIndex() + step;
+				// Ends do not wrap and do not accept: a stray extra press must not insert a reference.
+				if (next >= 0 && next < list.pickerView().items.length) list.setSelectedIndex(next);
+				this.onAutocompleteUpdate?.();
+				return;
 			}
 			// Right arrow at end of line accepts the selection like Tab (fish-style).
 			// Mid-line, right arrow keeps its cursor-movement role and falls through.
@@ -4209,6 +4386,19 @@ export class Editor implements Component, Focusable {
 		if (!selected) return false;
 		return selected.value.startsWith("/") || selected.value.startsWith('"');
 	}
+
+	/**
+	 * The standalone `#<number>` token being completed, or undefined. Only when the contextual popup is
+	 * opted in and the visible list actually offers GitHub references. The bare token is returned, without
+	 * an optional `pr`/`issue` qualifier: it is a single word and never wraps mid-token, so its width is
+	 * a safe offset from the caret even when the qualifier wrapped onto the previous row.
+	 */
+	#contextualReferenceToken(): string | undefined {
+		if (!this.contextualTokenPopup || !this.#autocompleteList) return undefined;
+		const line = this.#state.lines[this.#state.cursorLine] ?? "";
+		const context = getGithubRefContext(line.slice(0, this.#state.cursorCol));
+		return context ? `#${context.number}` : undefined;
+	}
 	/**
 	 * Whether the current popup selection is the collapsed `/skill:` namespace
 	 * row. Accepting it expands the namespace (insert `/skill:`, reopen the
@@ -4322,11 +4512,12 @@ export class Editor implements Component, Focusable {
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/")
-			? SLASH_COMMAND_SELECT_LIST_LAYOUT
-			: prefix.startsWith("@")
-				? AT_FILE_SELECT_LIST_LAYOUT
-				: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
+		const layout =
+			findLeadingSlashCommandStart(prefix) !== null
+				? SLASH_COMMAND_SELECT_LIST_LAYOUT
+				: prefix.startsWith("@")
+					? AT_FILE_SELECT_LIST_LAYOUT
+					: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
 		const list = new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
 		// A pointer pick on the popup (TSP `select`/`activate`) accepts it like Tab.
 		list.onSelect = item => {
@@ -4399,6 +4590,7 @@ export class Editor implements Component, Focusable {
 		if (replacements.endCol > line.length) return;
 		const original = line.slice(replacements.startCol, replacements.endCol);
 		this.#autocompletePrefix = original;
+		this.#autocompleteCommandArgument = false;
 		this.#autocompleteList = this.#createAutocompleteList(
 			original,
 			replacements.items.map(value => ({ value, label: value })),
@@ -4458,6 +4650,7 @@ export class Editor implements Component, Focusable {
 		this.#autocompleteList = undefined;
 		this.#textAssistReplacement = undefined;
 		this.#autocompletePrefix = "";
+		this.#autocompleteCommandArgument = false;
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
@@ -4532,7 +4725,7 @@ export class Editor implements Component, Focusable {
 			cursorCol === this.#state.cursorCol &&
 			lines.length === this.#state.lines.length &&
 			lines.every((line, index) => line === this.#state.lines[index]);
-		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
+		let suggestions: { items: AutocompleteItem[]; prefix: string; commandArgument?: boolean } | null;
 		try {
 			if (request.kind === "force") {
 				const getForceFileSuggestions = provider.getForceFileSuggestions;
@@ -4562,10 +4755,11 @@ export class Editor implements Component, Focusable {
 	}
 
 	#showAutocompleteSuggestions(
-		suggestions: { items: AutocompleteItem[]; prefix: string },
+		suggestions: { items: AutocompleteItem[]; prefix: string; commandArgument?: boolean },
 		state: "regular" | "force",
 	): void {
 		this.#autocompletePrefix = suggestions.prefix;
+		this.#autocompleteCommandArgument = suggestions.commandArgument === true;
 		this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
 		this.#autocompleteState = state;
 		this.onAutocompleteUpdate?.();
@@ -4587,8 +4781,27 @@ export class Editor implements Component, Focusable {
 		for (const resolve of waiters) resolve();
 	}
 
+	/**
+	 * Keep the labels of an open `#N` list in step with the number now in the text until the debounced refresh
+	 * replaces it, like `#narrowAtFileList` does for `@`. The items are always `PR #N` / `Issue #N` for the token
+	 * being typed, so this only rewrites the number; values, descriptions and the selected item are kept.
+	 */
+	#relabelReferenceList(): void {
+		const list = this.#autocompleteList;
+		const ref = this.#contextualReferenceToken();
+		if (!list || ref === undefined) return;
+		const items = list.pickerView().items;
+		const relabeled = items.map(item => {
+			const scheme = item.value.split("://", 1)[0];
+			const label = scheme === "pr" ? `PR ${ref}` : scheme === "issue" ? `Issue ${ref}` : item.label;
+			return label === item.label ? item : { ...item, label };
+		});
+		if (relabeled.some((item, index) => item !== items[index])) list.setItems(relabeled);
+	}
+
 	#debouncedUpdateAutocomplete(): void {
 		if (this.#autocompleteState !== "assist") this.#narrowAtFileList();
+		this.#relabelReferenceList();
 		if (this.#autocompleteTimeout) {
 			clearTimeout(this.#autocompleteTimeout);
 		}

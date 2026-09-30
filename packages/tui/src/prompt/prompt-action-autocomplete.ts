@@ -135,8 +135,8 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		cursorLine: number,
 		cursorCol: number,
 		signal?: AbortSignal,
-		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string }) => void,
-	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		onPartial?: (suggestions: { items: AutocompleteItem[]; prefix: string; commandArgument?: boolean }) => void,
+	): Promise<{ items: AutocompleteItem[]; prefix: string; commandArgument?: boolean } | null> {
 		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
@@ -165,8 +165,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				// GitHub references and internal URLs while keeping prompt-action
 				// tokens such as `#copy` literal.
 				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
-				if (githubRefSuggestions) return githubRefSuggestions;
-				return getInternalUrlSuggestions(textBeforeCursor, undefined, signal, this.#internalUrlCaller);
+				if (githubRefSuggestions) return { ...githubRefSuggestions, commandArgument: true };
+				const internalSuggestions = await getInternalUrlSuggestions(
+					textBeforeCursor,
+					undefined,
+					signal,
+					this.#internalUrlCaller,
+				);
+				return internalSuggestions ? { ...internalSuggestions, commandArgument: true } : null;
 			}
 		}
 

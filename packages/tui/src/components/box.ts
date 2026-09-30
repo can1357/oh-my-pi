@@ -4,11 +4,14 @@ import { card, col } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import {
+	Ellipsis,
 	getPaddingX,
 	getPublishedLineWidths,
 	getWidthConfigEpoch,
 	padding,
 	publishLineWidths,
+	replaceTabs,
+	truncateToWidth,
 	visibleWidth,
 } from "../utils";
 
@@ -34,6 +37,26 @@ export interface BoxBorder {
 		vertical: string;
 	};
 	color?: (text: string) => string;
+	/** Text set into the top border, e.g. a heading. Truncated to fit; absent keeps the plain rule. */
+	topLabel?: string;
+}
+
+/**
+ * The horizontal run between a border's corners. With a label it reads `──── label ────`: the label is
+ * stripped of control characters, cut to the room left after one rule cell and a space on each side, centered
+ * in the run, and skipped entirely when fewer than 5 cells remain so a narrow box still shows a plain rule.
+ */
+function borderRule(border: BoxBorder, innerWidth: number, label: string | undefined): string {
+	const rule = border.chars.horizontal;
+	if (label === undefined || innerWidth < 5) return rule.repeat(Math.max(0, innerWidth));
+	const room = innerWidth - 4;
+	const clean = replaceTabs(Bun.stripANSI(label)).replace(/[\x00-\x1f\x7f]/g, "");
+	const text = truncateToWidth(clean, room, Ellipsis.Unicode);
+	const used = visibleWidth(text);
+	if (used === 0) return rule.repeat(Math.max(0, innerWidth));
+	const spare = innerWidth - used - 2;
+	const left = Math.floor(spare / 2);
+	return `${rule.repeat(left)} ${text} ${rule.repeat(spare - left)}`;
 }
 
 /**
@@ -189,7 +212,7 @@ export class Box implements Component {
 		// (theme mutation); sample both so a silent palette swap still misses the cache.
 		const bgSample = this.#bgFn ? this.#bgFn("test") : undefined;
 		const borderSample = border
-			? `${border.color ? border.color("|") : "|"}${border.chars.topLeft}${border.chars.vertical}`
+			? `${border.color ? border.color("|") : "|"}${border.chars.topLeft}${border.chars.vertical}|${border.topLabel ?? ""}`
 			: undefined;
 
 		// Render every child every frame (renders may carry side effects); the
@@ -265,13 +288,20 @@ export class Box implements Component {
 
 			if (border) {
 				const paint = border.color ?? (s => s);
-				const rule = border.chars.horizontal.repeat(Math.max(0, innerWidth));
 				const side = paint(border.chars.vertical);
-				result.push(paint(border.chars.topLeft + rule + border.chars.topRight));
+				result.push(
+					paint(border.chars.topLeft + borderRule(border, innerWidth, border.topLabel) + border.chars.topRight),
+				);
 				for (const row of interior) {
 					result.push(side + row + side);
 				}
-				result.push(paint(border.chars.bottomLeft + rule + border.chars.bottomRight));
+				result.push(
+					paint(
+						border.chars.bottomLeft +
+							border.chars.horizontal.repeat(Math.max(0, innerWidth)) +
+							border.chars.bottomRight,
+					),
+				);
 			} else {
 				for (const row of interior) {
 					result.push(row);
