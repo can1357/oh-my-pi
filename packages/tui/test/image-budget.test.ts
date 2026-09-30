@@ -737,6 +737,42 @@ describe("TUI inline-image budget", () => {
 		);
 	}
 
+	/**
+	 * A started composer over `term`, with a transcript above an editor row.
+	 * Renders run synchronously, so no frame waits on the clock.
+	 */
+	function startTranscriptComposer(term: VirtualTerminal): { composer: Composer; transcript: TranscriptContainer } {
+		const composer = new Composer({
+			terminal: term,
+			tuiOptions: {
+				renderScheduler: {
+					now: () => 0,
+					scheduleImmediate: (callback: () => void) => callback(),
+					scheduleRender: (callback: () => void) => {
+						callback();
+						return { cancel() {} };
+					},
+				},
+			},
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+		return { composer, transcript };
+	}
+
+	/** A one-cell-wide image `rows` cells tall, counted against `budget`. */
+	function cellImage(budget: ImageBudget, key: string, rows = 1): Image {
+		return new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 1, maxHeightCells: rows, budget, imageKey: key },
+			{ widthPx: 10, heightPx: 10 * rows },
+		);
+	}
+
 	it("renders following text below a multi-row direct Kitty placement", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);
@@ -1479,43 +1515,14 @@ describe("TUI inline-image budget", () => {
 		// Block 0 is an image too: it is the frontier head the cap skips, and the
 		// retry must count it as the first pass did.
 		const isImage = (index: number) => index === 0 || (index >= EXIT_FLUSH_MAX_ROWS - 50 && index % 5 === 0);
-		// Renders run synchronously, so no frame waits on the clock.
-		const renderScheduler = {
-			now: () => 0,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void) => {
-				callback();
-				return { cancel() {} };
-			},
-		};
 		const quit = async (capped: boolean) => {
 			const term = new VirtualTerminal(40, 10, 20_000);
-			const composer = new Composer({
-				terminal: term,
-				tuiOptions: { renderScheduler },
-				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
-			});
-			const transcript = new TranscriptContainer();
-			composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
-			composer.start({ playWelcomeIntro: false });
+			const { composer, transcript } = startTranscriptComposer(term);
 			// The fullscreen overlay freezes retirement, as the viewport does.
 			composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
 			for (let index = 0; index < EXIT_FLUSH_MAX_ROWS; index++) {
 				transcript.addChild(
-					isImage(index)
-						? new Image(
-								BASE64_ONE_PIXEL_PNG,
-								"image/png",
-								{ fallbackColor: text => text },
-								{
-									maxWidthCells: 1,
-									maxHeightCells: 1,
-									budget: composer.ui.imageBudget,
-									imageKey: `image-${index}`,
-								},
-								{ widthPx: 10, heightPx: 10 },
-							)
-						: new Text(`row-${index}`, 0, 0),
+					isImage(index) ? cellImage(composer.ui.imageBudget, `image-${index}`) : new Text(`row-${index}`, 0, 0),
 				);
 			}
 			composer.ui.requestRender();
@@ -1555,23 +1562,8 @@ describe("TUI inline-image budget", () => {
 	it("keeps every image a capped stop writes live when the block the cap leaves out holds one", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		setKittyGraphics({ unicodePlaceholders: true });
-		const renderScheduler = {
-			now: () => 0,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void) => {
-				callback();
-				return { cancel() {} };
-			},
-		};
 		const term = new VirtualTerminal(40, 10, 1_000);
-		const composer = new Composer({
-			terminal: term,
-			tuiOptions: { renderScheduler },
-			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
-		});
-		const transcript = new TranscriptContainer();
-		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
-		composer.start({ playWelcomeIntro: false });
+		const { composer, transcript } = startTranscriptComposer(term);
 		composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
 		// Eight one-row images and their blanks fill 16 of 18 rows, so the cap
 		// measures the older two-row image, finds it does not fit, and leaves it
@@ -1581,16 +1573,7 @@ describe("TUI inline-image budget", () => {
 		transcript.addChild(new Text("head", 0, 0));
 		for (let i = 0; i < 9; i++) {
 			// Block 1 is the two-row image the cap leaves out.
-			const rows = i === 0 ? 2 : 1;
-			transcript.addChild(
-				new Image(
-					BASE64_ONE_PIXEL_PNG,
-					"image/png",
-					{ fallbackColor: text => text },
-					{ maxWidthCells: 1, maxHeightCells: rows, budget: composer.ui.imageBudget, imageKey: `image-${i}` },
-					{ widthPx: 10, heightPx: 10 * rows },
-				),
-			);
+			transcript.addChild(cellImage(composer.ui.imageBudget, `image-${i}`, i === 0 ? 2 : 1));
 		}
 		try {
 			composer.ui.stop({ maxRows: 18 });
@@ -1608,49 +1591,26 @@ describe("TUI inline-image budget", () => {
 	it("never writes an older image live while a newer one is demoted at a stop", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		setKittyGraphics({ unicodePlaceholders: true });
-		const renderScheduler = {
-			now: () => 0,
-			scheduleImmediate: (callback: () => void) => callback(),
-			scheduleRender: (callback: () => void) => {
-				callback();
-				return { cancel() {} };
-			},
-		};
 		try {
 			// The live frame shows more images than the default cap of 8, so the budget
 			// demotes the oldest ones. A capped flush walks newest-first; the frame that
 			// writes the batch must still demote in display order.
-			const images = (from: number, status: string) =>
-				Array.from({ length: 12 - from }, (_, offset) => `${from + offset}:${status}`);
+			const images = (from: number, to: number, status: string) =>
+				Array.from({ length: to - from }, (_, offset) => `${from + offset}:${status}`);
 			// Pressure retires images 0 and 1 during the live frame, already text there.
 			// The capped batch then holds images 8-11, under the cap; the uncapped one
 			// holds images 2-11, of which the oldest two are past the cap.
 			const cases: [maxRows: number | undefined, expected: string[]][] = [
-				[18, ["0:text", "1:text", ...images(8, "live")]],
-				[undefined, [...images(0, "text").slice(0, 4), ...images(4, "live")]],
+				[18, [...images(0, 2, "text"), ...images(8, 12, "live")]],
+				[undefined, [...images(0, 4, "text"), ...images(4, 12, "live")]],
 			];
 			for (const [maxRows, expected] of cases) {
 				const term = new VirtualTerminal(40, 40, 1_000);
-				const composer = new Composer({
-					terminal: term,
-					tuiOptions: { renderScheduler },
-					preferences: { ...COMPOSER_DEFAULTS, quiet: true },
-				});
-				const transcript = new TranscriptContainer();
-				composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
-				composer.start({ playWelcomeIntro: false });
+				const { composer, transcript } = startTranscriptComposer(term);
 				transcript.addChild(new Text("head", 0, 0));
 				for (let i = 0; i < 12; i++) {
 					transcript.addChild(new Text(`label-${i}`, 0, 0));
-					transcript.addChild(
-						new Image(
-							BASE64_ONE_PIXEL_PNG,
-							"image/png",
-							{ fallbackColor: text => text },
-							{ maxWidthCells: 1, maxHeightCells: 1, budget: composer.ui.imageBudget, imageKey: `image-${i}` },
-							{ widthPx: 10, heightPx: 10 },
-						),
-					);
+					transcript.addChild(cellImage(composer.ui.imageBudget, `image-${i}`));
 				}
 				composer.ui.requestRender();
 				await term.flush();
