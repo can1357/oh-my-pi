@@ -12,17 +12,32 @@ const SETTLE_RESET = "\x1b\\\x1b[?2026l\x1b[0m\x1b]8;;\x07\x1b[?25h";
 const STOP_RESTORE = "\x1b[?2004l\x1b[?5522l";
 const HINT = "Resume this session with";
 
+function loadPtyLibc() {
+	return dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
+		grantpt: { args: [FFIType.i32], returns: FFIType.i32 },
+		unlockpt: { args: [FFIType.i32], returns: FFIType.i32 },
+		ptsname_r: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+	});
+}
+
+/** No PTY helpers (Windows, or a libc under another name such as musl's): skip. */
+function canOpenPty(): boolean {
+	if (process.platform === "win32") return false;
+	try {
+		loadPtyLibc().close();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * A pseudo-terminal whose output reaches the test only once it starts reading
  * the master: until then a writer blocks when the PTY buffer fills, as it
  * does on a terminal that stopped reading.
  */
 function openPty(): { master: number; slave: number } {
-	const libc = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
-		grantpt: { args: [FFIType.i32], returns: FFIType.i32 },
-		unlockpt: { args: [FFIType.i32], returns: FFIType.i32 },
-		ptsname_r: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
-	});
+	const libc = loadPtyLibc();
 	try {
 		const { O_RDWR, O_NOCTTY } = fs.constants;
 		const master = fs.openSync("/dev/ptmx", O_RDWR | O_NOCTTY);
@@ -42,14 +57,13 @@ function openPty(): { master: number; slave: number } {
 	}
 }
 
-/** Read the terminal until every writer has closed it; `onText` sees everything received so far. */
-function readTerminal(master: number, onText: (text: string) => void): Promise<string> {
+/** Read the terminal until every writer has closed it. */
+function readTerminal(master: number): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	let text = "";
 	const stream = fs.createReadStream("", { fd: master, autoClose: false });
 	stream.on("data", chunk => {
 		text += Buffer.from(chunk).toString("latin1");
-		onText(text);
 	});
 	stream.on("end", () => resolve(text));
 	// A PTY master reads EIO once the last slave descriptor closes.
@@ -57,61 +71,70 @@ function readTerminal(master: number, onText: (text: string) => void): Promise<s
 	return promise;
 }
 
-describe.skipIf(process.platform === "win32")("quitting while the terminal is not reading", () => {
+/**
+ * Whether `signal` settles before `ms` pass. The deadlines are real time on
+ * purpose: the child runs against a real terminal it cannot see stalling.
+ */
+function within<T>(signal: Promise<T>, ms: number): Promise<T | "timeout"> {
+	return Promise.race([signal, Bun.sleep(ms).then(() => "timeout" as const)]);
+}
+
+describe.skipIf(!canOpenPty())("quitting while the terminal is not reading", () => {
 	const cleanups: Array<() => void> = [];
 
 	afterEach(() => {
 		for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 	});
 
-	it("prints the resume hint after the terminal restore, without waiting for the terminal", async () => {
+	it("waits for the terminal, then gives it the restore before the resume hint", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-stalled-quit-"));
 		cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
 		const { master, slave } = openPty();
 		cleanups.push(() => fs.closeSync(master));
-		const quitting = Promise.withResolvers<true>();
+		const shutdownStarted = Promise.withResolvers<true>();
+		const exitCleanupReached = Promise.withResolvers<true>();
 		const child = Bun.spawn([process.execPath, FIXTURE, dir], {
 			cwd: process.cwd(),
 			// A real terminal, not the test runtime: the child's ProcessTerminal
 			// paints through the native output pump. Input comes from a pipe that
-			// stays open: restoring a terminal stdin's mode would wait for the
-			// terminal to drain (tcsetattr TCSADRAIN) and serialize the quit
-			// behind the stalled reader, which hides the order under test.
+			// stays open. With stdin on the terminal, restoring its mode
+			// (setRawMode) makes stop() wait for the terminal to read on kernels
+			// whose tcsetattr(TCSADRAIN) waits for a blocked writer (current
+			// mainline); others, such as 5.15, do not wait. The pipe stands in for
+			// those kernels: the quit reaches the hint with the backlog unread.
 			env: { PATH: Bun.env.PATH ?? "", HOME: dir, TERM: "xterm-256color", LANG: "C.UTF-8" },
 			stdin: "pipe",
 			stdout: slave,
 			stderr: slave,
 			ipc(message) {
-				if (message === "quitting") quitting.resolve(true);
+				if (message === "shutdown") shutdownStarted.resolve(true);
+				if (message === "exit-cleanup") exitCleanupReached.resolve(true);
 			},
 		});
 		cleanups.push(() => child.kill());
 		fs.closeSync(slave);
+		const exited = child.exited.then(() => "exited" as const);
 
-		// Nothing reads the terminal until the quit reaches its exit cleanup.
-		// The deadline is real time on purpose: a quit that waits on the stalled
-		// terminal never gets there, and the reader then resumes anyway so the
-		// byte order is still checked.
-		const quitWhileStalled = await Promise.race([
-			quitting.promise,
-			child.exited.then(() => false),
-			Bun.sleep(45_000).then(() => false),
-		]);
-		let released = false;
-		const output = await readTerminal(master, text => {
-			if (released || !text.includes("--resume ")) return;
-			released = true;
-			child.send("go");
-		});
+		// Nothing reads the terminal until the checks below are done.
+		const started = await within(Promise.race([shutdownStarted.promise, exited]), 60_000);
+		// The quit gets through the hint to its exit cleanup without the terminal
+		// reading: the hint queues behind the unread backlog instead of blocking
+		// on the terminal.
+		const reachedExitCleanup = await within(Promise.race([exitCleanupReached.promise, exited]), 60_000);
+		// Then the exit waits for the terminal instead of dropping what it holds.
+		const stillRunning = await within(exited, 3_000);
+		const output = await readTerminal(master);
 		const exitCode = await child.exited;
 
+		expect(output).toContain(HINT);
+		expect(started).toBe(true);
 		const hintAt = output.indexOf(HINT);
-		expect(hintAt).toBeGreaterThan(-1);
 		expect(output.indexOf(SETTLE_RESET)).toBeGreaterThan(-1);
 		expect(output.indexOf(SETTLE_RESET)).toBeLessThan(hintAt);
 		expect(output.indexOf(STOP_RESTORE)).toBeGreaterThan(-1);
 		expect(output.indexOf(STOP_RESTORE)).toBeLessThan(hintAt);
-		expect(quitWhileStalled).toBe(true);
+		expect(reachedExitCleanup).toBe(true);
+		expect(stillRunning).toBe("timeout");
 		expect(exitCode).toBe(0);
-	}, 120_000);
+	}, 180_000);
 });

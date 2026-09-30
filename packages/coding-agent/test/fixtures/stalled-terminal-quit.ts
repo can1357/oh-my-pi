@@ -3,8 +3,8 @@
  * on the terminal it was given (a PTY the test is not reading), with a large
  * backlog queued, as a long session's last output leaves it.
  *
- * At exit a cleanup keeps the process alive until the test has read the
- * terminal: it sends `quitting` over IPC, then waits for the test's message.
+ * Reports progress over IPC without holding anything up: `shutdown` as the
+ * quit starts, `exit-cleanup` once it reaches postmortem's exit cleanup.
  */
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -20,9 +20,6 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 
 const dir = process.argv[2];
 if (!dir) throw new Error("usage: stalled-terminal-quit.ts <dir>");
-
-const go = Promise.withResolvers<void>();
-process.once("message", () => go.resolve());
 
 initTheme();
 await Settings.init({ inMemory: true, cwd: dir });
@@ -62,8 +59,9 @@ composer.start();
 const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, undefined, composer);
 mode.ui.terminal.write("x".repeat(4 * 1024 * 1024));
 
-postmortem.register("hold-for-reader", async () => {
-	process.send?.("quitting");
-	await go.promise;
+// Registered last, so it runs first in the exit cleanup; it only reports.
+postmortem.register("report-exit-cleanup", () => {
+	process.send?.("exit-cleanup");
 });
+process.send?.("shutdown");
 await mode.shutdown();

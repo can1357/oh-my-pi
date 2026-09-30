@@ -322,11 +322,12 @@ export function writeThroughActiveTerminal(data: string): boolean {
 /**
  * The output pump a stopped terminal left holding bytes its reader has not
  * taken yet (a stalled PTY), and the terminal it belongs to. The pump keeps
- * running, and whatever this process writes to the terminal afterwards - the
- * resume hint, the exit-time restore, a fatal report - queues behind those
- * bytes: it reaches the terminal after them once the reader resumes, or is
- * lost with them if the process exits first. A direct write would land ahead
- * of them, and their late alternate-screen exit would then erase it.
+ * running, and the writes routed here - the resume hint, restart errors, the
+ * fatal report, the exit-time restore, the stopped terminal's own writes -
+ * queue behind those bytes instead of reaching the terminal ahead of them,
+ * where their late alternate-screen exit would erase them. Each waits up to
+ * {@link STOP_DRAIN_MS}; the exit boundary ({@link drainTerminalHandoff})
+ * waits until the terminal has taken everything.
  */
 let terminalHandoff: { pump: OutputPump; owner: ProcessTerminal } | undefined;
 
@@ -347,10 +348,10 @@ function releaseTerminalHandoff(): void {
 
 /**
  * Queue `text` behind the held pump's undelivered bytes, then wait up to
- * {@link STOP_DRAIN_MS} for the terminal to take them. Returns false when no
- * such bytes are pending; the caller then writes directly.
+ * `waitMs` for the terminal to take them. Returns false when no such bytes are
+ * pending; the caller then writes directly.
  */
-function writeBehindTerminalHandoff(text: string): boolean {
+function writeBehindTerminalHandoff(text: string, waitMs = STOP_DRAIN_MS): boolean {
 	const pump = terminalHandoff?.pump;
 	if (!pump) return false;
 	if (pump.dead || pump.pending() === 0) {
@@ -358,8 +359,23 @@ function writeBehindTerminalHandoff(text: string): boolean {
 		return false;
 	}
 	pump.write(text.isWellFormed() ? text : text.toWellFormed());
-	if (pump.flushSync(STOP_DRAIN_MS)) releaseTerminalHandoff();
+	if (pump.flushSync(waitMs)) releaseTerminalHandoff();
 	return true;
+}
+
+/**
+ * The exit boundary: wait, with no time bound, until the held pump has
+ * delivered everything queued on it, so the process never exits with the
+ * terminal-mode restore or the resume hint still undelivered. A terminal that
+ * never reads again holds the exit, as a direct write to it always has.
+ */
+function drainTerminalHandoff(): void {
+	const pump = terminalHandoff?.pump;
+	if (!pump) return;
+	while (!pump.flushSync(STOP_DRAIN_MS) && !pump.dead) {
+		// Still stalled: the next wait starts where this one ran out.
+	}
+	releaseTerminalHandoff();
 }
 
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
@@ -458,6 +474,10 @@ function createConsoleCodepageGuard(): (() => void) | null {
 /**
  * Emergency terminal restore - call this from signal/crash handlers
  * Resets terminal state without requiring access to the ProcessTerminal instance
+ *
+ * Postmortem runs it on every exit path, so it is also the exit boundary: it
+ * returns only once the terminal has taken whatever a stalled stop left
+ * queued (see terminalHandoff).
  */
 export function emergencyTerminalRestore(): void {
 	try {
@@ -499,12 +519,15 @@ export function emergencyTerminalRestore(): void {
 				"\x1b[?25h"; // Show cursor
 			// Behind what a stopped terminal still holds (see terminalHandoff): a
 			// direct write would wait out a stalled reader and land ahead of it.
-			if (!writeBehindTerminalHandoff(restore)) process.stdout.write(restore);
+			// No wait here; the drain below waits for all of it.
+			if (!writeBehindTerminalHandoff(restore, 0)) process.stdout.write(restore);
 			altScreenActive = false;
 			if (process.stdin.setRawMode) {
 				process.stdin.setRawMode(false);
 			}
 		}
+		// A headless process (tests) makes no terminal side effects, waiting included.
+		if (!isTerminalHeadless()) drainTerminalHandoff();
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
 	}
