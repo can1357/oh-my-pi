@@ -23,7 +23,7 @@ import {
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { ModelBrowserRegistry, ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -53,6 +53,7 @@ import {
 	MODEL_ROLE_ALIAS_PREFIX,
 	MODEL_ROLE_IDS,
 	type ModelRole,
+	roleCandidatePool,
 } from "./model-roles";
 import type { Settings } from "./settings";
 
@@ -1574,6 +1575,23 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 		candidates.push(candidate);
 	}
 	return candidates;
+}
+
+/**
+ * The first on-device (`local` provider) model in a role's chain. `omp setup
+ * speech` downloads exactly this model, so every local speech feature resolves
+ * through it.
+ */
+export function resolveLocalRoleModelId(
+	role: "speech" | "dictation",
+	settings: Settings,
+	registry: ModelBrowserRegistry,
+): string {
+	const candidate = resolveRoleChain(role, settings, roleCandidatePool(role, settings, registry)).find(
+		entry => entry.model.provider === "local",
+	);
+	if (!candidate) throw new Error(`No local model is available for the ${role} role.`);
+	return candidate.model.id;
 }
 
 /**
