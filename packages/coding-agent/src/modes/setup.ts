@@ -9,7 +9,7 @@ import {
 	selectSetupScenes as selectScenes,
 	type SetupSceneSelectionOptions,
 } from "@oh-my-pi/pi-tui/setup/wizard";
-import { addCustomProvider } from "../config/custom-provider";
+import { addCustomProvider, customProviderContext } from "../config/custom-provider";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { createModelBrowserSource } from "./model-browser-source";
@@ -70,13 +70,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
 			await ctx.refreshScopedModelsAfterLogin?.();
 		},
-		addCustomProvider: provider =>
-			addCustomProvider(provider, {
-				authStorage: ctx.session.modelRegistry.authStorage,
-				refreshProvider: id => ctx.session.modelRegistry.refreshProvider(id, "online"),
-				discoverySucceeded: id => ctx.session.modelRegistry.getProviderDiscoveryState(id)?.status === "ok",
-				hasChatModels: id => ctx.session.modelRegistry.getAll("chat").some(model => model.provider === id),
-			}),
+		addCustomProvider: provider => addCustomProvider(provider, customProviderContext(ctx.session.modelRegistry)),
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();

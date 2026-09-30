@@ -7,6 +7,7 @@ import { isMap, parseDocument, YAMLMap } from "yaml";
 import { writeFileAtomically } from "../utils/atomic-file";
 import type { ConfigFile } from "./config-file";
 import { ModelsConfigFile, validateModelsConfigProviders } from "./models-config";
+import type { ModelRegistry } from "./model-registry";
 import type { ModelsConfig } from "./models-config-schema";
 
 const CHANGED_ON_DISK = "models.yml changed on disk; retry";
@@ -82,6 +83,16 @@ export interface CustomProviderContext {
 	discoverySucceeded(id: string): boolean;
 	hasChatModels(id: string): boolean;
 	readonly config?: ConfigFile<ModelsConfig>;
+}
+
+/** The live registry as the context every custom-provider write runs against. */
+export function customProviderContext(registry: ModelRegistry): CustomProviderContext {
+	return {
+		authStorage: registry.authStorage,
+		refreshProvider: id => registry.refreshProvider(id, "online"),
+		discoverySucceeded: id => registry.getProviderDiscoveryState(id)?.status === "ok",
+		hasChatModels: id => registry.getAll("chat").some(model => model.provider === id),
+	};
 }
 
 /** Validate a provider endpoint and return it without trailing slashes. */

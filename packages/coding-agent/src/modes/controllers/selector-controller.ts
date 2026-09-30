@@ -27,6 +27,13 @@ import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-confi
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
 import {
+	addCustomProvider,
+	customProviderContext,
+	getCustomProvider,
+	removeCustomProvider,
+	updateCustomProvider,
+} from "../../config/custom-provider";
+import {
 	acquireModelRoleMutation,
 	applyModelPreset,
 	formatModelPresetSwitch,
@@ -1197,6 +1204,13 @@ export class SelectorController {
 					} finally {
 						hub?.refreshAfterExternalMutation();
 					}
+				},
+				providerEditor: {
+					get: id => getCustomProvider(id, undefined, this.ctx.session.modelRegistry.authStorage),
+					add: values => addCustomProvider(values, customProviderContext(this.ctx.session.modelRegistry)),
+					update: (id, update) =>
+						updateCustomProvider(id, update, customProviderContext(this.ctx.session.modelRegistry)),
+					remove: id => removeCustomProvider(id, customProviderContext(this.ctx.session.modelRegistry)),
 				},
 				onCancel: () => done(),
 			},
