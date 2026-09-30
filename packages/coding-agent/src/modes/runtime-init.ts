@@ -8,6 +8,7 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../extensibility/extensions/send-user-input-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -95,6 +96,25 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
 				});
+			},
+			sendUserInput: (text, inputOptions) => {
+				const inputTask = sendSessionUserInput(session, text, inputOptions);
+				// Only a submitted prompt or skill starts a turn; the rest handle the text locally.
+				const invokingTask = inputTask.then(result => {
+					if (result.handled !== "prompt" && result.handled !== "skill") {
+						throw new Error("input did not invoke the agent");
+					}
+				});
+				invokingTask.catch(() => {});
+				if (trackAgentInvokingMessage) {
+					trackAgentInvokingMessage(invokingTask);
+				} else {
+					invokingTask.then(
+						() => markAgentInvokingMessage?.(),
+						() => {},
+					);
+				}
+				return inputTask;
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);

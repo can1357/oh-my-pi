@@ -1571,6 +1571,15 @@ export interface ExtensionAPI {
 	 *  batch while streaming; idle still starts a turn. */
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
+	/**
+	 * Run text as typed input, the way the RPC and ACP modes run a prompt: `/skill:<name>`, built-in slash
+	 * commands that run headless, extension and custom commands, file slash commands and prompt templates are
+	 * handled as commands; anything else is sent as a user prompt. Resolves once the input is handled or
+	 * submitted, with how it was handled. `tag` is recorded on the message the input submits, so a bridge can
+	 * match it on `message_start`/`message_end`. See {@link SendUserInputResult}.
+	 */
+	sendUserInput(text: string, options?: SendUserInputOptions): Promise<SendUserInputResult>;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1800,6 +1809,32 @@ export type SendUserMessageHandler = (
 	options?: SendUserMessageOptions,
 ) => void;
 
+/** Options for {@link ExtensionAPI.sendUserInput}. */
+export interface SendUserInputOptions {
+	/** How input that submits a message queues while the agent is streaming (default: steer, like Enter). An idle session starts a turn either way. */
+	deliverAs?: "steer" | "followUp" | "aside";
+	/** Caller correlation id recorded as `tag` on the message the input submits. */
+	tag?: string;
+}
+
+/**
+ * How {@link ExtensionAPI.sendUserInput} handled text:
+ * - `prompt`: submitted as a user message (plain text, or a template, file slash command, custom command or
+ *   built-in that produced prompt text); the message carries the caller's `tag`.
+ * - `command`: a command ran locally and submitted nothing itself; `output` is what a built-in printed.
+ * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the caller's `tag`.
+ * - `terminal-only`: a built-in only the interactive terminal runs (e.g. `/new`, `/resume`); nothing was sent.
+ * - `unknown`: a leading `/` names no command; nothing was sent.
+ * - `unavailable`: the host mode does not wire `sendUserInput`; nothing was sent.
+ */
+export interface SendUserInputResult {
+	handled: "prompt" | "command" | "skill" | "terminal-only" | "unknown" | "unavailable";
+	/** Text a built-in command printed, when it printed any. */
+	output?: string;
+}
+
+export type SendUserInputHandler = (text: string, options?: SendUserInputOptions) => Promise<SendUserInputResult>;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type GetActiveToolsHandler = () => string[];
@@ -1835,6 +1870,8 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	/** Optional so SDK embedders that build their own actions keep compiling; unwired, the API answers `unavailable`. */
+	sendUserInput?: SendUserInputHandler;
 	appendEntry: AppendEntryHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;
@@ -1878,8 +1915,9 @@ export interface ExtensionCommandContextActions {
 	reload: () => Promise<void>;
 }
 
-/** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
+/** Full runtime = state + actions, including host-compatible fallbacks for optional actions. */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
+	sendUserInput: SendUserInputHandler;
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
 }

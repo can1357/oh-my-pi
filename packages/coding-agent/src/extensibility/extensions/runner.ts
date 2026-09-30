@@ -83,6 +83,7 @@ import type {
 	RegisteredTool,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	SendUserInputResult,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactResult,
 	SessionBeforeSwitchResult,
@@ -131,6 +132,10 @@ let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
 function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
+}
+
+async function answerSendUserInputUnavailable(): Promise<SendUserInputResult> {
+	return { handled: "unavailable" };
 }
 
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
@@ -767,6 +772,7 @@ export class ExtensionRunner {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
+		this.runtime.sendUserInput = actions.sendUserInput ?? answerSendUserInputUnavailable;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;

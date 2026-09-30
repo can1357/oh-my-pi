@@ -39,6 +39,7 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../extensibility/extensions/send-user-input-handler";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -4220,6 +4221,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								});
 							});
 							pendingExtensionMessages.push(sendPromise);
+						},
+						sendUserInput: (text, options) => {
+							const inputPromise = sendSessionUserInput(session, text, options);
+							pendingExtensionMessages.push(
+								inputPromise.catch(e => {
+									logger.error("Extension sendUserInput failed", {
+										error: e instanceof Error ? e.message : String(e),
+									});
+								}),
+							);
+							return inputPromise;
 						},
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);

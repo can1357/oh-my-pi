@@ -54,6 +54,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../../extensibility/extensions/send-user-input-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -2574,6 +2575,14 @@ export class AcpAgent implements Agent {
 				},
 				sendUserMessage: (content, options) => {
 					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+				},
+				sendUserInput: (text, options) => {
+					const inputTask = sendSessionUserInput(record.session, text, options);
+					this.#trackExtensionUserMessage(
+						record,
+						inputTask.then(() => {}),
+					);
+					return inputTask;
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);

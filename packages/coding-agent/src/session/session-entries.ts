@@ -294,6 +294,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Caller correlation id of the input this message came from (an extension's `sendUserInput` `tag`). */
+	tag?: string;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
