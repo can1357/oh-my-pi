@@ -204,6 +204,7 @@ describe("status line model segment fast-mode icon", () => {
 		const rendered = renderSegment("model", createFastContext("off"));
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.icon.fast);
 	});
+
 	it("marks refused priority in native status spans", () => {
 		expect(describeSegment("model", createFastContext("blocked"))?.spans).toContainEqual({
 			t: ` ${theme.icon.fast}`,
@@ -214,5 +215,4 @@ describe("status line model segment fast-mode icon", () => {
 			s: "error",
 		});
 	});
-
 });

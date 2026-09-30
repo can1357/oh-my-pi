@@ -1844,8 +1844,8 @@ export class AgentSession implements SettingsScope {
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
 		});
-		// Resolve the wire tier once per request and retain whether priority came
-		// from explicit configuration or the temporary activity lease.
+		// Resolve the wire service tier once per request and retain whether priority
+		// came from explicit configuration or the temporary activity lease.
 		this.agent.serviceTierResolver = model => {
 			const configuredTier = this.#models.effectiveServiceTier(model);
 			const resolvedTier = this.#resolveMainServiceTier(model);
@@ -7260,13 +7260,14 @@ export class AgentSession implements SettingsScope {
 		// Expand file-based prompt templates if requested
 		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		const expandedText = options?.synthetic ? templated : this.#modelMentions.expandMentions(templated);
+
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		const userInitiated = options?.userInitiated ?? (!options?.synthetic && promptAttribution === "user");
 
 		// Magic keywords (see modes/magic-keywords.ts): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
 		// agent-initiated turns never trigger them.
-		const keywordNotices = userInitiated ? this.#createMagicKeywordNotices(expandedText) : [];
+		const keywordNotices = !options?.synthetic && userInitiated ? this.#createMagicKeywordNotices(expandedText) : [];
 
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
@@ -7318,17 +7319,16 @@ export class AgentSession implements SettingsScope {
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
 		const activeModel = this.agent.state.model;
 		const externalThinkingToolChoice =
-			userInitiated &&
+			!options?.synthetic &&
 			!hasPendingUserDirective &&
 			cfgExternalThinking.get(this.settings) &&
 			this.getEnabledToolNames().includes("think") &&
 			supportsExternalThinking(activeModel)
 				? buildNamedToolChoice("think", activeModel)
 				: undefined;
-		const eagerTodoPrelude =
-			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
-		const eagerTaskPrelude =
-			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+		const eagerPreludeEligible = !options?.synthetic && !hasPendingUserDirective;
+		const eagerTodoPrelude = eagerPreludeEligible ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+		const eagerTaskPrelude = eagerPreludeEligible ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
