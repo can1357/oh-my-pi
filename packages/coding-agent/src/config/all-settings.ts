@@ -4,6 +4,7 @@
  * `PLACED_DOMAINS` splice a domain into another domain's rows.
  */
 import { all, type AnySetting, Setting } from "./registry";
+import * as panelSettings from "../panel/settings";
 import * as modesSettings from "../modes/settings";
 import * as sessionSettings from "../session/settings";
 import * as advisorSettings from "../advisor/settings";
@@ -43,6 +44,7 @@ import * as telemetrySettings from "../telemetry-settings";
 
 const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	configModelSettings,
+	panelSettings,
 	modesSettings,
 	sessionSettings,
 	telemetrySettings,
