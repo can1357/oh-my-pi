@@ -10,6 +10,7 @@
 
 - Fixed OpenRouter decision models that report no context/output limits (`respan/span-01`, `respan/span-01-lite`, `respan/span-01-lite:free`) missing from the judge model list ([#13888](https://github.com/can1357/oh-my-pi/issues/13888))
 - Fixed every `google-vertex/claude-sonnet-5-5` request failing with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#13795](https://github.com/can1357/oh-my-pi/issues/13795))
+- Fixed Cursor Grok 4.7 appearing as separate `grok-4.7-{low,medium,high,xhigh}` and `-fast` models that each also offered an effort selector; they now show as `grok-4.7` and `grok-4.7-fast` with effort picked separately ([#12773](https://github.com/can1357/oh-my-pi/issues/12773))
 
 ## [18.4.4] - 2026-09-29
 
