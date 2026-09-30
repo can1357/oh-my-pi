@@ -652,8 +652,9 @@ describe("runGcCommand cold-session archive", () => {
 		// archive-me's 90d, so retainNewestGlobal:1 deterministically protects it regardless
 		// of readdir order when two sessions would otherwise share an mtime millisecond.
 		const keepRecent = await writeSession(root, "project", "keep-recent", "complete", { ageDays: 60 });
-		const pending = await writeSession(root, "project", "pending", "pending", { ageDays: 90 });
-		const interrupted = await writeSession(root, "project", "interrupted", "interrupted", { ageDays: 90 });
+		// Recent active-status sessions may still be alive and are always skipped.
+		const pending = await writeSession(root, "project", "pending", "pending", { ageDays: 5 });
+		const interrupted = await writeSession(root, "project", "interrupted", "interrupted", { ageDays: 5 });
 		await fs.mkdir(archiveMe.slice(0, -".jsonl".length), { recursive: true });
 		await Bun.write(path.join(archiveMe.slice(0, -".jsonl".length), "0.bash.log"), "artifact");
 		const original = await Bun.file(archiveMe).bytes();
@@ -679,6 +680,32 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(keepRecent).exists()).toBe(true);
 		expect(await Bun.file(pending).exists()).toBe(true);
 		expect(await Bun.file(interrupted).exists()).toBe(true);
+	});
+
+	test("archives active-status sessions once they are older than the cold age", async () => {
+		// Crashed runs leave interrupted/pending transcripts and header-only
+		// files read as unknown; with no age cap they were skipped forever.
+		const stalePending = await writeSession(root, "project", "stale-pending", "pending", { ageDays: 90 });
+		const staleInterrupted = await writeSession(root, "project", "stale-interrupted", "interrupted", { ageDays: 90 });
+
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+
+		expect(result.archive?.archived).toBe(2);
+		expect(result.archive?.skippedActive).toBe(0);
+		expect(await Bun.file(stalePending).exists()).toBe(false);
+		expect(await Bun.file(staleInterrupted).exists()).toBe(false);
+		expect(await Bun.file(path.join(root, "archive", "sessions", "project", "stale-pending.jsonl.gz")).exists()).toBe(
+			true,
+		);
 	});
 
 	test("keeps the source journal when compression encounters a read error", async () => {
