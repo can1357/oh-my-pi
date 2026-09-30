@@ -918,10 +918,16 @@ function homePatternFor(homeDir: string, windowsStyle: boolean): HomePattern {
 				})
 				.join("[\\\\/]");
 		}
+		// `*` and `_` are also identifier and glob characters (`/home/me_old`, `src/**/home/me/**`), so they
+		// bound the home directory only as Markdown emphasis: opened at start or after whitespace, and
+		// closed before end, whitespace, or punctuation.
+		const end = `[\\\\/\\s"'\\x60)\\]},;:<>&|]`;
 		pattern = {
 			leading: new RegExp(`^${escapedHome}(?=$|[\\\\/])`, windowsStyle ? "i" : ""),
 			embedded: new RegExp(
-				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
+				`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+` +
+					`|(^|[\\s"'\\x60([{=,:<>&|])(${escapedHome})(?=$|${end})` +
+					`|((?:^|\\s)[*_]{1,3})(${escapedHome})(?=$|${end}|[*_]{1,3}(?=$|[\\s.,;:!?)\\]}"'\\x60]))`,
 				windowsStyle ? "gi" : "g",
 			),
 		};
@@ -955,8 +961,13 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSep
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
 	const textWithShortenedHome = text.replace(
 		homePattern.embedded,
-		(match, boundary: string | undefined, candidate: string | undefined) =>
-			candidate === undefined ? match : `${boundary}~`,
+		(
+			match,
+			boundary: string | undefined,
+			candidate: string | undefined,
+			emphasis: string | undefined,
+			emphasized: string | undefined,
+		) => (candidate !== undefined ? `${boundary}~` : emphasized !== undefined ? `${emphasis}~` : match),
 	);
 	if (preserveSeparators) return textWithShortenedHome;
 	return textWithShortenedHome
@@ -973,6 +984,43 @@ export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSep
 			return `${leading}${normalized}${trailing}`;
 		})
 		.join(" ");
+}
+
+/**
+ * Shorten filesystem and command arguments without rewriting literal search patterns. A producer that
+ * names no argument key gets the general embedded-path shortening.
+ */
+export function shortenToolArgumentPaths(text: string, key: string | undefined, homeDir?: string): string {
+	if (key === "url") {
+		try {
+			const url = new URL(text);
+			if (url.protocol === "file:") {
+				let decodedPath = url.pathname;
+				try {
+					decodedPath = decodeURIComponent(decodedPath);
+				} catch {
+					/* Retain malformed percent escapes as literal path bytes. */
+				}
+				const filePath = url.hostname
+					? `//${url.hostname}${decodedPath}`
+					: /^[A-Za-z]:$/.test(decodedPath.slice(1, 3))
+						? decodedPath.slice(1)
+						: decodedPath;
+				return shortenEmbeddedPaths(filePath, homeDir);
+			}
+		} catch {
+			// Preserve malformed and non-file URL arguments verbatim.
+		}
+		return text;
+	}
+	return key === undefined ||
+		key === "path" ||
+		key === "file_path" ||
+		key === "command" ||
+		key === "task" ||
+		key === "prompt"
+		? shortenEmbeddedPaths(text, homeDir)
+		: text;
 }
 
 /** Sanitize warning text before showing it in TUI, including embedded home paths. */
