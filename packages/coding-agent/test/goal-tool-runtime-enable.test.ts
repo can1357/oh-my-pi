@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -14,6 +15,7 @@ import { cfgGoalEnabled, cfgGoalToolDefault } from "@oh-my-pi/pi-coding-agent/go
 describe("goal tool registration when goal mode is enabled at runtime", () => {
 	let tempDir: TempDir;
 	let session: AgentSession | undefined;
+	let mode: InteractiveMode | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -22,6 +24,8 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 	});
 
 	afterEach(async () => {
+		mode?.stop();
+		mode = undefined;
 		await session?.dispose();
 		session = undefined;
 		tempDir?.removeSync();
@@ -129,20 +133,67 @@ describe("goal tool registration when goal mode is enabled at runtime", () => {
 	});
 
 	it.each([
-		["complete", "complete"],
-		["drop", "dropped"],
-	] as const)("keeps an opted-in goal tool available after %s", async (op, status) => {
-		session = await makeSession(true, op === "complete" ? { toolNames: ["read", "goal"] } : { toolDefault: true });
+		["explicit --tools", false],
+		["goal.toolDefault", true],
+	] as const)("refuses agent-created goals while plan mode is active with %s", async (_label, toolDefault) => {
+		session = await makeSession(true, toolDefault ? { toolDefault: true } : { toolNames: ["read", "goal"] });
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handlePlanModeCommand("plan a tiny task");
+		expect(mode.planModeEnabled).toBe(true);
+		expect(session.getEnabledToolNames()).toContain("goal");
+
 		const goalTool = session.agent.state.tools.find(t => t.name === "goal");
 		expect(goalTool).toBeDefined();
-		await goalTool!.execute("create", { op: "create", objective: "small goal" });
-		const result = await goalTool!.execute("finish", { op });
-		expect(result.details?.goal?.status).toBe(status);
-		if (op === "complete") session.setGoalModeState(undefined);
-		await session.setActiveToolsByName(session.getEnabledToolNames());
-		const activeGoalTool = session.agent.state.tools.find(t => t.name === "goal");
-		expect(activeGoalTool).toBeDefined();
-		const next = await activeGoalTool!.execute("new_goal", { op: "create", objective: "next goal" });
-		expect(next.details?.goal?.objective).toBe("next goal");
+		await expect(goalTool!.execute("create", { op: "create", objective: "tiny goal" })).rejects.toThrow(
+			"Exit plan mode before starting a goal.",
+		);
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(mode.goalModeEnabled).toBe(false);
+	});
+
+	it.each([
+		["explicit --tools", false],
+		["goal.toolDefault", true],
+	] as const)("restores %s after goal completion and drop, allowing another goal", async (_label, toolDefault) => {
+		session = await makeSession(true, toolDefault ? { toolDefault: true } : { toolNames: ["read", "goal"] });
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		const create = async (objective: string) => {
+			const goalTool = session!.agent.state.tools.find(t => t.name === "goal");
+			expect(goalTool).toBeDefined();
+			const result = await goalTool!.execute(objective, { op: "create", objective });
+			expect(result.details?.goal?.objective).toBe(objective);
+			expect(mode!.goalModeEnabled).toBe(true);
+		};
+
+		await create("first goal");
+		const goalTool = session.agent.state.tools.find(t => t.name === "goal")!;
+		const completed = await goalTool.execute("complete", { op: "complete" });
+		expect(completed.details?.goal?.status).toBe("complete");
+		const restoredAfterComplete = Promise.withResolvers<void>();
+		const setActiveTools = session.setActiveToolsByName.bind(session);
+		const restoration = vi.spyOn(session, "setActiveToolsByName").mockImplementation(async names => {
+			await setActiveTools(names);
+			restoredAfterComplete.resolve();
+		});
+		void mode.getUserInput();
+		await restoredAfterComplete.promise;
+		await Promise.resolve();
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toContain("goal");
+
+		await create("second goal");
+		const restoredAfterDrop = Promise.withResolvers<void>();
+		restoration.mockImplementation(async names => {
+			await setActiveTools(names);
+			restoredAfterDrop.resolve();
+		});
+		const dropped = await session.agent.state.tools.find(t => t.name === "goal")!.execute("drop", { op: "drop" });
+		expect(dropped.details?.goal?.status).toBe("dropped");
+		await restoredAfterDrop.promise;
+		expect(mode.goalModeEnabled).toBe(false);
+		expect(session.getEnabledToolNames()).toContain("goal");
+		await create("third goal");
 	});
 });

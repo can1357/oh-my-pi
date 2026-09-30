@@ -80,6 +80,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 
 		let response: GoalToolResponse;
 		if (params.op === "create") {
+			if (this.#session.getPlanModeState?.()?.enabled) {
+				throw new ToolError("Exit plan mode before starting a goal.");
+			}
 			const created = await runtime.createGoal(validateCreateParams(params));
 			response = buildGoalToolResponse(created.goal);
 		} else if (params.op === "get") {
