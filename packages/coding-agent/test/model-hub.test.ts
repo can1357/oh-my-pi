@@ -2209,6 +2209,7 @@ describe("ModelHub custom provider editor", () => {
 		const { editor } = makeProviderEditor();
 		const { hub } = createHub({ models, providerEditor: editor });
 
+		hub.handleInput("\n"); // Enter moves focus from the sidebar into the model list
 		hub.handleInput("\n"); // Enter on the first model opens its role strip
 		expect(footerLine(hub.render(220))).toContain("gpt-x →");
 		const frame = hub.render(220).map(line => stripVTControlCharacters(line));
