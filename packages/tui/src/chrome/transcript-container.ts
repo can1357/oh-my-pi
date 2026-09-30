@@ -173,6 +173,7 @@ export class TranscriptContainer extends Container {
 	#offered: Offered | undefined;
 	#replayPending = false;
 	#replayRequested = false;
+	#allowEmptyReplay = false;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
@@ -316,8 +317,9 @@ export class TranscriptContainer extends Container {
 	}
 
 	/** Prepares one atomic replay of the committed ledger and an emitted active-head prefix. */
-	beginReplay(): void {
+	beginReplay(allowEmptyReplay = false): void {
 		this.#syncEntries();
+		this.#allowEmptyReplay ||= allowEmptyReplay;
 		if (this.#offered !== undefined) {
 			this.#replayRequested = true;
 			return;
@@ -332,6 +334,7 @@ export class TranscriptContainer extends Container {
 	cancelReplay(): void {
 		this.#replayPending = false;
 		this.#replayRequested = false;
+		this.#allowEmptyReplay = false;
 	}
 
 	/**
@@ -563,7 +566,9 @@ export class TranscriptContainer extends Container {
 			popLoopPhase();
 		}
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
+		const allowEmptyReplay = this.#allowEmptyReplay;
+		this.#allowEmptyReplay = false;
+		if (rows.length === 0 && !allowEmptyReplay) return undefined;
 		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
 		this.#offered = { batch, kind: "replay" };
 		return batch;
@@ -1036,7 +1041,8 @@ export class TranscriptContainer extends Container {
 
 	#startReplay(): void {
 		const head = this.#entries[this.#frontier];
-		this.#replayPending = this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
+		this.#replayPending =
+			this.#allowEmptyReplay || this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
 		this.#replayRequested = false;
 	}
 

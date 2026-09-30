@@ -245,6 +245,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		  }
 		| undefined;
 	#historyReplayRequested = false;
+	#allowEmptyHistoryReplay = false;
 	#headerReplayPending = false;
 	#historyFlush = false;
 	// The welcome header retires to terminal history exactly once, after the
@@ -347,6 +348,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
+		this.ui.setCursorOverlay(undefined, 0, 0);
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
 		if (this.#resizeRetiredHeaderStart !== undefined) {
@@ -601,7 +603,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/** Replays committed presentation without changing logical retirement state. */
-	beginHistoryReplay(): void {
+	beginHistoryReplay(allowEmptyReplay = false): void {
+		this.#allowEmptyHistoryReplay ||= allowEmptyReplay;
 		if (this.#offeredHistory !== undefined) {
 			this.#historyReplayRequested = true;
 			return;
@@ -617,6 +620,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// flush emits only genuinely un-retired rows. An already offered batch
 		// stays valid and is accepted by the flush loop.
 		this.#historyReplayRequested = false;
+		this.#allowEmptyHistoryReplay = false;
 		this.#headerReplayPending = false;
 		for (const child of this.#runtimeChildren) {
 			if (child instanceof TranscriptContainer) child.cancelReplay();
@@ -627,8 +631,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#headerReplayPending = this.#headerRetired && (this.#retiredHeaderRows?.length ?? 0) > 0;
 		this.#historyReplayRequested = false;
 		for (const child of this.#runtimeChildren) {
-			if (child instanceof TranscriptContainer) child.beginReplay();
+			if (child instanceof TranscriptContainer) child.beginReplay(this.#allowEmptyHistoryReplay);
 		}
+		this.#allowEmptyHistoryReplay = false;
 	}
 
 	/** Header retires first; replay coalesces it with the complete transcript ledger. */
