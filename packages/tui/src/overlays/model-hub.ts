@@ -2020,7 +2020,9 @@ export class ModelHubComponent implements Component {
 		}
 		const provider = this.#editableProvider(entry);
 		if (!provider) return false;
-		if (matchesKey(data, "ctrl+e")) {
+		// Without a provider-level endpoint (an override that only sets headers, per-model URLs) the form would
+		// demand a URL the user never had, and typing one would reroute the provider; only delete applies.
+		if (matchesKey(data, "ctrl+e") && provider.baseUrl.trim() !== "") {
 			this.#openProviderForm(provider);
 			return true;
 		}
@@ -2998,7 +3000,11 @@ export class ModelHubComponent implements Component {
 	/** Advertise the provider keys only where they act: on the sidebar, outside assignment. */
 	#providerEditorHint(entry: SidebarEntry): string {
 		if (!this.#callbacks.providerEditor || this.#focus !== "scope" || entry.kind === "addProvider") return "";
-		return this.#editableProvider(entry) ? "^E edit · ^D delete · ^N add provider · " : "^N add provider · ";
+		const provider = this.#editableProvider(entry);
+		if (!provider) return "^N add provider · ";
+		return provider.baseUrl.trim() === ""
+			? "^D delete · ^N add provider · "
+			: "^E edit · ^D delete · ^N add provider · ";
 	}
 
 	#footerHint(width: number): string {
