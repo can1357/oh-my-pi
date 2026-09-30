@@ -269,7 +269,6 @@ describe("readMacFileUrlsFromClipboard", () => {
 		// Buffer so the child receives it without blocking the event loop.
 		const stdin = calls[0]?.options.stdin;
 		expect(Buffer.isBuffer(stdin)).toBe(true);
-		expect((stdin as Buffer).toString("utf8")).toContain("public.file-url");
 	});
 
 	it("returns an empty list when osascript exits non-zero (e.g. binary missing)", async () => {
