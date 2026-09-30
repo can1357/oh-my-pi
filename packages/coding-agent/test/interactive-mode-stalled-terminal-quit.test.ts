@@ -98,10 +98,14 @@ describe.skipIf(!canOpenPty())("quitting while the terminal is not reading", () 
 			// A real terminal, not the test runtime: the child's ProcessTerminal
 			// paints through the native output pump. Input comes from a pipe that
 			// stays open. With stdin on the terminal, restoring its mode
-			// (setRawMode) makes stop() wait for the terminal to read on kernels
-			// whose tcsetattr(TCSADRAIN) waits for a blocked writer (current
-			// mainline); others, such as 5.15, do not wait. The pipe stands in for
-			// those kernels: the quit reaches the hint with the backlog unread.
+			// (setRawMode) makes stop() wait for the terminal to read, except on
+			// kernels without Linux commit 094fb49a2d0d ("tty: Prevent writing
+			// chars during tcsetattr TCSADRAIN/FLUSH"; in 5.4.243, 5.10.180,
+			// 5.15.111, 6.1.28 and 6.2.15 and later), which do not wait. The pipe
+			// stands in for every case where the quit reaches the hint with the
+			// backlog unread: stdin that is not the terminal (an embedded or SDK
+			// InteractiveMode), a quit before raw mode was ever enabled (the
+			// deferInput prepaint), and those kernels.
 			env: { PATH: Bun.env.PATH ?? "", HOME: dir, TERM: "xterm-256color", LANG: "C.UTF-8" },
 			stdin: "pipe",
 			stdout: slave,
