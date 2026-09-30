@@ -31,8 +31,15 @@ export async function replaceFileWithRetry(tempPath: string, targetPath: string)
 	}
 }
 
-/** Write a private file through a synced sibling before publishing it. */
-export async function writeFileAtomically(filePath: string, content: string): Promise<void> {
+/**
+ * Write a private file through a synced sibling before publishing it. `beforePublish` runs once the
+ * sibling is durable and immediately before the rename; if it throws, nothing is published.
+ */
+export async function writeFileAtomically(
+	filePath: string,
+	content: string,
+	beforePublish?: () => Promise<void>,
+): Promise<void> {
 	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let removeTemp = false;
@@ -45,6 +52,7 @@ export async function writeFileAtomically(filePath: string, content: string): Pr
 		} finally {
 			await handle.close();
 		}
+		await beforePublish?.();
 		await replaceFileAtomically(tempPath, filePath);
 		removeTemp = false;
 	} finally {
