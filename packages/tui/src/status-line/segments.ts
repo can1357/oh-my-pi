@@ -6,6 +6,7 @@ import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
@@ -100,6 +101,14 @@ function clampPathLength(pwd: string, maxLen: number): string {
 function leadingGlyph(display: string): string {
 	const space = display.indexOf(" ");
 	return space === -1 ? display : display.slice(0, space);
+}
+
+export function formatCompactContextPercent(percent: number | null | undefined): string {
+	if (percent === null || percent === undefined) return "?";
+	if (percent === 0) return "0%";
+	if (percent > 0 && percent < 1) return `${percent.toFixed(1)}%`;
+	if (Number.isInteger(percent)) return `${percent}%`;
+	return `${percent.toFixed(1)}%`;
 }
 
 /**
@@ -616,6 +625,24 @@ const pathSegment: StatusLineSegment = {
 	},
 };
 
+const profileSegment: StatusLineSegment = {
+	id: "profile",
+	render(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return { content: "", visible: false };
+
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		const content = `p:${label}`;
+		return { content: theme.fg("accent", content), visible: true };
+	},
+	describe(_ctx) {
+		const profile = getActiveProfile();
+		if (!profile) return null;
+		const label = truncateToWidth(sanitizeStatusText(profile), TRUNCATE_LENGTHS.SHORT - 2);
+		return segView([span(`p:${label}`, "accent")]);
+	},
+};
+
 /** A path as its dim parent directories and its strong leaf. */
 function pathSpans(value: string): TspSpan[] {
 	const slash = value.lastIndexOf("/", value.length - 2);
@@ -736,10 +763,23 @@ const tokenTotalSegment: StatusLineSegment = {
 		// Excludes cacheRead: that field re-reads the full cached context every
 		// turn, making the cumulative sum N×context_size. Orchestration cache read
 		// follows the same rule; orchestration input/output remain in the total so
-		// provider-side service work is preserved without labeling it prompt input.
+		// provider-side service work is preserved (surfaced under its own orch:
+		// label in the breakdown rather than folded into in:/out:).
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
+
+		if (ctx.options.token_total?.breakdown === true) {
+			const inTotal = input + cacheWrite;
+			const outTotal = output;
+			const orchTotal = orchestrationInput + orchestrationOutput;
+			const parts: string[] = [];
+			if (inTotal > 0) parts.push(`in:${formatNumber(inTotal)}`);
+			if (outTotal > 0) parts.push(`out:${formatNumber(outTotal)}`);
+			if (orchTotal > 0) parts.push(`orch:${formatNumber(orchTotal)}`);
+			if (parts.length === 0) return { content: "", visible: false };
+			return { content: theme.fg("statusLineSpend", parts.join(" ")), visible: true };
+		}
 
 		const content = formatMetric({
 			leading: theme.icon.tokens || undefined,
@@ -844,12 +884,14 @@ const contextPctSegment: StatusLineSegment = {
 						: theme.fg(color, theme.icon.auto)
 			}`;
 		}
-		// A known window with unknown usage (startup prepaint) shows the window alone.
-		const text = theme.fg(
-			color,
-			pct === null && window > 0 ? formatNumber(window) : formatContextUsage(pct, window, ctx.contextTokens),
-		);
-		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
+		const compact = ctx.options.context_pct?.compact === true;
+		const display = compact
+			? `ctx:${formatCompactContextPercent(pct)}`
+			: pct === null && window > 0
+				? formatNumber(window)
+				: formatContextUsage(pct, window, ctx.contextTokens);
+		const text = theme.fg(color, display);
+		const content = compact ? `${text}${autoIcon}` : withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
 	},
@@ -1271,6 +1313,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	status: statusSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	profile: profileSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,
