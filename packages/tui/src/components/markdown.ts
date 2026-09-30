@@ -1411,8 +1411,14 @@ export interface MarkdownHead {
  * Render the leading rows of a Markdown document: more than `minRows` rows,
  * or the whole document when it is shorter. The document is cut only at a
  * stable top-level block boundary, so every returned row equals the same row
- * of a full render. Documents under two probe windows, and documents that
- * can't be cut (a reference definition anywhere, a CR), render whole.
+ * of a full render. It renders whole, not `truncated`, in three cases:
+ * - It is under two probe windows: the first probe alone lexes half of it or
+ *   more, which leaves a cut little to save.
+ * - It can't be cut: a line could hold a reference definition
+ *   ({@link hasRefDefAnywhere}), or a CR shifts the token offsets.
+ * - No cut works: the orphan-fence repair would pair a fence in front of the
+ *   cut with one past it, or no boundary short of the end leaves more than
+ *   `minRows` rows.
  */
 export function renderMarkdownHead(text: string, width: number, theme: MarkdownTheme, minRows: number): MarkdownHead {
 	// The text a final-mode `Markdown` lexes: the constructor normalizes OSC 8
