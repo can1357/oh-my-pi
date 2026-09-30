@@ -103,20 +103,28 @@ class AdvisorNotes implements Component {
 	}
 }
 
+/** Per-note source label. Model identity is runtime-owned and survives fallback. */
+function advisorAttributionLabel(entry: AdvisorNote): string {
+	const labels: string[] = [];
+	if (entry.advisor && entry.advisor !== "default") labels.push(replaceTabs(entry.advisor));
+	if (entry.model) labels.push(replaceTabs(entry.model));
+	return labels.length > 0 ? `[${labels.join(" · ")}]` : "";
+}
+
 /** Wrapped, truncated rail rows for a single note; shared by both branches. */
 function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): string[] {
 	const badge = entry.severity ? `${formatBadge(entry.severity, severityColor(entry.severity), uiTheme)} ` : "";
-	// Multi-advisor: attribute the note to its source. The implicit
-	// single ("default") advisor renders unlabeled, as before.
-	const who =
-		entry.advisor && entry.advisor !== "default" ? `${uiTheme.fg("dim", `[${replaceTabs(entry.advisor)}]`)} ` : "";
+	const attribution = advisorAttributionLabel(entry);
+	const who = attribution ? `${uiTheme.fg("dim", attribution)} ` : "";
 	const railGlyph = uiTheme.symbol("advisor.rail");
 	const rail = uiTheme.fg(severityColor(entry.severity), railGlyph);
 	const quoteWidth = visibleWidth(`  ${railGlyph} `);
 	const badgeWidth = visibleWidth(badge);
 	const whoWidth = visibleWidth(who);
-	const w1 = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth - badgeWidth - whoWidth);
-	const w2 = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth);
+	const contentWidth = Math.max(10, Math.min(NOTE_LINE_WIDTH, width) - quoteWidth);
+	const attributionOwnLine = whoWidth > 0 && badgeWidth + whoWidth + 10 > contentWidth;
+	const w1 = attributionOwnLine ? contentWidth : Math.max(10, contentWidth - badgeWidth - whoWidth);
+	const w2 = contentWidth;
 
 	const paragraphs = entry.note.split("\n").filter(p => p.trim());
 	const bodyLines: string[] = [];
@@ -129,18 +137,27 @@ function renderAdvisorNote(entry: AdvisorNote, width: number, uiTheme: Theme): s
 		}
 	}
 
+	if (attributionOwnLine) {
+		const attributionLine = `  ${rail} ${badge}${who.trimEnd()}`;
+		return [
+			attributionLine,
+			...bodyLines.map(line => `  ${rail} ${uiTheme.fg("customMessageText", replaceTabs(line))}`),
+		];
+	}
+
 	return bodyLines.map(
 		(line, index) =>
 			`  ${rail} ${index === 0 ? `${badge}${who}` : ""}${uiTheme.fg("customMessageText", replaceTabs(line))}`,
 	);
 }
 
-/** Native spans for one note: severity badge, advisor attribution, then the note text. */
+/** Native spans for one note: severity badge, source attribution, then the note text. */
 function advisorNoteSpans(entry: AdvisorNote): TspSpan[] {
 	const spans: TspSpan[] = [];
 	if (entry.severity)
 		spans.push(span(entry.severity.toUpperCase(), `${severityColor(entry.severity)} strong`), span(" "));
-	if (entry.advisor && entry.advisor !== "default") spans.push(span(`[${entry.advisor}] `, "dim"));
+	const attribution = advisorAttributionLabel(entry);
+	if (attribution) spans.push(span(`${attribution} `, "dim"));
 	spans.push(span(plainText(entry.note), "customMessageText"));
 	return spans;
 }
