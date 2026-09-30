@@ -570,7 +570,8 @@ describe("input controller — bare slash commands opt-in", () => {
 		expect(ctx.showStatus).not.toHaveBeenCalled();
 		expect(addToHistory).toHaveBeenCalledWith("c");
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
-		expect(onInputCallback.mock.calls[0]?.[0]).toMatchObject({ cancelled: false });
+		// The answer itself, not the command it collides with.
+		expect(onInputCallback.mock.calls[0]?.[0]).toMatchObject({ text: "c" });
 	});
 
 	it("still arms another command during a guided interview, so the exemption stays narrow", async () => {
