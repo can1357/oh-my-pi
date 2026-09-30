@@ -23,7 +23,7 @@
 # - `main`'s block-start lookahead and the `table` context: `(?=[^|]*\|)` before `{{table_first_row}}`,
 #   the fast reject for lines without a pipe from https://github.com/sublimehq/Packages/pull/4603.
 #
-# Re-sync when the workspace bumps syntect (crates/pi-natives/Cargo.toml -> syntect.workspace):
+# Re-sync when the workspace bumps syntect (the `syntect` entry in the root Cargo.toml):
 #   1. Fetch Markdown/Markdown.sublime-syntax from sublimehq/Packages at the commit the new syntect pins
 #      (its testdata/Packages submodule) and re-apply every patch entry above.
 #   2. cargo nextest run -p pi-natives highlight::tests
@@ -85,7 +85,7 @@ variables:
     balance_square_brackets: |-
         (?x:
           (?:
-            (?:{{escape}})++                # escape characters
+            (?:{{escape}})++            # escape characters
           | [^\[\]`\\]+(?=[\[\]`\\]|$)  # anything that isn't a square bracket or a backtick or the start of an escape character
           | {{backticks}}               # inline code
           | \[(?:                       # nested square brackets (one level deep)
@@ -108,7 +108,7 @@ variables:
     balance_square_brackets_and_emphasis: |-
         (?x:
           (?:
-            (?:{{escape}})++                    # escape characters
+            (?:{{escape}})++                # escape characters
           | [^\[\]`\\_*]+(?=[\[\]`\\_*]|$)  # anything that isn't a square bracket, a backtick, the start of an escape character, or an emphasis character
           | {{backticks}}                   # inline code
           | \[(?:                           # nested square brackets (one level deep)
@@ -120,7 +120,7 @@ variables:
     balance_square_brackets_pipes_and_emphasis: |-
         (?x:
           (?:
-            (?:{{escape}})++                    # escape characters
+            (?:{{escape}})++                # escape characters
           | [^\[\]`\\_*|]+(?=[\[\]`\\_*|]|$)  # anything that isn't a square bracket, a backtick, the start of an escape character, or an emphasis character
           | {{backticks}}                   # inline code
           | \[(?:                           # nested square brackets (one level deep)
