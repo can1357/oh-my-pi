@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { UserMessageComponent, getUserMessageShape, setUserMessageShape } from "../src/chat/user-message";
-import { initTheme } from "../src/theme";
+import { UserMessageComponent, setUserMessageShape } from "../src/chat/user-message";
+import { initTheme, theme } from "../src/theme";
 
 const W = 60;
 
@@ -49,9 +49,20 @@ describe("UserMessageComponent shapes", () => {
 		expect(plain.join("\n")).toContain("Hello plain");
 	});
 
+	it("does not leak userMessageBg background color after chips in plain and box modes", () => {
+		const userMsgBg = theme.getBgAnsi("userMessageBg");
+		expect(userMsgBg).not.toBe("");
+		for (const shape of ["plain", "box"] as const) {
+			const comp = new UserMessageComponent('ask <model agent="m1" name="Opus"/> about this please', { shape });
+			const rows = comp.render(W);
+			for (const row of rows) {
+				expect(row).not.toContain(userMsgBg);
+			}
+		}
+	});
+
 	it("respects process-wide setUserMessageShape", () => {
 		setUserMessageShape("box");
-		expect(getUserMessageShape()).toBe("box");
 		const comp = new UserMessageComponent("Global box");
 		const rows = comp.render(W);
 		const plain = rows.map(r => Bun.stripANSI(r));
@@ -68,5 +79,18 @@ describe("UserMessageComponent shapes", () => {
 		expect(plain[0]).toStartWith("╭");
 		expect(plain[0]).toEndWith("╮");
 		expect(Bun.stringWidth(plain[0]!)).toBe(W);
+	});
+	it("falls back gracefully without synthesizing borders at very narrow widths", () => {
+		const comp = new UserMessageComponent("hello world", { shape: "box", liveSteered: true });
+		const rows4 = comp.render(4);
+		expect(rows4.length).toBeGreaterThan(0);
+		// At width 4 or 3, rows must not overflow their given width
+		for (const row of rows4) {
+			expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(4);
+		}
+		const rows3 = comp.render(3);
+		for (const row of rows3) {
+			expect(Bun.stringWidth(Bun.stripANSI(row))).toBeLessThanOrEqual(3);
+		}
 	});
 });

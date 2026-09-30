@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.userMessageShape` setting (`block`, `box`, `plain`) to support framed and plain user prompt styles in the chat transcript ([#13927](https://github.com/can1357/oh-my-pi/pull/13927) by [@ryaminal](https://github.com/ryaminal)).
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

@@ -70,14 +70,12 @@ export interface UserBubbleOptions {
 
 export type UserMessageShape = "block" | "box" | "plain";
 
+/** Process-wide default shape for user prompt bubbles in the chat transcript. */
 let defaultUserMessageShape: UserMessageShape = "block";
 
+/** Set the default visual framing shape for user messages in the chat transcript. */
 export function setUserMessageShape(shape: UserMessageShape): void {
 	defaultUserMessageShape = shape;
-}
-
-export function getUserMessageShape(): UserMessageShape {
-	return defaultUserMessageShape;
 }
 
 /**
@@ -91,16 +89,22 @@ export function userBubbleColor(
 	options: UserBubbleOptions = {},
 	tokenRegex: RegExp = COMPOSER_TOKEN_REGEX,
 ): (value: string) => string {
-	const { imageLinks, synthetic = false, skillPath } = options;
+	const { imageLinks, synthetic = false, skillPath, shape = defaultUserMessageShape } = options;
 	// The Markdown component routes code spans and fenced blocks through its own code styling
 	// (never `color`), so those are already excluded; `highlightMagicKeywords` additionally
 	// restores the bubble's own foreground after each painted keyword so the gradient never
 	// bleeds into the rest of the line.
-	const keywordReset = theme.getFgOnBgAnsi("userMessageText", "userMessageBg");
-	const bubbleReset = `${keywordReset}${theme.getBgAnsi("userMessageBg")}`;
+	const hasBg = shape === "block";
+	const keywordReset = hasBg
+		? theme.getFgOnBgAnsi("userMessageText", "userMessageBg")
+		: theme.fg("userMessageText", "");
+	const bubbleReset = hasBg ? `${keywordReset}${theme.getBgAnsi("userMessageBg")}` : `${keywordReset}\x1b[49m`;
 	const renderText = synthetic
 		? (text: string) => theme.fg("dim", text)
-		: (text: string) => theme.fgOnBg("userMessageText", "userMessageBg", highlightMagicKeywords(text, keywordReset));
+		: (text: string) =>
+				hasBg
+					? theme.fgOnBg("userMessageText", "userMessageBg", highlightMagicKeywords(text, keywordReset))
+					: theme.fg("userMessageText", highlightMagicKeywords(text, keywordReset));
 	return (value: string) =>
 		renderPlaceholders(
 			value,
@@ -178,39 +182,27 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 
 		const shape = options.shape ?? defaultUserMessageShape;
 		this.#shape = shape;
+		const hasBg = shape === "block";
+		const bgColor = hasBg ? (value: string) => theme.bg("userMessageBg", value) : undefined;
+		this.#bgColor = bgColor;
+
+		const pad = shape === "box" ? 0 : 1;
+		const markdown = new Markdown(text, pad, pad, getMarkdownTheme(), {
+			bgColor: shape === "block" ? bgColor : undefined,
+			color: userBubbleColor({ ...options, shape }, this.#tokens),
+		});
+		markdown.setIgnoreTight(true);
 
 		if (shape === "box") {
-			const bgColor = (value: string) => theme.bg("userMessageBg", value);
-			this.#bgColor = bgColor;
-			const md = new Markdown(text, 0, 0, getMarkdownTheme(), {
-				bgColor: undefined,
-				color: userBubbleColor(options, this.#tokens),
-			});
-			md.setIgnoreTight(true);
-			const box = new Box(1, 0, bgColor, {
+			const box = new Box(1, 0, undefined, {
 				chars: theme.boxRound,
 				color: (s: string) => theme.fg("border", s),
 			});
 			box.setIgnoreTight(true);
-			box.addChild(md);
+			box.addChild(markdown);
 			this.addChild(box);
-		} else if (shape === "plain") {
-			this.#bgColor = undefined;
-			const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
-				bgColor: undefined,
-				color: userBubbleColor(options, this.#tokens),
-			});
-			md.setIgnoreTight(true);
-			this.addChild(md);
 		} else {
-			const bgColor = (value: string) => theme.bg("userMessageBg", value);
-			this.#bgColor = bgColor;
-			const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
-				bgColor,
-				color: userBubbleColor(options, this.#tokens),
-			});
-			md.setIgnoreTight(true);
-			this.addChild(md);
+			this.addChild(markdown);
 		}
 	}
 
@@ -316,15 +308,21 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 
 	/** The top border row with the reaction badge docked into the border and live-steered marker. */
 	#badgeBorderRow(topBorderRow: string, width: number): string {
+		const chars = theme.boxRound;
+		// Box drops the border when width <= 4 (or insufficient space); don't synthesize border rows.
+		if (!Bun.stripANSI(topBorderRow).startsWith(chars.topLeft)) {
+			return topBorderRow;
+		}
+
 		const marker = this.#liveSteered ? theme.fg("accent", "*") : "";
 		const markerLen = this.#liveSteered ? 1 : 0;
 		const emoji = this.#reaction;
-		const chars = theme.boxRound;
 		const color = (s: string) => theme.fg("border", s);
 
 		if (!emoji) {
 			if (!this.#liveSteered) return topBorderRow;
-			// Only liveSteered marker
+			// Only liveSteered marker: requires at least topLeft + margin (1) + marker (1) + topRight (1) = 4 chars
+			if (width < 4) return topBorderRow;
 			const leftMargin = 1;
 			const rightLen = Math.max(0, width - 2 - leftMargin - markerLen);
 			return (

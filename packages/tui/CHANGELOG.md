@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `shape` option to `UserMessageComponent` (`block`, `box`, `plain`) and `setUserMessageShape` to configure visual framing of user prompts ([#13927](https://github.com/can1357/oh-my-pi/pull/13927) by [@ryaminal](https://github.com/ryaminal)).
+
 ## [18.4.5] - 2026-09-30
 
 ### Added
