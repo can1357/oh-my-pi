@@ -34,3 +34,18 @@ export const cfgSttSubmitTrigger = register({
 		options: STT_SUBMIT_TRIGGER_OPTIONS,
 	},
 });
+
+// Off by default: a transcript needs ffmpeg plus the ~680 MB dictation model, so
+// reading an audio file stays a plain binary-file read until the user opts in.
+export const cfgSttTranscribeFiles = register({
+	id: "stt.transcribeFiles",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Speech",
+		label: "Transcribe Audio and Video Files",
+		description:
+			"Let read return timestamped transcripts of audio files and video soundtracks (clip.mp4:transcript) with the on-device speech model",
+	},
+});

@@ -15,11 +15,12 @@ import {
 import { tinyWorkerEnv } from "../tiny/title-client";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
 import { getSttModelSpec, type SttModelKey } from "./models";
+import type { SttSegment } from "./transcript";
 
 type TranscribeRequest = {
 	kind: "transcribe";
 	modelKey: SttModelKey;
-	resolve: (text: string) => void;
+	resolve: (segments: SttSegment[]) => void;
 	reject: (error: Error) => void;
 };
 
@@ -110,13 +111,19 @@ export class SttClient {
 	}
 
 	/**
-	 * Transcribe 16 kHz mono audio on the warm worker. Rejects with the worker
-	 * error on failure and with an `AbortError` when the signal fires (the warm
-	 * worker keeps the model loaded across calls — the model is never reloaded).
+	 * Transcribe one window of 16 kHz mono audio (at most 30 s for Whisper tiers)
+	 * on the warm worker into timed segments, with times in seconds from the
+	 * window's first sample. Rejects with the worker error on failure and with an
+	 * `AbortError` when the signal fires (the warm worker keeps the model loaded
+	 * across calls — the model is never reloaded).
 	 */
-	async transcribe(modelKey: SttModelKey, audio: Float32Array, options: SttTranscribeOptions = {}): Promise<string> {
+	async transcribe(
+		modelKey: SttModelKey,
+		audio: Float32Array,
+		options: SttTranscribeOptions = {},
+	): Promise<SttSegment[]> {
 		options.signal?.throwIfAborted();
-		return this.#host.request<string>(
+		return this.#host.request<SttSegment[]>(
 			options.signal,
 			id => ({ type: "transcribe", id, modelKey, audio, language: options.language }),
 			(resolve, reject) => ({ kind: "transcribe", modelKey, resolve, reject }),
@@ -212,7 +219,7 @@ export class SttClient {
 		}
 		this.#host.deletePending(message.id);
 		if (message.type === "transcription") {
-			if (pending.kind === "transcribe") pending.resolve(message.text);
+			if (pending.kind === "transcribe") pending.resolve(message.segments);
 			return;
 		}
 		// message.type === "error"
