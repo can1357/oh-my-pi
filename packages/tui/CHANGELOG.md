@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/advisor config` shows the project and global advisors together, with the selected advisor's fields on the right, and the status line gets a compact glyph per advisor drawn from the active symbol preset ([#13931](https://github.com/can1357/oh-my-pi/pull/13931) by [@DarkPhilosophy](https://github.com/DarkPhilosophy))
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

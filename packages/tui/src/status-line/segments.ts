@@ -335,6 +335,43 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
 	return icon ? { icon, color } : undefined;
 }
 
+/** One compact glyph per advisor (up to four, then an overflow marker), shared by the text and native views. */
+function advisorStatusGlyphs(
+	ctx: SegmentContext,
+): { items: { glyph: string; color: ThemeColor }[]; nerd: boolean } | undefined {
+	const overview = ctx.session.getAdvisorStatusOverview?.();
+	if (!overview?.configured || overview.advisors.length === 0) return undefined;
+	// Nerd preset: one eye per advisor, open while it still has review work on the current turn and closed
+	// once it yielded or cannot run. Other presets use the compact status symbols from the active preset.
+	const nerd = theme.getSymbolPreset() === "nerd" && Boolean(theme.icon.advisor && theme.icon.advisorClosed);
+	const eyeOpen = theme.icon.advisor;
+	const eyeClosed = theme.icon.advisorClosed || theme.icon.advisor;
+	const items: { glyph: string; color: ThemeColor }[] = [];
+	for (const a of overview.advisors.slice(0, 4)) {
+		switch (a.status) {
+			case "running":
+				items.push(
+					nerd
+						? { glyph: a.yielded ? eyeClosed : eyeOpen, color: a.yielded ? "dim" : "success" }
+						: { glyph: theme.symbol("advisor.running"), color: "success" },
+				);
+				break;
+			case "paused":
+			case "no_model":
+				items.push({ glyph: nerd ? eyeClosed : theme.symbol("advisor.idle"), color: "dim" });
+				break;
+			case "quota_exhausted":
+				items.push({ glyph: nerd ? eyeClosed : theme.symbol("advisor.failed"), color: "warning" });
+				break;
+			case "error":
+				items.push({ glyph: nerd ? eyeClosed : theme.symbol("advisor.failed"), color: "error" });
+				break;
+		}
+	}
+	if (overview.advisors.length > 4) items.push({ glyph: "+", color: "dim" });
+	return { items, nerd };
+}
+
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
@@ -362,9 +399,13 @@ const modelSegment: StatusLineSegment = {
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
 		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
-		// Per-advisor detail lives in `/advisor status`.
-		const advisor = modelAdvisorBadge(ctx);
-		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
+		// Advisor badge (worst status) and per-advisor glyphs; the native view shares both helpers.
+		const advisorBadge = modelAdvisorBadge(ctx);
+		const advisorGlyphs = advisorStatusGlyphs(ctx);
+		if (advisorBadge && !advisorGlyphs?.nerd) content += theme.fg(advisorBadge.color, ` ${advisorBadge.icon}`);
+		if (advisorGlyphs) {
+			content += ` ${theme.fg("dim", "(")}${advisorGlyphs.items.map(g => theme.fg(g.color, g.glyph)).join(" ")}${theme.fg("dim", ")")}`;
+		}
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);
 		}
@@ -381,7 +422,13 @@ const modelSegment: StatusLineSegment = {
 		const token = accentToken(ctx, "statusLineModel");
 		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
 		const advisor = modelAdvisorBadge(ctx);
-		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
+		const glyphs = advisorStatusGlyphs(ctx);
+		if (advisor && !glyphs?.nerd) spans.push(span(` ${advisor.icon}`, advisor.color));
+		if (glyphs) {
+			spans.push(span(" (", "dim"));
+			glyphs.items.forEach((g, i) => spans.push(span(i === 0 ? g.glyph : ` ${g.glyph}`, g.color)));
+			spans.push(span(")", "dim"));
+		}
 		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));

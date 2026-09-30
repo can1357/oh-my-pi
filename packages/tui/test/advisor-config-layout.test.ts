@@ -54,7 +54,7 @@ describe("AdvisorConfigOverlayComponent", () => {
 		// whose offset broke mouse hit-testing and wasted the upper space).
 		expect(frame.length).toBe(fullHeight);
 		const text = strip(frame);
-		expect(text).toContain("Advisor configuration");
+		expect(text).toContain("Project · project");
 		expect(text).toContain("project");
 		expect(text).toContain("Architecture");
 		expect(text).toContain("Security");
@@ -100,7 +100,7 @@ describe("AdvisorConfigOverlayComponent", () => {
 		overlay.render(120);
 		overlay.handleInput("\x1b[<0;4;2M"); // left-button press, col 4, row 2
 		const text = strip(overlay.render(120));
-		expect(text).toContain("Editing");
+		expect(text).toContain("Enabled");
 		expect(text).toContain("Architecture");
 	});
 
@@ -115,9 +115,9 @@ describe("AdvisorConfigOverlayComponent", () => {
 			],
 		});
 		const text = strip(overlay.render(200));
-		// The list shows ● for enabled and ○ for disabled.
+		// The list shows ● for enabled and ⦸ for disabled.
 		expect(text).toContain("● Active");
-		expect(text).toContain("○ Disabled");
+		expect(text).toContain("⦸ Disabled");
 		// The preview of the highlighted (first) advisor shows its enabled status.
 		expect(text).toContain("● on");
 	});
