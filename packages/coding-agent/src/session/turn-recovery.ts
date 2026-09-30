@@ -1817,13 +1817,16 @@ export class TurnRecovery {
 			return false;
 		}
 		if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
+		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
+		const canUseQuota = (state: ModelUsageHealth["state"]) =>
+			state === "healthy" || (reservePolicy === "spend" && state === "reserve");
 		const selectedAccount = health.accounts.find(account => account.selected);
-		if (health.state === "healthy") {
+		if (canUseQuota(health.state)) {
 			this.#usageReserveApprovedSelector = undefined;
 			if (
 				selectedAccount &&
-				selectedAccount.state !== "healthy" &&
-				health.accounts.some(account => account.state === "healthy")
+				!canUseQuota(selectedAccount.state) &&
+				health.accounts.some(account => canUseQuota(account.state))
 			) {
 				this.#host.modelRegistry.authStorage.sessions.release(currentModel.provider, this.#host.sessionId());
 			}
@@ -1835,7 +1838,6 @@ export class TurnRecovery {
 		}
 		if (health.state !== "reserve") this.#usageReserveApprovedSelector = undefined;
 
-		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
 		if (reservePolicy === "fail-closed") {
 			const condition = health.state === "reserve" ? "reserve reached" : "usage depleted";
 			throw new Error(
@@ -1877,13 +1879,17 @@ export class TurnRecovery {
 						},
 					);
 					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-					if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
-					if (candidateHealth.state === "healthy") {
+					if (
+						candidateHealth.state === "depleted" ||
+						(candidateHealth.state === "reserve" && reservePolicy !== "spend")
+					)
+						continue;
+					if (canUseQuota(candidateHealth.state)) {
 						const selected = candidateHealth.accounts.find(account => account.selected);
 						if (
 							selected &&
-							selected.state !== "healthy" &&
-							candidateHealth.accounts.some(account => account.state === "healthy")
+							!canUseQuota(selected.state) &&
+							candidateHealth.accounts.some(account => canUseQuota(account.state))
 						) {
 							this.#host.modelRegistry.authStorage.sessions.release(
 								candidateModel.provider,

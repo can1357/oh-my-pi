@@ -23,7 +23,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgRetryFallbackChains, cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -1096,10 +1096,40 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("rejects a depleted terminal fallback after startup skips the primary", async () => {
+	test.each([
+		["reserve", "runtime-model", 1],
+		["depleted", "runtime-fallback-model", 2],
+	] as const)("spends startup reserve but still checks %s primary quota", async (state, modelId, checks) => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,
-			"retry.usageReservePolicy": "confirm",
+			"retry.usageReservePolicy": "spend",
+		});
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		const options = buildSessionOptions("task");
+		const usageHealth = vi
+			.spyOn(options.authStorage.health, "model")
+			.mockImplementation(async (_provider, options) => ({
+				state: options.modelId === "runtime-model" ? state : "reserve",
+				accounts: [],
+			}));
+		const { session } = await createAgentSession({
+			...options,
+			settings,
+			hasUI: false,
+		});
+		try {
+			expect(session.model?.id).toBe(modelId);
+			expect(usageHealth).toHaveBeenCalledTimes(checks);
+			expect(cfgRetryUsageReservePolicy.get(session.settings)).toBe("spend");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test.each(["confirm", "spend"] as const)("rejects exhausted startup chains under %s", async policy => {
+		const settings = Settings.isolated({
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": policy,
 		});
 		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
 		const options = buildSessionOptions("task");

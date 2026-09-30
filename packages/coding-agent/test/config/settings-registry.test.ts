@@ -9,6 +9,9 @@ import { YAML } from "bun";
 
 import {
 	cfgProvidersMaxInFlightRequests,
+	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
+	cfgRetryUsageReservePolicy,
 	cfgTemperature,
 	cfgTopK,
 	cfgTopP,
@@ -169,6 +172,36 @@ describe("settings registry", () => {
 		expect(cfgTemperature.get(child)).toBe(0.1);
 		expect(childTemperatures).toEqual([0.7, 0.1]);
 		expect(cfgTopP.get(parent)).not.toBe(0.5);
+	});
+
+	it("isolates a zero-reserve overlay from its parent and sibling without disabling usage checks", () => {
+		const parent = Settings.isolated({ "retry.usageAwareFallback": true, "retry.usageReservePct": 10 });
+		const child = parent.overlay({ "retry.usageReservePct": 0 });
+		const sibling = parent.overlay();
+		expect(cfgRetryUsageReservePct.get(child)).toBe(0);
+		expect(cfgRetryUsageReservePct.get(parent)).toBe(10);
+		expect(cfgRetryUsageReservePct.get(sibling)).toBe(10);
+		expect(cfgRetryUsageAwareFallback.get(child)).toBe(true);
+		cfgRetryUsageReservePct.override(parent, 20);
+		expect(cfgRetryUsageReservePct.get(child)).toBe(0);
+		expect(cfgRetryUsageReservePct.get(sibling)).toBe(20);
+		cfgRetryUsageReservePct.clearOverride(child);
+		expect(cfgRetryUsageReservePct.get(child)).toBe(20);
+	});
+
+	it("pins spend policy to a child overlay while parent and sibling retain their reserve policy", () => {
+		const parent = Settings.isolated({ "retry.usageAwareFallback": true });
+		const child = parent.overlay({ "retry.usageReservePolicy": "spend" });
+		const sibling = parent.overlay();
+		expect(cfgRetryUsageReservePolicy.get(child)).toBe("spend");
+		expect(cfgRetryUsageReservePolicy.get(parent)).toBe("confirm");
+		expect(cfgRetryUsageReservePolicy.get(sibling)).toBe("confirm");
+		expect(cfgRetryUsageAwareFallback.get(child)).toBe(true);
+		cfgRetryUsageReservePolicy.override(parent, "fail-closed");
+		expect(cfgRetryUsageReservePolicy.get(child)).toBe("spend");
+		expect(cfgRetryUsageReservePolicy.get(sibling)).toBe("fail-closed");
+		cfgRetryUsageReservePolicy.clearOverride(child);
+		expect(cfgRetryUsageReservePolicy.get(child)).toBe("fail-closed");
 	});
 
 	it("delivers every synchronous parent write to an overlay", async () => {

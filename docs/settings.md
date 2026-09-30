@@ -303,6 +303,32 @@ Wrappers may instead set `PI_CONFIG_FILES` to a platform-delimited path list (`:
 
 Overlay paths are resolved relative to the process working directory (and `~` is expanded). Each overlay must parse as a YAML mapping; a missing file, invalid YAML, or a top-level array/scalar is a hard error — it does **not** silently fall back to lower-precedence settings.
 
+#### Spend reserve for one launch
+
+For a bounded session, use an untracked `--config` overlay:
+
+```yaml
+retry:
+  usageAwareFallback: true
+  usageReservePct: 0
+```
+
+This keeps depleted-account preflight enabled while allowing remaining quota below the global reserve margin. The overlay does not change persisted settings or other launches. SDK callers can use `settings.overlay({ "retry.usageReservePct": 0 })` to keep the change local to a child settings scope.
+
+An explicit OAuth account `auth.accountPolicies[].reservePct` still takes precedence. The zero threshold is not an override for those account policies. Native account ranking, configured fallback chains, and model/provider restrictions remain in effect. Disabling `usageAwareFallback` is different: it also disables proactive depleted-account preflight.
+
+To allow reserve spending regardless of the global or explicit account reserve margin, use the existing reserve-policy setting instead:
+
+```yaml
+retry:
+  usageAwareFallback: true
+  usageReservePolicy: spend
+```
+
+`spend` retains reserve measurements and native account ranking, but reserve alone does not trigger model fallback or confirmation during startup or prompt preflight. Depleted models still trigger the configured fallback behavior; a fallback inside reserve remains eligible, while a depleted fallback does not. This does not change the existing behavior when no eligible fallback exists.
+
+For an SDK child, use `settings.overlay({ "retry.usageReservePolicy": "spend" })`. Parent and sibling settings retain their policy. Changes made through persistent config or `/settings` are not session-local; use a one-shot overlay for a bounded experiment.
+
 ## Path-scoped arrays
 
 Three array settings — `enabledModels`, `enabledProviders`, and `disabledProviders` — accept path-scoped entries in addition to bare strings, so a single global config can behave differently per directory:

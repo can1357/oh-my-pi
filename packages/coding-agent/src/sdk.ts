@@ -2923,7 +2923,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							continue;
 						}
 					}
-					if (usageHealth?.state === "reserve") {
+					if (usageHealth?.state === "reserve" && usageReservePolicy !== "spend") {
 						if (usageReservePolicy === "fail-closed") {
 							throw new Error(
 								`Usage reserve reached for ${primary.model.provider}/${primary.model.id}; reserve policy is fail-closed.`,
