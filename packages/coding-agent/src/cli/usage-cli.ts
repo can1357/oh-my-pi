@@ -1,3 +1,5 @@
+import { cfgUsageMaskAccountLabels, cfgUsageMaskOrganizationNames } from "../commands/settings";
+import { createUsageTextMasker, formatUsageOrganizationAlias } from "@oh-my-pi/pi-tui/overlays/usage-mask";
 /**
  * Usage CLI command handler.
  *
@@ -147,6 +149,7 @@ function collectIdentityStrings(
 	reports: UsageReport[],
 	accounts: UsageAccountIdentity[],
 	disabled: DisabledCredentialSummary[] = [],
+	includeOrgNames = true,
 ): string[] {
 	const values: string[] = [];
 	const add = (value: unknown): void => {
@@ -156,9 +159,10 @@ function collectIdentityStrings(
 		const meta = report.metadata ?? {};
 		add(meta.email);
 		add(meta.accountId);
+		add(meta.account_id);
 		add(meta.projectId);
 		add(meta.orgId);
-		add(meta.orgName);
+		if (includeOrgNames) add(meta.orgName);
 		for (const limit of report.limits) {
 			add(limit.scope.accountId);
 			add(limit.scope.projectId);
@@ -170,14 +174,14 @@ function collectIdentityStrings(
 		add(account.accountId);
 		add(account.projectId);
 		add(account.orgId);
-		add(account.orgName);
+		if (includeOrgNames) add(account.orgName);
 		add(account.enterpriseUrl);
 	}
 	for (const summary of disabled) {
 		add(summary.email);
 		add(summary.accountId);
 		add(summary.orgId);
-		add(summary.orgName);
+		if (includeOrgNames) add(summary.orgName);
 	}
 	return values;
 }
@@ -295,6 +299,7 @@ function formatAccountHeader(
 	index: number,
 	nowMs: number,
 	redaction?: Map<string, string>,
+	maskOrganizationNames = false,
 ): string {
 	const status = aggregateStatus(report.limits);
 	const icon = STATUS_COLOR[status]("●");
@@ -308,7 +313,13 @@ function formatAccountHeader(
 		const metaOrgName = report.metadata?.orgName;
 		const metaOrgId = report.metadata?.orgId;
 		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+		if (typeof org === "string" && org && org !== label) {
+			const displayOrg =
+				maskOrganizationNames && typeof metaOrgName === "string" && metaOrgName
+					? formatUsageOrganizationAlias(metaOrgName, metaOrgId, report.provider)
+					: (redaction?.get(org) ?? org);
+			header += chalk.dim(` · ${displayOrg}`);
+		}
 		const plan = report.metadata?.planType;
 		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
 	}
@@ -477,11 +488,12 @@ function formatReloginDeadline(
 	account: UsageAccountIdentity,
 	nowMs: number,
 	redaction?: Map<string, string>,
+	maskOrganizationNames = false,
 ): string | undefined {
 	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
 	const remaining = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS - nowMs;
 	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
-	const label = accountIdentityLabel(account, redaction);
+	const label = accountIdentityLabel(account, redaction, maskOrganizationNames);
 	if (remaining <= 0) {
 		return `  ${chalk.red(`⚠ ${label} — grant is past Anthropic's ~30d lifetime; re-login now`)}`;
 	}
@@ -533,12 +545,20 @@ function shortDisableCause(cause: string): string {
 }
 
 /** Label for a disabled tombstone, masking each identity part under `--redact`. */
-function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
+function disabledIdentityLabel(
+	summary: DisabledCredentialSummary,
+	redaction?: Map<string, string>,
+	maskOrganizationNames = false,
+): string {
 	const base = summary.email ?? summary.accountId ?? "OAuth account";
 	const masked = redaction?.get(base) ?? base;
 	const org = summary.orgName ?? summary.orgId;
 	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
+	const displayOrg =
+		maskOrganizationNames && summary.orgName && summary.provider !== "openai-codex"
+			? formatUsageOrganizationAlias(summary.orgName, summary.orgId, summary.provider)
+			: (redaction?.get(org) ?? org);
+	return `${masked} · ${displayOrg}`;
 }
 
 function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
@@ -629,6 +649,7 @@ export function formatUsageBreakdown(
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
+	privacy: { maskAccountLabels?: boolean; maskOrganizationNames?: boolean } = {},
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -679,7 +700,9 @@ export function formatUsageBreakdown(
 		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
 
 		providerReports.forEach((report, index) => {
-			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
+			lines.push(
+				`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction, privacy.maskOrganizationNames)}`,
+			);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
 					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
@@ -702,7 +725,7 @@ export function formatUsageBreakdown(
 		});
 
 		for (const account of providerUnreported) {
-			const label = accountIdentityLabel(account, redaction);
+			const label = accountIdentityLabel(account, redaction, privacy.maskOrganizationNames);
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
 			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
 				lines.push(
@@ -712,7 +735,7 @@ export function formatUsageBreakdown(
 		}
 
 		for (const summary of disabledByProvider.get(provider) ?? []) {
-			const label = disabledIdentityLabel(summary, redaction);
+			const label = disabledIdentityLabel(summary, redaction, privacy.maskOrganizationNames);
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
 			lines.push(
 				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
@@ -721,7 +744,7 @@ export function formatUsageBreakdown(
 
 		for (const account of accounts) {
 			if (account.provider !== provider) continue;
-			const warning = formatReloginDeadline(account, nowMs, redaction);
+			const warning = formatReloginDeadline(account, nowMs, redaction, privacy.maskOrganizationNames);
 			if (warning) lines.push(warning);
 		}
 
@@ -735,7 +758,18 @@ export function formatUsageBreakdown(
 		}
 	}
 
-	return lines.join("\n");
+	return createUsageTextMasker(
+		reports,
+		privacy.maskAccountLabels ?? !!redaction,
+		[...(redaction?.keys() ?? [])],
+		redaction,
+		{
+			maskOrganizationNames: privacy.maskOrganizationNames,
+			organizations: [...accounts, ...disabled].flatMap(account =>
+				account.orgName ? [{ name: account.orgName, id: account.orgId, provider: account.provider }] : [],
+			),
+		},
+	)(lines.join("\n"));
 }
 
 const HISTORY_SPARK_WIDTH = 48;
@@ -882,16 +916,31 @@ function maskIdentity(redaction: Map<string, string>, value: string | undefined)
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
 }
 
-const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
+const IDENTITY_METADATA_KEYS = ["email", "accountId", "account_id", "projectId", "orgId", "orgName"] as const;
 
 /** Mask identity fields in a raw-stripped report for `--redact --json`. */
 function redactReportForJson(
 	report: Omit<UsageReport, "raw">,
 	redaction: Map<string, string>,
+	privacy: { maskAccountLabels?: boolean; maskOrganizationNames?: boolean } = {},
 ): Omit<UsageReport, "raw"> {
+	const maskText = createUsageTextMasker(
+		[report],
+		privacy.maskAccountLabels ?? true,
+		[...redaction.keys()],
+		redaction,
+		{ maskOrganizationNames: privacy.maskOrganizationNames },
+	);
 	let metadata = report.metadata;
 	if (metadata) {
 		metadata = { ...metadata };
+		if (
+			privacy.maskOrganizationNames &&
+			report.provider !== "openai-codex" &&
+			typeof metadata.orgName === "string" &&
+			metadata.orgName
+		)
+			metadata.orgName = formatUsageOrganizationAlias(metadata.orgName, metadata.orgId, report.provider);
 		for (const key of IDENTITY_METADATA_KEYS) {
 			const value = metadata[key];
 			if (typeof value === "string") metadata[key] = redaction.get(value) ?? value;
@@ -899,6 +948,9 @@ function redactReportForJson(
 	}
 	const limits = report.limits.map(limit => ({
 		...limit,
+		id: maskText(limit.id),
+		label: maskText(limit.label),
+		notes: limit.notes?.map(maskText),
 		scope: {
 			...limit.scope,
 			accountId: maskIdentity(redaction, limit.scope.accountId),
@@ -906,7 +958,7 @@ function redactReportForJson(
 			orgId: maskIdentity(redaction, limit.scope.orgId),
 		},
 	}));
-	return { ...report, metadata, limits };
+	return { ...report, metadata, limits, notes: report.notes?.map(maskText) };
 }
 
 /** Compact token count for burn tables: 1234 → "1.2k", 4_500_000_000 → "4.50B". */
@@ -982,6 +1034,9 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
+	const redact = cmd.redact === true || cfgUsageMaskAccountLabels.get(settings);
+	const maskOrganizationNames = cfgUsageMaskOrganizationNames.get(settings);
+	const privacy = { maskAccountLabels: redact, maskOrganizationNames };
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		if (cmd.action === "invalidate") {
@@ -1029,7 +1084,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
 			const entries = authStorage.usage.history({ sinceMs, provider: cmd.provider?.toLowerCase() });
-			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
+			const redaction = redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
 				const masked = redaction
 					? entries.map(entry => ({
@@ -1103,9 +1158,11 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
 
-		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
-			: undefined;
+		const redaction = redact
+			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled, cmd.redact === true))
+			: maskOrganizationNames
+				? new Map<string, string>()
+				: undefined;
 
 		if (cmd.json) {
 			// Drop the heavy provider-specific `raw` payload — same shape as the
@@ -1113,7 +1170,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
 			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
 			if (redaction) {
-				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
+				trimmed = trimmed.map(report => redactReportForJson(report, redaction, privacy));
 				unreportedAccounts = unreportedAccounts.map(account => ({
 					...account,
 					email: maskIdentity(redaction, account.email),
@@ -1121,7 +1178,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					projectId: maskIdentity(redaction, account.projectId),
 					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
 					orgId: maskIdentity(redaction, account.orgId),
-					orgName: maskIdentity(redaction, account.orgName),
+					orgName:
+						maskOrganizationNames && account.orgName && account.provider !== "openai-codex"
+							? formatUsageOrganizationAlias(account.orgName, account.orgId, account.provider)
+							: maskIdentity(redaction, account.orgName),
 				}));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
@@ -1137,7 +1197,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
 					orgId: maskIdentity(redaction, summary.orgId),
-					orgName: maskIdentity(redaction, summary.orgName),
+					orgName:
+						maskOrganizationNames && summary.orgName && summary.provider !== "openai-codex"
+							? formatUsageOrganizationAlias(summary.orgName, summary.orgId, summary.provider)
+							: maskIdentity(redaction, summary.orgName),
 				}));
 			}
 			const payload = {
@@ -1147,7 +1210,17 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				disabledCredentials: disabledForJson,
 				capacity,
 			};
-			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+			const maskJsonText = redaction
+				? createUsageTextMasker(filteredReports, redact, [...redaction.keys()], redaction, {
+						maskOrganizationNames,
+						organizations: [...accounts, ...disabled].flatMap(account =>
+							account.orgName ? [{ name: account.orgName, id: account.orgId, provider: account.provider }] : [],
+						),
+					})
+				: undefined;
+			process.stdout.write(
+				`${JSON.stringify(payload, maskJsonText ? (_key: string, value: unknown) => (typeof value === "string" ? maskJsonText(value) : value) : undefined, 2)}\n`,
+			);
 			return;
 		}
 
@@ -1165,7 +1238,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, privacy)}\n`,
 		);
 	} finally {
 		authStorage.close();

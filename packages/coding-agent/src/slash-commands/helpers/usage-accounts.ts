@@ -1,3 +1,4 @@
+import { formatUsageOrganizationAlias } from "@oh-my-pi/pi-tui/overlays/usage-mask";
 import type { AuthStorage, UsageReport } from "@oh-my-pi/pi-ai";
 
 /** Identity slice of a stored credential, for "every account" coverage. */
@@ -159,7 +160,11 @@ export function collectUnreportedAccounts(
 }
 
 /** Compose the account label from parts, masking each part individually so `--redact` cannot be bypassed by the composite string. */
-export function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
+export function accountIdentityLabel(
+	account: UsageAccountIdentity,
+	redaction?: Map<string, string>,
+	maskOrganizationNames = false,
+): string {
 	if (account.type === "api_key") return "API key";
 	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
 	const masked = redaction?.get(base) ?? base;
@@ -168,5 +173,9 @@ export function accountIdentityLabel(account: UsageAccountIdentity, redaction?: 
 	// be tellable apart.
 	const org = account.orgName ?? account.orgId;
 	if (!org || org === base) return masked;
-	return `${masked} · ${redaction?.get(org) ?? org}`;
+	const displayOrg =
+		maskOrganizationNames && account.orgName && account.provider !== "openai-codex"
+			? formatUsageOrganizationAlias(account.orgName, account.orgId, account.provider)
+			: (redaction?.get(org) ?? org);
+	return `${masked} · ${displayOrg}`;
 }

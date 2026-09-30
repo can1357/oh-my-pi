@@ -1,3 +1,9 @@
+import {
+	cfgUsageLabelPlacement,
+	cfgUsageMaskAccountLabels,
+	cfgUsageMaskOrganizationNames,
+	cfgUsageMergeAccounts,
+} from "../../commands/settings";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
@@ -117,6 +123,7 @@ import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-se
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { createAccountMasker } from "@oh-my-pi/pi-tui/overlays/usage-mask";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
@@ -356,6 +363,13 @@ export class SelectorController {
 		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
 			provider: account.provider,
 			label: accountIdentityLabel(account),
+			identity:
+				account.type === "api_key"
+					? "API key"
+					: (account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account"),
+			organizationName: account.orgName,
+			organizationId: account.orgId,
+			placeholder: account.type === "api_key",
 		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
@@ -370,17 +384,27 @@ export class SelectorController {
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: (width, current) =>
+			renderDetail: (width, view, current) =>
 				renderUsageReports(
 					current,
 					theme,
 					Date.now(),
 					width,
 					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
-					unavailableAccounts,
+					{
+						usageModelSelectors,
+						unavailableAccounts,
+						maskAccountLabels: view.maskAccountLabels,
+						maskOrganizationNames: view.maskOrganizationNames,
+						labelPlacement: cfgUsageLabelPlacement.get(this.ctx.settings),
+					},
 				),
-			loadActivity: loadDailyActivity,
+			createMasker: createAccountMasker,
+			maskAccountLabels: cfgUsageMaskAccountLabels.get(this.ctx.settings),
+			maskOrganizationNames: cfgUsageMaskOrganizationNames.get(this.ctx.settings),
+			mergeAccounts: cfgUsageMergeAccounts.get(this.ctx.settings),
+			labelPlacement: cfgUsageLabelPlacement.get(this.ctx.settings),
+			loadActivity: (push, signal) => loadDailyActivity(push, signal),
 			refresh: () => this.ctx.session.fetchUsageReports(),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,

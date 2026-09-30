@@ -147,3 +147,70 @@ test("omp usage combines broker reports with locally registered extension usage"
 	expect(output.accountsWithoutUsage).toEqual([]);
 	expect(brokerProbe).not.toHaveBeenCalled();
 });
+
+test("global usage privacy masks CLI text and JSON notes without requiring --redact", async () => {
+	const email = "private@example.test";
+	const source = EXTENSION_SOURCE.replace(
+		"limits: [{",
+		`metadata: { email: "${email}", accountId: "account-sensitive", account_id: "alias-sensitive", orgId: "organization-sensitive", orgName: "Trusted Team" }, notes: ["Account ${email}"], limits: [{`,
+	).replace(
+		`scope: { provider: "ext-usage" }`,
+		`scope: { provider: "ext-usage", accountId: "account-sensitive" }, notes: ["Quota for ${email}"]`,
+	);
+	await Bun.write(extPath, source);
+	vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({ "usage.maskAccountLabels": true }));
+	const chunks: string[] = [];
+	vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+		chunks.push(String(chunk));
+		return true;
+	});
+	for (const json of [false, true]) {
+		chunks.length = 0;
+		await runUsageCommand({ json, provider: "ext-usage", extensions: [extPath], noExtensions: true });
+		const output = chunks.join("");
+		expect(output).not.toContain(email);
+		expect(output).not.toContain("account-sensitive");
+		expect(output).not.toContain("organization-sensitive");
+		expect(output).not.toContain("alias-sensitive");
+		expect(output).toContain("Account");
+		expect(output).toContain("Quota for");
+		expect(output).toContain("Trusted Team");
+	}
+});
+
+test("organization-only CLI privacy preserves email and uses the same organization alias in text and JSON", async () => {
+	const email = "visible@example.test";
+	const orgName = "Acme North";
+	await Bun.write(
+		extPath,
+		EXTENSION_SOURCE.replace(
+			"limits: [{",
+			`metadata: { email: "${email}", orgName: "${orgName}", orgId: "org-one" }, notes: ["Notes for ${orgName}"], resetCredits: { availableCount: 1 }, limits: [{`,
+		).replace(
+			`scope: { provider: "ext-usage" }`,
+			`scope: { provider: "ext-usage" }, notes: ["Limit for ${orgName}"]`,
+		),
+	);
+	vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(
+		Settings.isolated({ "usage.maskAccountLabels": false, "usage.maskOrganizationNames": true }),
+	);
+	const chunks: string[] = [];
+	vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+		chunks.push(String(chunk));
+		return true;
+	});
+	let alias: string | undefined;
+	for (const json of [false, true]) {
+		chunks.length = 0;
+		await runUsageCommand({ json, provider: "ext-usage", extensions: [extPath], noExtensions: true });
+		const output = chunks.join("");
+		expect(output).not.toContain(orgName);
+		expect(output).toContain(email);
+		const aliases = [...new Set(output.match(/Org-[a-f0-9]{16}/g))];
+		expect(aliases).toHaveLength(1);
+		alias ??= aliases[0];
+		expect(aliases[0]).toBe(alias);
+		expect(output).toContain(`Notes for ${alias}`);
+		expect(output).toContain(`Limit for ${alias}`);
+	}
+});

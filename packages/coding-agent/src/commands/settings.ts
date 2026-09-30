@@ -54,3 +54,49 @@ export const cfgShareRedactSecrets = register({
 		description: "Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)",
 	},
 });
+export const cfgUsageMaskAccountLabels = register({
+	id: "usage.maskAccountLabels",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Privacy",
+		label: "Mask Usage Accounts",
+		description: "Mask account identifiers in usage output",
+	},
+});
+export const cfgUsageMaskOrganizationNames = register({
+	id: "usage.maskOrganizationNames",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Privacy",
+		label: "Mask Usage Organizations",
+		description:
+			"Replace organization names in usage output with stable anonymous labels, independently of account masking",
+	},
+});
+export const cfgUsageMergeAccounts = register({
+	id: "usage.mergeAccounts",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Privacy",
+		label: "Merge Usage Accounts",
+		description: "Show one usage card per provider instead of per account",
+	},
+});
+export const cfgUsageLabelPlacement = register({
+	id: "usage.labelPlacement",
+	type: "enum",
+	values: ["moving", "right"] as const,
+	default: "moving",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Usage Label Position",
+		description: "Move percentages with the filled bar or anchor them at the right edge",
+	},
+});

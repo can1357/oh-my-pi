@@ -942,6 +942,19 @@ searxng:
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
+### Usage dashboard and privacy
+
+| Key | Type | Default | Values / notes |
+| --- | --- | --- | --- |
+| `usage.maskAccountLabels` | boolean | `false` | Mask email, account, project, and organization identifiers in usage output; keep attributed organization names visible unless the separate name option is enabled. |
+| `usage.maskOrganizationNames` | boolean | `false` | Replace organization names with stable `Org-…` display aliases, independently of account-label masking. Aliases use the provider and organization ID when available, otherwise the normalized organization name. |
+| `usage.mergeAccounts` | boolean | `true` | Start the dashboard with one card per provider rather than separate account cards. |
+| `usage.labelPlacement` | enum | `moving` | `moving` embeds the free-percentage label in the classic bar or attaches it to the native meter; `right` anchors it at the classic bar’s right edge or uses a separate native percentage column. |
+
+The privacy options apply to `/usage` cards, details, notes, saved-reset rows, ACP text, and `omp usage` text/JSON output. They are independent: organization names can be hidden while email addresses remain visible, or identifiers can be masked while organization names remain readable. Existing `omp usage --redact` remains a stronger, per-invocation redaction option.
+
+Every newly opened dashboard reads the saved settings. Inside that overlay, `p` toggles identifier masking, `o` toggles organization-name masking, and `m` toggles account grouping; native buttons perform the same actions. These changes affect all views of that overlay only and are never written to configuration. Closing and reopening starts from the saved settings again. Display masking does not modify stored credentials or provider data.
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

@@ -1,3 +1,12 @@
+import {
+	type AccountLabel,
+	type AccountMasker,
+	createAccountMasker,
+	createUsageTextMasker,
+	formatAccountQualifier,
+	usageIdentityKey,
+} from "@oh-my-pi/pi-tui/overlays/usage-mask";
+import { cfgUsageMaskAccountLabels, cfgUsageMaskOrganizationNames } from "../../commands/settings";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
@@ -5,7 +14,6 @@ import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-p
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
-
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
 	const normalizedLabel = label.toLowerCase();
@@ -28,27 +36,61 @@ function formatUsageAmount(limit: UsageLimit): string {
 
 function formatUsageReportAccount(
 	report: UsageReport,
-	peers: readonly UsageReport[],
-	limit: UsageLimit,
+	limit: UsageLimit | undefined,
 	index: number,
-): string {
-	const codex = report.provider === "openai-codex";
+	peers: readonly UsageReport[] = [],
+): AccountLabel {
+	const accountKey = usageIdentityKey(
+		(limit?.scope ?? report.limits[0]?.scope)?.accountId || report.metadata?.accountId,
+		(limit?.scope ?? report.limits[0]?.scope)?.projectId || report.metadata?.projectId,
+		limit?.scope ?? report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
 	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-	const label = (identity: string, includeOrg: boolean): string => {
-		if (codex) return formatCodexUsageReportLabel(report, peers, identity);
-		return includeOrg && typeof org === "string" && org && org !== identity ? `${identity} (${org})` : identity;
-	};
+	const qualifier = (identity: string) =>
+		report.provider === "openai-codex"
+			? formatCodexUsageReportLabel(
+					report,
+					peers.filter(peer => peer.provider === report.provider),
+					identity,
+				).slice(identity.length)
+			: org && org !== identity
+				? ` (${org})`
+				: undefined;
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return label(email, true);
-	// Empty metadata must not hide a valid scoped identity.
+	if (typeof email === "string" && email)
+		return {
+			identity: email,
+			qualifier: qualifier(email),
+			organizationName:
+				report.provider !== "openai-codex" && typeof metaOrgName === "string" ? metaOrgName : undefined,
+			organizationId: typeof metaOrgId === "string" ? metaOrgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
+	// Guard metadata values for truthiness before using, then fall back to scope.
+	// ?? won't help here: empty string is not null/undefined, so it would suppress
+	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
 	const metaAccountId = report.metadata?.accountId;
-	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
-	if (typeof accountId === "string" && accountId) return label(accountId, true);
+	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit?.scope.accountId;
+	if (typeof accountId === "string" && accountId) {
+		return {
+			identity: accountId,
+			qualifier: qualifier(accountId),
+			organizationName:
+				report.provider !== "openai-codex" && typeof metaOrgName === "string" ? metaOrgName : undefined,
+			organizationId: typeof metaOrgId === "string" ? metaOrgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
+	}
 	const metaProjectId = report.metadata?.projectId;
-	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
+	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit?.scope.projectId;
+	if (typeof projectId === "string" && projectId)
+		return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: limit ? `account ${index + 1}` : "account", placeholder: true, provider: report.provider };
 }
 
 function renderUsageReports(
@@ -56,12 +98,34 @@ function renderUsageReports(
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	maskAccountLabels = false,
+	maskOrganizationNames = false,
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
-	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
+	const identityMask = createUsageTextMasker(reports, maskAccountLabels);
+	const maskText = createUsageTextMasker(reports, maskAccountLabels, [], undefined, { maskOrganizationNames });
+	const normalize = (label: AccountLabel): AccountLabel => ({
+		...label,
+		qualifier: label.organizationName
+			? formatAccountQualifier(label, maskOrganizationNames)
+			: label.qualifier
+				? identityMask(label.qualifier)
+				: undefined,
+	});
+	const accountMasker = createAccountMasker(
+		reports
+			.flatMap(report => [
+				formatUsageReportAccount(report, undefined, 0, reports),
+				...report.limits.map((limit, index) => formatUsageReportAccount(report, limit, index, reports)),
+			])
+			.map(normalize),
+		maskAccountLabels,
+		maskOrganizationNames,
+	);
+	const displayAccount: AccountMasker = label => accountMasker(normalize(label));
+	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of displayReports) {
+	for (const report of collapseSharedUsageReports(reports)) {
 		const providerReports = grouped.get(report.provider) ?? [];
 		providerReports.push(report);
 		grouped.set(report.provider, providerReports);
@@ -85,23 +149,7 @@ function renderUsageReports(
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (resets && resets.bankedCount > 0) {
-				const resetIdentity =
-					typeof report.metadata?.email === "string"
-						? report.metadata.email
-						: typeof report.metadata?.accountId === "string"
-							? report.metadata.accountId
-							: "account";
-				let resetLabel: string;
-				if (report.provider === "openai-codex") {
-					resetLabel = formatCodexUsageReportLabel(report, providerReports, resetIdentity);
-				} else {
-					const orgName = report.metadata?.orgName;
-					const orgId = report.metadata?.orgId;
-					const org =
-						typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-					const raw = org && org !== resetIdentity ? `${resetIdentity} (${org})` : resetIdentity;
-					resetLabel = sanitizeText(raw.replace(/[\r\n\t]+/g, " "));
-				}
+				const resetLabel = displayAccount(formatUsageReportAccount(report, undefined, 0, reports));
 				const availability =
 					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
@@ -124,31 +172,26 @@ function renderUsageReports(
 				}
 			}
 			if (report.limits.length === 0) {
-				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				const label =
-					report.provider === "openai-codex" ? formatCodexUsageReportLabel(report, providerReports, email) : email;
-				lines.push(`- ${label}: no limits reported`);
+				const account = formatUsageReportAccount(report, undefined, 0, reports);
+				lines.push(`- ${displayAccount(account)}: no limits reported`);
 				continue;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
 				const limit = report.limits[index]!;
 				const window = limit.window?.label ?? limit.scope.windowId;
-				// Skip the tier suffix when the label already names it (e.g. Anthropic's
-				// "Claude 7 Day (Fable)" with scope.tier "fable") — mirrors limitTitle in usage-cli.
 				const tier =
 					limit.scope.tier && !limit.label.toLowerCase().includes(limit.scope.tier.toLowerCase())
 						? ` (${limit.scope.tier})`
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, providerReports, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${displayAccount(formatUsageReportAccount(report, limit, index, reports))}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
-				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
+				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs)
 					lines.push(
 						`  ${limit.window.resetLabel ?? "resets"} in ${formatCoarseDuration(limit.window.resetsAt - nowMs)}`,
 					);
-				}
 				if (limit.notes && limit.notes.length > 0)
 					lines.push(
 						`  ${limit.notes.map(n => sanitizeText(n.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))).join(" • ")}`,
@@ -156,7 +199,7 @@ function renderUsageReports(
 			}
 		}
 	}
-	return ["```", ...lines, "```"].join("\n");
+	return maskText(["```", ...lines, "```"].join("\n"));
 }
 
 /**
@@ -182,6 +225,8 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
+				cfgUsageMaskAccountLabels.get(runtime.settings),
+				cfgUsageMaskOrganizationNames.get(runtime.settings),
 			);
 		}
 	}

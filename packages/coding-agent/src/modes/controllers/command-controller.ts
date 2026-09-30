@@ -1,3 +1,18 @@
+import { formatUnavailableAccountLabel, fitAccountLabel } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import {
+	type AccountLabel,
+	type AccountMasker,
+	createAccountMasker,
+	createUsageTextMasker,
+	formatAccountQualifier,
+	MASK_STARS,
+	usageIdentityKey,
+} from "@oh-my-pi/pi-tui/overlays/usage-mask";
+import { renderFractionBar } from "@oh-my-pi/pi-tui/overlays/usage-bar";
+import {
+	getActiveAccountLabelParts,
+	reportMatchesActiveAccount,
+} from "../../slash-commands/helpers/active-oauth-account";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,7 +52,7 @@ import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
+import { getMarkdownTheme, getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
@@ -59,7 +74,6 @@ import {
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
 	codexUsagePlan,
-	formatActiveAccountLabel,
 	formatCodexUsageReportLabel,
 	limitMatchesActiveAccount,
 } from "../../slash-commands/helpers/active-oauth-account";
@@ -1837,7 +1851,7 @@ function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): st
 	return "unknown";
 }
 
-export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<Theme, "fg">): string {
+export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<typeof theme, "fg">): string {
 	const lines: string[] = [];
 	lines.push(`${uiTheme.fg("dim", "Name:")} ${details.provider}`);
 	for (const field of details.fields) {
@@ -1853,7 +1867,7 @@ function resolveProviderUsageTotal(reports: UsageReport[]): number {
 		.reduce((sum, value) => sum + value, 0);
 }
 
-function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
+function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof theme): string {
 	const normalizedLabel = label.toLowerCase();
 	const normalizedWindow = windowLabel.toLowerCase();
 	if (normalizedWindow === "quota window") return "";
@@ -1869,50 +1883,142 @@ function orgSuffix(report: UsageReport): string {
 	return org ? ` (${org})` : "";
 }
 
-/** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
-function formatCodexTuiLabel(report: UsageReport, peers: readonly UsageReport[], base: string): string {
-	const identity = formatCodexUsageReportLabel(report, peers, base, undefined, false);
+function usageAccountQualifier(report: UsageReport | undefined, peers: readonly UsageReport[]): string {
+	if (!report) return "";
+	if (report.provider !== "openai-codex") return orgSuffix(report);
+	const identity =
+		typeof report.metadata?.email === "string"
+			? report.metadata.email
+			: typeof report.metadata?.accountId === "string"
+				? report.metadata.accountId
+				: "account";
+	const rendered = formatCodexUsageReportLabel(report, peers, identity, undefined, false);
 	const plan = codexUsagePlan(report);
-	return plan ? `${identity} (${plan})` : identity;
+	return rendered.slice(identity.length) + (plan ? ` (${plan})` : "");
+}
+
+function styleAccountMask(label: string, uiTheme: typeof theme): string {
+	return label.replace(MASK_STARS, uiTheme.fg("warning", MASK_STARS));
 }
 
 function formatAccountLabel(
 	limit: UsageLimit,
 	report: UsageReport,
-	peers: readonly UsageReport[],
 	index: number,
-): string {
-	const codex = report.provider === "openai-codex";
+	peers: readonly UsageReport[] = [],
+): AccountLabel {
+	const accountKey = usageIdentityKey(
+		limit.scope.accountId || report.metadata?.accountId,
+		limit.scope.projectId || report.metadata?.projectId,
+		limit.scope,
+		report.metadata?.orgId,
+	);
 	const email = report.metadata?.email;
 	if (typeof email === "string" && email)
-		return codex ? formatCodexTuiLabel(report, peers, email) : `${email}${orgSuffix(report)}`;
+		return {
+			identity: email,
+			qualifier: usageAccountQualifier(report, peers),
+			organizationName:
+				report.provider !== "openai-codex" && typeof report.metadata?.orgName === "string"
+					? report.metadata.orgName
+					: undefined,
+			organizationId: typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
 	const accountId =
-		typeof report.metadata?.accountId === "string" && report.metadata.accountId
+		limit.scope.accountId ||
+		(typeof report.metadata?.accountId === "string" && report.metadata.accountId
 			? report.metadata.accountId
-			: limit.scope.accountId || undefined;
-	if (accountId) return codex ? formatCodexTuiLabel(report, peers, accountId) : `${accountId}${orgSuffix(report)}`;
+			: undefined);
+	if (accountId)
+		return {
+			identity: accountId,
+			qualifier: usageAccountQualifier(report, peers),
+			organizationName:
+				report.provider !== "openai-codex" && typeof report.metadata?.orgName === "string"
+					? report.metadata.orgName
+					: undefined,
+			organizationId: typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
 	const projectId =
-		typeof report.metadata?.projectId === "string" && report.metadata.projectId
+		limit.scope.projectId ||
+		(typeof report.metadata?.projectId === "string" && report.metadata.projectId
 			? report.metadata.projectId
-			: limit.scope.projectId || undefined;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return codex ? formatCodexTuiLabel(report, peers, base) : base;
+			: undefined);
+	if (projectId) return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: `account ${index + 1}`, placeholder: true, provider: report.provider };
 }
 
-function formatUnlimitedReportLabel(report: UsageReport, peers: readonly UsageReport[], index: number): string {
+function formatUnlimitedReportLabel(
+	report: UsageReport,
+	index: number,
+	peers: readonly UsageReport[] = [],
+): AccountLabel {
+	const accountKey = usageIdentityKey(
+		report.metadata?.accountId,
+		report.metadata?.projectId,
+		report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
 	const email = report.metadata?.email;
 	if (typeof email === "string" && email)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, email)
-			: `${email}${orgSuffix(report)}`;
+		return {
+			identity: email,
+			qualifier: usageAccountQualifier(report, peers),
+			organizationName:
+				report.provider !== "openai-codex" && typeof report.metadata?.orgName === "string"
+					? report.metadata.orgName
+					: undefined,
+			organizationId: typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
 	const accountId = report.metadata?.accountId;
 	if (typeof accountId === "string" && accountId)
-		return report.provider === "openai-codex"
-			? formatCodexTuiLabel(report, peers, accountId)
-			: `${accountId}${orgSuffix(report)}`;
+		return {
+			identity: accountId,
+			qualifier: usageAccountQualifier(report, peers),
+			organizationName:
+				report.provider !== "openai-codex" && typeof report.metadata?.orgName === "string"
+					? report.metadata.orgName
+					: undefined,
+			organizationId: typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined,
+			accountKey,
+			provider: report.provider,
+		};
 	const projectId = report.metadata?.projectId;
-	const base = typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`;
-	return report.provider === "openai-codex" ? formatCodexTuiLabel(report, peers, base) : base;
+	if (typeof projectId === "string" && projectId)
+		return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: `account ${index + 1}`, placeholder: true, provider: report.provider };
+}
+
+function formatResetAccountLabel(report: UsageReport, peers: readonly UsageReport[] = []): AccountLabel {
+	const accountKey = usageIdentityKey(
+		report.metadata?.accountId,
+		report.metadata?.projectId,
+		report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
+	const email = report.metadata?.email;
+	const accountId = report.metadata?.accountId;
+	const identity =
+		typeof email === "string" && email ? email : typeof accountId === "string" && accountId ? accountId : undefined;
+	return identity
+		? {
+				identity,
+				qualifier: usageAccountQualifier(report, peers),
+				organizationName:
+					report.provider !== "openai-codex" && typeof report.metadata?.orgName === "string"
+						? report.metadata.orgName
+						: undefined,
+				organizationId: typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined,
+				accountKey,
+				provider: report.provider,
+			}
+		: { identity: "account", placeholder: true, provider: report.provider };
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -1930,16 +2036,23 @@ function formatAccountHeaderRow(
 	peers: readonly UsageReport[],
 	nowMs: number,
 	columnWidth: number,
-	uiTheme: Theme,
-	activeAccount?: OAuthAccountIdentity,
+	uiTheme: typeof theme,
+	activeAccount: OAuthAccountIdentity | undefined,
+	mask: AccountMasker,
+	startIndex = 0,
 ): string[] {
 	const parts = limits.map((limit, index) => {
 		const reset = formatResetShort(limit, nowMs);
 		const report = reports[index];
 		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
-		const label = formatAccountLabel(limit, report, peers, index);
+		const accountLabel = formatAccountLabel(limit, report, index + startIndex, peers);
+		const label = mask(accountLabel);
 		return {
 			label: active ? `● ${label}` : label,
+			qualifier:
+				(accountLabel.qualifier ? mask({ ...accountLabel, identity: "", placeholder: true }) : undefined) ||
+				label.match(/ \(\d+\)$/)?.[0] ||
+				"",
 			suffix: reset ? `(${reset})` : "",
 			active,
 			daybreak: report?.metadata?.daybreak === true,
@@ -1949,25 +2062,46 @@ function formatAccountHeaderRow(
 	const gap = maxSuffixWidth > 0 ? 1 : 0;
 	const prefixBudget = columnWidth - maxSuffixWidth - gap;
 
-	// If suffix can't share the cell with at least `x…`, fall back to whole-label truncation.
+	// When reset text cannot share the cell, preserve the account qualifier or
+	// collision ordinal instead; identical truncated prefixes are not identities.
 	if (prefixBudget < 2) {
 		return parts.map(p => {
-			const full = `${p.label}${p.daybreak ? " daybreak" : ""}${p.suffix ? ` ${p.suffix}` : ""}`;
-			const cell = padColumn(truncateJobLabel(full, columnWidth), columnWidth);
-			return p.active ? uiTheme.fg("accent", cell) : cell;
+			if (/^ \(\d+\)$/.test(p.qualifier) && visibleWidth(p.qualifier) >= columnWidth) {
+				const cell = padColumn(p.qualifier.trim(), columnWidth);
+				return styleAccountMask(p.active ? uiTheme.fg("accent", cell) : cell, uiTheme);
+			}
+			const cell = padColumn(fitAccountLabel(p.label, columnWidth, p.qualifier), columnWidth);
+			return styleAccountMask(p.active ? uiTheme.fg("accent", cell) : cell, uiTheme);
 		});
 	}
 
 	return parts.map(p => {
-		// Keep the full badge visible by taking its columns from the account label.
-		const badge = p.daybreak && prefixBudget >= 10 ? " daybreak" : "";
-		const label = truncateJobLabel(p.label, prefixBudget - visibleWidth(badge));
-		const prefix = `${p.active ? uiTheme.fg("accent", label) : label}${badge ? uiTheme.fg("success", badge) : ""}`;
+		const prefix = fitAccountLabel(p.label, prefixBudget, p.qualifier);
 		const prefixCell = prefix + " ".repeat(prefixBudget - visibleWidth(prefix));
-		if (!p.suffix) return prefixCell + " ".repeat(maxSuffixWidth + gap);
+		const styledPrefix = styleAccountMask(p.active ? uiTheme.fg("accent", prefixCell) : prefixCell, uiTheme);
+		if (!p.suffix) return styledPrefix + " ".repeat(maxSuffixWidth + gap);
 		const suffixPad = " ".repeat(maxSuffixWidth - visibleWidth(p.suffix));
 		return `${prefixCell} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
 	});
+}
+
+function resolveAccountHeaderWidth(
+	limits: UsageLimit[],
+	reports: UsageReport[],
+	peers: readonly UsageReport[],
+	nowMs: number,
+	activeAccount: OAuthAccountIdentity | undefined,
+	mask: AccountMasker,
+	startIndex = 0,
+): number {
+	return limits.reduce((max, limit, index) => {
+		const report = reports[index];
+		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
+		const label = `${active ? "● " : ""}${mask(formatAccountLabel(limit, report, index + startIndex, peers))}`;
+		const reset = formatResetShort(limit, nowMs);
+		const width = visibleWidth(reset ? `${label} (${reset})` : label);
+		return Math.max(max, width);
+	}, BAR_WIDTH_MAX);
 }
 
 function padColumn(text: string, width: number): string {
@@ -2050,8 +2184,7 @@ function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
 	}
 	return `${verb} in ${formatDuration(minReset)}`;
 }
-
-function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
+function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: typeof theme): string {
 	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
 	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
 	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
@@ -2059,14 +2192,12 @@ function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): stri
 	return uiTheme.fg("dim", uiTheme.status.pending);
 }
 
-function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
-	if (status === "exhausted") return "error";
-	if (status === "warning") return "warning";
-	if (status === "ok") return "success";
-	return "dim";
-}
-
-function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): string {
+function renderUsageBar(
+	limit: UsageLimit,
+	uiTheme: typeof theme,
+	barWidth: number,
+	labelPlacement: "moving" | "right",
+): string {
 	const usedAmount = limit.amount.used;
 	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
 		const used =
@@ -2075,53 +2206,94 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
 				: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
 		return uiTheme.fg("dim", truncateJobLabel(`${used} used`, barWidth));
 	}
-	const fraction = resolveUsedFraction(limit);
-	if (fraction === undefined) {
+	const usedFraction = resolveUsedFraction(limit);
+	if (usedFraction === undefined) {
 		return uiTheme.fg("dim", "·".repeat(barWidth));
 	}
-	const clamped = Math.min(Math.max(fraction, 0), 1);
-	const exact = clamped * barWidth;
-	const fullCells = Math.floor(exact);
-	const remainder = exact - fullCells;
-	let partial = "";
-	if (remainder >= 2 / 3) partial = "▓";
-	else if (remainder >= 1 / 3) partial = "▒";
-	const leading = "█".repeat(fullCells) + partial;
-	const empty = "░".repeat(Math.max(0, barWidth - fullCells - (partial ? 1 : 0)));
-	const color = resolveStatusColor(limit.status);
-	return `${uiTheme.fg(color, leading)}${uiTheme.fg("dim", empty)}`;
+
+	return renderFractionBar(1 - Math.min(Math.max(usedFraction, 0), 1), barWidth, uiTheme, labelPlacement);
 }
 
-/**
- * Pick a per-account column width so the columns and trailing amount fit in `available`.
- * Falls back to the minimum when the terminal is too narrow rather than wrapping.
- */
-function resolveColumnWidth(count: number, available: number, trailing: number): number {
+/** Pick the widest per-account column that fits alongside gaps and trailing text. */
+function resolveColumnWidth(count: number, available: number, trailing: number, preferred: number): number {
 	if (count <= 0) return BAR_WIDTH_MAX;
 	const indent = 2;
 	const gaps = count - 1;
 	const spaceForBars = available - indent - gaps - (trailing > 0 ? trailing + 1 : 0);
 	const ideal = Math.floor(spaceForBars / count);
 	if (ideal < COLUMN_WIDTH_MIN) return COLUMN_WIDTH_MIN;
-	return ideal;
+	return Math.min(ideal, Math.max(COLUMN_WIDTH_MIN, preferred));
+}
+
+/** Limit each row to the number of minimum-width account columns that physically fit. */
+function resolveColumnsPerRow(count: number, available: number, trailing: number): number {
+	if (count <= 0) return 0;
+	const indent = 2;
+	const trailingWidth = trailing > 0 ? trailing + 1 : 0;
+	const capacity = Math.floor((available - indent - trailingWidth + 1) / (COLUMN_WIDTH_MIN + 1));
+	return Math.max(1, Math.min(count, capacity));
 }
 
 export function renderUsageReports(
 	reports: UsageReport[],
-	uiTheme: Theme,
+	uiTheme: typeof theme,
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
-	usageModelSelectors: readonly string[] = [],
-	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
+	options: {
+		maskAccountLabels?: boolean;
+		maskOrganizationNames?: boolean;
+		usageModelSelectors?: readonly string[];
+		unavailableAccounts?: readonly UnavailableUsageAccount[];
+		labelPlacement?: "moving" | "right";
+	} = {},
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const {
+		maskAccountLabels = false,
+		maskOrganizationNames = false,
+		usageModelSelectors = [],
+		labelPlacement = "moving",
+		unavailableAccounts = [],
+	} = options;
+	const activeAccounts = new Map(
+		[
+			...new Set([
+				...reports.map(report => report.provider),
+				...unavailableAccounts.map(account => account.provider),
+			]),
+		].map(provider => [provider, resolveActiveAccount?.(provider)] as const),
+	);
+	const organizations = [
+		...unavailableAccounts.flatMap(account =>
+			account.organizationName
+				? [{ name: account.organizationName, id: account.organizationId, provider: account.provider }]
+				: [],
+		),
+		...[...activeAccounts.entries()].flatMap(([provider, account]) =>
+			account?.orgName ? [{ name: account.orgName, id: account.orgId, provider }] : [],
+		),
+	];
+	const identifiers = [
+		...unavailableAccounts.map(account => account.label),
+		...[...activeAccounts.values()].flatMap(account =>
+			account
+				? [account.email, account.accountId, account.projectId, account.orgId].filter(
+						(value): value is string => !!value,
+					)
+				: [],
+		),
+	];
+	const identityMask = createUsageTextMasker(reports, maskAccountLabels, identifiers);
+	const maskText = createUsageTextMasker(reports, maskAccountLabels, identifiers, undefined, {
+		maskOrganizationNames,
+		organizations,
+	});
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
 	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of displayReports) {
+	for (const report of collapseSharedUsageReports(reports)) {
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);
@@ -2143,7 +2315,7 @@ export function renderUsageReports(
 	for (const { provider, providerReports } of providerEntries) {
 		lines.push("");
 		const providerName = formatProviderName(provider);
-		const activeAccount = resolveActiveAccount?.(provider);
+		const activeAccount = activeAccounts.get(provider);
 
 		const limitGroups = new Map<
 			string,
@@ -2167,35 +2339,44 @@ export function renderUsageReports(
 		}
 
 		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
-		const activeReport =
-			provider === "openai-codex" && activeAccount
-				? ((activeAccount.accountId
-						? providerReports.find(
-								report =>
-									report.metadata?.orgId === activeAccount.orgId &&
-									report.metadata?.accountId === activeAccount.accountId,
-							)
-						: undefined) ??
-					providerReports.find(
-						report =>
-							report.metadata?.orgId === activeAccount.orgId &&
-							!!activeAccount.email &&
-							report.metadata?.email === activeAccount.email &&
-							(!activeAccount.accountId || !report.metadata?.accountId),
-					))
-				: undefined;
-		const activeAccountLabel =
-			provider === "openai-codex"
-				? activeReport
-					? formatCodexTuiLabel(
-							activeReport,
-							providerReports,
-							activeAccount?.email || activeAccount?.accountId || "account",
-						)
-					: activeAccount?.email || activeAccount?.accountId || activeAccount?.projectId
-				: formatActiveAccountLabel(activeAccount);
+		// One masker per provider so colliding masks (`mai1@` vs `mai2@`) get
+		// ordinals consistently across the header, reset lines and unlimited rows.
+		const maskInputs = providerReports.flatMap((report, index) => [
+			...report.limits.map(limit => formatAccountLabel(limit, report, index, providerReports)),
+			formatUnlimitedReportLabel(report, index, providerReports),
+			formatResetAccountLabel(report, providerReports),
+		]);
+		const activeLabelParts = getActiveAccountLabelParts(activeAccount);
+		const activeReportIndex = activeLabelParts
+			? providerReports.findIndex(report => reportMatchesActiveAccount(report, activeAccount))
+			: -1;
+		let activeLabel: AccountLabel | undefined = activeLabelParts ? { ...activeLabelParts, provider } : undefined;
+		if (activeReportIndex >= 0) {
+			const report = providerReports[activeReportIndex]!;
+			const limit = report.limits.find(candidate => limitMatchesActiveAccount(report, candidate, activeAccount));
+			activeLabel = limit
+				? formatAccountLabel(limit, report, activeReportIndex, providerReports)
+				: formatUnlimitedReportLabel(report, activeReportIndex, providerReports);
+		}
+		if (activeLabel) maskInputs.push(activeLabel);
+		const normalize = (label: AccountLabel): AccountLabel => ({
+			...label,
+			qualifier: label.organizationName
+				? formatAccountQualifier(label, maskOrganizationNames)
+				: label.qualifier
+					? identityMask(label.qualifier)
+					: undefined,
+		});
+		maskInputs.push(
+			...unavailableAccounts.filter(account => account.provider === provider).map(formatUnavailableAccountLabel),
+		);
+		const maskAccount = createAccountMasker(maskInputs.map(normalize), maskAccountLabels, maskOrganizationNames);
+		const mask: AccountMasker = label => maskAccount(normalize(label));
+		const activeAccountLabel = activeLabel ? mask(activeLabel) : "";
 		if (activeAccountLabel) {
-			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+			lines.push(
+				`  ${uiTheme.fg("accent", "in use by this session:")} ${styleAccountMask(activeAccountLabel, uiTheme)}`,
+			);
 		}
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
@@ -2206,7 +2387,7 @@ export function renderUsageReports(
 		}
 		for (const account of unavailableAccounts) {
 			if (account.provider !== provider) continue;
-			const label = replaceTabs(sanitizeText(account.label.replace(/[\r\n]+/g, " ")));
+			const label = replaceTabs(sanitizeText(mask(formatUnavailableAccountLabel(account)).replace(/[\r\n]+/g, " ")));
 			const status = " — usage unavailable";
 			const boundedLabel = truncateToWidth(label, Math.max(0, availableWidth - 2 - visibleWidth(status)));
 			lines.push(`  ${uiTheme.fg("dim", truncateToWidth(`${boundedLabel}${status}`, availableWidth - 2))}`);
@@ -2217,7 +2398,7 @@ export function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		if (providerNotes.length > 0) {
 			lines.push(
-				`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(providerNotes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), 110)))}`.trimEnd(),
+				`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(maskText(providerNotes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • "))), 110)))}`.trimEnd(),
 			);
 		}
 
@@ -2225,38 +2406,17 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (!resets || resets.bankedCount <= 0) continue;
-			const identityLabel =
-				typeof report.metadata?.email === "string" && report.metadata.email
-					? report.metadata.email
-					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
-						? report.metadata.accountId
-						: "account";
-			const orgName = report.metadata?.orgName;
-			const orgId = report.metadata?.orgId;
-			const orgLabel =
-				typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-			const rawLabel =
-				provider === "openai-codex"
-					? formatCodexTuiLabel(report, providerReports, identityLabel)
-					: orgLabel && orgLabel !== identityLabel
-						? `${identityLabel} (${orgLabel})`
-						: identityLabel;
-			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
-			const activeOrg = activeAccount?.orgId;
-			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
-			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
-			const isActive =
-				provider === "openai-codex"
-					? activeReport === report
-					: orgMatches &&
-						!!activeAccount &&
-						((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
-							(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+			const label = maskText(mask(formatResetAccountLabel(report, providerReports)));
+			const isActive = reportMatchesActiveAccount(report, activeAccount);
 			const availability =
 				resets.redeemableCount === resets.bankedCount ? "" : ` · ${resets.redeemableCount} usable now`;
-			resetAccountLines.push(
-				`    • ${label}: ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}${availability}${isActive ? " (active)" : ""}`,
-			);
+			const suffix = `: ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}${availability}${isActive ? " (active)" : ""}`;
+			const budget = availableWidth - 6 - visibleWidth(suffix);
+			if (budget >= 1) resetAccountLines.push(`    • ${truncateToWidth(label, budget)}${suffix}`);
+			else
+				resetAccountLines.push(
+					`    ${resets.bankedCount} reset${resets.bankedCount === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
+				);
 			if (resets.soonestExpiry) {
 				const expiryMs = Date.parse(resets.soonestExpiry);
 				const remaining = expiryMs - nowMs;
@@ -2311,12 +2471,39 @@ export function renderUsageReports(
 			});
 			const sortedLimits = entries.map(entry => entry.limit);
 			const sortedReports = entries.map(entry => entry.report);
-			return { group, sortedLimits, sortedReports, amountText: formatAggregateAmount(sortedLimits) };
+			const aggregateAmount = formatAggregateAmount(sortedLimits);
+			// Only prefix "combined" when the aggregate is a real combined percentage
+			// (every limit has a fraction). Used-only absolute amounts yield an empty
+			// aggregate; prefixing them produced a bogus 9-char "combined " cell.
+			const allHaveFraction = sortedLimits.every(limit => resolveUsedFraction(limit) !== undefined);
+			const amountText =
+				sortedLimits.length > 1 && aggregateAmount.length > 0
+					? allHaveFraction
+						? `combined ${aggregateAmount}`
+						: aggregateAmount
+					: resolveUsedFraction(sortedLimits[0]) === undefined
+						? aggregateAmount
+						: "";
+			return { group, sortedLimits, sortedReports, amountText };
 		});
 
 		const sectionCount = renderableGroups.reduce((max, g) => Math.max(max, g.sortedLimits.length), 0);
 		const sectionTrailing = renderableGroups.reduce((max, g) => Math.max(max, visibleWidth(g.amountText)), 0);
-		const sectionColumnWidth = resolveColumnWidth(sectionCount, availableWidth, sectionTrailing);
+		const sectionColumnsPerRow = resolveColumnsPerRow(sectionCount, availableWidth, sectionTrailing);
+		const preferredColumnWidth = renderableGroups.reduce(
+			(max, g) =>
+				Math.max(
+					max,
+					resolveAccountHeaderWidth(g.sortedLimits, g.sortedReports, providerReports, nowMs, activeAccount, mask),
+				),
+			BAR_WIDTH_MAX,
+		);
+		const sectionColumnWidth = resolveColumnWidth(
+			sectionColumnsPerRow,
+			availableWidth,
+			sectionTrailing,
+			preferredColumnWidth,
+		);
 		const sectionBarWidth = Math.min(sectionColumnWidth, BAR_WIDTH_MAX);
 
 		for (const { group, sortedLimits, sortedReports, amountText } of renderableGroups) {
@@ -2325,20 +2512,30 @@ export function renderUsageReports(
 
 			const windowSuffix = formatWindowSuffix(group.label, group.windowLabel, uiTheme);
 			lines.push(`${statusIcon} ${uiTheme.bold(group.label)} ${windowSuffix}`.trim());
-			const accountLabels = formatAccountHeaderRow(
-				sortedLimits,
-				sortedReports,
-				providerReports,
-				nowMs,
-				sectionColumnWidth,
-				uiTheme,
-				activeAccount,
-			);
-			lines.push(`  ${accountLabels.join(" ")}`.trimEnd());
-			const bars = sortedLimits.map(limit =>
-				padColumn(renderUsageBar(limit, uiTheme, sectionBarWidth), sectionColumnWidth),
-			);
-			lines.push(`  ${bars.join(" ")} ${amountText}`.trimEnd());
+			for (let offset = 0; offset < sortedLimits.length; offset += sectionColumnsPerRow) {
+				const chunkLimits = sortedLimits.slice(offset, offset + sectionColumnsPerRow);
+				const chunkReports = sortedReports.slice(offset, offset + sectionColumnsPerRow);
+				const accountLabels = formatAccountHeaderRow(
+					chunkLimits,
+					chunkReports,
+					providerReports,
+					nowMs,
+					sectionColumnWidth,
+					uiTheme,
+					activeAccount,
+					mask,
+					offset,
+				);
+				lines.push(`  ${accountLabels.join(" ")}`.trimEnd());
+				const bars = chunkLimits.map(limit =>
+					padColumn(renderUsageBar(limit, uiTheme, sectionBarWidth, labelPlacement), sectionColumnWidth),
+				);
+				const trailingAmount =
+					offset + sectionColumnsPerRow >= sortedLimits.length
+						? ` ${truncateToWidth(amountText, Math.max(0, availableWidth - 2 - sectionColumnWidth * chunkLimits.length - chunkLimits.length))}`
+						: "";
+				lines.push(`  ${bars.join(" ")}${trailingAmount}`.trimEnd());
+			}
 			const resetText = sortedLimits.length <= 1 ? resolveResetRange(sortedLimits, nowMs) : null;
 			if (resetText) {
 				lines.push(`  ${uiTheme.fg("dim", resetText)}`.trimEnd());
@@ -2346,7 +2543,7 @@ export function renderUsageReports(
 			const notes = [...new Set(sortedLimits.flatMap(limit => limit.notes ?? []))];
 			if (notes.length > 0) {
 				lines.push(
-					`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(notes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), 110)))}`.trimEnd(),
+					`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(maskText(notes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • "))), availableWidth - 2)))}`.trimEnd(),
 				);
 			}
 		}
@@ -2354,7 +2551,7 @@ export function renderUsageReports(
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
 		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, providerReports, 0);
+			const label = styleAccountMask(mask(formatUnlimitedReportLabel(report, 0, providerReports)), uiTheme);
 			const tier = report.provider === "openai-codex" ? undefined : report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
@@ -2365,5 +2562,5 @@ export function renderUsageReports(
 		// No per-provider footer; global header shows last check.
 	}
 
-	return lines.join("\n");
+	return maskText(lines.join("\n"));
 }
