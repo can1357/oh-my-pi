@@ -15,6 +15,9 @@
 - Runtime usage providers (`usage.setProvider`, extension `registerProvider({ usage })`) now key cached reports by their own `cacheVersion`, so reports written by processes without the override are no longer served to it ([#13814](https://github.com/can1357/oh-my-pi/issues/13814)).
 - xAI OAuth accounts with active weekly credits no longer switch away solely because an uncertain monthly counter exceeds its limit ([#13806](https://github.com/can1357/oh-my-pi/issues/13806)).
 - Cursor retries after a rejected conversation now keep the tool calls and results already completed in the turn, instead of re-sending the last message and redoing that work ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+### Fixed
+
+- An OpenAI Responses turn whose connection drops mid-stream now recovers the finished answer from the provider (on hosts that store results, such as Muse Code) instead of re-running the whole turn and discarding the reasoning already done ([#13748](https://github.com/can1357/oh-my-pi/pull/13748) by [@abilliontokens](https://github.com/abilliontokens))
 
 ## [18.4.4] - 2026-09-29
 

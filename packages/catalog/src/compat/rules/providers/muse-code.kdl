@@ -15,6 +15,11 @@ provider "muse-code" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// Store results so a dropped stream can be recovered: verified 2026-09-29
+	// against api.meta.ai/v1, a stored run keeps generating after the client
+	// socket dies and `GET /responses/{id}` returns it once finished (~60s for
+	// a high-effort turn), while `store: false` runs 404 forever.
+	store-responses #true
 	// Subscription tier bills per request; the compact edit prompt cuts the
 	// recurring tool-schema bytes. Verified 2026-09-05 against api.meta.ai/v1:
 	// `custom` tools are rejected with 400 "`custom` tools are not supported

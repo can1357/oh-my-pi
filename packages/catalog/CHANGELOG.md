@@ -17,6 +17,7 @@
 - Cursor fast lanes whose bundled rate card lists only the base rate now bill at Cursor's declared fast multiplier instead of the base rate ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 - Cursor's `default` (Auto) router is marked as variably priced instead of free ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
 - Switching Cursor accounts no longer shows the previous account's cached model list ([#11613](https://github.com/can1357/oh-my-pi/pull/11613) by [@will-bogusz](https://github.com/will-bogusz)).
+- Muse Code now stores Responses results on Meta's side (`store-responses`), so a turn whose connection drops can be recovered instead of re-run ([#13748](https://github.com/can1357/oh-my-pi/pull/13748) by [@abilliontokens](https://github.com/abilliontokens))
 
 ## [18.4.4] - 2026-09-29
 

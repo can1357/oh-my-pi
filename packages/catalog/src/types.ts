@@ -960,6 +960,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;
 	/**
+	 * Whether Responses requests send `store: true`, persisting each result so
+	 * `GET /responses/{id}` can recover a run whose stream socket dropped
+	 * mid-generation. Rule-owned: hosts that finish runs server-side after a
+	 * client disconnect (Muse Code); everywhere else keeps `store: false`.
+	 */
+	storeResponses: boolean;
+	/**
 	 * Whether `reasoning.context: "all_turns"` (full cross-turn reasoning
 	 * replay) is accepted. Rule-owned: gpt-5.4+ wire generation on the Codex
 	 * transport; earlier ids reject the value.
