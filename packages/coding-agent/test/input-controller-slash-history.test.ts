@@ -25,7 +25,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	const onInputCallback = vi.fn();
 	const shutdown = vi.fn(async () => {});
 	let text = "";
-	let guidedGoalInterview = false;
+	const isGuidedGoalInterviewActive = vi.fn(() => false);
 	const editor = {
 		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
 		getText: () => text,
@@ -90,7 +90,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 			return { ...input, cancelled: false, started: false };
 		},
 		ui: { requestRender: vi.fn() },
-		isGuidedGoalInterviewActive: () => guidedGoalInterview,
+		isGuidedGoalInterviewActive,
 		compactionQueuedMessages: [],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -111,6 +111,9 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		prompt,
 		shutdown,
 		sessionManager,
+		// Exposed so tests can drive the /guided-goal interview: `ctx` is cast to
+		// `InteractiveModeContext`, which erases the mock type.
+		interview: isGuidedGoalInterviewActive,
 	};
 }
 
@@ -496,8 +499,8 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 	// history filing has to follow: a genuine user answer belongs in `Up` history, while
 	// the continue shortcut is a host action that must not masquerade as a message.
 	it("files `c` in Up history while a guided interview is active", async () => {
-		const { ctx, editor, addToHistory } = makeCtx(false, []);
-		ctx.isGuidedGoalInterviewActive = () => true;
+		const { ctx, editor, addToHistory, interview } = makeCtx(false, []);
+		interview.mockReturnValue(true);
 		controllerFor(ctx);
 
 		await editor.onSubmit?.("c");
@@ -506,14 +509,17 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 	});
 
 	it("keeps `c` out of Up history outside a guided interview, where it continues", async () => {
-		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		const { ctx, editor, addToHistory, onInputCallback } = makeCtx(false, []);
 		controllerFor(ctx);
 
 		await editor.onSubmit?.("c");
 
+		// The shortcut continues the session: the word is consumed here and never
+		// forwarded as if the user had typed `c`, and never filed in Up history.
+		expect(onInputCallback).toHaveBeenCalledTimes(1);
+		expect(onInputCallback.mock.calls[0]?.[0]).not.toBe("c");
 		expect(addToHistory).not.toHaveBeenCalled();
 	});
-
 
 	it("files a context-switching command once, under the context it was typed in", async () => {
 		// `/move` changes the cwd, so a second write after the handler ran would re-file the row
@@ -547,6 +553,36 @@ describe("input controller — bare slash commands opt-in", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+	});
+
+	// A /guided-goal interview asks questions, and `c` reads as an answer ("option C").
+	// Armed as a command it would either wait for a second Enter or, on a fresh session,
+	// run `/c` outright and lose the answer with no status line to show for it.
+	it("sends `c` as the interview answer even when a command named `c` exists", async () => {
+		await enable();
+		const { ctx, editor, addToHistory, onInputCallback, interview } = makeCtx();
+		interview.mockReturnValue(true);
+		ctx.fileSlashCommands.add("c");
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("c");
+
+		expect(ctx.showStatus).not.toHaveBeenCalled();
+		expect(addToHistory).toHaveBeenCalledWith("c");
+		expect(onInputCallback).toHaveBeenCalledTimes(1);
+		expect(onInputCallback.mock.calls[0]?.[0]).toMatchObject({ cancelled: false });
+	});
+
+	it("still arms another command during a guided interview, so the exemption stays narrow", async () => {
+		await enable();
+		const { ctx, editor, interview } = makeCtx(false, [{ role: "user", content: "hello" }] as AgentMessage[]);
+		interview.mockReturnValue(true);
+		ctx.fileSlashCommands.add("alpha");
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("alpha");
+
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("Press Enter again to run /alpha"));
 	});
 
 	it.each(["hotkeys", "HotKeys"])("runs builtin %p as its slash command before the first message", async word => {

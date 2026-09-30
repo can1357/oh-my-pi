@@ -1381,6 +1381,12 @@ export class InputController {
 			this.ctx.locallySubmittedUserSignatures.size === 0 &&
 			this.ctx.session.messages.length === 0;
 		const folded = text.toLowerCase();
+		// A /guided-goal interview is a question-and-answer exchange, so `c` is a
+		// plausible answer ("option C"), not a request to run a command named /c — the
+		// same reason the continue shortcut stands down at the submit call site (see
+		// `text === "c" && !isGuidedGoalInterviewActive()`). Leaving the word alone here
+		// also keeps an empty session from silently executing `/c` on a single Enter.
+		if (folded === "c" && this.ctx.isGuidedGoalInterviewActive()) return undefined;
 		if (
 			emptySession &&
 			Object.hasOwn(BARE_EXIT_WORDS, folded) &&
