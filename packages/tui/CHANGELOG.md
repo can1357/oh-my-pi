@@ -927,7 +927,7 @@
 - Added a fullscreen annotation overlay for diffs and text, with multi-line notes, editing, deletion, and undo ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Added Daybreak-enabled account listing to usage dashboard overlay
 - Added a custom OpenAI-compatible endpoint option to the setup provider list ([#12997](https://github.com/can1357/oh-my-pi/pull/12997) by [@DrB0rk](https://github.com/DrB0rk)).
-- Added add, edit, and delete of custom OpenAI-compatible providers to the `/models` hub: a `+ Add provider…` sidebar row and `Ctrl+N` / `Ctrl+E` / `Ctrl+D` on the provider list.
+- Added a provider editor to the `/models` hub for adding, editing, and deleting custom OpenAI-compatible providers (`+ Add provider…`, `Ctrl+N` / `Ctrl+E` / `Ctrl+D`); saves keep `models.yml` comments ([#13874](https://github.com/can1357/oh-my-pi/pull/13874) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
