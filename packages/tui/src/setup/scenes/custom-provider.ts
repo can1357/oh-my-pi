@@ -173,6 +173,8 @@ export class CustomProviderForm implements Component {
 			this.#saving = false;
 			if (!this.#abandoned) this.#host.finish("done");
 		} catch (error) {
+			// Nobody is looking at this form any more; do not take focus back from whatever replaced it.
+			if (this.#abandoned) return;
 			// The clear notice is replaced by the error below; a hidden pending clear must not fire on the retry.
 			this.#clearKey = false;
 			this.#index = this.#edit ? 1 : 0;
