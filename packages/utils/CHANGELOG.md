@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `mathBlockMayCloseAt` to `math-delimiters`, which tells whether an own-line display block in a streaming prefix could still close as the text grows
+- Added `mathBlockMayCloseAt` to `math-delimiters`, which tells whether an own-line display block in a streaming prefix could still close as the text grows ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.4.4] - 2026-09-29
 

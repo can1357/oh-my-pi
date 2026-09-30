@@ -33,8 +33,8 @@ export interface MathBlock {
 // it. The own-line requirement leaves inline `$$…$$` inside prose to the span
 // grammar below. `\r?\n` at each line boundary keeps the grammar CRLF-safe for
 // direct callers; marked-fed renderers already normalize line endings first.
-const MATH_BLOCK_DOLLAR = /^ {0,3}\$\$[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\$\$[ \t]*(?:\r?\n|$)/;
-const MATH_BLOCK_BRACKET = /^ {0,3}\\\[[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\\\][ \t]*(?:\r?\n|$)/;
+const MATH_BLOCK_DOLLAR = / {0,3}\$\$[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\$\$[ \t]*(?:\r?\n|$)/y;
+const MATH_BLOCK_BRACKET = / {0,3}\\\[[ \t]*\r?\n([\s\S]+?)\r?\n {0,3}\\\][ \t]*(?:\r?\n|$)/y;
 
 /**
  * Leftmost offset at or after `from` where an opener could begin. A scan hint,
@@ -87,8 +87,10 @@ export function mathSpanAt(source: string, at: number, from = 0): MathSpan | und
 	return { opener, display: opener === "$$" || opener === "\\[", end: closeAt + opener.length, body };
 }
 
-/** The own-line display block starting at offset 0, or `undefined`. */
-export function mathBlockAt(source: string): MathBlock | undefined {
+/** The own-line display block starting at `from`, or `undefined`. */
+export function mathBlockAt(source: string, from = 0): MathBlock | undefined {
+	MATH_BLOCK_DOLLAR.lastIndex = from;
+	MATH_BLOCK_BRACKET.lastIndex = from;
 	const match = MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source);
 	if (!match || match[1].trim() === "") return undefined;
 	return { raw: match[0], body: match[1] };
@@ -99,19 +101,24 @@ function closerOf(opener: MathOpener): string {
 	return opener === "\\(" ? "\\)" : opener === "\\[" ? "\\]" : opener;
 }
 
-// A display opener (`$$` or `\[` after up to 3 spaces) at the start of the text, captured.
-const MATH_BLOCK_OPENER_RE = /^ {0,3}(\$\$|\\\[)/;
+// A display opener (`$$` or `\[` after up to 3 spaces), captured.
+const MATH_BLOCK_OPENER_RE = / {0,3}(\$\$|\\\[)/y;
 
 /**
- * Whether the own-line display block opened at offset 0 of `source` is closed,
- * or could still close once more text is appended: `source` is a streaming
- * prefix whose real closer may not have arrived. The closer line is appended
- * after a sentinel character (`x`), so the last line of `source`, which the
- * next append may still extend, is never read as a finished closer line.
+ * Whether the own-line display block opened at `from` in `source` is closed,
+ * or could still close once more text is appended: the text from `from`
+ * onward is a streaming prefix whose real closer may not have arrived. The
+ * closer line is appended after a sentinel character (`x`), so the last line
+ * of `source`, which the next append may still extend, is never read as a
+ * finished closer line. With no display opener at `from` it returns false
+ * before copying any text, so a caller can ask at every block start.
  */
-export function mathBlockMayCloseAt(source: string): boolean {
-	const opener = MATH_BLOCK_OPENER_RE.exec(source);
-	return opener !== null && mathBlockAt(`${source}x\n${closerOf(opener[1] as MathOpener)}`) !== undefined;
+export function mathBlockMayCloseAt(source: string, from = 0): boolean {
+	MATH_BLOCK_OPENER_RE.lastIndex = from;
+	const m = MATH_BLOCK_OPENER_RE.exec(source);
+	if (!m) return false;
+	const opener = mathOpenerAt(source, from + m[0].length - m[1].length);
+	return opener !== undefined && mathBlockAt(`${source.slice(from)}x\n${closerOf(opener)}`) !== undefined;
 }
 
 /**

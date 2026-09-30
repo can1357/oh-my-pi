@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed long Markdown messages sometimes showing raw display math, a visible HTML comment, or a code block split in two ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed streamed Markdown keeping raw `$$` math or an unresolved reference link after the message finished, when a display-math block contained blank lines or a link definition sat inside a quote or list ([#13839](https://github.com/can1357/oh-my-pi/pull/13839) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed long Markdown files and skills being slow to appear in read previews: a collapsed preview now renders only the start of the document, so its hidden-line count counts source lines past that start rather than rendered rows
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
@@ -10,12 +16,6 @@
 - Redesigned transcript, chat, dashboard, and picker UI components for native wire representation
 - `HookEditorComponent` accepts pasted images when constructed with `acceptImages`; the ask dialog returns them as `customInputImages` / `noteImages` ([#13774](https://github.com/can1357/oh-my-pi/pull/13774) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Added `formatFileMatches` and `FileMatchSection` to `tools/grouped-file-output` for rendering per-file grep/ast-grep matches in grouped or flat mode.
-
-### Fixed
-
-- Fixed long Markdown messages sometimes showing raw display math, a visible HTML comment, or a code block split in two
-- Fixed streamed Markdown keeping raw `$$` math or an unresolved reference link after the message finished, when a display-math block contained blank lines or a link definition sat inside a quote or list
-- Fixed long Markdown files and skills being slow to appear in read previews: a collapsed preview now renders only the start of the document, so its hidden-line count counts source lines past that start rather than rendered rows
 
 ## [18.4.3] - 2026-09-28
 
