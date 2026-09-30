@@ -2,6 +2,7 @@ import { Container, type Component } from "../../tui";
 import { Input } from "../../components/input";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
+import { matchesSelectCancel } from "../../keybinding-matchers";
 import { matchesKey } from "../../keys";
 import { theme } from "../../theme/theme";
 import type { SetupSceneHost } from "./types";
@@ -37,7 +38,10 @@ export class CustomProviderForm implements Component {
 	#host: CustomProviderFormHost;
 	#submitValues: (values: CustomProviderFormValues) => Promise<void>;
 	#edit: CustomProviderFormOptions["edit"];
+	#onCancel: () => void;
 	#clearKey = false;
+	/** Esc was pressed mid-save: the save still runs, but nothing reports back to a form nobody sees. */
+	#abandoned = false;
 	#inputs = FIELDS.map(field => {
 		const input = new Input();
 		input.prompt = field.prompt;
@@ -57,6 +61,7 @@ export class CustomProviderForm implements Component {
 		this.#host = host;
 		this.#submitValues = submit;
 		this.#edit = options.edit;
+		this.#onCancel = onCancel;
 		this.#index = this.#edit ? 1 : 0;
 		if (this.#edit) {
 			this.#inputs[0].setValue(this.#edit.id);
@@ -104,7 +109,13 @@ export class CustomProviderForm implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (this.#saving) return;
+		if (this.#saving) {
+			if (matchesSelectCancel(data) && !this.#abandoned) {
+				this.#abandoned = true;
+				this.#onCancel();
+			}
+			return;
+		}
 		if (this.#edit?.hasKey && this.#index === KEY_FIELD && matchesKey(data, "ctrl+x")) {
 			this.#clearKey = true;
 			this.#inputs[KEY_FIELD].setValue("");
@@ -160,8 +171,10 @@ export class CustomProviderForm implements Component {
 			});
 			this.#status = theme.fg("success", "Provider saved. Its discovered models are available in the model picker.");
 			this.#saving = false;
-			this.#host.finish("done");
+			if (!this.#abandoned) this.#host.finish("done");
 		} catch (error) {
+			// The clear notice is replaced by the error below; a hidden pending clear must not fire on the retry.
+			this.#clearKey = false;
 			this.#index = this.#edit ? 1 : 0;
 			this.#focusCurrent();
 			const message = error instanceof Error ? error.message : String(error);

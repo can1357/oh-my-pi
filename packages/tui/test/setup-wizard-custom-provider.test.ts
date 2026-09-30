@@ -1,7 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { CustomProviderForm, type CustomProviderFormOptions } from "@oh-my-pi/pi-tui/setup/scenes/custom-provider";
+import {
+	CustomProviderForm,
+	type CustomProviderFormOptions,
+	type CustomProviderFormValues,
+} from "@oh-my-pi/pi-tui/setup/scenes/custom-provider";
 import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
 import type { SetupSceneHost, SetupSceneResult, SetupSceneController } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -47,9 +51,9 @@ function enter(form: CustomProviderForm, value: string): void {
 	form.handleInput("\n");
 }
 
+/** Drain the submit's promise chain by yielding one macrotask, instead of counting microtask turns. */
 async function waitForSubmit(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
+	await new Promise<void>(resolve => setImmediate(resolve));
 }
 
 describe("CustomProviderForm", () => {
@@ -229,5 +233,66 @@ describe("CustomProviderForm", () => {
 			expect(shown).not.toContain("Ctrl+X");
 			expect(shown).not.toContain("Stored key will be cleared");
 		});
+
+		it("returns to the URL step, not the fixed ID, when a save fails", async () => {
+			const submit = vi.fn(async () => {
+				throw new Error("No chat models were discovered.");
+			});
+			const { form } = createForm(submit, { edit });
+			form.onActivate?.();
+			form.handleInput("\n"); // URL → key
+			form.handleInput("\n"); // submit
+			await waitForSubmit();
+
+			const shown = Bun.stripANSI(form.render(120).join("\n"));
+			expect(shown).toContain("No chat models were discovered.");
+			expect(shown).toContain("Endpoint URL");
+			expect(shown).not.toContain("Provider ID");
+		});
+
+		it("does not clear the stored key on a retry after a failed save that had queued the clear", async () => {
+			const submit = vi
+				.fn<(values: CustomProviderFormValues) => Promise<void>>()
+				.mockRejectedValueOnce(new Error("endpoint unreachable"))
+				.mockResolvedValue(undefined);
+			const { form } = createForm(submit, { edit });
+			form.onActivate?.();
+			form.handleInput("\n");
+			form.handleInput("\x18"); // queue the clear
+			form.handleInput("\n"); // submit; it fails
+			await waitForSubmit();
+			expect(Bun.stripANSI(form.render(120).join("\n"))).toContain("endpoint unreachable");
+
+			form.handleInput("\n"); // URL → key; the queued clear is no longer announced
+			expect(Bun.stripANSI(form.render(120).join("\n"))).not.toContain("Stored key will be cleared");
+			form.handleInput("\n"); // retry with a blank key
+			await waitForSubmit();
+			expect(submit).toHaveBeenCalledTimes(2);
+			expect(submit).toHaveBeenLastCalledWith({ id: "my-gw", baseUrl: "https://gateway.example/v1", apiKey: "" });
+		});
+
+		it.each([
+			["resolves", (gate: PromiseWithResolvers<void>) => gate.resolve()],
+			["rejects", (gate: PromiseWithResolvers<void>) => gate.reject(new Error("late failure"))],
+		])(
+			"Esc during a save leaves the form once, and a save that later %s reports nothing back",
+			async (_settled, finishSave) => {
+				const gate = Promise.withResolvers<void>();
+				const { form, finished } = createForm(() => gate.promise, { edit });
+				form.onActivate?.();
+				form.handleInput("\n");
+				form.handleInput("\n"); // submit
+				expect(form.modal).toBe(true);
+
+				form.handleInput("\x1b");
+				form.handleInput("\x1b");
+				expect(finished).toEqual(["skipped"]);
+
+				finishSave(gate);
+				await waitForSubmit();
+				expect(finished).toEqual(["skipped"]);
+				expect(form.modal).toBe(false);
+			},
+		);
 	});
 });
