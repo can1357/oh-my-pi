@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added initial MCP readiness snapshots for extensions, covering first-discovery attempts only (later retries do not change the snapshot); hung discovery may wait indefinitely. Waiters support per-caller abort signals and reject when the manager is disposed ([#13828](https://github.com/can1357/oh-my-pi/pull/13828) by [@tahsinrahman](https://github.com/tahsinrahman))
+
 ## [18.4.6] - 2026-10-01
 
 ### Added
