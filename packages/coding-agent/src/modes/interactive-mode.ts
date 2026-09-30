@@ -320,6 +320,7 @@ import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { UiHelpers } from "./utils/ui-helpers";
 
 import {
+	cfgAskTimeout,
 	cfgAutocompleteMaxVisible,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -532,8 +533,6 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
 
-/** How long a `cfg://` approval prompt waits for an answer before the write fails as unanswered. */
-const CFG_APPROVAL_TIMEOUT_MS = 10_000;
 const CFG_APPROVE_SESSION = "Always for this session";
 const CFG_APPROVE_ONCE = "Allow once";
 const CFG_DENY = "Deny";
@@ -6623,9 +6622,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it;
-	 * leaving it unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any keypress restarts the
-	 * countdown) drops it as `timeout`.
+	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it.
+	 * The prompt waits like a tool approval unless `ask.timeout` is set; then leaving it
+	 * unanswered that long (any keypress restarts the countdown) drops it as `timeout`.
 	 */
 	async #promptCfgChange(request: CfgChangeRequest): Promise<CfgApproval> {
 		const headline = request.save
@@ -6634,6 +6633,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const warning = request.shadowedBy
 			? `\n⚠️ Overridden by your ${request.shadowedBy}: the saved value won't take effect here.`
 			: "";
+		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
 		let timedOut = false;
 		const choice = await this.showHookSelector(
 			`${headline}\n${request.previous} → ${request.value}${warning}`,
@@ -6641,7 +6641,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				// A reflexive Enter approves this change only, never the whole session.
 				initialIndex: 1,
-				timeout: CFG_APPROVAL_TIMEOUT_MS,
+				timeout: timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined,
 				// The selector auto-picks the highlighted option on expiry; an unanswered prompt approves nothing.
 				onTimeout: () => {
 					timedOut = true;

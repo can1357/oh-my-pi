@@ -1161,7 +1161,8 @@ export const cfgAskTimeout = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Ask Timeout",
-		description: "Auto-select the recommended ask option after this many seconds (0 disables)",
+		description:
+			"Auto-select the recommended ask option after this many seconds; also expires agent settings-change prompts, which then change nothing (0 disables)",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "15", label: "15 seconds" },
