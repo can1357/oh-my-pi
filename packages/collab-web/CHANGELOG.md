@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added zombie-connection self-healing for browser guests: when the page returns to the foreground, the network comes back, or the page is restored from the back/forward cache, an OPEN socket that has not received anything for 60s is force-replaced through the ordinary reconnect path (fresh join and snapshot). Fixes sessions that silently stall behind NAT/firewall drops until a manual refresh.
+
 ## [18.4.1] - 2026-09-28
 
 ### Fixed
