@@ -33,6 +33,11 @@ function footerLine(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines[lines.length - 2] ?? "");
 }
 
+/** The sidebar column of a rendered frame: one trimmed cell per row, body and borders excluded. */
+function sidebarCells(lines: readonly string[]): string[] {
+	return lines.map(line => stripVTControlCharacters(line).split("│")[1]?.trim() ?? "");
+}
+
 function makeModel(
 	provider: string,
 	id: string,
@@ -163,6 +168,7 @@ function createHub(options: {
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const LEFT = "\x1b[D";
+const RIGHT = "\x1b[C";
 const ALT_RIGHT = "\x1b[1;3C";
 /** What macOS terminals (ghostty, Terminal.app, iTerm) emit for Option+→. */
 const OPTION_RIGHT_MAC = "\x1bf";
@@ -2016,11 +2022,8 @@ describe("ModelHub custom provider editor", () => {
 		await settle();
 
 		expect(add).toHaveBeenCalledWith({ id: "newgw", baseUrl: "https://new.example/v1", apiKey: "sk-1" });
-		const sidebarRow = hub
-			.render(220)
-			.map(line => stripVTControlCharacters(line))
-			.find(line => line.includes("newgw"));
-		expect(sidebarRow).toBeDefined();
+		// The All-models browser also lists `newgw/m1`; only the sidebar column proves the provider row.
+		expect(sidebarCells(hub.render(220)).some(cell => /newgw\s+1$/.test(cell))).toBe(true);
 		expect(normalize(hub.render(220))).not.toContain("Provider ID");
 	});
 
@@ -2139,5 +2142,84 @@ describe("ModelHub custom provider editor", () => {
 
 		expect(onUnassign).toHaveBeenCalledWith("smol");
 		expect(remove).not.toHaveBeenCalled();
+	});
+
+	test("a rejected add keeps the form open with the error visible", async () => {
+		const message = "No chat models were discovered. Check the endpoint and API key, then try again.";
+		const { editor, add } = makeProviderEditor({
+			add: async () => {
+				throw new Error(message);
+			},
+		});
+		const { hub } = createHub({ models: [makeModel("openai", "gpt-x")], providerEditor: editor });
+
+		hub.handleInput(CTRL_N);
+		for (const ch of "newgw") hub.handleInput(ch);
+		hub.handleInput("\n");
+		for (const ch of "https://new.example/v1") hub.handleInput(ch);
+		hub.handleInput("\n");
+		hub.handleInput("\n"); // blank key: a keyless endpoint
+		await settle();
+
+		expect(add).toHaveBeenCalledTimes(1);
+		const rendered = normalize(hub.render(220));
+		expect(rendered).toContain(message);
+		expect(rendered).toContain("Provider ID");
+		hub.handleInput(ESC);
+		expect(normalize(hub.render(220))).not.toContain("Provider ID");
+	});
+
+	test("Delete, ctrl+e, ctrl+d and ctrl+n in the model list do not open the editor", () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const { editor, remove } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(RIGHT); // focus the model list
+		expect(footerLine(hub.render(220))).not.toContain("^E edit");
+		const before = normalize(hub.render(220));
+		hub.handleInput(DELETE);
+		hub.handleInput(CTRL_D);
+		hub.handleInput(CTRL_E);
+		hub.handleInput(CTRL_N);
+		expect(normalize(hub.render(220))).toBe(before);
+		expect(remove).not.toHaveBeenCalled();
+	});
+
+	test("clicking the + Add provider row while a strip is open leaves the strip alone", () => {
+		const models = [makeModel("openai", "gpt-x")];
+		const { editor } = makeProviderEditor();
+		const { hub } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput("\n"); // Enter on the first model opens its role strip
+		expect(footerLine(hub.render(220))).toContain("gpt-x →");
+		const frame = hub.render(220).map(line => stripVTControlCharacters(line));
+		const screenRow = frame.findIndex(line => line.includes("+ Add provider…"));
+		expect(screenRow).toBeGreaterThan(0);
+		hub.handleInput(`\x1b[<0;4;${screenRow + 1}M`); // SGR reports are 1-based
+
+		expect(normalize(hub.render(220))).not.toContain("Provider ID");
+		expect(footerLine(hub.render(220))).toContain("gpt-x →");
+	});
+
+	test("Esc while a delete is pending closes the hub; other keys stay ignored", async () => {
+		const models = [makeModel("custom-gw", "m1")];
+		const gate = Promise.withResolvers<void>();
+		const { editor, remove } = makeProviderEditor({ remove: () => gate.promise });
+		const { hub, onCancel } = createHub({ models, providerEditor: editor });
+
+		hub.handleInput(DOWN); // All models → custom-gw
+		hub.handleInput(CTRL_D);
+		hub.handleInput("\n");
+		expect(footerLine(hub.render(220))).toContain('Deleting provider "custom-gw"');
+		hub.handleInput("x");
+		hub.handleInput(DOWN);
+		expect(onCancel).not.toHaveBeenCalled();
+
+		hub.handleInput(ESC);
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		expect(remove).toHaveBeenCalledTimes(1);
+		gate.resolve();
+		await settle();
 	});
 });

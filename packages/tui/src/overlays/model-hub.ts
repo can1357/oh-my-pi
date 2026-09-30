@@ -2269,8 +2269,12 @@ export class ModelHubComponent implements Component {
 	#handleStripInput(data: string): void {
 		const strip = this.#strip;
 		if (!strip) return;
-		// Input is ignored while the removal is in flight so Enter can't fire it twice.
-		if (strip.kind === "deleteProvider" && strip.pending) return;
+		// While the removal is in flight only Esc is honored (it closes the hub, as during a
+		// pending assignment); Enter must not fire the removal twice.
+		if (strip.kind === "deleteProvider" && strip.pending) {
+			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
+			return;
+		}
 		if (matchesSelectCancel(data)) {
 			this.#closeStrip();
 			return;
@@ -2567,7 +2571,7 @@ export class ModelHubComponent implements Component {
 	#clickSidebarEntry(clicked: SidebarEntry | undefined): void {
 		if (!clicked || clicked.kind === "separator") return;
 		if (clicked.kind === "addProvider") {
-			if (this.#assigning === null) this.#openProviderForm();
+			if (this.#assigning === null && this.#strip === null) this.#openProviderForm();
 			return;
 		}
 		const already = clicked.id === this.#activeEntryId;
