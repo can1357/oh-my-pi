@@ -42,7 +42,16 @@ export interface MediaTranscriptOptions {
  * dictation role, or the default tier when no registry is available.
  */
 export function resolveTranscriptModel(settings: Settings, registry: ModelBrowserRegistry | undefined): SttModel {
-	return resolveSttModelSpec(registry ? resolveLocalRoleModelId("dictation", settings, registry) : undefined);
+	if (!registry) return resolveSttModelSpec(undefined);
+	let modelId: string;
+	try {
+		modelId = resolveLocalRoleModelId("dictation", settings, registry);
+	} catch (error) {
+		throw new MediaTranscriptError(
+			`${error instanceof Error ? error.message : String(error)} Transcripts run on-device and need a local speech model in the \`dictation\` role chain: add one (e.g. parakeet-tdt-0.6b-v3) to the role or to \`retry.fallbackChains.dictation\`, then run \`omp setup speech\`.`,
+		);
+	}
+	return resolveSttModelSpec(modelId);
 }
 
 const TRANSCRIPT_TARGET_RE = /^(.*?):transcript(?::(.+))?$/is;

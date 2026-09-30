@@ -144,6 +144,7 @@ import {
 	transcribeMediaFile,
 } from "../stt/media-transcript";
 import { cfgSttLanguage } from "../stt/settings";
+import type { SttModel } from "../stt/models";
 import { formatTranscriptLines, formatTranscriptTime } from "../stt/transcript";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import {
@@ -1234,9 +1235,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				`Invalid selector on '${displayPath}'. Transcripts take line selectors (e.g. :40-80, :-20, :raw).`,
 			);
 		}
-		const model = resolveTranscriptModel(this.session.settings, this.session.modelRegistry);
+		let model: SttModel;
 		let transcript: MediaTranscript;
 		try {
+			model = resolveTranscriptModel(this.session.settings, this.session.modelRegistry);
 			transcript = await transcribeMediaFile(absolutePath, {
 				model,
 				language: cfgSttLanguage.get(this.session.settings),
