@@ -3807,8 +3807,8 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the band, so we
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
-	#compactionCreatedHeadroom(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+	#compactionCreatedHeadroom(modelOverride?: Model): boolean {
+		const contextWindow = (modelOverride ?? this.#model)?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
 		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		const residualTokens = compactionContextTokens(
@@ -4316,6 +4316,7 @@ export class SessionMaintenance {
 				options.triggerContextTokens,
 				suppressContinuation,
 				options.detachPostCommit === true,
+				options.targetModel,
 			);
 			if (outcome !== "fallback") return outcome;
 			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
@@ -4413,6 +4414,7 @@ export class SessionMaintenance {
 					suppressContinuation,
 					fallbackFromShake,
 					detachPostCommit: options.detachPostCommit === true,
+					targetModel: options.targetModel,
 					autoCompactionSignal,
 					onCommitted: () => {
 						compactionCommitted = true;
@@ -4494,7 +4496,7 @@ export class SessionMaintenance {
 					if (frameRescueResult) {
 						rescueRewroteHistory = true;
 						pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
+						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom(options.targetModel);
 					}
 					if (!frameRescueCreatedHeadroom) {
 						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
@@ -5053,6 +5055,7 @@ export class SessionMaintenance {
 				suppressContinuation,
 				fallbackFromShake,
 				detachPostCommit: options.detachPostCommit === true,
+				targetModel: options.targetModel,
 				autoCompactionSignal,
 				onCommitted: () => {
 					compactionCommitted = true;
@@ -5146,6 +5149,8 @@ export class SessionMaintenance {
 		suppressContinuation: boolean;
 		fallbackFromShake: boolean;
 		detachPostCommit: boolean;
+		/** Pre-fallback compaction: judge headroom against this model instead of the live one. */
+		targetModel?: Model;
 		autoCompactionSignal: AbortSignal;
 		onCommitted: () => void;
 	}): Promise<CompactionCheckResult> {
@@ -5252,11 +5257,11 @@ export class SessionMaintenance {
 			// when auto-continue is disabled, a no-headroom threshold pass must still
 			// block later automatic continuations (todo reminders/session_stop hooks)
 			// from re-entering the same oversized context.
-			hasHeadroom = this.#compactionCreatedHeadroom();
+			hasHeadroom = this.#compactionCreatedHeadroom(args.targetModel);
 			if (!hasHeadroom) {
 				hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 					skipElide: args.fallbackFromShake,
-					hasProgress: () => this.#compactionCreatedHeadroom(),
+					hasProgress: () => this.#compactionCreatedHeadroom(args.targetModel),
 				});
 			}
 			if (!hasHeadroom) {
@@ -5325,6 +5330,7 @@ export class SessionMaintenance {
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 		detachPostCommit = false,
+		targetModel?: Model,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -5368,7 +5374,7 @@ export class SessionMaintenance {
 			// any supersede/drop-useless pruning that already rewrote the next prompt;
 			// without that pre-shake savings, shake can advance to the next preference
 			// even though the post-prune history is already inside the recovery band.
-			const contextWindow = this.#model?.contextWindow ?? 0;
+			const contextWindow = (targetModel ?? this.#model)?.contextWindow ?? 0;
 			const compactionSettings = cfgCompaction.get(this.#host.settings);
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
