@@ -642,6 +642,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
+	#subagentTreeCost = 0;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -885,6 +886,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
+	setSubagentTreeCost(cost: number): void {
+		const next = Number.isFinite(cost) && cost > 0 ? cost : 0;
+		if (next === this.#subagentTreeCost) return;
+		this.#subagentTreeCost = next;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2391,6 +2400,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			// The tree total describes the main session; a focused subagent's
+			// view falls back to its own completed task results.
+			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			now: new Date(nowMs),

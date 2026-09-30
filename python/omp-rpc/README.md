@@ -204,6 +204,13 @@ prompt. Native rejection, including an older server that does not support the
 command, raises `RpcCommandError`. Missing or non-boolean `removed` values raise
 `ValueError` rather than being treated as successful cancellation.
 
+`promote_queued_message(message)` moves one matching follow-up, with its hidden
+attachment context, to the end of the steering queue without resending it.
+Check `result.promoted` on the returned `PromoteQueuedMessageResult`; `False`
+means no matching follow-up was still queued. Never fall back to `steer()`,
+which would enqueue a duplicate. Unsupported servers raise `RpcCommandError`,
+and missing or non-boolean `promoted` values raise `ValueError`.
+
 ## Host-Owned Custom Tools
 
 RPC hosts can expose custom tools to the agent with JSON Schema metadata. The

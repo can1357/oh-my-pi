@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The status-line cost segment renders subagent spend after the session's own spend as `(+1.27)`, and billing summaries print the `$` or subscription mark once, so a later amount billed the same way (such as advisor spend) shows bare ([#13944](https://github.com/can1357/oh-my-pi/pull/13944) by [@H4vC](https://github.com/H4vC))
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

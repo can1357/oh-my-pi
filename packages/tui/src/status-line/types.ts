@@ -138,6 +138,8 @@ export interface SegmentContext {
 		orchestrationCacheRead: number;
 		premiumRequests: number;
 		cost: number;
+		/** Portion of `cost` carried by completed subagent task results. */
+		subagentCost?: number;
 		tokensPerSecond: number | null;
 	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
@@ -150,6 +152,11 @@ export interface SegmentContext {
 	/** Blink phase for the running-speculation pulse; toggled by the component's timer. */
 	speculationBlinkOn: boolean;
 	subagentCount: number;
+	/**
+	 * Spend of every subagent under the main session (descendants included),
+	 * from the Agent Hub projection; 0 while a subagent is focused or unknown.
+	 */
+	subagentTreeCost?: number;
 	/**
 	 * Active processing time accumulated this session, in ms — the union of
 	 * every `agent_start`→`agent_end` window plus the currently-streaming
