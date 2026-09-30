@@ -53,9 +53,10 @@ describe("Mermaid rendering setting", () => {
 		const markdown = new Markdown("```mermaid\ngraph TD\n  A --> B\n```", 0, 0, getMarkdownTheme());
 		const lines = stripAnsi(markdown.render(80).join("\n"));
 
-		expect(lines).toContain("```mermaid");
+		expect(lines).toMatch(/\[[^\]\n]*\bmermaid\]/);
 		expect(lines).toContain("graph TD");
 		expect(lines).toContain("-->");
+		expect(lines).not.toContain("```");
 	});
 
 	it("draws Mermaid structure with the muted token and labels with the text token", async () => {
