@@ -34,6 +34,7 @@ export type KnownProvider =
 	| "google-gemini-cli"
 	| "google-vertex"
 	| "groq"
+	| "helmcode"
 	| "huggingface"
 	| "kilo"
 	| "kimi-code"

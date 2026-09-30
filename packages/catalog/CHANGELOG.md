@@ -35,6 +35,7 @@
 - Added support for Claude Sonnet 5.5 model with image and text inputs
 - Added new compatibility rules for Anthropic Sonnet family enabling mid‑conversation system features and disabling forced tool choice
 - Added the `web-search-model`, `hosted-image`, and `image-model` catalog axes (`Model.webSearchModel`, `hostedImage`, `imageModel`). `web-search` now comes from the model's lineage and API (GPT-5+ Responses, Claude 4+ Messages, Gemini 2+), so proxies and gateways that expose these models inherit it.
+- Added Helmcode as a built-in provider with API-key login and live model discovery. Its open-weight models use Helmcode's documented reasoning levels, and its resold Claude, GPT, and Gemini models show their context window, image input, pricing, and reasoning levels ([#13630](https://github.com/can1357/oh-my-pi/pull/13630) by [@alexcerezo](https://github.com/alexcerezo)).
 
 ### Changed
 

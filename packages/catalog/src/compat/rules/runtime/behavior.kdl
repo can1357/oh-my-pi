@@ -149,6 +149,9 @@ behavior {
 	// Text-chat transports cannot serve StepFun's audio-only and image-editing
 	// SKUs, which its /v1/models roster interleaves with the chat models.
 	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
+	// beside the chat models (helmcode.com/docs/models).
+	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
