@@ -110,6 +110,40 @@ describe.skipIf(!hasFfmpeg)("read transcript", () => {
 		expect(second).not.toContain("0:33.5");
 	});
 
+	it("runs recognition once for parallel page reads of one file, and one reader's abort leaves the other intact", async () => {
+		// Two 30 s windows: a 40 s tone track transcribes in exactly two model calls.
+		const audio = path.join(testDir, "talk.flac");
+		await ffmpeg(
+			"-f",
+			"lavfi",
+			"-i",
+			`aevalsrc='0.5*sin(2*PI*440*t)*(between(t,2,2.999)+between(t,33.5,34.499))':s=${SAMPLE_RATE}:d=40`,
+			audio,
+		);
+		spyOn(sttDownloader, "isSttModelCached").mockResolvedValue(true);
+		// Hold the first model call until the abort has happened. By the time a window
+		// reaches the model, ffprobe and the decode have run, so both reads have joined.
+		const firstCall = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const transcribe = spyOn(sttClient, "transcribe").mockImplementation(async (key, samples) => {
+			firstCall.resolve();
+			await release.promise;
+			return detectTones(key, samples);
+		});
+		const tool = new ReadTool(makeSession(testDir));
+
+		const aborted = new AbortController();
+		const first = tool.execute("call", { path: `${audio}:1-1:raw` }, aborted.signal);
+		const second = tool.execute("call", { path: `${audio}:2-2:raw` });
+		await firstCall.promise;
+		aborted.abort();
+		await expect(first).rejects.toThrow();
+		release.resolve();
+
+		expect(textOf(await second)).toContain("[0:33.5-0:34.5] tone");
+		expect(transcribe.mock.calls.length).toBe(2);
+	});
+
 	it("points at `omp setup speech` when the speech model is not downloaded", async () => {
 		const audio = path.join(testDir, "memo.wav");
 		await ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=2", audio);

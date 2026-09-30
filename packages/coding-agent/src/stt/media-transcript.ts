@@ -77,8 +77,19 @@ export function parseTranscriptSel(sel: string | undefined): { lineSel: string |
 }
 
 // Transcripts are slow to produce and small to keep; memoize so paging a long
-// one (`talk.mp3:400-800`) does not run speech recognition again.
+// one (`talk.mp3:400-800`) does not run speech recognition again. Concurrent
+// reads of the same file (parallel page reads in one turn) join the in-flight
+// job instead of decoding and recognizing it a second time.
 const transcriptCache = new LRUCache<string, MediaTranscript>({ max: 16 });
+
+interface TranscriptJob {
+	promise: Promise<MediaTranscript>;
+	/** Aborts the shared work; fired only once every joined read has aborted. */
+	controller: AbortController;
+	readers: number;
+}
+
+const inFlightTranscripts = new Map<string, TranscriptJob>();
 
 /**
  * Transcribe the first audio stream of an audio or video file. Throws
@@ -90,11 +101,82 @@ export async function transcribeMediaFile(
 	options: MediaTranscriptOptions,
 ): Promise<MediaTranscript> {
 	const { model, language, signal } = options;
+	signal?.throwIfAborted();
 	const stat = await fs.stat(absolutePath);
 	const cacheKey = [absolutePath, stat.size, stat.mtimeMs, model.key, language ?? ""].join("\0");
 	const cached = transcriptCache.get(cacheKey);
 	if (cached) return cached;
 
+	let job = inFlightTranscripts.get(cacheKey);
+	if (!job) {
+		const controller = new AbortController();
+		const started: TranscriptJob = {
+			controller,
+			readers: 0,
+			promise: produceTranscript(absolutePath, model, language, controller.signal)
+				.then(transcript => {
+					transcriptCache.set(cacheKey, transcript);
+					return transcript;
+				})
+				.finally(() => {
+					if (inFlightTranscripts.get(cacheKey) === started) inFlightTranscripts.delete(cacheKey);
+				}),
+		};
+		inFlightTranscripts.set(cacheKey, started);
+		job = started;
+	}
+	return joinTranscriptJob(cacheKey, job, signal);
+}
+
+/**
+ * Wait on a shared transcript job under this read's own abort signal. A read
+ * that aborts rejects at once; the shared work stops only when no reader is
+ * left waiting on it.
+ */
+function joinTranscriptJob(
+	cacheKey: string,
+	job: TranscriptJob,
+	signal: AbortSignal | undefined,
+): Promise<MediaTranscript> {
+	job.readers += 1;
+	let joined = true;
+	const leave = (): void => {
+		if (!joined) return;
+		joined = false;
+		job.readers -= 1;
+	};
+	if (!signal) return job.promise.finally(leave);
+	const { promise, resolve, reject } = Promise.withResolvers<MediaTranscript>();
+	const onAbort = (): void => {
+		leave();
+		if (job.readers === 0) {
+			if (inFlightTranscripts.get(cacheKey) === job) inFlightTranscripts.delete(cacheKey);
+			job.controller.abort(signal.reason);
+		}
+		reject(signal.reason);
+	};
+	signal.addEventListener("abort", onAbort, { once: true });
+	job.promise.then(
+		transcript => {
+			signal.removeEventListener("abort", onAbort);
+			leave();
+			resolve(transcript);
+		},
+		(error: unknown) => {
+			signal.removeEventListener("abort", onAbort);
+			leave();
+			reject(error);
+		},
+	);
+	return promise;
+}
+
+async function produceTranscript(
+	absolutePath: string,
+	model: SttModel,
+	language: string | undefined,
+	signal: AbortSignal,
+): Promise<MediaTranscript> {
 	const meta = await probeVideo(absolutePath, signal);
 	if (meta.audioCodec === undefined) {
 		throw new MediaTranscriptError(`'${path.basename(absolutePath)}' has no audio stream to transcribe.`);
@@ -120,8 +202,5 @@ export async function transcribeMediaFile(
 	}
 	const tail = chunker.flush();
 	if (tail) await transcribeChunk(tail);
-
-	const transcript = { segments, durationSec: meta.durationSec };
-	transcriptCache.set(cacheKey, transcript);
-	return transcript;
+	return { segments, durationSec: meta.durationSec };
 }
