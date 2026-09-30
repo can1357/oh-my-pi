@@ -103,8 +103,8 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
 		// One row per account in the detail table, not the bucket mean.
 		const table = findAll(detail, n => n.k === "table")[0];
-		const left = table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
-		expect(left).toEqual([[{ t: "75% left" }], [{ t: "25% left", s: "warning" }]]);
+		const used = table?.k === "table" ? table.p?.rows.map(row => row.cells.used) : undefined;
+		expect(used).toEqual([[{ t: "25% used" }], [{ t: "75% used", s: "warning" }]]);
 	});
 
 	it("re-fetches reports from the Refresh button like the r key", async () => {
