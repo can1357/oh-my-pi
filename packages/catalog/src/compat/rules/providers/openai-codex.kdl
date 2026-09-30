@@ -89,6 +89,23 @@ provider "openai-codex" {
 			cache-write 0
 		}
 	}
+	// GPT-6.1 Sol keeps GPT-6 Sol's $2/$10 list price but halves cached input
+	// to $0.10 (OpenAI API docs, 2026-09-29). Like Astra, Codex reports a 272K
+	// default and an 872K maximum while OpenAI documents 922K max input (1.05M
+	// total); the curated maximum applies only with extended context on, and a
+	// higher live maximum still wins.
+	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 0
+		}
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 922000
+	}
 	models "gpt-6-luna" "gpt-6-luna-wm" {
 		cost-patch {
 			input 0.1

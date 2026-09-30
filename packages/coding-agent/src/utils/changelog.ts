@@ -315,9 +315,9 @@ async function parseStartupChangelogFile(
 			newlineIndex = pending.indexOf("\n");
 		}
 	}
-	if (pending && !processLine(pending + decoder.decode())) {
-		finishCurrentEntry();
-	}
+	// A seen-version stop already finished the current entry, so this is a no-op then.
+	if (pending) processLine(pending + decoder.decode());
+	finishCurrentEntry();
 	return { entries, totalUnseenEntries };
 }
 

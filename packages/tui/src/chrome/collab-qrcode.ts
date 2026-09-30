@@ -3,7 +3,9 @@ import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import type { AnimationFrame, TranscriptPresentationTarget } from "./transcript-container";
 import { fgOrPlain } from "../theme/theme";
 import { urlHyperlinkAlways } from "../render/index";
-import { QrCode, renderQrHalfBlocks } from "./qrcode";
+import { QrCode, renderQrHalfBlocks, renderQrText } from "./qrcode";
+import type { DescribeContext, NativeNode } from "../native/node";
+import { code, col, text } from "../native/describe";
 
 /** Scheme-less display form of a collab browser deep link, OSC-8 linked. */
 export function collabBrowserLink(webLink: string, label?: string): string {
@@ -30,12 +32,16 @@ export function collabBrowserLink(webLink: string, label?: string): string {
  * URL above" is not reachable.
  */
 export class CollabQrCodeComponent implements Component, TranscriptPresentationTarget {
+	readonly #qr: QrCode;
 	readonly #lines: readonly string[];
 	readonly #minWidth: number;
 	#allocatedRows = Number.POSITIVE_INFINITY;
+	/** Native description per appearance: the polarity follows the terminal's foreground. */
+	#native: { dark: boolean; node: NativeNode } | undefined;
 
 	constructor(readonly url: string) {
-		const rows = renderQrHalfBlocks(QrCode.encodeText(url, "M"));
+		this.#qr = QrCode.encodeText(url, "M");
+		const rows = renderQrHalfBlocks(this.#qr);
 		this.#lines = rows.map(row => ` ${row}`);
 		this.#minWidth = rows.reduce((max, row) => Math.max(max, visibleWidth(row)), 0) + 1;
 	}
@@ -52,6 +58,25 @@ export class CollabQrCodeComponent implements Component, TranscriptPresentationT
 			return [this.#hiddenHint(`viewport height ${this.#allocatedRows}; need ${this.#lines.length}`, width)];
 		}
 		return this.#lines;
+	}
+
+	/**
+	 * The symbol as an unwrapped monospace block plus the join link. Glyphs are
+	 * drawn in the terminal's foreground, so on a dark appearance the light
+	 * modules are inked to keep the dark-on-light symbol scanners expect.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		if (this.#native?.dark === cx.dark) return this.#native.node;
+		const qr = renderQrText(this.#qr, cx.dark).join("\n");
+		const node = col(
+			[
+				text([{ t: this.url.replace(/^https?:\/\//, ""), s: "accent link", href: this.url }], { wrap: "none" }),
+				code(qr, { lang: "text", wrap: false }),
+			],
+			{ role: "omp.collab.qrcode" },
+		);
+		this.#native = { dark: cx.dark, node };
+		return node;
 	}
 
 	/** Survives emergency 1-row transcript pressure when this block is otherwise hidden. */

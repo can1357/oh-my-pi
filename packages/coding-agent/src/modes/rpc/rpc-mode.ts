@@ -33,6 +33,7 @@ import {
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession } from "../../session/session-listing";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -141,6 +142,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
 	skill: Skill;
+	queueChipText: string;
 }
 
 /**
@@ -154,7 +156,7 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt };
+	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 
 /**
@@ -179,7 +181,7 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, queueChipText: invocation.queueChipText },
 	);
 }
 
@@ -755,9 +757,9 @@ export function registerRpcPersistenceSurface(
 
 /** Startup options for {@link runRpcMode}. */
 export interface RpcModeOptions {
-	/** `--mode rpc-ui`: route tool UI (ask, tool cards) over the protocol as well. */
+	/** `--mode rpc-ui`: route tool UI (e.g. ask) over the protocol, independently of headless extensions. */
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-	/** `--no-ui`: extensions run with `hasUI=false`; no dialog or presentation `extension_ui_request` frames are emitted. */
+	/** `--no-ui`: extensions run with `hasUI=false` and no UI frames; tool UI and host-issued login are unaffected. */
 	headless?: boolean;
 	subagentEventBus?: EventBus;
 	input?: ReadableStream<Uint8Array>;
@@ -1225,6 +1227,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "follow_up");
 			}
 
+			case "remove_queued_message": {
+				if (typeof command.message !== "string") {
+					return error(id, "remove_queued_message", "message must be a string");
+				}
+				if (command.queue !== "steering" && command.queue !== "followUp") {
+					return error(id, "remove_queued_message", 'queue must be "steering" or "followUp"');
+				}
+				return success(id, "remove_queued_message", {
+					removed: session.removeQueuedMessage(command.message, command.queue),
+				});
+			}
+
 			case "abort": {
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
@@ -1271,6 +1285,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "get_state": {
+				const queuedMessages = session.getQueuedMessages();
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
@@ -1286,6 +1301,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					queuedMessageCount: session.queuedMessageCount,
 					hasPendingAsyncWork: session.hasPendingAsyncWork(),
 					isSettled: isRpcSessionSettled(session),
+					queuedMessages: { steering: [...queuedMessages.steering], followUp: [...queuedMessages.followUp] },
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
@@ -1385,7 +1401,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				) {
 					return error(id, "set_event_filter", "events must be null or an array of non-empty event type strings");
 				}
-				return success(id, "set_event_filter", { events: sessionEvents.setFilter(events) });
+				const messageUpdates = command.messageUpdates === undefined ? "full" : command.messageUpdates;
+				if (messageUpdates !== "full" && messageUpdates !== "delta") {
+					return error(id, "set_event_filter", 'messageUpdates must be "full" or "delta"');
+				}
+				return success(id, "set_event_filter", {
+					events: sessionEvents.setFilter(events, messageUpdates),
+					messageUpdates,
+				});
 			}
 
 			case "get_subagents": {
@@ -1508,6 +1531,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			// =================================================================
+			// Cache warming
+			// =================================================================
+
+			case "set_cache_warming": {
+				if (!CACHE_WARMING_MODES.includes(command.mode)) {
+					return error(id, "set_cache_warming", `Invalid cache warming mode: ${String(command.mode)}`);
+				}
+				const mode = session.setCacheWarmingMode(command.mode);
+				return success(id, "set_cache_warming", { mode });
 			}
 
 			// =================================================================

@@ -118,7 +118,7 @@ describe("task.agentServiceTierOverrides", () => {
 				overrides: { "task.agentServiceTierOverrides": { scout: "turbo" } },
 			}),
 		).rejects.toThrow(
-			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, none, auto, default, flex, scale, priority.",
+			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, none, auto, default, flex, scale, priority, ultrafast.",
 		);
 	});
 

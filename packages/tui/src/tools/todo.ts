@@ -11,6 +11,11 @@ import { renderStatusLine, renderTreeList } from "../render";
 import { framedToolCard } from "../render/tool-card";
 
 import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "../render/render-utils";
+import type { TspChecklistItem, TspChecklistPhase } from "@oh-my-pi/pi-wire";
+import { node } from "../native/describe";
+import { OwnerMemo } from "../native/memo";
+import { errorText, noteText, resultText } from "./native-view";
+import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 // =============================================================================
 // Types
@@ -428,6 +433,74 @@ export function setActiveTodoDescriptionsProvider(provider: () => readonly strin
 	activeTodoDescriptionsProvider = provider;
 }
 
+/** omp todo status → checklist item status (§7.5). */
+const CHECKLIST_STATUS: Record<TodoStatus, TspChecklistItem["status"]> = {
+	pending: "pending",
+	in_progress: "active",
+	completed: "done",
+	abandoned: "dropped",
+	blocked: "blocked",
+};
+
+/** Checklist item for one todo; a pending todo an in-flight subagent executes reads as active. */
+function checklistItem(task: TodoItem, id: string, matched = false): TspChecklistItem {
+	const status = task.status === "pending" && matched ? "active" : CHECKLIST_STATUS[task.status];
+	const note = task.status === "blocked" && task.blocker ? forDisplay(task.blocker) : undefined;
+	return note === undefined
+		? { id, text: forDisplay(task.content), status }
+		: { id, text: forDisplay(task.content), status, note };
+}
+
+/**
+ * Checklist phases for native terminals: plain phase titles (no roman
+ * numerals — the terminal numbers nothing), completed phases folded.
+ */
+export function todoChecklistPhases(
+	phases: readonly { name: string; tasks: readonly TodoItem[] }[],
+	isMatched: (task: TodoItem) => boolean = () => false,
+): TspChecklistPhase[] {
+	return phases.map((phase, p) => ({
+		id: `p${p}`,
+		title: forDisplay(phase.name),
+		items: phase.tasks.map((task, t) => checklistItem(task, `p${p}.${t}`, isMatched(task))),
+		collapsed: phase.tasks.length > 0 && phase.tasks.every(isClosedTodo),
+	}));
+}
+
+const todoResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
+/**
+ * Native todo result: head `Todo closed/total`, body one `checklist` node.
+ * Renderers get no describe context, so the checklist is always emitted;
+ * terminals that do not list the kind draw its unknown-kind fallback (§3).
+ */
+function describeTodoResult(
+	result: ToolRenderResult<TodoToolDetails>,
+	options: RenderResultOptions,
+): NativeToolView | undefined {
+	if (result.isError) {
+		return {
+			tool: { title: "Todo" },
+			tone: "error",
+			body: [errorText(resultText(result) || "Todo operation failed")],
+		};
+	}
+	const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
+	const total = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+	if (total === 0) {
+		return { tool: { title: "Todo" }, body: [noteText(forDisplay(resultText(result) || "No todos"))] };
+	}
+	const closed = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+	const activeDescs = options.expanded ? [] : activeTodoDescriptionsProvider();
+	const isMatched = (task: TodoItem): boolean =>
+		activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
+	return {
+		tool: { title: "Todo", target: `${closed}/${total}`, targetKind: "text" },
+		body: [node("checklist", { mode: "full", phases: todoChecklistPhases(phases, isMatched) }, [], "checklist")],
+		preview: "none",
+	};
+}
+
 /** Render todo operations and phased task snapshots. */
 export const todoToolRenderer = {
 	renderCall(args: TodoRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
@@ -576,5 +649,21 @@ export const todoToolRenderer = {
 			};
 		});
 	},
+	describeCall(args: TodoRenderArgs): NativeToolView {
+		const ops = normalizeTodoArg(args).map(e => {
+			const parts = [forDisplay(e.op ?? "update")];
+			if (e.task) parts.push(forDisplay(e.task));
+			if (e.phase) parts.push(forDisplay(e.phase));
+			if (Array.isArray(e.items) && e.items.length)
+				parts.push(`${e.items.length} ${pluralize("item", e.items.length)}`);
+			return parts.join(" ");
+		});
+		return { tool: { title: "Todo", target: ops.length === 0 ? "update" : ops.join(", "), targetKind: "text" } };
+	},
+
+	describeResult(result: ToolRenderResult<TodoToolDetails>, options: RenderResultOptions): NativeToolView | undefined {
+		return todoResultMemo.get(result, [options.expanded], () => describeTodoResult(result, options));
+	},
+
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<TodoRenderArgs, TodoToolDetails>;

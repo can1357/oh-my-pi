@@ -30,7 +30,15 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { formatKeyHint } from "../app-keybindings";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { renderSegmentTrack } from "../chrome/segment-track";
+import { Input } from "../components/input";
 import { MenuSelection, getMenuWindow } from "../components/menu-selection";
+import type { KeyName } from "../key-hint-format";
+import { node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import { plainText } from "../native/spans";
+import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import type { TspPickerItem } from "@oh-my-pi/pi-wire";
 
 /** One segment of a {@link HookSelectorSlider} — a label and an optional
  *  detail line (e.g. the resolved model name) shown beneath the track while
@@ -161,9 +169,27 @@ class OutlinedList extends Container {
  *  disabled-index lookups survive fuzzy filtering and reordering. */
 type FilteredOption = { option: HookSelectorOption; index: number };
 
+/** Plain text of an extension-supplied inline-markdown string: markers rendered away, no ANSI. */
+function plainInline(source: string, mdTheme: MarkdownTheme): string {
+	return plainText(renderInlineMarkdown(source, mdTheme));
+}
+
+const ENTER_KEYS: readonly KeyName[] = ["enter"];
+
+interface HookSelectorNativeMemo {
+	items: readonly FilteredOption[];
+	selected: string | undefined;
+	query: string;
+	slider: number;
+	countdown: NativeNode | undefined;
+	node: NativeNode;
+}
+
 export class HookSelectorComponent extends OverlayPanel {
 	#options: HookSelectorOption[];
 	#menu: MenuSelection<FilteredOption>;
+	/** The type-to-search field; its value drives `#menu`'s query. */
+	#search = Object.assign(new Input(), { prompt: "" });
 	#disabledIndices: Set<number>;
 	#selectionMarker: "radio" | "checkbox" | undefined;
 	#checkedIndices: Set<number>;
@@ -183,6 +209,24 @@ export class HookSelectorComponent extends OverlayPanel {
 	#sliderIndex: number = 0;
 	#sliderComponent: Text | undefined;
 	#lastRenderWidth: number | undefined;
+	readonly #detailLines: readonly string[];
+	readonly #helpText: string | undefined;
+	/** Described option rows by original index; `marker` is the radio state baked into the label. */
+	readonly #nativeItems = new Map<number, { marker: boolean; node: NativeNode }>();
+	/** Title/detail/hint nodes, fixed for the dialog's lifetime. */
+	#nativeStatic: { title: string; detail: NativeNode | undefined; hints: NativeNode } | undefined;
+	#nativeMemo: HookSelectorNativeMemo | undefined;
+	/** Every option as a picker row, by original index (built once; filtering only changes `order`). */
+	#pickerItems: readonly TspPickerItem[] | undefined;
+	#pickerMemo:
+		| {
+				items: readonly FilteredOption[];
+				selected: string | undefined;
+				query: string;
+				cursor: number;
+				node: NativeNode;
+		  }
+		| undefined;
 	constructor(
 		title: string,
 		options: HookSelectorOptionInput[],
@@ -190,7 +234,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		onCancel: () => void,
 		opts?: HookSelectorOptions,
 	) {
-		super(title.split(/\r?\n/, 1)[0] ?? "");
+		super(title.split(/\r?\n/, 1)[0] ?? "", "omp.overlay.hook-select");
 
 		this.#options = options.map(normalizeHookSelectorOption);
 		this.#disabledIndices = new Set(
@@ -218,6 +262,8 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
 		this.#baseTitle = this.title;
+		this.#detailLines = title.split(/\r?\n/).slice(1);
+		this.#helpText = opts?.helpText;
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
@@ -536,31 +582,30 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.#menu.query.trim() && total !== this.#options.length
 				? `${selectedCount}/${total} of ${this.#options.length}`
 				: `${selectedCount}/${total}`;
-		const suffix = this.#menu.query.trim() ? `  Search: ${this.#menu.query}` : "  Type to search";
-		return theme.fg("dim", `  (${count})${suffix}`);
+		if (!this.#menu.query.trim()) return theme.fg("dim", `  (${count})  Type to search`);
+		const field = this.#search.render(visibleWidth(this.#search.getValue()) + 1)[0] ?? "";
+		return `${theme.fg("dim", `  (${count})  Search: `)}${field}`;
 	}
 
-	#setSearchQuery(query: string): void {
-		this.#menu.setQuery(query, false);
+	/** Applies the search field's value to the filter. */
+	#syncSearchQuery(): void {
+		this.#menu.setQuery(this.#search.getValue(), false);
 		this.#updateList();
 	}
 
+	/** Feeds keys the selector does not bind to the search field. Backspace on an empty query and a leading space bubble. */
 	#handleSearchInput(keyData: string): boolean {
 		if (!this.#isSearchEnabled()) return false;
-
-		if (matchesKey(keyData, "backspace")) {
-			if (this.#menu.query.length === 0) return false;
-			const chars = [...this.#menu.query];
-			chars.pop();
-			this.#setSearchQuery(chars.join(""));
-			return true;
+		const before = this.#search.getValue();
+		if (before.length === 0) {
+			if (matchesKey(keyData, "backspace")) return false;
+			const printableText = extractPrintableText(keyData);
+			if (printableText !== undefined && printableText.trim().length === 0) return false;
 		}
-
-		const printableText = extractPrintableText(keyData);
-		if (printableText === undefined) return false;
-		if (this.#menu.query.length === 0 && printableText.trim().length === 0) return false;
-
-		this.#setSearchQuery(this.#menu.query + printableText);
+		const cursorBefore = this.#search.getCursor();
+		if (!this.#search.handleInput(keyData)) return false;
+		if (this.#search.getValue() !== before) this.#syncSearchQuery();
+		else if (this.#search.getCursor() !== cursorBefore) this.#updateList();
 		return true;
 	}
 
@@ -596,10 +641,6 @@ export class HookSelectorComponent extends OverlayPanel {
 			return;
 		}
 
-		if (this.#handleSearchInput(keyData)) {
-			return;
-		}
-
 		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "k"))) {
 			this.#moveSelection(-1);
 		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "j"))) {
@@ -621,6 +662,8 @@ export class HookSelectorComponent extends OverlayPanel {
 			else this.#onRightCallback?.();
 		} else if (this.#onExternalEditorCallback && matchesAppExternalEditor(keyData)) {
 			this.#onExternalEditorCallback();
+		} else {
+			this.#handleSearchInput(keyData);
 		}
 	}
 
@@ -635,5 +678,251 @@ export class HookSelectorComponent extends OverlayPanel {
 
 	override dispose(): void {
 		this.#countdown?.dispose();
+	}
+
+	/** The options as a `picker md` sheet: every option by original index, filtering sends only `order`. */
+	#describePicker(): NativeNode {
+		const items = this.#menu.visibleItems;
+		const selected = this.#menu.selectedKey;
+		const query = this.#menu.query;
+		const cursor = this.#search.getCursor();
+		const memo = this.#pickerMemo;
+		if (
+			memo &&
+			memo.items === items &&
+			memo.selected === selected &&
+			memo.query === query &&
+			memo.cursor === cursor
+		) {
+			return memo.node;
+		}
+		const mdTheme = getMarkdownTheme();
+		const fixed = this.#describeStatic(mdTheme);
+		this.#pickerItems ??= this.#options.map((option, index) => ({
+			id: String(index),
+			label: plainInline(option.label, mdTheme),
+			...(option.description ? { detail: plainInline(option.description, mdTheme) } : {}),
+			...(this.#isDisabled(index) ? { disabled: true as const } : {}),
+		}));
+		const checkbox = this.#selectionMarker === "checkbox";
+		const result = dockedPicker({
+			title: fixed.title,
+			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join(" ")) } : {}),
+			noun: "options",
+			size: "md",
+			layout: "rows",
+			preview: "none",
+			...pickerQuery(this.#isSearchEnabled() || query.length > 0 ? this.#search : null),
+			items: this.#pickerItems,
+			...(query.length > 0 ? { order: items.map(filtered => String(filtered.index)) } : {}),
+			selected: selected ?? null,
+			...(checkbox ? { current: [...this.#checkedIndices].map(String) } : {}),
+			total: this.#options.length,
+			empty: "No matching options",
+			actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
+		});
+		this.#pickerMemo = { items, selected, query, cursor, node: result };
+		return result;
+	}
+
+	/**
+	 * A plain option list is a picker sheet. Otherwise a card headed by the
+	 * title (plus the countdown `elapsed` when a timeout runs), the extra title
+	 * lines, the slider as `tabs`, the options as a `list` keyed by original
+	 * option index, the search query while typing, and the key hints.
+	 */
+	override describe(cx: DescribeContext): NativeNode {
+		if (cx.supports("picker") && !this.#slider && !this.#countdown) return this.#describePicker();
+		const items = this.#menu.visibleItems;
+		const selected = this.#menu.selectedKey;
+		const query = this.#menu.query;
+		const countdown = this.#countdown?.describe();
+		const memo = this.#nativeMemo;
+		if (
+			memo &&
+			memo.items === items &&
+			memo.selected === selected &&
+			memo.query === query &&
+			memo.slider === this.#sliderIndex &&
+			memo.countdown === countdown
+		) {
+			return memo.node;
+		}
+
+		const mdTheme = getMarkdownTheme();
+		const fixed = this.#describeStatic(mdTheme);
+		const children: NativeChild[] = [];
+		if (countdown) {
+			children.push(
+				node("row", { gap: "sm", align: "baseline" }, [node("text", { text: fixed.title }), countdown], "head"),
+			);
+		}
+		if (fixed.detail) children.push(fixed.detail);
+		if (this.#slider) children.push(...this.#describeSlider(this.#slider));
+
+		const selectedItem = this.#menu.selectedItem;
+		const rows: NativeNode[] = [];
+		for (const filtered of items) {
+			rows.push(this.#describeOption(filtered, filtered === selectedItem, mdTheme));
+		}
+		children.push(
+			node(
+				"list",
+				{
+					selected: selectedItem && !this.#menu.isDisabled(selectedItem) ? (selected ?? null) : null,
+					filter: query.trim() || undefined,
+					empty: "No matching options",
+					max: { lines: this.#maxVisible },
+				},
+				rows,
+				"list",
+			),
+		);
+		if (query) {
+			children.push(
+				node("text", { spans: [span("Search: ", "dim"), span(query)], wrap: "none" }, undefined, "search"),
+			);
+		}
+		children.push(fixed.hints);
+
+		const root = overlayCard(this.nativeRole, countdown ? undefined : fixed.title, children);
+		this.#nativeMemo = { items, selected, query, slider: this.#sliderIndex, countdown, node: root };
+		return root;
+	}
+
+	/** Pointer pick of an option does what highlighting it and pressing Enter does; a tab pick moves the slider. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const ev = pickerEvent(event, PICKER_KEY);
+		if (ev?.kind === "action") {
+			this.#resetCountdown();
+			if (ev.act === "close" || ev.act === "cancel") this.#onCancelCallback();
+			else if (ev.act === "clear") {
+				this.#search.setValue("");
+				this.#syncSearchQuery();
+			} else if (ev.act === "confirm") {
+				const selected = this.#menu.selectedItem;
+				if (selected && !this.#menu.isDisabled(selected)) this.#onSelectCallback(selected.option.label);
+			}
+			return;
+		}
+		if (ev?.kind === "select") {
+			const index = this.#menu.visibleItems.findIndex(filtered => String(filtered.index) === ev.item);
+			const target = this.#menu.visibleItems[index];
+			if (!target || this.#menu.isDisabled(target)) return;
+			this.#resetCountdown();
+			this.#menu.setSelectedIndex(index);
+			this.#updateList();
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		if (event.key === "slider") {
+			const target = Number(event.item);
+			if (!Number.isInteger(target)) return;
+			this.#resetCountdown();
+			this.#moveSlider(target - this.#sliderIndex);
+			return;
+		}
+		if (event.key !== "list" && ev?.kind !== "activate") return;
+		const index = this.#menu.visibleItems.findIndex(filtered => String(filtered.index) === event.item);
+		const target = this.#menu.visibleItems[index];
+		if (!target || this.#menu.isDisabled(target)) return;
+		this.#resetCountdown();
+		this.#menu.setSelectedIndex(index);
+		this.#updateList();
+		this.#onSelectCallback(target.option.label);
+	}
+
+	#resetCountdown(): void {
+		if (!this.#countdown) return;
+		this.#countdown.reset();
+		this.#onTimeoutResetCallback?.();
+	}
+
+	#describeStatic(mdTheme: MarkdownTheme): { title: string; detail: NativeNode | undefined; hints: NativeNode } {
+		if (this.#nativeStatic) return this.#nativeStatic;
+		const detail =
+			this.#detailLines.length > 0
+				? node(
+						"text",
+						{ spans: [span(plainText(this.#detailLines.join("\n")), "accent")], wrap: "word" },
+						undefined,
+						"detail",
+					)
+				: undefined;
+		const hints =
+			this.#helpText !== undefined
+				? node("text", { spans: [span(plainText(this.#helpText), "dim")], wrap: "word" }, undefined, "hints")
+				: hintsRow([
+						actionHint(["tui.select.up", "tui.select.down"], "navigate"),
+						{ keys: ENTER_KEYS, label: "select" },
+						actionHint("tui.select.cancel", "cancel"),
+					]);
+		this.#nativeStatic = { title: plainInline(this.#baseTitle, mdTheme), detail, hints };
+		return this.#nativeStatic;
+	}
+
+	/** Caption, a `tabs` strip of the segments (active = slider index), and the active segment's detail. */
+	#describeSlider(slider: HookSelectorSlider): NativeNode[] {
+		const out: NativeNode[] = [];
+		if (slider.caption) {
+			out.push(node("text", { spans: [span(plainText(slider.caption), "dim")] }, undefined, "slider-caption"));
+		}
+		out.push(
+			node(
+				"tabs",
+				{
+					items: slider.segments.map((segment, i) => ({ id: String(i), label: plainText(segment.label) })),
+					active: String(this.#sliderIndex),
+				},
+				undefined,
+				"slider",
+			),
+		);
+		const detail = slider.segments[this.#sliderIndex]?.detail;
+		if (detail) {
+			out.push(
+				node(
+					"text",
+					{ spans: [span("↳ ", "dim"), span(plainText(detail), "muted")], wrap: "word" },
+					undefined,
+					"slider-detail",
+				),
+			);
+		}
+		return out;
+	}
+
+	/** One option `item`; radio rows re-describe only when their filled state flips. */
+	#describeOption(filtered: FilteredOption, isSelected: boolean, mdTheme: MarkdownTheme): NativeNode {
+		const { option, index } = filtered;
+		const radio = this.#selectionMarker === "radio" && index < this.#markableCount;
+		const marker = radio && isSelected;
+		const cached = this.#nativeItems.get(index);
+		if (cached && cached.marker === marker) return cached.node;
+
+		const disabled = this.#isDisabled(index);
+		const label = plainInline(option.label, mdTheme);
+		let glyph: string | undefined;
+		let glyphColor = "dim";
+		if (radio) {
+			glyph = marker ? theme.radio.selected : theme.radio.unselected;
+			if (marker && !disabled) glyphColor = "accent";
+		} else if (this.#selectionMarker === "checkbox" && index < this.#markableCount) {
+			const checked = this.#checkedIndices.has(index);
+			glyph = checked ? theme.checkbox.checked : theme.checkbox.unchecked;
+			if (checked && !disabled) glyphColor = "success";
+		}
+		const described = node(
+			"item",
+			{
+				label: glyph ? [span(`${glyph} `, glyphColor), span(label)] : [span(label)],
+				detail: option.description ? [span(plainInline(option.description, mdTheme), "muted")] : undefined,
+				disabled: disabled || undefined,
+			},
+			undefined,
+			String(index),
+		);
+		this.#nativeItems.set(index, { marker, node: described });
+		return described;
 	}
 }

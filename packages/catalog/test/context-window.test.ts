@@ -5,6 +5,7 @@ import {
 	codexOverrideCeiling,
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 function bundledAstra() {
 	const astra = getBundledModels("openai-codex").find(model => model.id === "gpt-6-astra");
@@ -33,6 +34,27 @@ test("falls back to the curated window when the live maximum is missing or inval
 	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(922_000);
 	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 0 })).toBe(922_000);
 	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBe(922_000);
+});
+
+test("corrects GPT-6.1 Sol's stale 872K Codex maximum to the documented 922K input cap", () => {
+	// Not bundled yet: build the row the way Codex discovery reports it.
+	for (const id of ["gpt-6.1-sol", "gpt-6.1-sol-wm"]) {
+		const sol = buildModel({
+			id,
+			name: "GPT-6.1 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxContextWindow: 872_000,
+			maxTokens: 128_000,
+		});
+		expect(sol.contextWindow).toBe(272_000);
+		expect(resolveMaxContextWindow(sol)).toBe(922_000);
+	}
 });
 
 test("leaves models without a curated maximum to the live value or undefined", () => {
