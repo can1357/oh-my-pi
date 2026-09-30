@@ -46,6 +46,7 @@ import {
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
+import { cfgCompactionEnabled } from "./context-settings";
 import type {
 	InitialRetryFallbackState,
 	UsageFallbackConfirmation,
@@ -79,6 +80,7 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 import {
 	cfgFeaturesUnexpectedStopDetection,
 	cfgModelLoopGuardEnabled,
+	cfgRetryCompactBeforeFallback,
 	cfgRetry,
 	cfgRetryEnabled,
 	cfgRetryModelFallback,
@@ -263,6 +265,12 @@ export interface TurnRecoveryHost {
 	): Promise<RecoveryCompactionResult>;
 	shakeForRequestBodyReadTimeout(generation: number): Promise<boolean>;
 	withBashBranchTransition<T>(operation: () => T): T;
+	/**
+	 * Compact the conversation to fit a target model *before* a swap.
+	 * `excludedMessage` is omitted from the fit check when retry will drop it.
+	 * @returns true when the context fits (already or after compaction).
+	 */
+	compactForTargetModel(target: Model, excludedMessage?: AssistantMessage): Promise<boolean>;
 }
 
 /** Construction-time retry state restored from model selection. */
@@ -1703,6 +1711,16 @@ export class TurnRecovery {
 		this.#fallbackRoutedFor = undefined;
 	}
 
+	#canCompactBeforeFallback(target: Model, current: Model | undefined): boolean {
+		const targetWindow = target.contextWindow ?? 0;
+		return (
+			cfgRetryCompactBeforeFallback.get(this.#host.settings) &&
+			cfgCompactionEnabled.get(this.#host.settings) &&
+			targetWindow > 0 &&
+			targetWindow < (current?.contextWindow ?? 0)
+		);
+	}
+
 	/** Checks whether a fallback selector remains in cooldown. */
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
 		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
@@ -2088,6 +2106,7 @@ export class TurnRecovery {
 			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
+		let compactedForFallback = false;
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2134,14 +2153,24 @@ export class TurnRecovery {
 				// A candidate whose effort floor exceeds the per-spawn ceiling would be
 				// clamped UP past the cap by its model floor — skip it entirely.
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
-				// Skip a candidate whose window cannot hold the retry context. The
-				// failed assistant is excluded only when retry removes it; preserved
-				// unexecuted-tool turns remain part of the request (issue #8065).
-				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
+				// The failed assistant is excluded only when retry removes it; a
+				// preserved unexecuted-tool turn remains in the request (#8065).
+				const excludedMessage = options?.preserveFailedTurn ? undefined : failedMessage;
+				let fits = this.#host.contextFitsModel(candidate, excludedMessage);
+				if (!fits && (compactedForFallback || !this.#canCompactBeforeFallback(candidate, this.#host.model()))) {
 					continue;
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
+				// Compact once, still on the current model. Later candidates are
+				// judged against that same result; the first one that fits is used.
+				if (!fits) {
+					compactedForFallback = true;
+					await this.#host.compactForTargetModel(candidate, excludedMessage);
+					if (this.#host.isDisposed()) return false;
+					fits = this.#host.contextFitsModel(candidate, excludedMessage);
+					if (!fits) continue;
+				}
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
@@ -2312,6 +2341,16 @@ export class TurnRecovery {
 		if (!primaryModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
+		// Fit the smaller primary before leaving the fallback. If compaction
+		// cannot make the conversation fit, stay on the fallback instead of
+		// sending an oversized request.
+		if (
+			this.#canCompactBeforeFallback(primaryModel, currentModel) &&
+			!this.#host.contextFitsModel(primaryModel) &&
+			!(await this.#host.compactForTargetModel(primaryModel))
+		) {
+			return false;
+		}
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =

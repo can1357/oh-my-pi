@@ -2502,6 +2502,26 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
+	/**
+	 * Compact the current conversation so it fits `target` before a model swap.
+	 * `excludedMessage` is a failed turn that retry will drop, so the fit check
+	 * matches the request that will actually be sent.
+	 * @returns true when the context fits (already, or after compaction).
+	 */
+	async compactForTargetModel(target: Model, excludedMessage?: AssistantMessage): Promise<boolean> {
+		const contextWindow = target.contextWindow ?? 0;
+		if (contextWindow <= 0 || this.contextFitsModel(target, excludedMessage)) return true;
+		const contextTokens = this.#estimatePrePromptContextTokens([], contextWindow);
+		await this.runAutoCompaction("threshold", false, false, false, {
+			autoContinue: false,
+			suppressContinuation: true,
+			triggerContextTokens: contextTokens,
+			preparedContextTokens: this.#estimateStoredContextTokens(),
+			phase: "pre_turn",
+		});
+		return this.contextFitsModel(target, excludedMessage);
+	}
+
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
