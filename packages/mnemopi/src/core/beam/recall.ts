@@ -77,8 +77,9 @@ type RecallMmrItem = {
 /**
  * Score multipliers for a candidate's stored `veracity` label and, for episodic
  * rows, its degradation tier. Resolved once per {@link recall} from the
- * `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` readers in `config.ts`;
- * `true`, `likely_true` and `false` have no override.
+ * `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` readers in `config.ts`,
+ * clamped at 0 like the hybrid weights so a negative value cannot rank a row
+ * below one labelled `false`; `true`, `likely_true` and `false` have no override.
  */
 interface TrustWeights {
 	readonly veracity: Readonly<Record<string, number>> & { readonly unknown: number };
@@ -88,16 +89,16 @@ interface TrustWeights {
 function resolveTrustWeights(): TrustWeights {
 	return {
 		veracity: {
-			stated: statedWeight(),
+			stated: Math.max(0, statedWeight()),
 			true: 1.0,
 			likely_true: 1.0,
-			unknown: unknownWeight(),
-			inferred: inferredWeight(),
-			imported: importedWeight(),
-			tool: toolWeight(),
+			unknown: Math.max(0, unknownWeight()),
+			inferred: Math.max(0, inferredWeight()),
+			imported: Math.max(0, importedWeight()),
+			tool: Math.max(0, toolWeight()),
 			false: 0,
 		},
-		tiers: [tier1Weight(), tier2Weight(), tier3Weight()],
+		tiers: [Math.max(0, tier1Weight()), Math.max(0, tier2Weight()), Math.max(0, tier3Weight())],
 	};
 }
 

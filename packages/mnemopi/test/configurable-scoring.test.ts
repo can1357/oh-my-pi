@@ -128,6 +128,18 @@ describe("configurable recall scoring", () => {
 		expect(await order()).toEqual(["tool", "unknown"]);
 	});
 
+	it("counts a negative MNEMOPI_<LABEL>_WEIGHT as 0, never below a false row", async () => {
+		process.env.MNEMOPI_TOOL_WEIGHT = "-1";
+		const beam = makeBeam();
+		beam.remember("quorum ledger rotation alpha", { importance: 0.5, source: "test", veracity: "tool" });
+		beam.remember("quorum ledger rotation bravo", { importance: 0.5, source: "test", veracity: "false" });
+		const scores = Object.fromEntries(
+			(await beam.recall("quorum ledger rotation", 2)).map(row => [row.veracity, row.score]),
+		);
+
+		expect(scores).toEqual({ tool: 0, false: 0 });
+	});
+
 	it("ranks episodic rows by the MNEMOPI_TIER<N>_WEIGHT degradation weights", async () => {
 		delete process.env.MNEMOPI_TIER1_WEIGHT;
 		delete process.env.MNEMOPI_TIER2_WEIGHT;
