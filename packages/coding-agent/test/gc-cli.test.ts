@@ -681,6 +681,31 @@ describe("runGcCommand cold-session archive", () => {
 		expect(await Bun.file(interrupted).exists()).toBe(true);
 	});
 
+	test("prunes dangling custom-session-files pointers and keeps valid ones", async () => {
+		const session = await writeSession(root, "project", "pointer-keep", "complete", { ageDays: 90 });
+		const registryDir = getCustomSessionFilesDir(root);
+		await fs.mkdir(registryDir, { recursive: true });
+		const valid = path.join(registryDir, "alive");
+		await Bun.write(valid, `${session}\n`);
+		const dangling = path.join(registryDir, "gone");
+		await Bun.write(dangling, `${path.join(root, "sessions", "project", "deleted.jsonl")}\n`);
+		const blank = path.join(registryDir, "blank");
+		await Bun.write(blank, "  \n");
+
+		const dry = await runGcCommand({
+			flags: { agentDir: root, archive: true, coldArchiveAfterDays: 30, apply: false },
+		});
+		expect(dry.archive?.danglingPointersPruned).toBe(2);
+		expect(await Bun.file(dangling).exists()).toBe(true);
+
+		await runGcCommand({
+			flags: { agentDir: root, archive: true, coldArchiveAfterDays: 30, apply: true },
+		});
+		expect(await Bun.file(valid).exists()).toBe(true);
+		expect(await Bun.file(dangling).exists()).toBe(false);
+		expect(await Bun.file(blank).exists()).toBe(false);
+	});
+
 	test("keeps the source journal when compression encounters a read error", async () => {
 		const session = await writeSession(root, "project", "compression-error", "complete", { ageDays: 90 });
 		const original = await Bun.file(session).bytes();

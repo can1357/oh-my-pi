@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- `omp gc` prunes custom-session-files pointers whose target no longer exists
+
 
 ## [18.4.5] - 2026-09-30
 

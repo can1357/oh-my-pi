@@ -77,6 +77,8 @@ export interface ArchiveGcResult {
 	keptNewestPerCwd: number;
 	wouldArchive: number;
 	archived: number;
+	/** custom-session-files pointers whose target no longer exists (dry run: would be; apply: were) pruned. */
+	danglingPointersPruned: number;
 	historyRowsDeleted: number;
 	statsRowsDeleted: number;
 	ftsRebuilt: boolean;
@@ -368,6 +370,43 @@ async function collectRegisteredSessionFiles(registryDir: string): Promise<strin
 		files.set(normalizePathForComparison(sessionFile), sessionFile);
 	}
 	return [...files.values()];
+}
+
+/**
+ * custom-session-files entries whose target no longer exists are dead weight:
+ * gc only reads the registry to PROTECT referenced sessions, so dangling
+ * pointers protect nothing and are never cleaned up by anything else. Empty
+ * and whitespace-only pointers are dangling too.
+ */
+async function pruneDanglingSessionPointers(registryDir: string, apply: boolean): Promise<number> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(registryDir);
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return 0;
+		throw error;
+	}
+	let pruned = 0;
+	for (const entry of entries) {
+		const pointer = path.join(registryDir, entry);
+		const recorded = (await readTextIfPresent(pointer)).trim();
+		if (recorded) {
+			const stat = await statIfPresent(path.resolve(recorded));
+			if (stat?.isFile()) continue;
+		}
+		if (!apply) {
+			pruned += 1;
+			continue;
+		}
+		try {
+			await fs.unlink(pointer);
+		} catch (error) {
+			if (codeOf(error) === "ENOENT") continue;
+			throw error;
+		}
+		pruned += 1;
+	}
+	return pruned;
 }
 
 /**
@@ -1366,6 +1405,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		keptNewestPerCwd: 0,
 		wouldArchive: 0,
 		archived: 0,
+		danglingPointersPruned: 0,
 		historyRowsDeleted: 0,
 		statsRowsDeleted: 0,
 		ftsRebuilt: false,
@@ -1425,6 +1465,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		}
 	}
 
+	result.danglingPointersPruned = await pruneDanglingSessionPointers(getCustomSessionFilesDir(options.agentDir), options.apply);
 	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
 	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
 	return result;
@@ -1678,6 +1719,7 @@ function renderText(result: GcResult): string {
 			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
 		);
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
+		if (result.archive.danglingPointersPruned > 0) lines.push(`dangling session pointers ${result.apply ? "pruned" : "to prune"}: ${result.archive.danglingPointersPruned}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
 	if (result.wal) {
