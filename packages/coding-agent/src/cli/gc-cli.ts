@@ -1450,6 +1450,10 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	result.wouldArchive = candidates.length;
+	result.danglingPointersPruned = await pruneDanglingSessionPointers(
+		getCustomSessionFilesDir(options.agentDir),
+		options.apply,
+	);
 	if (!options.apply) return result;
 
 	const archivedSessionIds: string[] = [];
@@ -1465,7 +1469,6 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		}
 	}
 
-	result.danglingPointersPruned = await pruneDanglingSessionPointers(getCustomSessionFilesDir(options.agentDir), options.apply);
 	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
 	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
 	return result;
@@ -1719,7 +1722,10 @@ function renderText(result: GcResult): string {
 			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
 		);
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
-		if (result.archive.danglingPointersPruned > 0) lines.push(`dangling session pointers ${result.apply ? "pruned" : "to prune"}: ${result.archive.danglingPointersPruned}`);
+		if (result.archive.danglingPointersPruned > 0)
+			lines.push(
+				`dangling session pointers ${result.apply ? "pruned" : "to prune"}: ${result.archive.danglingPointersPruned}`,
+			);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
 	if (result.wal) {
