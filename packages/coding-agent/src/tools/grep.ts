@@ -24,7 +24,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { sessionDelegationBias } from "../task/prompt-policy";
+import { sessionPrefersTaskDelegation } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
@@ -357,7 +357,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
+			eagerDelegation: sessionPrefersTaskDelegation(this.session),
 			scoutAvailable: isScoutSpawnable(
 				cfgTaskDisabledAgents.get(this.session.settings),
 				this.session.getSessionSpawns?.() ?? "*",
