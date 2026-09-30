@@ -14,7 +14,7 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	return undefined;
 }
 
-function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
+export function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
 	if (!("content" in message) || typeof message.content === "string") return undefined;
 	const images: ImageContent[] = [];
 	for (const part of message.content) {
@@ -77,6 +77,13 @@ const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set(MAGIC_KEYWORDS.m
 /** Hidden companion carrying vision descriptions for a text-only model. */
 export const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
 
+/**
+ * Queued content the agent authored (advisor notes, async results, nudges):
+ * never restorable, and never a barrier between two user steers.
+ */
+export function isAgentQueuedMessage(message: AgentMessage): boolean {
+	return message.role === "custom" && message.attribution === "agent";
+}
 /** Hidden companion carrying the source path of a video contact sheet. */
 export const VIDEO_ATTACHMENT_TYPE = "video-attachment";
 

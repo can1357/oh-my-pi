@@ -1842,6 +1842,10 @@ function openLiveSteering(
 ): LiveSteeringChannel | undefined {
 	const { getSteeringMessages, waitForSteeringMessages } = config;
 	if (!getSteeringMessages || !waitForSteeringMessages || prepared.ownedDialect) return undefined;
+	// "wait" promises steering is read only at the next boundary. Claiming it
+	// mid-stream took the first steer out of the queue while later ones kept
+	// arriving, so they could not coalesce with it and surfaced as a second box.
+	if (config.interruptMode === "wait") return undefined;
 	const bound = (signal: AbortSignal): AbortSignal => (loopSignal ? AbortSignal.any([signal, loopSignal]) : signal);
 	return new LiveSteeringChannel({
 		wait: signal => waitForSteeringMessages(bound(signal)),

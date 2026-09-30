@@ -161,7 +161,13 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
-import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import {
+	AgentSession,
+	coreQueueMode,
+	type InitialRetryFallbackState,
+	type PlanYolo,
+	type Prewalk,
+} from "./session/agent-session";
 import {
 	createAuthStorageSettingsSync,
 	discoverAuthStorage as discoverAuthStorageFromConfig,
@@ -328,9 +334,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "./session/settings";
-import { cfgInterruptMode } from "./modes/settings";
-import { cfgFollowUpMode } from "./modes/settings";
-import { cfgSteeringMode } from "./modes/settings";
+import { cfgFollowUpMode, cfgInterruptMode, cfgSteeringMode } from "./modes/settings";
 import {
 	cfgCommandsEnableClaudeProject,
 	cfgCommandsEnableClaudeUser,
@@ -4239,8 +4243,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deadline: options.deadline,
 			transformContext,
 			transformProviderContext,
-			steeringMode: cfgSteeringMode.get(settings),
-			followUpMode: cfgFollowUpMode.get(settings),
+			steeringMode: coreQueueMode(cfgSteeringMode.get(settings)),
+			followUpMode: coreQueueMode(cfgFollowUpMode.get(settings)),
 			interruptMode: cfgInterruptMode.get(settings),
 			...cfgSampling.get(settings),
 			getToolContext: tc => toolContextStore.getContext(tc),

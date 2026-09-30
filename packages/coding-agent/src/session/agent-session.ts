@@ -377,10 +377,12 @@ import {
 import {
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
+	isAgentQueuedMessage,
 	isHiddenUserCompanion,
 	isUserAuthoredQueuedMessage,
 	isUserQueuedMessage,
 	queueChipText,
+	queuedImageContent,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
@@ -454,8 +456,7 @@ import {
 } from "./settings";
 import { type AnthropicSlowModeController, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 import { cfgInterruptMode } from "../modes/settings";
-import { cfgFollowUpMode } from "../modes/settings";
-import { cfgSteeringMode } from "../modes/settings";
+import { cfgFollowUpMode, cfgSteeringMode } from "../modes/settings";
 import { cfgDisabledProviders, cfgModelRoles } from "../config/model-settings";
 import { cfgEvalToolsEnabled } from "../eval/settings";
 import { cfgExtensions, type SkillsSettings } from "../extensibility/settings";
@@ -565,6 +566,47 @@ const noOpUIContext: ExtensionUIContext = {
 // ============================================================================
 // AgentSession Class
 // ============================================================================
+
+type UserQueueMessage = Extract<AgentMessage, { role: "user" }>;
+type QueuedUserMessageListener = (text: string, imageCount: number, replacedText?: string) => void;
+export type QueueMode = "all" | "one-at-a-time" | "coalescing";
+
+export function coreQueueMode(mode: QueueMode): "all" | "one-at-a-time" {
+	return mode === "all" ? "all" : "one-at-a-time";
+}
+export type LocalQueueCoalescedListener = (
+	perSendText: string,
+	mergedText: string,
+	replacedText: string,
+	perSendImageCount: number,
+	mergedImageCount: number,
+	replacedImageCount: number,
+) => void;
+
+const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\]/g;
+
+function shiftQueuedImageMarkers(text: string, offset: number): string {
+	if (offset === 0) return text;
+	return text.replace(
+		VISION_MARKER_REGEX,
+		(_match, kind: string, idx: string, tail: string) => `[${kind} #${Number(idx) + offset}${tail}]`,
+	);
+}
+
+function queuedUserDraftText(message: AgentMessage): string | undefined {
+	if (message.role !== "user" || message.attribution === "agent") return undefined;
+	if (!("content" in message)) return undefined;
+	if (typeof message.content === "string") return message.content;
+	const text = message.content.find((part): part is TextContent => part.type === "text")?.text ?? "";
+	if (text) return text;
+	return queuedImageContent(message) ? "[Image]" : "";
+}
+
+function withQueuedUserContent(message: UserQueueMessage, text: string, images?: ImageContent[]): AgentMessage {
+	const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+	if (images?.length) content.push(...images);
+	return { ...message, content, timestamp: Date.now() };
+}
 
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
@@ -764,6 +806,9 @@ export class AgentSession implements SettingsScope {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#queuedUserMessageTail: Promise<void> = Promise.resolve();
+	#steeringModeOverride: QueueMode | undefined;
+	#followUpModeOverride: QueueMode | undefined;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
@@ -773,6 +818,7 @@ export class AgentSession implements SettingsScope {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	onLocalQueueCoalesced: LocalQueueCoalescedListener | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -2319,8 +2365,8 @@ export class AgentSession implements SettingsScope {
 	 * session's selection — the settings panel and `cfg://` apply it explicitly.
 	 */
 	#watchSessionSettings(): void {
-		cfgSteeringMode.listen(this, mode => this.agent.setSteeringMode(mode));
-		cfgFollowUpMode.listen(this, mode => this.agent.setFollowUpMode(mode));
+		cfgSteeringMode.listen(this, mode => this.agent.setSteeringMode(coreQueueMode(mode)));
+		cfgFollowUpMode.listen(this, mode => this.agent.setFollowUpMode(coreQueueMode(mode)));
 		cfgInterruptMode.listen(this, mode => this.agent.setInterruptMode(mode));
 		cfgSampling.listen(this, sampling => {
 			this.agent.temperature = sampling.temperature;
@@ -6290,13 +6336,13 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Current steering mode */
-	get steeringMode(): "all" | "one-at-a-time" {
-		return this.agent.getSteeringMode();
+	get steeringMode(): QueueMode {
+		return this.#steeringModeOverride ?? cfgSteeringMode.get(this.settings);
 	}
 
 	/** Current follow-up mode */
-	get followUpMode(): "all" | "one-at-a-time" {
-		return this.agent.getFollowUpMode();
+	get followUpMode(): QueueMode {
+		return this.#followUpModeOverride ?? cfgFollowUpMode.get(this.settings);
 	}
 
 	/** Current interrupt mode */
@@ -6953,6 +6999,7 @@ export class AgentSession implements SettingsScope {
 				attribution: promptAttribution,
 				prependMessages: keywordNotices,
 				rawText: typedText,
+				onQueued: options.onQueued,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -7009,6 +7056,7 @@ export class AgentSession implements SettingsScope {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
 				},
+				onQueued: options.onQueued,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -7767,6 +7815,7 @@ export class AgentSession implements SettingsScope {
 		await this.#queueUserMessage(expandedText, images, "steer", {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
+			onQueued: options?.onQueued,
 			rawText: text,
 		});
 	}
@@ -7850,6 +7899,110 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
+	async #withQueuedUserMessageLock<T>(fn: () => Promise<T>): Promise<T> {
+		const previous = this.#queuedUserMessageTail;
+		const gate = Promise.withResolvers<void>();
+		this.#queuedUserMessageTail = previous.catch(() => undefined).then(() => gate.promise);
+		await previous.catch(() => undefined);
+		try {
+			return await fn();
+		} finally {
+			gate.resolve();
+		}
+	}
+
+	#tryCoalesceQueuedUserMessage(
+		text: string,
+		images: ImageContent[] | undefined,
+		mode: "steer" | "followUp",
+		companionMessages: readonly CustomMessage[],
+		onQueued: QueuedUserMessageListener | undefined,
+		rawText: string,
+	): boolean {
+		const visibleSteering = this.agent.peekSteeringQueue();
+		const visibleFollowUp = this.agent.peekFollowUpQueue();
+		const steering = [...this.agent.peekUnclaimedSteeringQueue()];
+		const followUp = [...this.agent.peekUnclaimedFollowUpQueue()];
+		// Never rewrite queues while asynchronous preparation owns a claimed batch:
+		// replaceQueues would cancel that claim after the model may have committed it.
+		if (visibleSteering.length !== steering.length || visibleFollowUp.length !== followUp.length) return false;
+		const queue = mode === "steer" ? steering : followUp;
+		if (queue.length === 0) return false;
+		const perSendText = text || (images?.length ? "[Image]" : "");
+		if (!perSendText) return false;
+
+		// Merge into the user's last queued steer, stepping over everything the
+		// agent queued after it (advisor notes, async results, nudges, hidden
+		// companions). Stopping at the literal tail let one advisor note split a
+		// burst of steers into separate boxes.
+		let suffixCompanionStart = queue.length;
+		while (
+			suffixCompanionStart > 0 &&
+			(isHiddenUserCompanion(queue[suffixCompanionStart - 1]) ||
+				isAgentQueuedMessage(queue[suffixCompanionStart - 1]))
+		) {
+			suffixCompanionStart--;
+		}
+		const userIndex = suffixCompanionStart - 1;
+		const tail = queue[userIndex];
+		if (tail?.role !== "user") return false;
+		const replacedText = queuedUserDraftText(tail);
+		if (replacedText === undefined) return false;
+
+		let prefixCompanionStart = userIndex;
+		while (prefixCompanionStart > 0 && isHiddenUserCompanion(queue[prefixCompanionStart - 1])) {
+			prefixCompanionStart--;
+		}
+		const tailImages = queuedImageContent(tail);
+		const imageOffset = tailImages?.length ?? 0;
+		const shiftedPerSendText = shiftQueuedImageMarkers(perSendText, imageOffset);
+		const mergedImages = [...(tailImages ?? []), ...(images ?? [])];
+		const mergedText = `${replacedText}\n${shiftedPerSendText}`;
+		const replacement = withQueuedUserContent(tail, mergedText, mergedImages.length > 0 ? mergedImages : undefined);
+		const previousRawText = this.#queuedMessageRawText.get(tail) ?? replacedText;
+		this.#queuedMessageRawText.set(replacement, `${previousRawText}\n${rawText}`);
+		const shiftedCompanions = companionMessages.map(companion => ({
+			...companion,
+			content:
+				typeof companion.content === "string"
+					? shiftQueuedImageMarkers(companion.content, imageOffset)
+					: companion.content.map(block =>
+							block.type === "text"
+								? { ...block, text: shiftQueuedImageMarkers(block.text, imageOffset) }
+								: block,
+						),
+		}));
+		// Companions must stay contiguous and directly before the merged prompt:
+		// withdrawing it removes only the run of companions adjacent to it, so an
+		// agent entry left between them orphaned the old companion (e.g. an image
+		// description), which the model then received on its own.
+		const nextQueue = [
+			...queue.slice(0, prefixCompanionStart),
+			...queue.slice(userIndex + 1),
+			...queue.slice(prefixCompanionStart, userIndex),
+			...shiftedCompanions,
+			replacement,
+		];
+		this.agent.replaceQueues(
+			mode === "steer" ? nextQueue : [...steering],
+			mode === "followUp" ? nextQueue : [...followUp],
+		);
+		const perSendImageCount = images?.length ?? 0;
+		const replacedImageCount = tailImages?.length ?? 0;
+		const mergedImageCount = mergedImages.length;
+		onQueued?.(mergedText, mergedImageCount, replacedText);
+		if (!onQueued) {
+			this.onLocalQueueCoalesced?.(
+				perSendText,
+				mergedText,
+				replacedText,
+				perSendImageCount,
+				mergedImageCount,
+				replacedImageCount,
+			);
+		}
+		return true;
+	}
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
@@ -7857,29 +8010,35 @@ export class AgentSession implements SettingsScope {
 		options?: {
 			timestamp?: number;
 			attribution?: MessageAttribution;
+			onQueued?: QueuedUserMessageListener;
 			prependMessages?: readonly CustomMessage[];
-			/** Text the caller originally submitted, before slash/custom-command
-			 *  rewriting, prompt-template expansion, or `^model` mention substitution.
-			 *  Recorded via `#queuedMessageRawText` so `removeQueuedMessage` can match
-			 *  it later. Defaults to `text` (the common case: no transformation ran,
-			 *  so raw and queued content are identical). */
 			rawText?: string;
-			/**
-			 * Set only when image normalization and the vision description already
-			 * ran for this prompt; its presence suppresses both here. Companions
-			 * travel in `prependMessages` so a notice-only caller cannot claim
-			 * attachments were prepared (they would be silently dropped).
-			 */
-			preprocessed?: {
-				images?: ImageContent[];
-				descriptionNotice?: CustomMessage;
-			};
+			preprocessed?: { images?: ImageContent[]; descriptionNotice?: CustomMessage };
+		},
+	): Promise<void> {
+		await this.#withQueuedUserMessageLock(() => this.#queueUserMessageLocked(text, images, mode, options));
+	}
+
+	async #queueUserMessageLocked(
+		text: string,
+		images: ImageContent[] | undefined,
+		mode: "steer" | "followUp" | "aside",
+		options?: {
+			timestamp?: number;
+			attribution?: MessageAttribution;
+			onQueued?: QueuedUserMessageListener;
+			prependMessages?: readonly CustomMessage[];
+			/** Original submitted text, used to withdraw transformed queued prompts. */
+			rawText?: string;
+			/** Reuse attachment preparation already performed by prompt(). */
+			preprocessed?: { images?: ImageContent[]; descriptionNotice?: CustomMessage };
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
 		const timestamp = options?.timestamp;
 		const rawText = options?.rawText ?? text;
 		const preprocessed = options?.preprocessed;
+		const onQueued = options?.onQueued;
 		const prependMessages = options?.prependMessages ?? [];
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
@@ -7918,14 +8077,22 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
-			// The awaits above (image normalization / vision description) can span the run's
-			// settle, so the run may already be idle by the time the record lands in the aside
-			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
-			// wakes/folds correctly once idle (see #resumeStrandedIrcAsides).
+			// The awaits above can span run settlement; wake/fold the aside once idle.
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
 		this.#allowQueuedMessageDrainRetry();
+		const companionMessages = [...prependMessages, ...attachmentSourceNotices];
+		if (imageDescriptionNotice) companionMessages.push(imageDescriptionNotice);
+		const queueMode = mode === "followUp" ? this.followUpMode : this.steeringMode;
+		if (
+			attribution === "user" &&
+			queueMode === "coalescing" &&
+			this.#tryCoalesceQueuedUserMessage(text, normalizedImages, mode, companionMessages, onQueued, rawText)
+		) {
+			this.#scheduleIdleQueueDrain();
+			return;
+		}
 		// Publish the complete group without yielding: removal owns contiguous companions.
 		if (mode === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
@@ -7953,6 +8120,7 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);
 		}
+		onQueued?.(text, normalizedImages?.length ?? 0);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -7971,23 +8139,34 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		this.#queuedMessageDrainScheduled = true;
-		this.#scheduleAgentContinue({
-			source: "queued-message-drain",
-			shouldContinue: () => {
+		this.#schedulePostPromptTask(async signal => {
+			let observedTail: Promise<void>;
+			do {
+				observedTail = this.#queuedUserMessageTail;
+				await observedTail.catch(() => undefined);
+			} while (observedTail !== this.#queuedUserMessageTail);
+			if (signal.aborted) {
 				this.#queuedMessageDrainScheduled = false;
-				return (
-					this.#modeExitDrainSuppressionDepth === 0 &&
-					this.#canAutoContinueForFollowUp() &&
-					this.agent.hasQueuedMessages()
-				);
-			},
-			onSkip: () => {
-				this.#queuedMessageDrainScheduled = false;
-			},
-			onError: () => {
-				this.#queuedMessageDrainScheduled = false;
-				this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
-			},
+				return;
+			}
+			this.#scheduleAgentContinue({
+				source: "queued-message-drain",
+				shouldContinue: () => {
+					this.#queuedMessageDrainScheduled = false;
+					return (
+						this.#modeExitDrainSuppressionDepth === 0 &&
+						this.#canAutoContinueForFollowUp() &&
+						this.agent.hasQueuedMessages()
+					);
+				},
+				onSkip: () => {
+					this.#queuedMessageDrainScheduled = false;
+				},
+				onError: () => {
+					this.#queuedMessageDrainScheduled = false;
+					this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+				},
+			});
 		});
 	}
 
@@ -9554,8 +9733,9 @@ export class AgentSession implements SettingsScope {
 	 * `persist: false` for a session-only change (RPC) that leaves Settings —
 	 * and therefore later sessions and subagents — untouched.
 	 */
-	setSteeringMode(mode: "all" | "one-at-a-time", persist = true): void {
-		this.agent.setSteeringMode(mode);
+	setSteeringMode(mode: QueueMode, persist = true): void {
+		this.agent.setSteeringMode(coreQueueMode(mode));
+		this.#steeringModeOverride = persist ? undefined : mode;
 		if (persist) {
 			cfgSteeringMode.set(this.settings, mode);
 		}
@@ -9566,8 +9746,9 @@ export class AgentSession implements SettingsScope {
 	 * `persist: false` for a session-only change (RPC) that leaves Settings —
 	 * and therefore later sessions and subagents — untouched.
 	 */
-	setFollowUpMode(mode: "all" | "one-at-a-time", persist = true): void {
-		this.agent.setFollowUpMode(mode);
+	setFollowUpMode(mode: QueueMode, persist = true): void {
+		this.agent.setFollowUpMode(coreQueueMode(mode));
+		this.#followUpModeOverride = persist ? undefined : mode;
 		if (persist) {
 			cfgFollowUpMode.set(this.settings, mode);
 		}

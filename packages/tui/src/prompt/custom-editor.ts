@@ -94,6 +94,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.select"
 	| "app.model.selectTemporary"
 	| "app.message.dequeue"
+	| "app.message.expandQueue"
 	| "app.retry"
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
@@ -112,6 +113,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.select": ["alt+m"],
 	"app.model.selectTemporary": ["alt+p"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
+	"app.message.expandQueue": ["alt+o"],
 	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
@@ -1202,12 +1204,16 @@ export class CustomEditor extends Editor {
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
+	/** Called when the configured expand-queue shortcut is pressed (toggle queued-message preview). */
+	onExpandQueue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
+	/** Called when Up is pressed on an empty editor. Return true to consume it before history navigation. */
+	onUpWhenEmpty?: () => boolean;
 
 	/** Space-bar push-to-talk; set its `handler` to enable it. It is a text-composition gesture, so it
 	 *  stays out of Vim's Normal/Visual modes (where the space bar is the `l` motion) and away from an
@@ -1393,6 +1399,10 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
+		if (canonical === "up" && this.onUpWhenEmpty && this.getText().trim() === "" && this.onUpWhenEmpty()) {
+			return;
+		}
+
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
 		switch (this.spaceHold.process(canonical === "space")) {
 			case "type":
@@ -1523,6 +1533,12 @@ export class CustomEditor extends Editor {
 			// Intercept configured dequeue shortcut (restore queued message to editor)
 			if (this.#matchesAction(canonical, "app.message.dequeue") && this.onDequeue) {
 				this.onDequeue();
+				return;
+			}
+
+			// Intercept configured expand-queue shortcut (toggle queued-message preview)
+			if (this.#matchesAction(canonical, "app.message.expandQueue") && this.onExpandQueue) {
+				this.onExpandQueue();
 				return;
 			}
 

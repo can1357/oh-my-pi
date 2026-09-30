@@ -189,6 +189,7 @@ export interface InteractiveModeContext {
 	toolOutputExpanded: boolean;
 	hideToolActivity: boolean;
 	todoExpanded: boolean;
+	pendingQueueExpanded: boolean;
 	planModeEnabled: boolean;
 	vibeModeEnabled: boolean;
 	goalModeEnabled: boolean;

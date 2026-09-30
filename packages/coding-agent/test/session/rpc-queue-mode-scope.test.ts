@@ -7,7 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { applyRpcQueueModeCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, coreQueueMode } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -87,8 +87,8 @@ describe("AgentSession queue-mode controls are session-scoped by default", () =>
 		const laterSession = new AgentSession({
 			agent: new Agent({
 				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-				steeringMode: cfgSteeringMode.get(settings) ?? "one-at-a-time",
-				followUpMode: cfgFollowUpMode.get(settings) ?? "one-at-a-time",
+				steeringMode: coreQueueMode(cfgSteeringMode.get(settings)),
+				followUpMode: coreQueueMode(cfgFollowUpMode.get(settings)),
 				interruptMode: cfgInterruptMode.get(settings) ?? "immediate",
 			}),
 			sessionManager: SessionManager.create(agentDir, agentDir),

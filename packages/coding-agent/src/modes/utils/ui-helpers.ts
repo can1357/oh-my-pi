@@ -1,10 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { cfgPendingQueueCollapseLines } from "../settings";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
@@ -45,6 +48,7 @@ import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/
 import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { QueuedMessageBox } from "@oh-my-pi/pi-tui/queued-message-box";
 import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
@@ -107,6 +111,17 @@ function waitForImmediate(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setImmediate(resolve);
 	return promise;
+}
+
+function queuedMessageVisualRowCount(message: string, boxWidth: number): number {
+	const contentWidth = Math.max(0, boxWidth - 7);
+	return message
+		.split("\n")
+		.map(line => sanitizeText(line.replace(/\t/g, "    ")))
+		.reduce((rows, line) => {
+			if (contentWidth <= 0 || line.length === 0) return rows + 1;
+			return rows + Bun.wrapAnsi(line, contentWidth, { wordWrap: true, hard: true }).split("\n").length;
+		}, 0);
 }
 
 type QueuedMessages = {
@@ -1092,25 +1107,58 @@ export class UiHelpers {
 		this.ctx.pendingMessagesContainer.disposeChildren();
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
-		const steeringMessages = [...queuedMessages.steering];
+		const steeringMessages: Array<{ message: string; label: string }> = [];
+		for (const message of queuedMessages.steering) {
+			steeringMessages.push({ message, label: "Steer" });
+		}
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") steeringMessages.push(entry.text);
+			if (entry.mode === "steer") steeringMessages.push({ message: entry.text, label: "Steer" });
 		}
 
-		const followUpMessages = [...queuedMessages.followUp];
+		const followUpMessages: Array<{ message: string; label: string }> = [];
+		for (const message of queuedMessages.followUp) {
+			followUpMessages.push({ message, label: "Follow-up" });
+		}
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") followUpMessages.push(entry.text);
+			if (entry.mode === "followUp") followUpMessages.push({ message: entry.text, label: "Follow-up" });
 		}
 
-		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
-		].filter(group => group.messages.length > 0);
-		if (groups.length > 0) {
-			const dequeueKey = this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up";
-			this.ctx.pendingMessagesContainer.addChild(
-				new QueuedMessagesBand(groups, dequeueKey, () => this.ctx.handleDequeue()),
-			);
+		const allMessages = [...steeringMessages, ...followUpMessages];
+		if (allMessages.length === 0) return;
+
+		const queueBand = new QueuedMessagesBand(
+			[
+				{ label: "Steering", messages: steeringMessages.map(entry => entry.message) },
+				{ label: "After yield", messages: followUpMessages.map(entry => entry.message) },
+			].filter(group => group.messages.length > 0),
+			this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up",
+			() => this.ctx.handleDequeue(),
+		);
+		// Retain native pills and edit actions with the expanded ANSI preview.
+		queueBand.disposeChildren();
+		queueBand.addChild(new Spacer(1));
+		this.ctx.pendingMessagesContainer.addChild(queueBand);
+		const expanded = this.ctx.pendingQueueExpanded;
+		const collapseLines = Math.max(
+			1,
+			// Session-focus rebuilds run against a context whose settings may be
+			// absent (attached worker views); fall back to the registered default.
+			this.ctx.settings ? cfgPendingQueueCollapseLines.get(this.ctx.settings) : cfgPendingQueueCollapseLines.default,
+		);
+		const queueBoxWidth = Math.max(1, this.ctx.ui.terminal?.columns ?? 80);
+		const canExpandQueue = allMessages.some(
+			entry => queuedMessageVisualRowCount(entry.message, queueBoxWidth) > collapseLines,
+		);
+		const dequeueKey = appKey(this.ctx.keybindings, "app.message.dequeue") || formatKeyHint("alt+up");
+		const expandKey = appKey(this.ctx.keybindings, "app.message.expandQueue") || formatKeyHint("alt+o");
+		const expandHint = canExpandQueue ? `, ${expandKey} to ${expanded ? "collapse" : "expand"}` : "";
+		const hint = `${dequeueKey} (or Up) to edit${expandHint}`;
+
+		for (let idx = 0; idx < allMessages.length; idx++) {
+			const entry = allMessages[idx];
+			const safeAll = entry.message.split("\n").map(line => sanitizeText(line.replace(/\t/g, "    ")));
+			const footerText = idx === allMessages.length - 1 ? hint : undefined;
+			queueBand.addChild(new QueuedMessageBox(entry.label, safeAll, { collapseLines, expanded, footerText }));
 		}
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);
 	}

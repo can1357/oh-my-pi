@@ -121,6 +121,35 @@ function liveSteeredTexts(transcript: AgentMessage[]): unknown[] {
 }
 
 describe("agent loop live steering", () => {
+	it("does not offer live steering when interruptMode is wait", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first"] }] });
+		let offered = false;
+		const streamFn: StreamFn = async (model, context, options) => {
+			offered = options?.liveSteering !== undefined;
+			return mock.stream(model, context, options);
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm,
+			interruptMode: "wait",
+			getSteeringMessages: async () => [],
+			waitForSteeringMessages: async () => {},
+		};
+		const run = agentLoop(
+			[createUserMessage("start")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			config,
+			undefined,
+			streamFn,
+		);
+		for await (const _ of run) {
+			// drain
+		}
+		// Steers queued under "wait" must stay in the queue until the boundary so
+		// later steers coalesce into the same entry.
+		expect(offered).toBe(false);
+	});
+
 	it("records accepted steering right after the steered response and holds later input for the next boundary", async () => {
 		let claimedView: string[] | undefined;
 		const { contexts, transcript } = await runSteered(async (live, queue) => {
