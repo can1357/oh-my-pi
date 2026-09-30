@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `login "custom"` rule to the `mistral` auth policy so `/login mistral` offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

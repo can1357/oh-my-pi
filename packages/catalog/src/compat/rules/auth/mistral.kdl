@@ -1,3 +1,13 @@
+// Mistral Vibe browser sign-in. Mirrors the Vibe Code CLI flow on
+// console.mistral.ai (POST /api/vibe/sign-in with a PKCE S256 challenge,
+// poll until the browser session approves, exchange for an API key).
+// The minted key is a regular Mistral API key whose usage bills against the
+// Vibe Code quota of the signed-in plan rather than pay-as-you-go credits,
+// which is why the existing env-key path stays as the fallback. The hook
+// returns the key as a string, so /login stores it as a plain API key.
+// Verified end to end 2026-09-30 against a Pro plan.
 auth "mistral" {
 	name "Mistral"
+	env "MISTRAL_API_KEY"
+	login "custom" hook="mistral-vibe-sign-in"
 }

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin))
 - `AuthStorage.keys.setConfig(provider, value, { fallback: true })` registers a key that is used only when no stored OAuth or `/login` credential exists, instead of overriding them; `removeConfig`/`clearConfig` also clear these fallbacks ([#13815](https://github.com/can1357/oh-my-pi/pull/13815) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
