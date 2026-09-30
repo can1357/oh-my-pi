@@ -272,33 +272,36 @@ export function getUnknownCompatKeys(config: ModelsConfig): string[] {
 	return unknownKeys;
 }
 
+/** Provider-level checks a loadable `models.yml` must pass beyond its schema. */
+export function validateModelsConfigProviders(config: ModelsConfig): void {
+	const providers = config.providers ?? {};
+	for (const providerName in providers) {
+		const providerConfig = providers[providerName];
+		validateProviderConfiguration(
+			providerName,
+			{
+				baseUrl: providerConfig.baseUrl,
+				headers: providerConfig.headers,
+				apiKey: providerConfig.apiKey,
+				api: providerConfig.api as Api | undefined,
+				auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
+				discovery: providerConfig.discovery as ProviderDiscovery | undefined,
+				compat: providerConfig.compat,
+				remoteCompaction: providerConfig.remoteCompaction,
+				disableStrictTools: providerConfig.disableStrictTools,
+				guardrailIdentifier: providerConfig.guardrailIdentifier,
+				requestMetadata: providerConfig.requestMetadata,
+				modelOverrides: providerConfig.modelOverrides,
+				models: (providerConfig.models ?? []) as ProviderValidationModel[],
+			},
+			"models-config",
+		);
+	}
+}
+
 export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 	kind: "deferred",
 	resolve: getModelsConfigSchema,
 })
 	.withNormalization("models", normalizeModelsConfig)
-	.withValidation("models", config => {
-		const providers = config.providers ?? {};
-		for (const providerName in providers) {
-			const providerConfig = providers[providerName];
-			validateProviderConfiguration(
-				providerName,
-				{
-					baseUrl: providerConfig.baseUrl,
-					headers: providerConfig.headers,
-					apiKey: providerConfig.apiKey,
-					api: providerConfig.api as Api | undefined,
-					auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
-					discovery: providerConfig.discovery as ProviderDiscovery | undefined,
-					compat: providerConfig.compat,
-					remoteCompaction: providerConfig.remoteCompaction,
-					disableStrictTools: providerConfig.disableStrictTools,
-					guardrailIdentifier: providerConfig.guardrailIdentifier,
-					requestMetadata: providerConfig.requestMetadata,
-					modelOverrides: providerConfig.modelOverrides,
-					models: (providerConfig.models ?? []) as ProviderValidationModel[],
-				},
-				"models-config",
-			);
-		}
-	});
+	.withValidation("models", validateModelsConfigProviders);
