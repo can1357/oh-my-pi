@@ -65,6 +65,9 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
+		inferenceRegion: credential.inferenceRegion,
+		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -81,6 +84,9 @@ export function usageCacheIdentity(credential: UsageCredential): string {
 	if (projectId) parts.push(`project:${projectId}`);
 	const enterpriseUrl = credential.enterpriseUrl?.trim().toLowerCase();
 	if (enterpriseUrl) parts.push(`enterprise:${enterpriseUrl}`);
+	if (credential.region) parts.push(`region:${credential.region}`);
+	if (credential.inferenceRegion) parts.push(`inference:${credential.inferenceRegion}`);
+	if (credential.activeOrganizationId) parts.push(`selected-org:${credential.activeOrganizationId}`);
 	// Only fall back to a secret-derived key when a stable account identifier is
 	// unavailable. Including the token hash when accountId/email/orgId are present
 	// causes cache misses on every OAuth refresh — usage data is per-account (or

@@ -91,6 +91,7 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
  * - `always`: every regen (same-id upstream/discovery rows still win dedup).
  * - `fallback`: only when the provider's authoritative discovery did not succeed.
  * - `empty`: only when no other source produced a row for the provider.
+ * - `never`: runtime-only rows the provider's model manager serves itself.
  *
  * xai-oauth projects curated chat rows into Responses specs while preserving
  * runner seed transports. The bundle carries both so configured roles resolve
@@ -103,6 +104,7 @@ function bundledSeedRows(
 ): readonly ModelSpec[] {
 	switch (entry.seed?.bundle) {
 		case undefined:
+		case "never":
 			return [];
 		case "fallback":
 			if (authoritativeProviders.has(entry.id)) return [];

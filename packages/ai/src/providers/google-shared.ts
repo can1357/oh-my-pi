@@ -140,7 +140,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
-const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
@@ -1135,7 +1135,7 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
  * hid both, so every billing 429 replayed as a transient rate limit (#13090).
  * The Cloud Code Assist path keeps the whole raw body for the same reason.
  */
-function extractGoogleErrorMessage(errorText: string, status: number): string {
+export function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
 	try {
 		const parsed = JSON.parse(errorText) as {

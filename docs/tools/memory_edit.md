@@ -41,7 +41,7 @@
 7. The tool renders the returned status and passes the backend result through unchanged in `details`.
 
 ## Modes / Variants
-- `update` replaces working-memory text and/or importance. Content replacement is wholesale, not a patch.
+- `update` replaces working-memory text and/or importance. Content replacement is wholesale, not a patch, and passes through `redactMemorySecrets(...)` before storage.
 - `forget` permanently deletes working-memory rows.
 - `invalidate` softly supersedes working or episodic rows and may record `replacement_id`.
 - Fact rows are readable but immutable; every operation returns `not_editable`.

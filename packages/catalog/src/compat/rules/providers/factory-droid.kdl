@@ -1,0 +1,1166 @@
+// Factory Droid: the native CLI's model registry plus the request dialect each
+// selected upstream speaks. These are Factory contracts, NOT direct-host
+// inheritance. Registry facts are reviewed against the CLI version pinned by
+// FACTORY_DROID_CLIENT_VERSION (wire/factory-droid.ts); request ground truth is
+// the native CLI's own traffic: packages/ai/test/fixtures/
+// factory-droid-native-requests.json, checked by factory-droid-native-parity.test.ts.
+// Each model's wire and billing pool live in runtime/behavior.kdl
+// (`api-routes` / `quota-tiers provider="factory-droid"`).
+provider "factory-droid" {
+	default-model "kimi-k3"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// Native subscription limits are not direct-host price-tier or capacity heuristics.
+	context-window-authoritative #true
+
+	// The registry roster. Factory has no model-listing endpoint, so first-party
+	// clients ship this list and narrow it per account with feature flags, org
+	// policy and live routing (discovery/factory-droid.ts). The rows never enter
+	// models.json: gated models must stay hidden until live flags prove access,
+	// and each account rebuilds them on its residency host and wire path. Cost is
+	// zero here because Factory bills credits; `list-price-from` supplies the
+	// upstream list price shown beside the credit rate.
+	seed api="factory-droid-agent" base-url="https://api.factory.ai" bundle="never" {
+		model "claude-fable-5.1" name="Fable 5.1" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-fable-5" name="Fable 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-5-5" name="Opus 5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=872000 max-tokens=128000
+		}
+		model "claude-opus-5-5-fast" name="Opus 5.5 Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=872000 max-tokens=128000
+		}
+		model "claude-opus-5" name="Opus 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-5-fast" name="Opus 5 Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-4-8" name="Opus 4.8" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-4-8-fast" name="Opus 4.8 Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-4-7" name="Opus 4.7" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-4-6" name="Opus 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "claude-opus-4-5-20251101" name="Opus 4.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=180000 max-tokens=64000
+		}
+		model "claude-sonnet-5-5" name="Sonnet 5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=872000 max-tokens=128000
+		}
+		model "claude-sonnet-5" name="Sonnet 5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=872000 max-tokens=128000
+		}
+		model "claude-sonnet-4-6" name="Sonnet 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=931000 max-tokens=64000
+		}
+		model "claude-sonnet-4-5-20250929" name="Sonnet 4.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=180000 max-tokens=32000
+		}
+		model "claude-haiku-4-5-20251001" name="Haiku 4.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=180000 max-tokens=32000
+		}
+		model "gpt-6-astra" name="GPT-6 Astra" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6.1-sol" name="GPT-6.1 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6-sol" name="GPT-6 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6-luna" name="GPT-6 Luna" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.6-sol" name="GPT-5.6 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.6-sol-fast" name="GPT-5.6 Sol Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.6-terra" name="GPT-5.6 Terra" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.6-luna" name="GPT-5.6 Luna" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.5" name="GPT-5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.5-fast" name="GPT-5.5 Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.5-pro" name="GPT-5.5 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.4" name="GPT-5.4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.4-fast" name="GPT-5.4 Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-5.4-mini" name="GPT-5.4 Mini" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "gpt-5.4-mini-fast" name="GPT-5.4 Mini Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "gpt-5.3-codex" name="GPT-5.3-Codex" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "gpt-5.3-codex-fast" name="GPT-5.3-Codex Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "gpt-5.2" name="GPT-5.2" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "garnet-07-15" name="Garnet 07/15 (Preview)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3.1-pro-preview" name="Gemini 3.1 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3.8-flash" name="Gemini 3.8 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3.7-flash" name="Gemini 3.7 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3.6-flash" name="Gemini 3.6 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3.5-flash" name="Gemini 3.5 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "gemini-3-flash-preview" name="Gemini 3 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "inkling" name="Inkling" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1007232 max-tokens=32768
+		}
+		model "mistral-medium-3.5" name="Mistral Medium 3.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=192000 max-tokens=64000
+		}
+		model "glm-5.3-flash" name="GLM-5.3-Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=917504 max-tokens=131072
+		}
+		model "glm-5.3" name="GLM-5.3" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "glm-5.2" name="GLM-5.2" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "glm-5.2-fast" name="GLM-5.2 Fast" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=393216 max-tokens=131072
+		}
+		model "kimi-k3" name="Kimi K3" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=196608 max-tokens=65536
+		}
+		model "qwen3.8-max" name="Qwen3.8 Max" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=131072 max-tokens=131072
+		}
+		model "nemotron-3-ultra" name="Nemotron 3 Ultra" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=136464 max-tokens=65536
+		}
+		model "deepseek-v4.1-flash" name="DeepSeek V4.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "deepseek-v4-flash-0731" name="DeepSeek V4 Flash 0731" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "deepseek-v4-pro" name="DeepSeek V4 Pro" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "minimax-m3" name="MiniMax M3" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=448000 max-tokens=64000
+		}
+		model "grok-4.7" name="Grok 4.7" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=436644 max-tokens=63356
+		}
+		model "grok-4.6" name="Grok 4.6" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=63356
+		}
+		model "grok-4.5" name="Grok 4.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=63356
+		}
+		model "atlas-07-21" name="Atlas 07/21 (Preview)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "aster-07-15" name="Aster 07/15 (Preview)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=867000 max-tokens=128000
+		}
+		model "minimax-m2.7" name="MiniMax M2.7" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=196600 max-tokens=64000
+		}
+	}
+
+	// Upstream serving regions (the CLI's upstream region table). A model's own
+	// `region-upstreams-*` rule replaces its region's set (the CLI's
+	// regionOverrides): it may enable an upstream this table omits (EU Mistral),
+	// and a bare directive means the region does not serve the model.
+	region-upstreams-global "fireworks" "baseten" "mistral" "anthropic" "azure_anthropic" "vertex_anthropic" \
+		"bedrock_anthropic" "openai" "azure_openai" "bedrock_openai" "google" "xai" "snowflake" "databricks"
+	region-upstreams-us "baseten" "anthropic" "vertex_anthropic" "bedrock_anthropic" "openai" "bedrock_openai" \
+		"google" "xai"
+	region-upstreams-eu "vertex_anthropic" "bedrock_anthropic" "openai" "bedrock_openai"
+
+	// Per-model registry entries: live-routing family, upstream rotation (first
+	// entry is the default `x-api-provider`), region overrides, Standard Credits
+	// rates, list-price source, org-policy aliases, the effort ladder (an off/none
+	// rung means `thinking-requires-effort #false`), and account gates.
+	models "claude-fable-5.1" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-eu
+		credit-rates { input 4; output 5; cache-read 0.025 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { requires-explicit-opt-in #true }
+	}
+	models "claude-fable-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-eu
+		credit-rates { input 4; output 5 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { requires-explicit-opt-in #true }
+	}
+	models "claude-opus-5-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
+		credit-rates { input 1.6; output 5; cache-read 0.05 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "claude-opus-5-5-fast" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		credit-rates { input 3.2; output 5; cache-read 0.05 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { feature-flag "claude_opus_5_5_fast"; base-variant "claude-opus-5-5" }
+	}
+	models "claude-opus-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
+		region-upstreams-eu "bedrock_anthropic"
+		credit-rates { input 2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-opus-5-fast" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		credit-rates { input 4 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { base-variant "claude-opus-5" }
+	}
+	models "claude-opus-4-8" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
+		region-upstreams-eu "bedrock_anthropic"
+		credit-rates { input 2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-opus-4-8-fast" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		credit-rates { input 4 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { base-variant "claude-opus-4-8" }
+	}
+	models "claude-opus-4-7" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-eu "bedrock_anthropic"
+		credit-rates { input 2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-opus-4-6" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" "snowflake"
+		credit-rates { input 2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-opus-4-5-20251101" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-us "vertex_anthropic" "bedrock_anthropic"
+		credit-rates { input 2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #false
+		default-reasoning-off #true
+	}
+	models "claude-sonnet-5-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic"
+		credit-rates { input 0.8; output 5 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "claude_sonnet_5_5" }
+	}
+	models "claude-sonnet-5" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic"
+		credit-rates { input 0.8; output 5 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-sonnet-4-6" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		credit-rates { input 1.2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "claude-sonnet-4-5-20250929" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-us "vertex_anthropic" "bedrock_anthropic"
+		credit-rates { input 1.2 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #false
+		default-reasoning-off #true
+	}
+	models "claude-haiku-4-5-20251001" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
+		region-upstreams-us "vertex_anthropic" "bedrock_anthropic"
+		credit-rates { input 0.4 }
+		list-price-from "anthropic"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #false
+		default-reasoning-off #true
+	}
+	models "gpt-6-astra" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "snowflake" "azure_openai"
+		region-upstreams-eu
+		credit-rates { input 4; output 5 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "gpt-6.1-sol" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		region-upstreams-eu "openai"
+		credit-rates { input 0.8; output 5; cache-read 0.05 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { feature-flag "gpt_6_1_sol" }
+	}
+	models "gpt-6-sol" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai"
+		region-upstreams-eu "openai"
+		credit-rates { input 0.8; output 5 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+	}
+	models "gpt-6-luna" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai"
+		region-upstreams-eu "openai"
+		credit-rates { input 0.04; output 5 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { feature-flag "gpt_6_luna" }
+	}
+	models "gpt-5.6-sol" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
+		region-upstreams-eu "openai"
+		credit-rates { input 2; output 5 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+	}
+	models "gpt-5.6-sol-fast" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 4; output 5 }
+		policy-aliases "gpt-5.6-fast"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-5.6-sol" }
+	}
+	models "gpt-5.6-terra" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
+		region-upstreams-eu "openai"
+		credit-rates { input 0.8; output 6 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+	}
+	models "gpt-5.6-luna" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
+		region-upstreams-eu "openai"
+		credit-rates { input 0.08; output 6 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+	}
+	models "gpt-5.5" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
+		region-upstreams-eu "openai"
+		credit-rates { input 2; output 6 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "gpt-5.5-fast" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 5; output 6 }
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-5.5" }
+	}
+	models "gpt-5.5-pro" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 12; output 6 }
+		list-price-from "openai"
+		thinking-efforts "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "gpt-5.4" {
+		routing-family "openai"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "databricks"
+		region-upstreams-eu "openai"
+		credit-rates { input 1; output 6 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "gpt-5.4-fast" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 2; output 6 }
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-5.4" }
+	}
+	models "gpt-5.4-mini" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 0.3; output 6 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gpt-5.4-mini-fast" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 0.6; output 6 }
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { base-variant "gpt-5.4-mini" }
+	}
+	models "gpt-5.3-codex" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		region-upstreams-us
+		credit-rates { input 0.7 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+	}
+	models "gpt-5.3-codex-fast" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		region-upstreams-us
+		credit-rates { input 1.4; output 8 }
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-5.3-codex" }
+	}
+	models "gpt-5.2" {
+		routing-family "openai"
+		upstream-rotation "openai" "azure_openai"
+		credit-rates { input 0.7 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #false
+		thinking-default-level "low"
+	}
+	models "garnet-07-15" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.6 }
+		thinking-efforts "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "garnet_0715" }
+	}
+	models "gemini-3.1-pro-preview" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.8 }
+		list-price-from "google"
+		policy-aliases "gemini-3-pro-preview"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gemini-3.8-flash" {
+		routing-family "google"
+		upstream-rotation "google"
+		credit-rates { input 0.6; output 5 }
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gemini-3.7-flash" {
+		routing-family "google"
+		upstream-rotation "google"
+		credit-rates { input 0.6; output 5 }
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gemini-3.6-flash" {
+		routing-family "google"
+		upstream-rotation "google"
+		credit-rates { input 0.6; output 5 }
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gemini-3.5-flash" {
+		routing-family "google"
+		upstream-rotation "google"
+		credit-rates { input 0.6 }
+		list-price-from "google"
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "gemini-3-flash-preview" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.2 }
+		list-price-from "google"
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "inkling" {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.4; output 4.05; cache-read 0.17 }
+		list-price-from "fireworks"
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "mistral-medium-3.5" {
+		routing-family "factory"
+		upstream-rotation "mistral"
+		region-upstreams-eu "mistral"
+		credit-rates { input 0.6; output 5 }
+		thinking-efforts "high"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "glm-5.3-flash" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.06; output 3.34; cache-read 0.2 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "glm-5.3" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "mistral" "databricks"
+		region-upstreams-global "fireworks" "baseten" "databricks"
+		region-upstreams-eu "mistral"
+		credit-rates { input 0.56; output 3.15 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+		thinking-default-level "max"
+	}
+	models "glm-5.2" {
+		routing-family "factory"
+		upstream-rotation "baseten" "mistral"
+		region-upstreams-global "baseten"
+		region-upstreams-eu "mistral"
+		region-limits-eu { context-window 200000; max-tokens 65536 }
+		credit-rates { input 0.56; output 3.15 }
+		list-price-from "fireworks"
+		policy-aliases "glm-5.1"
+		thinking-efforts "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "glm-5.2-fast" {
+		routing-family "factory"
+		upstream-rotation "baseten"
+		credit-rates { input 0.84; output 3.2 }
+		policy-aliases "glm-5p2-fast"
+		thinking-efforts "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "glm_5_2_fast"; base-variant "glm-5.2" }
+	}
+	models "kimi-k3" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 1.2; output 5 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		// Native Factory exposes off even though direct K3 deployments do not.
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "qwen3.8-max" {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.8; output 3 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "medium" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "xhigh"
+	}
+	models "nemotron-3-ultra" {
+		routing-family "factory"
+		upstream-rotation "baseten" "fireworks"
+		credit-rates { input 0.24; output 4 }
+		list-price-from "baseten" "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B"
+		thinking-efforts "high"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+	}
+	models "deepseek-v4.1-flash" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.12; output 4; cache-read 0.024 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "deepseek_v4_1_flash" }
+	}
+	models "deepseek-v4-flash-0731" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten"
+		credit-rates { input 0.176; output 3; cache-read 0.032 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { deprecation-flag "deprecate_deepseek_v4_flash_0731" }
+	}
+	models "deepseek-v4-pro" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten"
+		credit-rates { input 0.528; output 3; cache-read 0.034 }
+		list-price-from "fireworks"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { deprecation-flag "deprecate_deepseek_v4_pro" }
+	}
+	models "minimax-m3" {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.12; output 4 }
+		list-price-from "fireworks"
+		thinking-efforts "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "minimax_m3" }
+	}
+	models "grok-4.7" {
+		routing-family "xai"
+		upstream-rotation "xai"
+		credit-rates { input 0.8; output 3; cache-read 0.25 }
+		list-price-from "xai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "grok-4.6" {
+		routing-family "xai"
+		upstream-rotation "xai"
+		credit-rates { input 0.8; output 3; cache-read 0.25 }
+		list-price-from "xai"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "grok-4.5" {
+		routing-family "xai"
+		upstream-rotation "xai"
+		region-upstreams-us
+		credit-rates { input 0.8; output 3; cache-read 0.15 }
+		list-price-from "xai"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "atlas-07-21" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		region-upstreams-us
+		credit-rates { input 2 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "atlas_0721" }
+	}
+	models "aster-07-15" {
+		routing-family "anthropic"
+		upstream-rotation "anthropic"
+		region-upstreams-us
+		credit-rates { input 2 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "aster_0715" }
+	}
+	models "minimax-m2.7" {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.12; output 4 }
+		list-price-from "fireworks"
+		thinking-efforts "high"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+
+
+	on-api "openai-completions" {
+		max-tokens-field "max_tokens"
+		supports-store #false
+		thinking-format "openai"
+		disable-reasoning-on-forced-tool-choice #false
+		disable-reasoning-on-tool-choice #false
+		allows-synthetic-reasoning-content-for-tool-calls #false
+		requires-assistant-content-for-tool-calls #false
+		requires-reasoning-content-for-tool-calls #false
+		requires-reasoning-content-for-all-assistant-turns #false
+		replay-reasoning-content #true
+		mistral-reasoning-content-parts #false
+		requires-thinking-as-text #false
+		reasoning-content-field "reasoning_content"
+	}
+	on-api "openai-responses" {
+		// Native declares every Responses tool `strict: false`; the field must reach the wire.
+		supports-strict-mode #true
+	}
+	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "qwen3.8-max" "minimax-m3" {
+		clamp-output-to-model-max #true
+		completions-reasoning-mode "none"
+		completions-reasoning-history "omit"
+		on-upstream "fireworks" {
+			completions-reasoning-mode "effort"
+			completions-reasoning-history "preserved"
+		}
+		on-upstream "baseten" "databricks" {
+			completions-reasoning-mode "effort"
+		}
+	}
+	// MiniMax M3 uses Completions with high effort, but NO reasoning_history.
+	models "minimax-m3" {
+		on-upstream "fireworks" priority=10 {
+			completions-reasoning-history "omit"
+		}
+	}
+	models "kimi-k3" {
+		requires-tool-result-name #true
+	}
+	models "nemotron-3-ultra" {
+		on-upstream "baseten" {
+			completions-reasoning-mode "opt-in"
+		}
+	}
+	models "deepseek-*" {
+		on-upstream "baseten" priority=10 {
+			completions-reasoning-mode "forced-on"
+		}
+		on-upstream "fireworks" priority=10 {
+			completions-reasoning-history "interleaved"
+		}
+		on-upstream "fireworks" "baseten" {
+			requires-reasoning-content-for-tool-calls #true
+			synthetic-reasoning-content-fallback " "
+		}
+	}
+	// The replay codec follows the selected route, including EU GLM routes.
+	on-upstream "mistral" {
+		models "glm-*" "mistral-medium-3.5" {
+			completions-reasoning-mode "effort"
+			completions-reasoning-history "omit"
+			mistral-reasoning-content-parts #true
+		}
+	}
+
+	// Native budget ladder for the Messages models that still use token budgets.
+	models "claude-sonnet-4-5-20250929" "claude-haiku-4-5-20251001" "claude-opus-4-5-20251101" "minimax-m2.7" {
+		thinking-effort-budgets {
+			low 4096
+			medium 12288
+			high 24576
+		}
+	}
+
+	// Messages contract on every Factory Anthropic route: non-thinking-led
+	// history drops thinking, disabled thinking omits the field, and the effort
+	// beta rides only where the route requires it alongside output effort.
+	on-api "anthropic-messages" {
+		strip-thinking-history #true
+		disabled-thinking "omit"
+		effort-beta #false
+		// Native declares no strict tools; strict schemas compile into a grammar
+		// that proxied routes can reject as oversized.
+		disable-strict-tools #true
+		// Bedrock/Vertex require the beta alongside any output effort.
+		on-upstream "bedrock_anthropic" "vertex_anthropic" {
+			effort-beta #true
+		}
+		on-upstream "snowflake" {
+			disabled-thinking "disabled"
+		}
+	}
+	models "claude-*" "atlas-07-21" "aster-07-15" {
+		anthropic-thinking "adaptive-summarized"
+	}
+	models "claude-opus-4-6" "claude-sonnet-4-6" {
+		anthropic-thinking "adaptive"
+	}
+	models "claude-sonnet-4-5-20250929" "claude-haiku-4-5-20251001" {
+		anthropic-thinking "budget-interleaved"
+	}
+	// Native Opus 4.5 thinking always pairs output effort with its beta, on every upstream.
+	models "claude-opus-4-5-20251101" {
+		anthropic-thinking "budget-effort"
+		effort-beta #true
+	}
+	models "minimax-m2.7" {
+		anthropic-thinking "budget-effort"
+	}
+	// Always-thinking models keep adaptive thinking on disabled turns, on every upstream.
+	models "claude-fable-5.1" "claude-opus-5-5" "claude-opus-5-5-fast" "claude-sonnet-5-5" {
+		disabled-thinking "adaptive"
+	}
+	// Fast tiers are distinct SKUs served with `speed: "fast"`.
+	models "claude-opus-5-5-fast" "claude-opus-5-fast" "claude-opus-4-8-fast" {
+		fast-mode #true
+	}
+	// Refusals retry server-side only on the first-party Anthropic upstream.
+	models "claude-fable-5" "claude-fable-5.1" {
+		on-upstream "anthropic" {
+			server-side-fallback-models "claude-opus-5"
+		}
+	}
+	// With tools, Anthropic and Vertex stream tool input eagerly and advertise
+	// fine-grained tool streaming; Bedrock takes the beta alone.
+	on-upstream "anthropic" "vertex_anthropic" {
+		supports-eager-tool-input-streaming #true
+		anthropic-tool-streaming-beta #true
+	}
+	on-upstream "bedrock_anthropic" {
+		anthropic-tool-streaming-beta #true
+	}
+	// xAI and Google sessions lock their upstream.
+	on-upstream "xai" "google" {
+		routing-session-lock #true
+	}
+	// OpenAI-family upstreams carry native's platform organization hint.
+	on-upstream "openai" "azure_openai" {
+		openai-platform-header "org-bHuLtG1fGmYk5YaOihAAXFBw"
+	}
+
+	models "gpt-*" "grok-*" {
+		// Disabled reasoning omits the reasoning object, except on routes that
+		// need the literal `none` tier.
+		reasoning-disable-mode "omit"
+		responses-cache-retention #false
+		responses-parallel-tool-calls #true
+		on-upstream "bedrock_openai" "snowflake" {
+			reasoning-disable-mode "none-effort"
+		}
+	}
+	models "gpt-*" {
+		omit-max-output-tokens #true
+		responses-verbosity "low"
+		responses-safety-identifier #true
+		// Native defaults tool_choice to auto for the OpenAI family only.
+		responses-tool-choice-auto #true
+		reasoning-effort-map {
+			max "max"
+		}
+		on-upstream "openai" {
+			responses-cache-retention #true
+		}
+	}
+	models "gpt-5.2" {
+		responses-cache-retention #false
+		responses-safety-identifier #false
+	}
+	models "gpt-*-fast" {
+		responses-service-tier "priority"
+	}
+	models "grok-*" {
+		supports-reasoning-summary #false
+	}
+	models "gemini-*" "garnet-07-15" {
+		omit-max-output-tokens #true
+		google-thinking "level"
+	}
+	models "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
+		google-thinking "level-medium"
+	}
+	// FACTORY_API_KEY is a control-plane key, not a subscription proxy token.
+}
