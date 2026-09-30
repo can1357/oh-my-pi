@@ -6,7 +6,7 @@ import {
 	type CustomProviderFormOptions,
 	type CustomProviderFormValues,
 } from "@oh-my-pi/pi-tui/setup/scenes/custom-provider";
-import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
+import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
 import type { SetupSceneHost, SetupSceneResult, SetupSceneController } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -84,7 +84,7 @@ describe("CustomProviderForm", () => {
 		expect(finished).toEqual(["done"]);
 	});
 
-	it("shows custom endpoint in the sign-in provider list and keeps tabs reachable from its form", () => {
+	it("opens the custom endpoint form from the sign-in provider list and returns on Esc", () => {
 		const authStorage = {
 			credentials: { has: () => false },
 			keys: { source: () => undefined },
@@ -94,8 +94,6 @@ describe("CustomProviderForm", () => {
 			ctx: {
 				authStorage,
 				disabledProviders: [],
-				webSearchOrder: ["auto"],
-				isSearchProviderAvailable: async () => true,
 				addCustomProvider: async () => {},
 			},
 			requestRender() {},
@@ -114,12 +112,6 @@ describe("CustomProviderForm", () => {
 			send("\x1b[C");
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Provider ID");
 
-			send("\t");
-			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain(
-				"Choose the provider the web_search tool should prefer.",
-			);
-			send("\x1b[Z");
-			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Provider ID");
 			send("\x1b");
 			expect(Bun.stripANSI(scene.render(120).join("\n"))).toContain("Select provider to login");
 		} finally {
@@ -132,7 +124,6 @@ describe("CustomProviderForm", () => {
 			ctx: {
 				authStorage: { credentials: { has: () => false }, keys: { source: () => undefined } },
 				disabledProviders: [],
-				webSearchOrder: ["auto"],
 			},
 			requestRender() {},
 			finish() {},
