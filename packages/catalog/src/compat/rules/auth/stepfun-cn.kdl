@@ -1,0 +1,14 @@
+auth "stepfun-cn" {
+	name "StepFun Step Plan (China)"
+	login "api-key" {
+		auth-url "https://platform.stepfun.com/interface-key"
+		instructions "Subscribe to Step Plan and copy your StepFun API key"
+		// StepFun keys are unprefixed opaque strings (no `sk-` prefix), so the
+		// placeholder must not teach a credential shape the console never issues.
+		prompt "Paste your StepFun Step Plan API key" placeholder="..."
+		// The same key also works on the pay-as-you-go host, so a models listing
+		// only proves the key is valid. A one-token chat call on the Step Plan
+		// path exercises the plan itself. Only a 401/403 rejects the key.
+		validate "chat-completions" label="StepFun Step Plan (China)" base-url="https://api.stepfun.com/step_plan/v1" model="step-3.5-flash" max-tokens-field="max_tokens" optional=#true
+	}
+}

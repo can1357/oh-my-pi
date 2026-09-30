@@ -65,6 +65,7 @@ export type KnownProvider =
 	| "singularityapi-dev"
 	| "singularityapi-tech"
 	| "stepfun"
+	| "stepfun-cn"
 	| "synthetic"
 	| "together"
 	| "typesafe"

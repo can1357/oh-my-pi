@@ -149,6 +149,8 @@ behavior {
 	// Text-chat transports cannot serve StepFun's audio-only and image-editing
 	// SKUs, which its /v1/models roster interleaves with the chat models.
 	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// Step Plan's /models roster interleaves the same StepAudio and image SKUs.
+	exclude-models provider="stepfun-cn" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \

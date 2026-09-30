@@ -1425,7 +1425,7 @@ SiliconFlow (China) is the domestic China deployment of SiliconFlow's AI model p
 - **Runtime Reference Hydration**: Live discovered models are cross-referenced with models.dev catalog entries (`SILICONFLOW_MODELS_DEV_DESCRIPTORS`) with a 5-second timeout (`SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS`) in `loadSiliconFlowModelsDevReferences` (`packages/catalog/src/provider-models/openai-compat.ts`) to hydrate pricing and limit metadata.
 
 ## StepFun (`stepfun`)
-StepFun is the OpenAI-compatible Open Platform endpoint at `https://api.stepfun.ai/v1` serving StepFun's own chat models (`step-5-preview`, `step-3.7-flash`, `step-3.5-flash`, `step-3.5-flash-2603`). It uses the OpenAI Chat Completions transport (`openai-completions`). StepFun's China deployment (`api.stepfun.com`) and Step Plan subscription endpoints (`/step_plan/v1`) are separate deployments whose API keys are not interchangeable with `.ai` keys.
+StepFun is the OpenAI-compatible Open Platform endpoint at `https://api.stepfun.ai/v1` serving StepFun's own chat models (`step-5-preview`, `step-3.7-flash`, `step-3.5-flash`, `step-3.5-flash-2603`). It uses the OpenAI Chat Completions transport (`openai-completions`). StepFun's China deployment (`api.stepfun.com`) and Step Plan subscription endpoints (`/step_plan/v1`) are separate deployments whose API keys are not interchangeable with `.ai` keys. The Step Plan subscription is the `stepfun-cn` provider.
 
 ### Special casings
 - **`max_tokens` Only**: The provider rule sets `max-tokens-field "max_tokens"` in `packages/catalog/src/compat/rules/providers/stepfun.kdl`. StepFun documents `max_tokens` (default `INF`) and never the `max_completion_tokens` spelling the OpenAI baseline assumes, which the endpoint silently ignores — output budgets would go unlimited.
@@ -1443,6 +1443,27 @@ StepFun is the OpenAI-compatible Open Platform endpoint at `https://api.stepfun.
 - **Descriptor Configuration**: `stepfunModelManagerOptions` is registered in `packages/catalog/src/provider-models/descriptors.ts` with `defaultModel: "step-5-preview"`, `envVars: ["STEPFUN_API_KEY"]`, and discovery label `StepFun`.
 - **Seeded Bundle**: `providers/stepfun.kdl` carries `seed bundle="always"` rows with StepFun's published model-card limits and prices (`https://platform.stepfun.ai/docs/en/guides/pricing/details`, limits as catalogued on models.dev), so the provider is selectable before first discovery.
 - **Live Discovery**: `stepfunModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` treats a successful `/v1/models` snapshot as authoritative (`dynamicModelsAuthoritative`): it replaces the seed rows, hydrated by `mapWithBundledReference`, so retired models leave the picker and models StepFun ships later become selectable without an omp release.
+
+## StepFun Step Plan (China) (`stepfun-cn`)
+StepFun Step Plan is the China console's monthly credit subscription. Chat calls use the OpenAI Chat Completions transport at `https://api.stepfun.com/step_plan/v1`. This is not the pay-as-you-go `stepfun` provider (`https://api.stepfun.ai/v1`); a `STEPFUN_API_KEY` does not authorize the plan host.
+
+### Special casings
+- **`max_tokens` Only**: `providers/stepfun-cn.kdl` sets `max-tokens-field "max_tokens"`. The plan's chat API documents `max_tokens` and ignores `max_completion_tokens`.
+- **Credit Pricing**: Seed rows carry zero USD prices. The plan debits monthly credits.
+- **Effort Ladder**: The provider scope assigns `low` / `medium` / `high` for the `step` family. `step-3.5-flash` and `step-3.5-flash-2603` are residue rules with only `low` / `high`, matching the Step Plan chat reference. The `.ai` Open Platform accepts `medium` on those ids; this deployment was not re-probed.
+- **Router Window**: `step-router-v1` is seeded at 256K. The router can hand a turn to `step-3.7-flash` (256K) or `deepseek-v4-pro` (1M); the shared id keeps the smaller window.
+- **`reasoning_content` Replay**: Tool-call turns replay `reasoning_content` and do not send a synthetic placeholder (`requires-reasoning-content-for-tool-calls #true`, `allows-synthetic-reasoning-content-for-tool-calls #false`). `step-router-v1` can hand tool work to `deepseek-v4-pro`, which rejects a made-up placeholder.
+- **Non-Chat Roster Filtering**: `/models` interleaves StepAudio and image SKUs and carries no per-model type. `isStepfunCnChatModelId` drops the same prefixes as `stepfun` (`stepaudio-`, `step-image-`, `step-tts-`, `step-2x-large`) via `exclude-models provider="stepfun-cn"`.
+
+### Auth & usage
+- **Environment Variable**: `STEPFUN_CN_API_KEY` only. `STEPFUN_API_KEY` and `STEP_API_KEY` do not enable this provider.
+- **API Key Login**: `auth/stepfun-cn.kdl` declares `login "api-key"` with console URL `https://platform.stepfun.com/interface-key`. The probe is a one-token chat call to `step-3.5-flash` on the Step Plan path (`max_tokens`, `optional=#true`), so only a 401/403 rejects the pasted key.
+- **No Usage Tracking**: No dedicated quota module under `packages/ai/src/usage/`.
+
+### Catalog model handling
+- **Descriptor Configuration**: `stepfunCnModelManagerOptions` is registered in `packages/catalog/src/provider-models/descriptors.ts` with `defaultModel: "step-5-preview"`, `envVars: ["STEPFUN_CN_API_KEY"]`, and discovery label `StepFun Step Plan (China)`.
+- **Seeded Bundle**: `providers/stepfun-cn.kdl` carries `seed bundle="always"` rows for `step-5-preview` (1M context, 64K output, image input), `step-3.7-flash` (256K, image input), `step-3.5-flash`, `step-3.5-flash-2603`, and `step-router-v1` (256K, text only).
+- **Live Discovery**: A successful `/models` snapshot is authoritative. Known ids keep their seeded rows through `mapWithBundledReference`. An id the seed does not know yet takes `reasoning_effort_support_list` and otherwise stays on the generic defaults, same as `stepfun`.
 
 ## Synthetic (`synthetic`)
 Synthetic is an AI platform offering dual API format support for its models, exposing both OpenAI-compatible (`https://api.synthetic.new/openai/v1/chat/completions`) and Anthropic-compatible (`https://api.synthetic.new/anthropic/v1/messages`) endpoints. Calls default to the `OpenAI Chat Completions` transport, but can switch dynamically to the `Anthropic Messages` transport when configured.

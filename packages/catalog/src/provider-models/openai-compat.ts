@@ -5060,6 +5060,63 @@ export function stepfunModelManagerOptions(
 	});
 }
 
+/**
+ * Whether a Step Plan `/models` id is a chat model omp can route. The plan
+ * roster interleaves the same audio and image SKUs as the `.ai` Open Platform;
+ * the exclusion policy lives in `runtime/behavior.kdl` (`exclude-models
+ * provider="stepfun-cn"`).
+ */
+export function isStepfunCnChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) return false;
+	return !isExcludedModel("stepfun-cn", normalized);
+}
+
+/**
+ * Step Plan discovery configuration: the API key plus optional base-URL and
+ * fetch overrides. Consumed by {@link stepfunCnModelManagerOptions}.
+ */
+export interface StepfunCnModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Step Plan model manager: OpenAI-compatible chat completions at
+ * `api.stepfun.com/step_plan/v1`. A successful `/models` snapshot is
+ * authoritative over which bundled ids remain (`providers/stepfun-cn.kdl`).
+ * A known id keeps the seed's context window and output cap: the shared
+ * mapper would otherwise copy `context_length` and `max_completion_tokens`.
+ * An id the seed does not know yet takes `reasoning_effort_support_list` and
+ * otherwise stays on the generic defaults, matching `stepfun`.
+ */
+export function stepfunCnModelManagerOptions(
+	config?: StepfunCnModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "stepfun-cn",
+		defaultBaseUrl: "https://api.stepfun.com/step_plan/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => isStepfunCnChatModelId(model.id),
+		mapModel: (entry, model, reference) => {
+			const mapped = mapWithBundledReference(entry, model, reference);
+			if (reference) {
+				return {
+					...mapped,
+					contextWindow: reference.contextWindow,
+					maxTokens: reference.maxTokens,
+				};
+			}
+			const thinking = mapStepfunThinking(entry);
+			return thinking === undefined ? mapped : { ...mapped, reasoning: true, thinking };
+		},
+		dynamicModelsAuthoritative: true,
+	});
+}
+
 // ---------------------------------------------------------------------------
 // 17. Qwen Portal
 // ---------------------------------------------------------------------------

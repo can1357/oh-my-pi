@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added StepFun Step Plan (China) (`stepfun-cn`) as a built-in provider with API-key login and live model discovery ([#13732](https://github.com/can1357/oh-my-pi/pull/13732) by [@bubua12](https://github.com/bubua12)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
@@ -18,6 +22,9 @@
 - Fixed Claude models on Bedrock's `/anthropic` routes resolving `compat.disableStrictTools: false`, although those routes reject the tool `strict` field ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
 - Fixed Bedrock's FIPS (`bedrock-runtime-fips`) and AWS PrivateLink (`vpce-….vpce.amazonaws.com`) hostnames, and Mantle's documented `/v1` OpenAI base, not being recognized as Bedrock routes, which left them without native compaction and the `/anthropic` request fixes ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
 - Added `supportsBetweenToolsThinking` Anthropic compat flag (`supports-between-tools-thinking` KDL axis), enabled for Claude Sonnet 5.5
+### Added
+
+- Added StepFun Step Plan (China) (`stepfun-cn`) as a built-in provider with API-key login and live model discovery ([#12791](https://github.com/can1357/oh-my-pi/pull/12791) by [@bubua12](https://github.com/bubua12)).
 
 ## [18.4.3] - 2026-09-28
 
