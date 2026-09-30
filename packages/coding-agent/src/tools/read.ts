@@ -1352,6 +1352,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		displayMode: { hashLines: boolean; lineNumbers: boolean },
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
+		maxColumns: number,
 		allowBridge = true,
 	): Promise<{
 		outputText: string;
@@ -1389,7 +1390,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 		const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
-		const maxColumns = resolveOutputMaxColumns(this.session.settings);
 
 		const blocks: string[] = [];
 		const notices: string[] = [];
@@ -1638,6 +1638,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			options;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
+		// Artifact recovery must not reapply the column cap that elided the original output.
+		// Line and byte budgets still bound each page.
+		const maxColumns = located?.spec.artifactStore ? 0 : resolveOutputMaxColumns(this.session.settings);
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
 		const selectorBase = located?.url ?? "";
 
@@ -2067,6 +2070,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						displayMode,
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
+						maxColumns,
 						!located, // located URLs read their backing file directly, as their handlers do
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
@@ -2174,11 +2178,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							.done();
 					}
 
-					// Per-line column cap. Skipped in raw mode so `:raw` always returns
-					// verbatim bytes for paste-back-into-tool workflows. Total byte/line
-					// counts in `truncation` keep reflecting the source, not the trimmed
-					// view — column truncation surfaces separately via `.limits()`.
-					const maxColumns = resolveOutputMaxColumns(this.session.settings);
+					// Per-line column cap. Raw reads and artifact recovery preserve full
+					// lines within the byte budget. Total byte/line counts in `truncation`
+					// keep reflecting the source, not the trimmed view — column
+					// truncation surfaces separately via `.limits()`.
 					// Column truncation is display-only. `collectedLines` MUST stay
 					// byte-for-byte with the on-disk content so the snapshot recorded
 					// below can be verified against the live file. Mutating it with
