@@ -77,6 +77,8 @@ export interface ArchiveGcResult {
 	keptNewestPerCwd: number;
 	wouldArchive: number;
 	archived: number;
+	/** Childless session bucket directories (dry run: would be; apply: were) removed. */
+	emptyDirsRemoved: number;
 	historyRowsDeleted: number;
 	statsRowsDeleted: number;
 	ftsRebuilt: boolean;
@@ -1355,6 +1357,63 @@ async function cleanupStatsRowsForArchivedSessions(
 	}
 }
 
+/**
+ * Childless directories under the sessions root, deepest first. Every spawn
+ * creates a per-cwd bucket directory even when no transcript is ever written,
+ * and nothing removes those buckets after the sessions go away - so session
+ * pickers keep listing long-gone working directories. rmdir fails with
+ * ENOTEMPTY for anything that still holds content, which makes a
+ * deepest-first rmdir sweep a safe "remove exactly the empty leaves" pass:
+ * parents that only held empty buckets empty out as the sweep goes.
+ */
+async function vacuumEmptyBucketDirs(sessionsRoot: string, apply: boolean): Promise<number> {
+	const dirs: string[] = [];
+	async function collect(dir: string): Promise<void> {
+		let entries;
+		try {
+			entries = await fs.readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if (codeOf(error) === "ENOENT") return;
+			throw error;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const child = path.join(dir, entry.name);
+			dirs.push(child);
+			await collect(child);
+		}
+	}
+	await collect(sessionsRoot);
+	if (!apply) {
+		// Mirror the apply pass: a directory counts when it holds no files and
+		// every directory under it also counts (parents empty out as their
+		// empty children go).
+		const fileDirs = new Set<string>();
+		for (const dir of dirs) {
+			const entries = await fs.readdir(dir, { withFileTypes: true });
+			if (entries.some(entry => !entry.isDirectory())) fileDirs.add(dir);
+		}
+		const removable = new Set<string>();
+		for (const dir of [...dirs].sort((a, b) => b.split(path.sep).length - a.split(path.sep).length)) {
+			if (fileDirs.has(dir)) continue;
+			const childDirs = dirs.filter(candidate => candidate !== dir && path.dirname(candidate) === dir);
+			if (childDirs.every(child => removable.has(child))) removable.add(dir);
+		}
+		return removable.size;
+	}
+	dirs.sort((a, b) => b.split(path.sep).length - a.split(path.sep).length);
+	let removed = 0;
+	for (const dir of dirs) {
+		try {
+			await fs.rmdir(dir);
+			removed += 1;
+		} catch (error) {
+			if (codeOf(error) !== "ENOTEMPTY" && codeOf(error) !== "ENOENT") throw error;
+		}
+	}
+	return removed;
+}
+
 async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
@@ -1366,6 +1425,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		keptNewestPerCwd: 0,
 		wouldArchive: 0,
 		archived: 0,
+		emptyDirsRemoved: 0,
 		historyRowsDeleted: 0,
 		statsRowsDeleted: 0,
 		ftsRebuilt: false,
@@ -1410,6 +1470,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	result.wouldArchive = candidates.length;
+	result.emptyDirsRemoved = await vacuumEmptyBucketDirs(sessionsRoot, options.apply);
 	if (!options.apply) return result;
 
 	const archivedSessionIds: string[] = [];
@@ -1678,6 +1739,8 @@ function renderText(result: GcResult): string {
 			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
 		);
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
+		if (result.archive.emptyDirsRemoved > 0)
+			lines.push(`empty session dirs ${result.apply ? "removed" : "to remove"}: ${result.archive.emptyDirsRemoved}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
 	if (result.wal) {
