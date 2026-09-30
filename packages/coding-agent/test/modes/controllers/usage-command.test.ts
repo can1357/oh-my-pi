@@ -36,7 +36,7 @@ describe("renderUsageReports content", () => {
 		];
 
 		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 98));
-		expect(output).toContain("25% free");
+		expect(output).toContain("75% used");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
@@ -71,7 +71,7 @@ describe("renderUsageReports content", () => {
 		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
 		expect(output).toContain("Cursor");
 		expect(output).toContain("gpt-4 requests");
-		expect(output).toContain("70% free");
+		expect(output).toContain("30% used");
 		expect(output).toContain("resets in 1d");
 	});
 
@@ -428,14 +428,14 @@ describe("interactive /usage account visibility", () => {
 		expect(overview).toContain(email);
 		expect(overview).toContain("org-personal");
 		expect(overview).toContain("usage unavailable");
-		expect(overview).toContain("75%");
+		expect(overview).toContain("25%");
 		expect(overview).not.toContain("Tavily");
 
 		mounted?.handleInput("\r");
 		const details = display();
 		expect(details).toMatch(/shared@example\.test.*org-personal.*usage unavailable/);
 		expect(details).toContain("shared@example.test (org-team)");
-		expect(details).toContain("75% free");
+		expect(details).toContain("25% used");
 		expect(details).toContain("2 saved resets");
 		expect(details).toContain("1 usable now");
 		expect(details).toContain("in use by this session: shared@example.test (org-personal)");
