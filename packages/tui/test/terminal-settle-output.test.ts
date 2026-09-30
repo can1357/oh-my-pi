@@ -6,7 +6,7 @@ import {
 	type TerminalFrameProvider,
 	Text,
 } from "@oh-my-pi/pi-tui";
-import type { OutputPump } from "@oh-my-pi/pi-tui/terminal";
+import { emergencyTerminalRestore, type OutputPump } from "@oh-my-pi/pi-tui/terminal";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	createProcessTerminalRenderHarness,
@@ -26,6 +26,8 @@ const TITLE_POP = "\x1b[23;2t";
 // The tall session's content passes the 24-row viewport's bottom, so the
 // prompt goes on its last row and scrolls once.
 const TALL_PLACEMENT = "\x1b[24;1H\n";
+// The exit-time blind restore: bracketed paste off, then Mode 2031 off.
+const BLIND_RESTORE = "\x1b[?2004l\x1b[?2031l";
 
 interface FakePumpOptions {
 	/** One `flushSync` outcome per call: true means the terminal read everything within the wait. */
@@ -400,6 +402,43 @@ describe("settling the output pump before the terminal is handed back", () => {
 
 		expect(control.hintRow).toBe(control.editorRow + 1);
 		expect(cut).toEqual(control);
+	});
+});
+
+describe("the exit-time restore on a terminal that stopped reading", () => {
+	let harness: ProcessTerminalRenderHarness | undefined;
+
+	afterEach(() => {
+		harness?.dispose();
+		harness = undefined;
+		vi.restoreAllMocks();
+	});
+
+	it("still waits for the terminal to take the held output when restoring stdin's mode throws", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		// The terminal reads nothing through the stop and the next two waits, then everything.
+		const pump = new FakePump({ flushes: [false, false, false], thenFlushes: true });
+		harness = createProcessTerminalRenderHarness(80, 24, { outputPump: () => pump });
+		harness.tui.addChild(new TallBlock(60));
+		harness.tui.requestRender();
+		await harness.settle();
+		harness.tui.stop();
+		// A terminal whose mode cannot be restored, as a revoked but still-open tty reports it.
+		const setRawMode = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => {
+				throw new Error("setRawMode failed with errno: 5");
+			},
+			configurable: true,
+		});
+		try {
+			emergencyTerminalRestore();
+		} finally {
+			if (setRawMode) Object.defineProperty(process.stdin, "setRawMode", setRawMode);
+		}
+
+		expect(pump.pending()).toBe(0);
+		expect(positionsInOrder(pump.stream, [SETTLE_RESET, FIRST_RESTORE_WRITE, BLIND_RESTORE])).not.toContain(-1);
 	});
 });
 

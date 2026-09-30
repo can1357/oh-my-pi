@@ -519,17 +519,19 @@ export function emergencyTerminalRestore(): void {
 				"\x1b[?25h"; // Show cursor
 			// Behind what a stopped terminal still holds (see terminalHandoff): a
 			// direct write would wait out a stalled reader and land ahead of it.
-			// No wait here; the drain below waits for all of it.
+			// No wait here; the drain in `finally` waits for all of it.
 			if (!writeBehindTerminalHandoff(restore, 0)) process.stdout.write(restore);
 			altScreenActive = false;
 			if (process.stdin.setRawMode) {
 				process.stdin.setRawMode(false);
 			}
 		}
-		// A headless process (tests) makes no terminal side effects, waiting included.
-		if (!isTerminalHeadless()) drainTerminalHandoff();
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
+	} finally {
+		// Whatever threw above, the exit still waits for the held output. A
+		// headless process (tests) makes no terminal side effects, waiting included.
+		if (!isTerminalHeadless()) drainTerminalHandoff();
 	}
 }
 /** Terminal-reported appearance (dark/light mode). */
