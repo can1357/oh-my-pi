@@ -450,7 +450,8 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 
 /**
  * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * environment variable, runtime override, session setup (a loaded profile), `--config` overlay,
+ * project, global, then the default.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -539,7 +540,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Value from the settings layers alone (runtime, `--config` overlay, project, global, default),
+	 * Value from the settings layers alone (runtime, setup, `--config` overlay, project, global, default),
 	 * ignoring the environment variable — what the settings panel shows and edits.
 	 */
 	layered(scope: ScopeLike): T {
@@ -757,10 +758,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	}
 
 	/**
-	 * Holds the default as a runtime override only while no persisted layer — global, project,
-	 * `--config` overlay — configures this setting; no-op when the environment or any layer already
+	 * Holds the default as a runtime override only while no other layer — global, project, `--config`
+	 * overlay, session setup — configures this setting; no-op when the environment or any layer already
 	 * configures it, and dropped by a global write ({@link set}, {@link setEntry}, {@link setMember}) or
-	 * {@link unset} of this setting or when a reload or re-scope configures it (protocol-host defaults).
+	 * {@link unset} of this setting or when a reload, re-scope, or session setup configures it
+	 * (protocol-host defaults).
 	 */
 	pinDefault(scope: ScopeLike): void {
 		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
@@ -781,7 +783,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		settingsOf(scope).clearOverrideValue(this);
 	}
 
-	/** Whether the environment or any settings layer (runtime, overlay, project, global) sets this value. */
+	/** Whether the environment or any settings layer (runtime, setup, overlay, project, global) sets this value. */
 	isConfigured(scope: ScopeLike): boolean {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
