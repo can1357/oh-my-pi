@@ -1318,12 +1318,54 @@ function lexDocument(text: string): TokensList {
 	return lexWindowed(text);
 }
 
-// A `[label]:` anywhere in the text, for renderMarkdownHead only. A reference
-// definition registers for the whole document, including one nested in a
-// quote or list item where the line-anchored HAS_REF_DEF misses it, so a
-// prefix rendered alone could leave a reference above the cut unresolved.
-// Over-matching only costs the cut.
-const REF_DEF_ANYWHERE = /\[(?:\\.|[^\]\\\n])+\]:/;
+// States of the `[label]:` scan in hasRefDefAnywhere, one bit each: just past
+// a `[` with no label character yet, past at least one label character, and
+// just past a backslash that escapes the next character.
+const REF_LABEL_EMPTY = 1;
+const REF_LABEL = 2;
+const REF_LABEL_ESCAPE = 4;
+
+/**
+ * Whether `text` holds a `[label]:` anywhere, for renderMarkdownHead only: a
+ * `[`, one or more label characters, then `]:`, where a label character is any
+ * character but `]`, `\` and a newline, or a backslash and the character after
+ * it unless that is a line terminator. That is the language of
+ * `/\[(?:\\.|[^\]\\\n])+\]:/`, but the regex restarts at every `[` and scans to
+ * the end of its label, so a line of `[` with no `]:` costs it quadratic time.
+ * Every label open at a character continues the same way from the state it is
+ * in, so one pass that tracks which states some open label is in decides it in
+ * linear time.
+ *
+ * A reference definition registers for the whole document, including one
+ * nested in a quote or list item where the line-anchored HAS_REF_DEF misses it,
+ * so a prefix rendered alone could leave a reference above the cut unresolved.
+ * Over-matching only costs the cut.
+ */
+function hasRefDefAnywhere(text: string): boolean {
+	if (!text.includes("]:")) return false;
+	let states = 0;
+	for (let i = text.indexOf("["); i !== -1 && i < text.length;) {
+		const c = text.charCodeAt(i);
+		let next = 0;
+		// An escaped character is anything but a line terminator (the regex's `.`).
+		if (states & REF_LABEL_ESCAPE && c !== 0x0a && c !== 0x0d && c !== 0x2028 && c !== 0x2029) next = REF_LABEL;
+		if (states & (REF_LABEL_EMPTY | REF_LABEL)) {
+			if (c === 0x5d) {
+				// `]`: every open label ends here, a definition if it is not empty and `:` follows.
+				if (states & REF_LABEL && text.charCodeAt(i + 1) === 0x3a) return true;
+			} else if (c === 0x5c) {
+				next |= REF_LABEL_ESCAPE;
+			} else if (c !== 0x0a) {
+				next |= REF_LABEL;
+			}
+		}
+		if (c === 0x5b) next |= REF_LABEL_EMPTY;
+		states = next;
+		// With no label open, only the next `[` can open one.
+		i = states === 0 ? text.indexOf("[", i + 1) : i + 1;
+	}
+	return false;
+}
 
 /** Whether `text` holds anything but whitespace from `start` on. */
 function hasContentFrom(text: string, start: number): boolean {
@@ -1350,7 +1392,7 @@ export function renderMarkdownHead(text: string, width: number, theme: MarkdownT
 	// The text a final-mode `Markdown` lexes: the constructor normalizes OSC 8
 	// terminators, then render expands tabs and repairs an orphan closing fence.
 	const normalized = repairOrphanClosingFence(expandTabs(normalizeOsc8Terminators(text)));
-	if (normalized.length >= 2 * LEX_WINDOW_BYTES && !normalized.includes("\r") && !REF_DEF_ANYWHERE.test(normalized)) {
+	if (normalized.length >= 2 * LEX_WINDOW_BYTES && !normalized.includes("\r") && !hasRefDefAnywhere(normalized)) {
 		for (
 			let size = firstProbeSize(normalized, 0);
 			size < normalized.length;
