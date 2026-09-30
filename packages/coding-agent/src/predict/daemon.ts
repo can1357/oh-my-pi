@@ -11,13 +11,11 @@
  * Engine state that fails to load is wiped and rebuilt the same way.
  */
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
-import { getHistoryDbPath, isEnoent, logger, postmortem, VERSION, withFileLock } from "@oh-my-pi/pi-utils";
-import { LineParser, writeJsonLine } from "../tiny/jsonl-socket";
-import { endpointAlive } from "../tiny/worker-server";
+import { getHistoryDbPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { JsonLineServer } from "../tiny/worker-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
 import { readForeignPrompts } from "./foreign-history";
@@ -39,7 +37,6 @@ const PERSIST_DEBOUNCE_MS = 30_000;
 const INGEST_BATCH = 1_000;
 /** After an engine fails to open, requests for it fail fast for this long before a retry. */
 const OPEN_RETRY_MS = 60_000;
-const SHUTDOWN_BUDGET_MS = 2_000;
 const CURSOR_FILE = "cursor.json";
 
 /** Persisted history cursor, or `undefined` when the engine has no persisted state yet. */
@@ -166,14 +163,21 @@ class TextPredictDaemon {
 	#historyDbPath: string;
 	#engines = new Map<TextPredictMethod, Promise<Engine>>();
 	#failedAt = new Map<TextPredictMethod, number>();
-	#connections = new Set<net.Socket>();
-	#server: net.Server | undefined;
-	#endpoint = "";
-	#idleTimer: NodeJS.Timeout | undefined;
 	#persistTimer: NodeJS.Timeout | undefined;
-	#inFlight = 0;
-	#stopped = Promise.withResolvers<void>();
-	#stopping: Promise<void> | undefined;
+	#server = new JsonLineServer<TextPredictRequest, TextPredictResponse>({
+		name: "text-predict",
+		cleanupLabel: "text-predict-daemon",
+		subject: "text-predict daemon",
+		idleMs: IDLE_EXIT_MS,
+		banner: textPredictReadyBanner,
+		onRequest: (request, reply) =>
+			void this.#server.busy(() => this.#dispatch(request)).then(response => reply.send(response)),
+		beforeStop: () => {
+			clearTimeout(this.#persistTimer);
+			this.#persistTimer = undefined;
+		},
+		onStop: () => this.#persistAll(),
+	});
 
 	constructor(agentDir: string) {
 		this.#agentDir = agentDir;
@@ -181,78 +185,15 @@ class TextPredictDaemon {
 	}
 
 	/** Bind `endpoint` and serve until idle exit or `shutdown`. */
-	async serve(endpoint: string): Promise<void> {
-		this.#endpoint = endpoint;
-		if (process.platform === "win32") {
-			await this.#listen(endpoint);
-		} else {
-			await withFileLock(`${endpoint}.bind`, async () => {
-				await this.#clearStaleSocket(endpoint);
-				await this.#listen(endpoint);
-			});
-		}
-		const cancelCleanup = postmortem.register("text-predict-daemon", () => this.#shutdown());
-		this.#armIdle();
-		process.stdout.write(`${textPredictReadyBanner(endpoint)}\n`);
-		try {
-			await this.#stopped.promise;
-		} finally {
-			cancelCleanup();
-		}
-	}
-
-	#listen(endpoint: string): Promise<void> {
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		server.once("error", reject);
-		server.listen(endpoint, () => {
-			server.off("error", reject);
-			resolve();
-		});
-		return promise;
-	}
-
-	async #clearStaleSocket(endpoint: string): Promise<void> {
-		try {
-			await fs.stat(endpoint);
-		} catch {
-			return;
-		}
-		if (await endpointAlive(endpoint)) throw new Error(`text-predict daemon already listening on ${endpoint}`);
-		await fs.unlink(endpoint);
-	}
-
-	#accept(socket: net.Socket): void {
-		this.#connections.add(socket);
-		socket.setEncoding("utf-8");
-		const parser = new LineParser(line => {
-			let request: TextPredictRequest;
-			try {
-				request = JSON.parse(line);
-			} catch (error) {
-				logger.warn("text-predict: malformed request line", { error: String(error) });
-				return;
-			}
-			void this.#dispatch(request).then(response => writeJsonLine(socket, response));
-		});
-		socket.on("data", (chunk: string) => parser.push(chunk));
-		socket.on("error", () => {
-			// "close" always follows.
-		});
-		socket.once("close", () => this.#connections.delete(socket));
+	serve(endpoint: string): Promise<void> {
+		return this.#server.serve(endpoint);
 	}
 
 	async #dispatch(request: TextPredictRequest): Promise<TextPredictResponse> {
-		this.#inFlight++;
-		this.#armIdle();
 		try {
 			return await this.#handle(request);
 		} catch (error) {
 			return { id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) };
-		} finally {
-			this.#inFlight--;
-			this.#armIdle();
 		}
 	}
 
@@ -291,7 +232,7 @@ class TextPredictDaemon {
 				return { id: request.id, ok: true, op: "sync", ingested };
 			}
 			case "shutdown":
-				setImmediate(() => void this.#shutdown().finally(() => process.exit(0)));
+				setImmediate(() => this.#server.exit("shutdown requested"));
 				return { id: request.id, ok: true, op: "shutdown" };
 		}
 	}
@@ -390,47 +331,6 @@ class TextPredictDaemon {
 				logger.warn("text-predict: persist failed", { method: engine.method, error: String(error) });
 			}
 		}
-	}
-
-	#armIdle(): void {
-		clearTimeout(this.#idleTimer);
-		this.#idleTimer = setTimeout(() => {
-			if (this.#inFlight > 0) {
-				this.#armIdle();
-				return;
-			}
-			logger.debug("text-predict: idle; exiting", { endpoint: this.#endpoint });
-			void this.#shutdown().finally(() => process.exit(0));
-		}, IDLE_EXIT_MS);
-	}
-
-	#shutdown(): Promise<void> {
-		this.#stopping ??= this.#stop();
-		return this.#stopping;
-	}
-
-	async #stop(): Promise<void> {
-		clearTimeout(this.#idleTimer);
-		clearTimeout(this.#persistTimer);
-		this.#persistTimer = undefined;
-		for (const socket of this.#connections) socket.destroy();
-		this.#connections.clear();
-		const server = this.#server;
-		this.#server = undefined;
-		if (server) {
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await Promise.race([closed.promise, Bun.sleep(SHUTDOWN_BUDGET_MS)]);
-		}
-		await this.#persistAll();
-		if (process.platform !== "win32") {
-			try {
-				await fs.unlink(this.#endpoint);
-			} catch {
-				// Already removed.
-			}
-		}
-		this.#stopped.resolve();
 	}
 }
 

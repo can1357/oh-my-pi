@@ -4,8 +4,14 @@ import type { SgrMouseEvent } from "../../mouse";
 import type { ComposerPreviewStatusSource } from "../../overlays/composer-shape-preview";
 import type { ComposerShape } from "../../overlays/composer-shape-registry";
 import type { ModelBrowserSource } from "../../overlays/model-browser";
-import type { SymbolPreset } from "../../theme/theme";
+import type { SymbolPreset, ThemeColor } from "../../theme/theme";
 import type { Component, TUI } from "../../tui";
+
+/** One line of status copy kept as raw text plus its theme colour, never as pre-styled ANSI. */
+export interface StyledLine {
+	readonly text: string;
+	readonly color: ThemeColor;
+}
 
 /** Terminal capabilities used by setup overlays and the startup splash. */
 export interface SetupUiHost {

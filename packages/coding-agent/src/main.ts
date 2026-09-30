@@ -247,10 +247,10 @@ function applyProtocolDefaults(host: ProtocolHost, targetSettings: Settings = se
 	}
 }
 
-/** `--no-ui` only applies to `--mode rpc`; reject it elsewhere (exit 1). */
+/** `--no-ui` only applies to RPC modes; reject it elsewhere (exit 1). */
 function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
-	if (!args.noUi || args.mode === "rpc") return;
-	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc")}\n`);
+	if (!args.noUi || args.mode === "rpc" || args.mode === "rpc-ui") return;
+	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc or --mode rpc-ui")}\n`);
 	process.exit(1);
 }
 

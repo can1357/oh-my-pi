@@ -36,6 +36,22 @@ export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
 
+/** Identity of a refresh actually sent to the provider. */
+export interface CacheWarmingRefreshStart {
+	phase: "streaming" | "idle";
+	provider: string;
+	model: string;
+}
+
+/** Result of a refresh that {@link CacheWarmingRefreshStart} announced. */
+export interface CacheWarmingRefreshEnd extends CacheWarmingRefreshStart {
+	outcome: "hit" | "miss" | "error" | "aborted";
+	/** Present only when onWarmed recorded this refresh, including an aborted one the provider had already accepted. */
+	usage?: Usage;
+	/** Why warming stopped; absent when warming continues (the refresh rescheduled, or a new request replaced the run). */
+	warmingStopReason?: string;
+}
+
 /** Prompt-cache retention tier a request wrote its entry under. */
 export type PromptCacheTier = "short" | "long";
 
@@ -218,6 +234,7 @@ interface ActiveRun extends CacheWarmRequest {
 	/** Set while a refresh that an extension forced is in flight. */
 	extensionOverride: boolean;
 	timer?: NodeJS.Timeout;
+	warmingStopReason?: string;
 }
 
 /** Everything the warmer needs from its host; injected so the core stays session-agnostic. */
@@ -248,8 +265,12 @@ export class CacheWarmer {
 	#run?: ActiveRun;
 	#inactive: CacheWarmingStatus;
 	readonly #deps: CacheWarmerDeps;
-	/** Called with every paid warm response, including one that missed the cache. */
+	/** Called with every paid warm response, including one that missed the cache or was aborted after acceptance. */
 	onWarmed?: (message: AssistantMessage, extensionOverride: boolean) => void;
+	/** Called when a refresh is handed to the stream; stop decisions and extension vetoes send nothing and skip it. */
+	onRefreshStart?: (refresh: CacheWarmingRefreshStart) => void;
+	/** Called exactly once after each onRefreshStart, unless the host cleared it (dispose) while the refresh was in flight. */
+	onRefreshEnd?: (refresh: CacheWarmingRefreshEnd) => void;
 
 	constructor(deps: CacheWarmerDeps) {
 		this.#deps = deps;
@@ -349,7 +370,7 @@ export class CacheWarmer {
 		if (reason) this.#stop(reason);
 	}
 
-	/** Reconcile an active run after the persisted warming mode changes. */
+	/** Reconcile an active run after the effective warming mode changes. */
 	onModeChanged(): void {
 		const run = this.#run;
 		if (!run) return;
@@ -384,6 +405,7 @@ export class CacheWarmer {
 	}
 
 	#stop(reason: string, stopped?: Pick<CacheWarmingStatus, "decision" | "extensionOverride">): void {
+		if (this.#run) this.#run.warmingStopReason = reason;
 		this.#clearRun();
 		this.#inactive = { state: "inactive", reason, ...stopped };
 	}
@@ -450,22 +472,49 @@ export class CacheWarmer {
 		}
 
 		run.extensionOverride = extensionOverride;
-		const message = await this.#replay(run);
-		if (this.#run !== run) return;
-		if (message && message.usage.totalTokens > 0) this.onWarmed?.(message, extensionOverride);
-		if (!message || message.stopReason === "error") {
-			this.#stop("refresh failed");
-			return;
+		const refresh: CacheWarmingRefreshStart = {
+			phase: run.phase,
+			provider: run.model.provider,
+			model: run.model.id,
+		};
+		this.onRefreshStart?.(refresh);
+		let outcome: CacheWarmingRefreshEnd["outcome"] = "error";
+		let usage: Usage | undefined;
+		try {
+			const message = await this.#replay(run);
+			// Record before the abort check: a refresh cancelled or replaced after the
+			// provider accepted it was still billed, and spend tracking must see it.
+			if (message && message.usage.totalTokens > 0 && this.onWarmed) {
+				this.onWarmed(message, extensionOverride);
+				usage = message.usage;
+			}
+			if (this.#run !== run) {
+				outcome = "aborted";
+				return;
+			}
+			if (!message || message.stopReason === "error") {
+				this.#stop("refresh failed");
+				return;
+			}
+			// A replay that re-wrote the prefix (or read nothing) means the entry was
+			// already gone or the replay no longer lands on its key; further
+			// refreshes would each pay a full write.
+			if (message.usage.cacheRead <= 0 || message.usage.cacheWrite > 0) {
+				outcome = "miss";
+				this.#stop("refresh missed the cache");
+				return;
+			}
+			outcome = "hit";
+			if (!this.#validateRun(run)) return;
+			this.#schedule(run);
+		} finally {
+			this.onRefreshEnd?.({
+				...refresh,
+				outcome,
+				...(usage ? { usage } : {}),
+				...(run.warmingStopReason ? { warmingStopReason: run.warmingStopReason } : {}),
+			});
 		}
-		// A replay that re-wrote the prefix (or read nothing) means the entry was
-		// already gone or the replay no longer lands on its key; further
-		// refreshes would each pay a full write.
-		if (message.usage.cacheRead <= 0 || message.usage.cacheWrite > 0) {
-			this.#stop("refresh missed the cache");
-			return;
-		}
-		if (!this.#validateRun(run)) return;
-		this.#schedule(run);
 	}
 
 	/**
