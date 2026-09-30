@@ -1377,7 +1377,16 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	const archiveBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 
 	for (const session of sessions) {
-		if (session.status && ACTIVE_STATUSES.has(session.status)) {
+		// Active-status sessions are only immortal while they might still be
+		// alive. Past the cold-archive age nothing has written to them for that
+		// long, so they are just as dead as any other cold session and would
+		// otherwise pile up forever (crashed runs leave interrupted/pending
+		// transcripts; header-only files read as unknown).
+		if (
+			session.status &&
+			ACTIVE_STATUSES.has(session.status) &&
+			(options.coldArchiveAfterDays <= 0 || session.modified.getTime() > cutoffMs)
+		) {
 			result.skippedActive += 1;
 			continue;
 		}
