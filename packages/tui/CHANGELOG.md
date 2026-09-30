@@ -261,7 +261,7 @@
 - Fixed Enter doing nothing on a fully typed slash-command argument while its completion popup was open (e.g. `/mcp list`): it now submits instead of re-accepting the identical completion; subcommands that still need a required argument (e.g. `/mcp test`) keep inserting the subcommand so you can type it ([#13885](https://github.com/can1357/oh-my-pi/pull/13885) by [@H4vC](https://github.com/H4vC)).
 ### Changed
 
-- `/usage` now shows consumed quota percentages instead of remaining percentages, matching its usage bars ([#13886](https://github.com/can1357/oh-my-pi/pull/13886) by [@rxaviers](https://github.com/rxaviers)).
+- `/usage` now shows consumed quota percentages instead of remaining percentages, matching its usage bars; large overages keep percentages and reset countdowns aligned ([#13886](https://github.com/can1357/oh-my-pi/pull/13886) by [@rxaviers](https://github.com/rxaviers)).
 
 ## [18.4.4] - 2026-09-29
 

@@ -401,9 +401,13 @@ function usageMeter(fraction: number, status: UsageLimit["status"], meter: boole
 	return meter ? node("meter", { value, style: "bar", size: "md", tone }) : node("progress", { value, tone, grow: 1 });
 }
 
+function usedPercentage(fraction: number): string {
+	return `${Math.max(0, Math.round(fraction * 100))}%`;
+}
+
 /** Used percentage; preserve overage above 100%. */
 function usedText(fraction: number): string {
-	return `${Math.max(0, Math.round(fraction * 100))}% used`;
+	return `${usedPercentage(fraction)} used`;
 }
 
 /** `Mon 28 Sep` for a local date. */
@@ -523,6 +527,7 @@ const CARD_MAX_LABEL_LINES = 2;
 interface CardRowLayout {
 	labelWidth: number;
 	resetWidth: number;
+	percentageWidth: number;
 	barWidth: number;
 	stacked: boolean;
 	labelHeights: number[];
@@ -680,7 +685,7 @@ export class UsageDashboardComponent implements Component {
 		}
 
 		const hidden = card.windows.length - CARD_MAX_WINDOWS;
-		const { labelWidth, resetWidth, barWidth, stacked, labelHeights } = layout;
+		const { labelWidth, resetWidth, percentageWidth, barWidth, stacked, labelHeights } = layout;
 		const contentWidth = Math.max(1, width - 2);
 		for (let index = 0; index < Math.min(card.windows.length, CARD_MAX_WINDOWS); index++) {
 			const window = card.windows[index]!;
@@ -697,8 +702,10 @@ export class UsageDashboardComponent implements Component {
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
-			const usedPct = Math.max(0, Math.round(window.fraction * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${usedPct}%`.padStart(5));
+			const pctText = theme.fg(
+				this.#statusColor(window.status),
+				usedPercentage(window.fraction).padStart(percentageWidth),
+			);
 			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			for (const line of wrapTextWithAnsi(
@@ -744,8 +751,17 @@ export class UsageDashboardComponent implements Component {
 					),
 				0,
 			);
+			const percentageWidth = windows.reduce(
+				(max, rows) =>
+					rows.reduce(
+						(width, window) =>
+							Math.max(width, window.fraction !== undefined ? usedPercentage(window.fraction).length : 0),
+						max,
+					),
+				5,
+			);
 			const contentWidth = Math.max(1, cardWidth - 2);
-			const suffixWidth = 5 + (resetWidth > 0 ? resetWidth + 1 : 0);
+			const suffixWidth = percentageWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
 			const inlineBarWidth = contentWidth - labelWidth - 1 - suffixWidth;
 			const stacked = inlineBarWidth < CARD_MIN_BAR_WIDTH;
 			const labelLines = labels.map(rows =>
@@ -769,6 +785,7 @@ export class UsageDashboardComponent implements Component {
 			const layout: CardRowLayout = {
 				labelWidth,
 				resetWidth,
+				percentageWidth,
 				barWidth: Math.max(1, stacked ? contentWidth - suffixWidth : inlineBarWidth),
 				stacked,
 				labelHeights,

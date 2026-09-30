@@ -257,6 +257,31 @@ describe("UsageDashboardComponent", () => {
 		});
 	}
 
+	it("keeps large overage percentages and resets beside aligned bars", () => {
+		const now = Date.now();
+		const component = dashboard([
+			report("anthropic", "a@test", [
+				limit("anthropic", "a", "extra", "Claude Extra Usage", 100, "exhausted", now + 3_600_000),
+				limit("anthropic", "a", "5h", "Claude 5 Hour", 0.25, "ok", now + 3_600_000),
+			]),
+		]);
+		try {
+			for (const width of [36, 100]) {
+				const lines = component.render(width).map(line => Bun.stripANSI(line));
+				const quotaLines = lines.filter(line => /[█░]/.test(line));
+				expect(quotaLines).toHaveLength(2);
+				expect(quotaLines[0]).toMatch(/[█░]+ *10000% 1h/);
+				expect(quotaLines[1]).toMatch(/[█░]+ *25% 1h/);
+				const bars = quotaLines.map(line => line.match(/[█░]+/)![0]);
+				expect(bars[0].length).toBe(bars[1].length);
+				expect(quotaLines[0].indexOf("%")).toBe(quotaLines[1].indexOf("%"));
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("keeps usable bars and matching label rows across multi-column cards", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [
