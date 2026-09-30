@@ -2435,12 +2435,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The preset may have switched before this listener existed.
 		this.#refreshSlashCommandIcons();
 		// A confirmed Glyph Protocol handshake means omp's own icons render in
-		// this terminal without a Nerd Font, so the default `unicode` preset is
-		// upgraded to `nerd` for this session. The persisted setting is left
+		// this terminal without a Nerd Font, so the unconfigured `unicode` preset
+		// is upgraded to `nerd` for this session. The persisted setting is left
 		// alone: it travels to terminals (ssh, tmux) where the upgrade would
-		// show tofu. Explicit `ascii`/`nerd` choices are never touched.
+		// show tofu. Explicit preset choices are never touched.
 		this.ui.terminal.onGlyphProtocolReport?.(supported => {
-			if (!supported || cfgSymbolPreset.get(settings) !== "unicode" || theme.getSymbolPreset() !== "unicode") return;
+			if (!supported || cfgSymbolPreset.provenance(settings) !== "default" || theme.getSymbolPreset() !== "unicode")
+				return;
 			void setSymbolPreset("nerd").then(() => {
 				this.statusLine.invalidate();
 				this.ui.invalidate();

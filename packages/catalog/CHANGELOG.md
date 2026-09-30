@@ -6,6 +6,11 @@
 
 - Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
 
+### Fixed
+
+- Fixed OpenRouter decision models that report no context/output limits (`respan/span-01`, `respan/span-01-lite`, `respan/span-01-lite:free`) missing from the judge model list ([#13888](https://github.com/can1357/oh-my-pi/issues/13888))
+- Fixed every `google-vertex/claude-sonnet-5-5` request failing with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#13795](https://github.com/can1357/oh-my-pi/issues/13795))
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

@@ -3352,12 +3352,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
 									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
 								},
-								contextWindow:
-									typeof entry.context_length === "number" ? entry.context_length : baseModel.contextWindow,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: baseModel.maxTokens,
+								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
 								...(!supportsToolChoice && {
 									compat: { ...baseModel.compat, supportsToolChoice: false },
 								}),
@@ -3421,11 +3417,9 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: 0,
 									cacheWrite: 0,
 								},
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: null,
+								// Some rows (e.g. respan/span-01) advertise `0` for unknown limits.
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
 							};
 						},
 						fetch: config?.fetch,
@@ -3457,11 +3451,8 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 								supportsTools: false,
 								// OpenRouter bills reranking per search; ModelCost has no search-unit axis.
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
-								maxTokens:
-									typeof topProvider?.max_completion_tokens === "number"
-										? topProvider.max_completion_tokens
-										: null,
+								contextWindow: toPositiveNumber(entry.context_length, null),
+								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, null),
 							};
 						},
 						fetch: config?.fetch,
@@ -3505,7 +3496,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 									cacheRead: 0,
 									cacheWrite: 0,
 								},
-								contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
+								contextWindow: toPositiveNumber(entry.context_length, null),
 								maxTokens: null,
 							};
 						},

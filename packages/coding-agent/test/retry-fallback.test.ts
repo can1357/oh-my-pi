@@ -20,6 +20,7 @@ function createContext(
 		getBundledModel("google-vertex", "gemini-2.5-flash"),
 		getBundledModel("openrouter", "google/gemini-2.5-flash"),
 		getBundledModel("openai", "gpt-4o-mini"),
+		getBundledModel("xai-oauth", "grok-4.7"),
 	].filter(model => model !== undefined);
 	return {
 		chains,
@@ -233,6 +234,30 @@ describe("retry fallback selector resolution", () => {
 			"google/gemini-2.5-flash",
 			"openai/gpt-4o-mini",
 		]);
+	});
+
+	it("keeps a role's chain when the live effort differs from the role's explicit effort (#13789)", () => {
+		const model = getBundledModel("xai-oauth", "grok-4.7");
+		const high = "xai-oauth/grok-4.7:high";
+		const xhigh = "xai-oauth/grok-4.7:xhigh";
+
+		// A spawn `effort` or `/thinking` moved the session off the role's effort.
+		const roleOnly = createContext({ task: ["openai/gpt-4o-mini"] }, { task: high });
+		expect(resolveRetryFallbackChainKey(roleOnly, xhigh, model)).toBe("task");
+		expect(findRetryFallbackCandidates(roleOnly, "task", xhigh, model).map(candidate => candidate.raw)).toEqual([
+			"openai/gpt-4o-mini",
+		]);
+
+		// A role assigned the live effort still outranks one assigned another effort.
+		const exactRole = createContext(
+			{ task: ["openai/gpt-4o-mini"], slow: ["openai/gpt-4o-mini:high"] },
+			{ task: high, slow: xhigh },
+		);
+		expect(resolveRetryFallbackChainKey(exactRole, xhigh, model)).toBe("slow");
+
+		// Model-selector keys stay effort-exact.
+		const modelKey = createContext({ [high]: ["openai/gpt-4o-mini"] });
+		expect(resolveRetryFallbackChainKey(modelKey, xhigh, model)).toBeUndefined();
 	});
 });
 
