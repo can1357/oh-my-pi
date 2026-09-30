@@ -35,15 +35,17 @@ always capped, because the terminal is usually gone. Postmortem's
 `tui-restore` runs synchronously on any exit that finds the TUI still running.
 On a signal it is capped: after SIGHUP the terminal is gone, and SIGTERM or
 SIGINT must end the process before postmortem's deadline or a kill, so an
-unsaved session loses the skipped rows there. For every other reason (a fatal
+unsaved session, or a saved one whose file stopped being written (a latched
+persistence failure), loses the skipped rows there. For every other reason (a fatal
 error, `postmortem.quit()` without a prior stop, as in the escape hatch after a
 failed teardown or the stdout-EPIPE route, or a bare `process.exit()`) it
 flushes as the owner's `TUI.setExitFlushProvider()` says, and in full without
 one. InteractiveMode's provider applies quit's saved-session condition, and
 also flushes in full after a failed teardown or while the session manager has
 a disk failure latched, since the file then lacks the newest entries.
-A partly emitted frontier head that a capped batch leaves out gets its
-separator: the batch opens with a blank. The frame that writes a fresh flush
+A head that progressive append emitted in full retires without its
+separator, so the next batch on any path opens with a blank; so does a capped
+batch that leaves out the rest of a partly emitted frontier head. The frame that writes a fresh flush
 batch comes from a second, display-order pass whenever the first one saw
 images, so the image budget demotes the oldest images rather than the newest.
 A handoff stop that resumes with

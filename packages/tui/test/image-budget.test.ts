@@ -1620,7 +1620,15 @@ describe("TUI inline-image budget", () => {
 			// The live frame shows more images than the default cap of 8, so the budget
 			// demotes the oldest ones. A capped flush walks newest-first; the frame that
 			// writes the batch must still demote in display order.
-			for (const maxRows of [18, undefined]) {
+			const images = (from: number, status: string) =>
+				Array.from({ length: 12 - from }, (_, offset) => `${from + offset}:${status}`);
+			// Pressure retires images 0 and 1 during the live frame, already text there.
+			// The capped batch then holds images 8-11, under the cap; the uncapped one
+			// holds images 2-11, of which the oldest two are past the cap.
+			for (const [maxRows, expected] of [
+				[18, ["0:text", "1:text", ...images(8, "live")]],
+				[undefined, [...images(0, "text").slice(0, 4), ...images(4, "live")]],
+			] as const) {
 				const term = new VirtualTerminal(40, 40, 1_000);
 				const composer = new Composer({
 					terminal: term,
@@ -1650,14 +1658,16 @@ describe("TUI inline-image budget", () => {
 				const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
 				// Each label row is followed by a blank and its image's row.
 				const written = rows.flatMap((row, index) => {
-					if (!/^label-\d+$/.test(row)) return [];
+					const label = /^label-(\d+)$/.exec(row);
+					if (label === null) return [];
 					const image = rows[index + 2] ?? "";
-					return [image.includes(KITTY_PLACEHOLDER) ? "live" : image.includes("[Image:") ? "text" : "missing"];
+					return [
+						`${label[1]}:${image.includes(KITTY_PLACEHOLDER) ? "live" : image.includes("[Image:") ? "text" : "missing"}`,
+					];
 				});
-				expect(written).not.toContain("missing");
-				const firstLive = written.indexOf("live");
-				expect(firstLive).toBeGreaterThanOrEqual(0);
-				expect(written.slice(firstLive).every(image => image === "live")).toBe(true);
+				// Only the four images past the cap of 8, the oldest, are text; a capped
+				// stop writes images under the cap, all of them live.
+				expect(written).toEqual(expected);
 			}
 		} finally {
 			setKittyGraphics(originalGraphics);

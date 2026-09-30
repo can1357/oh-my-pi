@@ -92,14 +92,15 @@ interface TranscriptEntry {
 
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
-	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
+	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number; lead: boolean }
 	| { batch: HistoryBatch; kind: "commit"; start: number; end: number; dropped: number | undefined; lead: boolean }
 	| { batch: HistoryBatch; kind: "replay" };
 
 /**
- * Where a capped shutdown flush starts, the older block it measured and left
- * out, if any, and whether the batch opens with a blank: the separator a partly
- * emitted frontier head owes the next block when the cap leaves its rest out.
+ * Where a shutdown flush starts, the older block a cap measured and left out,
+ * if any, and whether the batch opens with a blank: the separator owed by a
+ * fully emitted head that already retired, or by a partly emitted frontier
+ * head whose rest the cap leaves out.
  */
 interface FlushTail {
 	start: number;
@@ -180,6 +181,11 @@ export interface TranscriptViewportSpan {
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
+	/**
+	 * A head that progressive append emitted in full retired without the blank
+	 * that follows a block, so the next append or commit batch opens with it.
+	 */
+	#separatorOwed = false;
 	#nextBatchId = 1;
 	#offered: Offered | undefined;
 	#replayPending = false;
@@ -246,6 +252,7 @@ export class TranscriptContainer extends Container {
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
+		this.#separatorOwed = false;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
 		this.#pinnedFrontier = undefined;
@@ -602,7 +609,7 @@ export class TranscriptContainer extends Container {
 			if (entry === undefined) return undefined;
 			const before = this.#renderStablePrefix(entry, entry.emitted, width);
 			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			rows = after.slice(before.length);
+			rows = offered.lead ? ["", ...after.slice(before.length)] : after.slice(before.length);
 		} else if (offered.kind === "commit") {
 			// A capped #peekBatch measured the frontier head and the block the cap
 			// left out, neither of them in the batch; measure them again so an
@@ -688,10 +695,16 @@ export class TranscriptContainer extends Container {
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
-					rows,
+					rows: this.#separatorOwed ? ["", ...rows] : rows,
 					kind: "append",
 				};
-				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd };
+				this.#offered = {
+					batch,
+					kind: "append",
+					entry: this.#frontier,
+					emittedEnd,
+					lead: this.#separatorOwed,
+				};
 				this.#pinnedFrontier = undefined;
 				return batch;
 			}
@@ -720,7 +733,7 @@ export class TranscriptContainer extends Container {
 			// rest on the next frames.
 			tail =
 				maxRows === undefined
-					? { start: this.#frontier, dropped: undefined, lead: false }
+					? { start: this.#frontier, dropped: undefined, lead: this.#separatorOwed }
 					: this.#flushTail(end, width, maxRows);
 			retirement = this.#renderRange(
 				tail.start,
@@ -768,6 +781,9 @@ export class TranscriptContainer extends Container {
 			}
 			this.#frontier = offered.end;
 		}
+		// An append or commit that opened with the owed blank paid it; a replay
+		// rewrites the committed ledger with every separator.
+		if (offered.kind === "replay" || offered.lead) this.#separatorOwed = false;
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
 	}
@@ -1021,20 +1037,23 @@ export class TranscriptContainer extends Container {
 	#flushTail(end: number, width: number, maxRows: number): FlushTail {
 		const head = this.#entries[this.#frontier]!;
 		const headEmitted = head.mode === "appendOnly" && head.emitted > 0;
+		const owed = this.#separatorOwed;
+		const skipsHead = owed || headEmitted;
 		let rows = 0;
 		for (let index = end - 1; index >= this.#frontier; index--) {
 			// A non-empty block adds its rows and one blank: the separator after
-			// it, or the trailing blank. Any block but the head, as the oldest,
-			// also brings the blank a partly emitted head owes.
-			const lead = headEmitted && index > this.#frontier ? 1 : 0;
-			if (rows > 0 && rows + 2 + lead > maxRows) return { start: index + 1, dropped: undefined, lead: headEmitted };
+			// it, or the trailing blank. The oldest block also brings any blank
+			// owed: always after a retired fully emitted head, and below the
+			// head when a partly emitted head is left out.
+			const lead = owed || (headEmitted && index > this.#frontier) ? 1 : 0;
+			if (rows > 0 && rows + 2 + lead > maxRows) return { start: index + 1, dropped: undefined, lead: skipsHead };
 			const height = this.#liveBlockRows(this.#entries[index]!, index, width).length;
 			if (height === 0) continue;
 			if (rows > 0 && rows + height + 1 + lead > maxRows)
-				return { start: index + 1, dropped: index, lead: headEmitted };
+				return { start: index + 1, dropped: index, lead: skipsHead };
 			rows += height + 1;
 		}
-		return { start: this.#frontier, dropped: undefined, lead: false };
+		return { start: this.#frontier, dropped: undefined, lead: owed };
 	}
 
 	/**
@@ -1098,6 +1117,8 @@ export class TranscriptContainer extends Container {
 			if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			this.#retireEntry(entry);
 			this.#frontier++;
+			// Its rows are in scrollback without the blank that follows a block.
+			if (rendered.length > 0) this.#separatorOwed = true;
 		}
 	}
 
