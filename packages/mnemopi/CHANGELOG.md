@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `MNEMOPI_STATED_WEIGHT` / `MNEMOPI_INFERRED_WEIGHT` / `MNEMOPI_TOOL_WEIGHT` / `MNEMOPI_IMPORTED_WEIGHT` / `MNEMOPI_UNKNOWN_WEIGHT` and `MNEMOPI_TIER1_WEIGHT` / `MNEMOPI_TIER2_WEIGHT` / `MNEMOPI_TIER3_WEIGHT` having no effect: recall now scores each memory with the configured veracity and degradation-tier weights instead of a fixed table; the defaults are unchanged ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` having no effect on recall ranking ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.4.4] - 2026-09-29
 
