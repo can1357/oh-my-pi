@@ -9,6 +9,14 @@ describe("renderMarkdownHead", () => {
 	const paragraphs = (count: number) =>
 		Array.from({ length: count }, (_, i) => `Paragraph ${i} holds a single row of prose.`).join("\n\n");
 
+	const elapsed = (render: () => void): number => {
+		clearRenderCache();
+		const start = Bun.nanoseconds();
+		render();
+		return Bun.nanoseconds() - start;
+	};
+	const bestOf3 = (render: () => void): number => Math.min(elapsed(render), elapsed(render), elapsed(render));
+
 	it("renders only the leading rows of a long document", () => {
 		const doc = `${paragraphs(5000)}\n`;
 		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
@@ -25,18 +33,32 @@ describe("renderMarkdownHead", () => {
 		// first probe window: the reference-definition check has to rule out a
 		// `[label]:` starting at every one of them before the head can be cut.
 		const doc = `${paragraphs(200)}\n\n\`\`\`\n${"[".repeat(30_000)}\n\`\`\`\n\n${paragraphs(2000)}\n`;
-		const elapsed = (render: () => void): number => {
-			clearRenderCache();
-			const start = Bun.nanoseconds();
-			render();
-			return Bun.nanoseconds() - start;
-		};
-		const head = Math.min(
-			...Array.from({ length: 3 }, () => elapsed(() => renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12))),
-		);
+		const head = bestOf3(() => renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12));
 		const full = elapsed(() => new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120));
 		expect(head).toBeLessThan(full);
 		// The head is a cut prefix, not the whole document rendered.
+		expect(renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12).truncated).toBe(true);
+	});
+
+	it("cuts a document of display-math openers that never close in time independent of its length", () => {
+		// Each paragraph opens a `\[` block that no `\]` line closes, so no block
+		// forms; deciding that per opener by scanning the rest of the text made
+		// the head's cost grow with the whole document.
+		const doc = (kb: number) => "\\[\nx\n\n".repeat(Math.ceil((kb * 1024) / 6));
+		const cut = (text: string) => () => {
+			expect(renderMarkdownHead(text, 80, defaultMarkdownTheme, 12).truncated).toBe(true);
+		};
+		const small = bestOf3(cut(doc(64)));
+		expect(bestOf3(cut(doc(1024)))).toBeLessThan(5 * small);
+	});
+
+	it("cuts past a display-math block whose closer is far away faster than the whole document", () => {
+		// Every window short of the `\]` 128 KB down stops at the `\[`. Windows
+		// that doubled toward the closer re-lexed the block each time.
+		const doc = `Intro.\n\n\\[\n${paragraphs(3000)}\n\\]\n\n${paragraphs(3000)}\n`;
+		const head = bestOf3(() => renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12));
+		const full = elapsed(() => new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120));
+		expect(head).toBeLessThan(full);
 		expect(renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12).truncated).toBe(true);
 	});
 

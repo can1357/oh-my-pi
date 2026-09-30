@@ -1448,21 +1448,19 @@ export function renderMarkdownHead(text: string, width: number, theme: MarkdownT
 	const normalized = repairOrphanClosingFence(expandTabs(normalizeOsc8Terminators(text)));
 	if (normalized.length >= 2 * LEX_WINDOW_BYTES && !normalized.includes("\r") && !hasRefDefAnywhere(normalized)) {
 		const mathBlocks = new MathBlockScan(normalized);
-		for (
-			let size = firstProbeSize(normalized, 0);
-			size < normalized.length;
-			size = nextProbeSize(normalized, 0, size, 0)
-		) {
-			const end = probeBoundary(normalized, 0, size, mathBlocks).end;
-			if (end === 0) continue;
-			const head = normalized.slice(0, end);
-			// Rendering `head` repairs it again on its own. That fires only when the
-			// repair's line scan pairs a fence the lexer doesn't see (one inside an
-			// HTML block, say) with a partner past the cut; then only a whole render
-			// matches.
-			if (repairOrphanClosingFence(head) !== head) break;
-			const lines = new Markdown(head, 0, 0, theme).render(width);
-			if (lines.length > minRows) return { lines, truncated: true };
+		for (let size = firstProbeSize(normalized, 0); size < normalized.length;) {
+			const boundary = probeBoundary(normalized, 0, size, mathBlocks);
+			if (boundary.end > 0) {
+				const head = normalized.slice(0, boundary.end);
+				// Rendering `head` repairs it again on its own. That fires only when the
+				// repair's line scan pairs a fence the lexer doesn't see (one inside an
+				// HTML block, say) with a partner past the cut; then only a whole render
+				// matches.
+				if (repairOrphanClosingFence(head) !== head) break;
+				const lines = new Markdown(head, 0, 0, theme).render(width);
+				if (lines.length > minRows) return { lines, truncated: true };
+			}
+			size = nextProbeSize(normalized, 0, size, boundary.blockEnd);
 		}
 	}
 	return { lines: new Markdown(text, 0, 0, theme).render(width), truncated: false };
