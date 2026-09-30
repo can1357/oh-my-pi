@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.4.4] - 2026-09-29
+
 ### Added
 
 - Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.

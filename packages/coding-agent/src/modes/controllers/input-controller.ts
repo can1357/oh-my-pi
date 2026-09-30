@@ -936,7 +936,8 @@ export class InputController {
 			const submittedText = text;
 			const armed = this.#armedBareCommand;
 			this.#armedBareCommand = undefined;
-			const armedBareCommand = armed?.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
+			const armedBareCommand =
+				armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
@@ -967,7 +968,9 @@ export class InputController {
 			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
 			// developer directive (no visible user message) instead of an empty turn, so the
 			// model continues the prior intent rather than second-guessing the interrupt.
-			if (text === "." || text === "c") {
+			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
+			// so it is sent as a normal reply there.
+			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({
