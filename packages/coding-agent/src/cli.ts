@@ -8,6 +8,11 @@
 try {
 	delete process.env.MallocStackLogging;
 	delete process.env.MallocStackLoggingNoCompact;
+	// Terminal emulators (e.g. Warp) inject __CFBundleIdentifier into child
+	// processes. When Cocoa/AppKit pasteboard APIs are called, macOS uses this
+	// inherited bundle ID to register the CLI process with LaunchServices,
+	// creating duplicate Dock icons or causing Dock flashes.
+	delete process.env.__CFBundleIdentifier;
 } catch {}
 
 /**
