@@ -44,6 +44,32 @@ const OAUTH_REFRESH_LEASE_RENEW_MS = 5_000;
 const OAUTH_REFRESH_OPERATION_TIMEOUT_MS = 10_000;
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
 
+type OrganizationScope = Pick<
+	OAuthCredentials,
+	"orgId" | "region" | "inferenceRegion" | "activeOrganizationId" | "orgName"
+>;
+
+/**
+ * Organization-scoped identity after a refresh: refreshed values win; stored
+ * org/residency/inference scope carries over only while the organization is
+ * unchanged. The WorkOS selection always falls back to the stored one.
+ */
+export function mergeRefreshedOrganizationScope(
+	current: OrganizationScope,
+	refreshed: OrganizationScope,
+): OrganizationScope {
+	const sameOrg =
+		(refreshed.orgId === undefined || refreshed.orgId === current.orgId) &&
+		(refreshed.activeOrganizationId === undefined || refreshed.activeOrganizationId === current.activeOrganizationId);
+	return {
+		orgId: refreshed.orgId ?? (sameOrg ? current.orgId : undefined),
+		region: refreshed.region ?? (sameOrg ? current.region : undefined),
+		inferenceRegion: refreshed.inferenceRegion ?? (sameOrg ? current.inferenceRegion : undefined),
+		activeOrganizationId: refreshed.activeOrganizationId ?? current.activeOrganizationId,
+		orgName: refreshed.orgName ?? (sameOrg ? current.orgName : undefined),
+	};
+}
+
 /** Merge provider refresh bytes with the stored OAuth row, preserving subtype metadata for every refresh path. */
 export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, refreshed: OAuthCredentials): T {
 	return {
@@ -56,8 +82,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		projectId: refreshed.projectId ?? current.projectId,
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
-		orgId: refreshed.orgId ?? current.orgId,
-		orgName: refreshed.orgName ?? current.orgName,
+		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 	};
 }

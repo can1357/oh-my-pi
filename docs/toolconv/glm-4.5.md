@@ -4,6 +4,8 @@ Native tool-calling convention of Zhipu AI / Z.ai's **GLM-4.5** family (`zai-org
 
 This document was verified against the authoritative `chat_template.jinja` from the HF repo (fetched raw and **rendered locally with Jinja2** — `trim_blocks=True, lstrip_blocks=True`, transformers' `tojson` filter — to produce the byte-exact streams below), `tokenizer_config.json` and `generation_config.json` for the exact token IDs and stop tokens, the model card, and the vLLM (`Glm4MoeModelToolParser`) and SGLang (`Glm4MoeDetector`) parser sources. The HF `resolve`/`blob` web paths redirect to the model-card API; the byte-exact source was obtained via the `resolve/main/...:raw` cache (template commit `cbb2c7cfb52fa128a9660cb1a7a78e017899e115`). The GLM-4.5 and GLM-4.6 `chat_template.jinja` files are identical (same content hash `41478957…`).
 
+The native template/server sections below provide format background. OMP implements its own decoded-text `glm` scanner and renderer in `packages/ai/src/dialect/glm.ts`, not the upstream Jinja template or Python parsers. Its different history, thinking, coercion, and recovery behavior is described under *omp / pi converter behavior*.
+
 ## Special tokens
 
 Token IDs are from `tokenizer_config.json` (`added_tokens_decoder`). Note the split: the turn/role markers are registered as **special** tokens, whereas the structural tool-call and thinking tags are each a single dedicated vocabulary token but flagged **`special: false`** (they are emitted/printed as ordinary text, not stripped as control tokens).
@@ -290,12 +292,14 @@ With a server parser active (`--tool-call-parser glm45 --reasoning-parser glm45`
 
 ## omp / pi converter behavior
 
-The repository's `glm` dialect is an **owned in-band converter**. Select it
-with `PI_DIALECT=glm`; legacy `PI_DIALECT=1` and `PI_DIALECT=true` also resolve
-to GLM. With tools present, the agent appends the GLM format guide and compact
-tool catalog to the system prompt, removes native provider tools, rewrites
-prior calls/results into grammar-owned text, and scans assistant text back
-into canonical pi events. GLM-family model affinity resolves to this dialect.
+The repository's `glm` dialect is an **owned in-band converter**. Set
+`tools.format` to `glm` to force it. `PI_DIALECT=glm` (also `1` or `true`) is
+consulted when the configured dialect resolver returns no owned dialect.
+The default `auto` uses native calls unless `supportsTools === false`, then
+selects the model-class dialect; GLM affinity and unknown-class fallback select
+`glm`. With tools present, the agent appends the compact normalized tool
+catalog and GLM guide, omits native tools/`tool_choice`, rewrites history, and
+projects assistant text back into canonical pi events.
 
 The owned renderer always emits the GLM-4.5 newline layout. It consults each
 tool's normalized schema: string-only properties are emitted raw, while all
@@ -305,27 +309,45 @@ owned history, result batches become a synthetic user message containing
 transcript renderer uses the model-native `<|observation|>` role marker
 instead.
 
-The scanner synthesizes `ptc_…` ids, emits `toolStart` once the name delimiter
-arrives, and streams each argument body as keyed `toolArgDelta` events.
-String-only schema properties stay verbatim; every other completed property is
-parsed with strict `JSON.parse` after trimming and falls back to the original
-raw text on failure. On flush, an unfinished key/value drops only the scanner's
-private call state. If `toolStart` was already emitted, OMP retains the
-canonical call and a normal stop may dispatch it; previously accumulated
-arguments—including partial value text published through `toolArgDelta`—remain
-on that call. Input that never yields a valid name emits no `toolStart` and
-therefore leaves no call. The scanner also heals narrowly recognizable model
-mistakes: `</arg_key>` used in place of `</arg_value>`, a stray wrong closer
-before the real closer, and a missing value closer immediately before the next
-argument or call close.
+These are separate paths: `encodeInbandToolHistory` converts assistant turns
+with calls to prose plus call blocks, dropping their thinking/image blocks;
+call-free assistant turns stay unchanged, and result images follow the
+synthetic user message's text. `renderTranscript` maps developer to system,
+renders all supplied assistant thinking without the upstream template's
+last-user trimming or empty-think prefill, and appends no generation prompt.
+Neither path injects `/nothink` into user text.
+
+`GLMInbandScanner` synthesizes `ptc_…` ids, emits `toolStart` once the name
+delimiter arrives, and streams argument bodies as keyed `toolArgDelta` events.
+Schema properties whose collected types are string-only after removing null
+stay verbatim; all other completed values use strict `JSON.parse` after
+trimming, falling back to the original raw text on failure. This is not the
+reference parsers' Python-literal fallback.
+
+At EOF, a nonempty name with no delimiter is accepted as a zero-argument call
+and emits both start/end without `</tool_call>`. Other unfinished calls may
+emit no end: an unfinished key/value can drop the scanner's private call state,
+but already-published starts/deltas are not retracted. A normal stop may retain
+and dispatch that canonical call; its streamed arguments remain raw strings
+until a `toolEnd` replaces them with the decoded object.
+
+Healing is limited to `</arg_key>` wrongly closing a value when followed by
+another key, a tool closer, or the real value closer; and a missing value
+closer before a complete next key/value opener. A bare `</tool_call>` inside
+an unclosed value is not itself a repair signature.
 
 Thinking parsing is enabled by default and excludes `<think>…</think>` from
-visible text. If `<tool_response>` appears in assistant output, the scanner
-drops that tag and the remainder of the currently buffered chunk rather than
-treating the hallucinated result as assistant content.
+visible text. With `parseThinking: false`, the think markers remain visible
+and calls inside them can be scanned. A standalone `<tool_response>` makes
+the scanner drop the rest of its currently buffered chunk. The owned stream
+detects that fabricated-result boundary across chunks and discards the entire
+continuation; `tools.abortOnFabricatedResult` defaults to `true` and aborts the
+provider there (when false, it drains instead). Named native calls are still
+forwarded if the provider emits them; the first native/in-band channel wins.
 
 ## Sources
 
+- OMP implementation: `packages/ai/src/dialect/glm.ts`, `coercion.ts` (`buildArgShapes`, `decodeValue`), `history.ts`, `owned-stream.ts`, `catalog.ts`; selection: `packages/catalog/src/identity/dialect.ts`, `packages/coding-agent/src/sdk.ts` (`resolveDialect`), `packages/agent/src/agent-loop.ts` (`resolveOwnedDialectFromEnv`).
 - Chat template (authoritative; rendered locally for the byte-exact streams), GLM-4.5 commit `cbb2c7c…`: https://huggingface.co/zai-org/GLM-4.5/resolve/main/chat_template.jinja — the `blob`/web path redirects to the model-card API; verified via the raw `resolve/main` cache.
 - Identical GLM-4.6 template (same content hash, confirming shared format): https://huggingface.co/zai-org/GLM-4.6/resolve/main/chat_template.jinja
 - Special-token IDs and `special` flags (`added_tokens_decoder`, `additional_special_tokens`): https://huggingface.co/zai-org/GLM-4.5/resolve/main/tokenizer_config.json

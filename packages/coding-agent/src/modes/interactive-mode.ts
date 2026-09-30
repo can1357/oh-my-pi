@@ -163,6 +163,7 @@ import {
 	previewLine,
 	replaceTabs,
 	shortenEmbeddedPaths,
+	shortenToolArgumentPaths,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -1017,9 +1018,16 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const recent = progress.recentTools[0];
 	const tool = currentTool ?? recent?.tool;
 	if (!tool) return undefined;
-	const detail = currentTool
-		? (progress.currentToolIntent ?? progress.currentToolArgs)
-		: (recent?.intent ?? recent?.args);
+	const intent = currentTool ? progress.currentToolIntent : recent?.intent;
+	const args = currentTool ? progress.currentToolArgs : recent?.args;
+	const argsKey = currentTool ? progress.currentToolArgsKey : recent?.argsKey;
+	// A model-written intent is prose, so home paths inside it are shortened as they stand. An argument is
+	// shortened by its key, so a literal search pattern that names a home path still shows what was searched.
+	const detail = intent
+		? shortenEmbeddedPaths(replaceTabs(intent))
+		: args
+			? shortenToolArgumentPaths(replaceTabs(args), argsKey)
+			: undefined;
 	const elapsed = currentTool && progress.currentToolStartMs ? Date.now() - progress.currentToolStartMs : 0;
 	const elapsedLabel =
 		elapsed > SUBAGENT_PREVIEW_ELAPSED_MIN_MS
@@ -1027,13 +1035,18 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 			: "";
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
-	const hookWidth = visibleWidth(hook);
+	// Between calls the row keeps the last call, marked with how it ended.
+	const status =
+		!currentTool && recent
+			? `${theme.styledSymbol(recent.isError ? "status.error" : "status.success", recent.isError ? "error" : "success")} `
+			: "";
+	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
-	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - hookWidth - elapsedWidth), "");
-	let line = `${hook}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
-	const detailBudget = width - hookWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
+	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
+	let line = `${hook}${status}${theme.fg(currentTool ? "muted" : "dim", shortTool)}`;
+	const detailBudget = width - prefixWidth - visibleWidth(shortTool) - elapsedWidth - visibleWidth(": ");
 	if (detail && detailBudget >= SUBAGENT_PREVIEW_MIN_DETAIL_WIDTH) {
-		line += `: ${theme.fg("dim", previewLine(shortenEmbeddedPaths(replaceTabs(detail)), Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
+		line += `: ${theme.fg("dim", previewLine(detail, Math.min(TRUNCATE_LENGTHS.SHORT, detailBudget)))}`;
 	}
 	return truncateToWidth(`${line}${elapsedLabel}`, width, "");
 }
@@ -2422,12 +2435,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The preset may have switched before this listener existed.
 		this.#refreshSlashCommandIcons();
 		// A confirmed Glyph Protocol handshake means omp's own icons render in
-		// this terminal without a Nerd Font, so the default `unicode` preset is
-		// upgraded to `nerd` for this session. The persisted setting is left
+		// this terminal without a Nerd Font, so the unconfigured `unicode` preset
+		// is upgraded to `nerd` for this session. The persisted setting is left
 		// alone: it travels to terminals (ssh, tmux) where the upgrade would
-		// show tofu. Explicit `ascii`/`nerd` choices are never touched.
+		// show tofu. Explicit preset choices are never touched.
 		this.ui.terminal.onGlyphProtocolReport?.(supported => {
-			if (!supported || cfgSymbolPreset.get(settings) !== "unicode" || theme.getSymbolPreset() !== "unicode") return;
+			if (!supported || cfgSymbolPreset.provenance(settings) !== "default" || theme.getSymbolPreset() !== "unicode")
+				return;
 			void setSymbolPreset("nerd").then(() => {
 				this.statusLine.invalidate();
 				this.ui.invalidate();

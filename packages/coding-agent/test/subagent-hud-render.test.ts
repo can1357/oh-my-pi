@@ -590,6 +590,54 @@ describe("subagent HUD lines", () => {
 			expect(out).not.toContain(os.homedir());
 		});
 
+		it("shortens a path argument by its key but keeps a literal search pattern as written", () => {
+			const homeFile = `${os.homedir()}/.ssh/config`;
+			const preview = (key: string) =>
+				render(
+					[
+						makeSession({
+							id: "Reader",
+							progress: makeProgress({
+								id: "Reader",
+								currentTool: "grep",
+								currentToolArgs: homeFile,
+								currentToolArgsKey: key,
+							}),
+						}),
+					],
+					200,
+					true,
+				);
+			expect(preview("path")).toContain("~/.ssh/config");
+			expect(preview("path")).not.toContain(os.homedir());
+			// A search pattern that names a home path must still show what was searched.
+			expect(preview("pattern")).toContain(homeFile);
+		});
+
+		it("marks the last completed call with how it ended while idle between calls", () => {
+			const rowFor = (isError: boolean) =>
+				render(
+					[
+						makeSession({
+							id: "Worker",
+							progress: makeProgress({
+								id: "Worker",
+								recentTools: [{ tool: "read", args: "a.ts", argsKey: "path", isError, endMs: Date.now() }],
+							}),
+						}),
+					],
+					120,
+					true,
+				)
+					.split("\n")
+					.find(line => line.includes("read: a.ts"));
+			const success = Bun.stripANSI(theme.styledSymbol("status.success", "success"));
+			const error = Bun.stripANSI(theme.styledSymbol("status.error", "error"));
+			expect(rowFor(false)).toContain(`${success} read: a.ts`);
+			expect(rowFor(true)).toContain(`${error} read: a.ts`);
+			expect(rowFor(false)).not.toContain(error);
+		});
+
 		it("keeps the elapsed marker with a very long tool name at a narrow width", () => {
 			const columns = 40;
 			const out = render(
