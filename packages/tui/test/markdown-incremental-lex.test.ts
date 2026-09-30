@@ -258,6 +258,30 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		expect(replaced).toEqual(renderCold("a flat replacement with no double newline at all", 60));
 	});
 
+	it("renders a transient non-append edit that keeps the frozen prefix as a one-shot render does", () => {
+		// The edit keeps the text of the frozen prefix but replaces what follows
+		// it, so the line after the prefix may no longer start a block of its
+		// own: a line of no-break spaces joins the blank run in front of it, and
+		// a same-marker item continues the list above it. Lexing the rest
+		// against that prefix kept the wrong rows through the finished render.
+		for (const [before, after] of [
+			["Para.\n\nnext para here", "Para.\n\n\u00a0\nAfter."],
+			["- a\n\nnext", "- a\n\n- b"],
+		]) {
+			const streaming = new Markdown("", 0, 0, THEME);
+			streaming.transientRenderCache = true;
+			clearRenderCache();
+			streaming.setText(before);
+			streaming.render(60);
+			clearRenderCache();
+			streaming.setText(after);
+			expect(streaming.render(60)).toEqual(renderColdTransient(after, 60));
+			streaming.transientRenderCache = false;
+			clearRenderCache();
+			expect(streaming.render(60)).toEqual(renderCold(after, 60));
+		}
+	});
+
 	it("CRLF text (fallback path) renders identically to a cold lex", () => {
 		const streaming = new Markdown("", 0, 0, THEME);
 		const crlf = "Para one with content.\r\n\r\nPara two with `code`.\r\n\r\nPara three tail.\r\n";
@@ -513,6 +537,18 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 			streamAgainstOneShot(doc, 1);
 	});
 
+	it("keeps watching an open opener of one kind while blocks of the other kind close below it", () => {
+		// A closer sends the prefix back only to the boundary in front of the
+		// opener of its own kind, so the open opener of the other kind above it
+		// is still watched, and its own closer further down still turns
+		// everything from it on into one block.
+		for (const doc of [
+			`Intro.\n\n\\[\nx = 1\n\n${paragraphs(2)}\n\n$$\na = b\n\nc = d\n$$\n\n${paragraphs(2)}\n\n\\]\n\nAfter.\n`,
+			`Intro.\n\n$$\nx = 1\n\n${paragraphs(2)}\n\n\\[\na = b\n\nc = d\n\\]\n\n${paragraphs(2)}\n\n$$\n\nAfter.\n`,
+		])
+			for (const step of [1, 7, 40]) streamAgainstOneShot(doc, step);
+	});
+
 	it("keeps freezing past a closed $$ pair around a blank body", () => {
 		// mathBlockAt rejects a whitespace-only body and no append can move its
 		// first closer, so this is no math block, and the freeze must not stall
@@ -555,27 +591,74 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 		streamAgainstOneShot(`${open}$$\n\nAfter the math.\n`, 40);
 	});
 
+	/** Wall time of streaming `doc` through one transient instance in `step`-character frames. */
+	function streamTime(doc: string, step: number): number {
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		const start = Bun.nanoseconds();
+		for (let len = step; len < doc.length + step; len += step) {
+			streaming.setText(doc.slice(0, len));
+			streaming.render(100);
+		}
+		return Bun.nanoseconds() - start;
+	}
+
+	/** Streaming `doc` costs less than three times streaming `baseline`, best of up to three runs. */
+	function expectStreamsAsFast(doc: string, baseline: string, step: number): void {
+		clearRenderCache();
+		const base = Math.min(streamTime(baseline, step), streamTime(baseline, step));
+		let cost = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && cost >= 3 * base; run++) cost = Math.min(cost, streamTime(doc, step));
+		expect(cost).toBeLessThan(3 * base);
+	}
+
 	it("streams past an own-line $$ that never closes as fast as without it", () => {
 		// The opener stays open to the end, so a frozen prefix that stopped in
 		// front of it left every frame re-lexing the whole message.
 		const body = paragraphs(750);
-		const stream = (doc: string): number => {
-			const streaming = new Markdown("", 0, 0, THEME);
-			streaming.transientRenderCache = true;
+		expectStreamsAsFast(`Intro.\n\n$$\nx = 1\n\n${body}\n`, `Intro.\n\nx = 1\n\n${body}\n`, 64);
+	});
+
+	it("streams $$ blocks around blank lines below an open \\[ as fast as $$ blocks without them", () => {
+		// A `$$` block with a blank line inside is frozen open until its closer
+		// arrives, and the closer turns only the text from its own opener on
+		// into a math block. So the prefix goes back to the boundary in front of
+		// that opener and keeps its rows there. Going back to the boundary in
+		// front of the `\[`, or rendering the kept prefix again, redid all the
+		// text after the `\[` for every block.
+		let blankInside = "Intro.\n\n\\[\nx = 1\n\n";
+		let noBlank = "Intro.\n\nx = 1\n\n";
+		for (let i = 0; i < 200; i++) {
+			blankInside += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\n\nc_{${i}} = d\n$$\n\n`;
+			noBlank += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\nc_{${i}} = d\n$$\n\n`;
+		}
+		expectStreamsAsFast(blankInside, noBlank, 16);
+	});
+
+	it("renders the frame after a last line that only read as a closer from the prefix frozen before it", () => {
+		// A frame ending in `$$` closes the open `$$` above it, as a one-shot
+		// render of that text does. Once the next chunk turns that line into
+		// text, the prefix frozen before it is right again, so the next frame
+		// lexes only the new text instead of everything after the opener.
+		const doc = `Intro.\n\n$$\nx = 1\n\n${paragraphs(1500)}\n\n`;
+		const frameTime = (streaming: Markdown, text: string): number => {
 			const start = Bun.nanoseconds();
-			for (let len = 64; len < doc.length + 64; len += 64) {
-				streaming.setText(doc.slice(0, len));
-				streaming.render(100);
-			}
+			streaming.setText(text);
+			streaming.render(100);
 			return Bun.nanoseconds() - start;
 		};
-		const withOpener = `Intro.\n\n$$\nx = 1\n\n${body}\n`;
-		const without = `Intro.\n\nx = 1\n\n${body}\n`;
-		clearRenderCache();
-		const baseline = Math.min(stream(without), stream(without));
-		let opened = Number.POSITIVE_INFINITY;
-		for (let run = 0; run < 3 && opened >= 3 * baseline; run++) opened = Math.min(opened, stream(withOpener));
-		expect(opened).toBeLessThan(3 * baseline);
+		let closing = 0;
+		let after = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && after >= closing / 4; run++) {
+			clearRenderCache();
+			const streaming = new Markdown("", 0, 0, THEME);
+			streaming.transientRenderCache = true;
+			for (let len = 4096; len < doc.length; len += 4096) frameTime(streaming, doc.slice(0, len));
+			frameTime(streaming, doc);
+			closing = frameTime(streaming, `${doc}$$`);
+			after = frameTime(streaming, `${doc}$$ E = mc^2 $$ holds.`);
+		}
+		expect(after).toBeLessThan(closing / 4);
 	});
 });
 

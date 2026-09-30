@@ -9,10 +9,10 @@ import {
 	type TokensList,
 } from "@oh-my-pi/pi-utils/marked";
 import {
-	hasMathBlockCloserLine,
 	MathBlockScan,
 	type MathBlockOpener,
 	mathBlockAt,
+	mathBlockCloserIndex,
 	mathBlockMayCloseAt,
 	mathBlockOpenerAt,
 	mathSpanAt,
@@ -1185,7 +1185,20 @@ interface BlockBoundary {
 // A whitespace-only line, capturing its terminator: "\n", or "" at the end of the text.
 const WHITESPACE_LINE_RE = /[^\S\n]*(\n|$)/y;
 
-const NO_OPENERS: readonly MathBlockOpener[] = [];
+/**
+ * A display-math opener in the frozen streaming prefix whose block an append
+ * could still close: the first such opener of its kind.
+ */
+interface PrefixOpener {
+	kind: MathBlockOpener;
+	/** Offset of the opener's line. */
+	at: number;
+	/** The stable boundary in front of the opener, as a text length and a token count. */
+	rewindEnd: number;
+	rewindCount: number;
+}
+
+const NO_OPENERS: readonly PrefixOpener[] = [];
 
 /**
  * Offset just past the last token in `tokens` that closes a block on a hard
@@ -1233,18 +1246,25 @@ const NO_OPENERS: readonly MathBlockOpener[] = [];
  * accumulate from `base`). The streaming freeze passes the frozen-prefix
  * token count: that prefix's boundary is permanent under append-only growth
  * (re-verified when frozen), so only the mutable tail can hold a new one.
+ * `endIndex` ends the scan in front of `tokens[endIndex]`, for the last
+ * boundary in front of a given token.
  */
 function stableBlockBoundary(
 	text: string,
 	base: number,
 	tokens: Token[],
-	{ startIndex = 0, window, settle = false }: { startIndex?: number; window?: ProbeWindow; settle?: boolean } = {},
+	{
+		startIndex = 0,
+		endIndex = tokens.length,
+		window,
+		settle = false,
+	}: { startIndex?: number; endIndex?: number; window?: ProbeWindow; settle?: boolean } = {},
 ): BlockBoundary {
 	let pos = base;
 	let end = 0;
 	let count = 0;
 	let blockEnd = 0;
-	for (let i = startIndex; i < tokens.length; i++) {
+	for (let i = startIndex; i < endIndex; i++) {
 		const token = tokens[i];
 		const raw = token.raw;
 		const tokenEnd = pos + raw.length;
@@ -1856,12 +1876,47 @@ interface RenderSignature {
 	headingProbe: string;
 }
 
+/** A shorter prefix the cached rows grew from: its length, its token count and the row count its rows end at. */
+interface PrefixMark {
+	textEnd: number;
+	tokenCount: number;
+	lineEnd: number;
+}
+
 interface StreamPrefixLineCache extends RenderSignature {
 	text: string;
 	tokenCount: number;
 	// Private to the cache and never handed to callers (each frame copies it
 	// into a fresh output array), so an advancing prefix appends in place.
 	lines: string[];
+	// The shorter prefixes the rows grew from, oldest first. Each ends on a
+	// frozen block boundary, so its rows are a render of its tokens alone,
+	// and a rewound prefix keeps the rows of the last one it still covers.
+	marks: PrefixMark[];
+}
+
+/**
+ * `cache` cut back to the rows of its last prefix of at most `tokenCount`
+ * tokens, in fresh arrays, or `undefined` when it has none. A put-aside prefix
+ * may still hold `cache`, so its arrays are never shared.
+ */
+function rewoundLineCache(
+	cache: StreamPrefixLineCache | undefined,
+	tokenCount: number,
+): StreamPrefixLineCache | undefined {
+	if (cache === undefined) return undefined;
+	if (cache.tokenCount <= tokenCount) return { ...cache, lines: cache.lines.slice(), marks: cache.marks.slice() };
+	let i = cache.marks.length - 1;
+	while (i >= 0 && cache.marks[i]!.tokenCount > tokenCount) i--;
+	if (i < 0) return undefined;
+	const mark = cache.marks[i]!;
+	return {
+		...cache,
+		text: cache.text.slice(0, mark.textEnd),
+		tokenCount: mark.tokenCount,
+		lines: cache.lines.slice(0, mark.lineEnd),
+		marks: cache.marks.slice(0, i),
+	};
 }
 /**
  * Per-token row cache for the *unfrozen tail* (PoC H). The tail re-lexes every
@@ -1914,6 +1969,17 @@ interface TailRenderRecorder {
 	raws: (string | undefined)[];
 	nextTypes: (string | undefined)[];
 }
+/**
+ * The frozen streaming prefix as it stood before a rewind whose only cause was
+ * a closer on the still-growing last line, with the row caches keyed on it.
+ */
+interface RewoundPrefix {
+	text: string;
+	tokens: Token[];
+	openers: readonly PrefixOpener[];
+	lineCache: StreamPrefixLineCache | undefined;
+	tailRowCache: TailRowCache | undefined;
+}
 interface StreamingHighlightCache extends RenderSignature {
 	lang: string | undefined;
 	text: string;
@@ -1964,15 +2030,20 @@ export class Markdown implements Component {
 	#streamPrefixText?: string;
 	#streamPrefixTokens?: Token[];
 	#streamPrefixLineCache?: StreamPrefixLineCache;
-	// Display-math openers in the frozen prefix whose blocks an append could
-	// still close. The prefix lexes them as the text stands, which stays right
-	// until a tail line could close one of them (hasMathBlockCloserLine); then
-	// the prefix falls back to its settled part and the rest is re-lexed.
-	#streamPrefixOpeners: readonly MathBlockOpener[] = NO_OPENERS;
+	// The first display-math opener of each kind in the frozen prefix whose
+	// block an append could still close. The prefix lexes them as the text
+	// stands, which stays right until a tail line could close one of them
+	// (mathBlockCloserIndex). Such a line turns the text from its kind's opener
+	// on into one math block, so the prefix goes back to the boundary in front
+	// of that opener, keeps the openers in front of it, and the rest is re-lexed.
+	#streamPrefixOpeners: readonly PrefixOpener[] = NO_OPENERS;
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
-	#streamSettledTokenCount = 0;
+	// The prefix before a rewind that only a closer on the still-growing last
+	// line caused. Once a later text holds no closer line after it, that
+	// prefix is right again, so #lexTokens puts it back.
+	#streamRewound?: RewoundPrefix;
 	// Guard-scan memo (PoC C): the ref-def/CR verdict with the exact text
 	// length it was checked on. Reuse is sound only while setText has been
 	// append-only since (tracked via the startsWith that setText performs): a
@@ -2086,8 +2157,13 @@ export class Markdown implements Component {
 		if (text === this.#text) return false;
 		if (!text.startsWith(this.#text)) {
 			// Non-append edit: the previous frame's guard verdict cannot be
-			// reused — the checked region may have changed anywhere.
+			// reused — the checked region may have changed anywhere. The frozen
+			// prefix, or one a rewind set aside, may still start the new text,
+			// but the line after it was replaced, and a boundary holds only
+			// while that line starts a block of its own.
 			this.#appendOnlySinceLastScan = false;
+			this.#dropStreamPrefix();
+			this.#streamRewound = undefined;
 		}
 		this.#text = text;
 		if (!text.trim()) {
@@ -2165,6 +2241,7 @@ export class Markdown implements Component {
 			this.#streamPrefixLineCache = undefined;
 			this.#tailRowCache = undefined;
 			this.#streamingHighlightCache = undefined;
+			this.#streamRewound = undefined;
 		}
 		this.invalidate();
 	}
@@ -2181,15 +2258,16 @@ export class Markdown implements Component {
 		// so the tail starts at a fresh line. The scan below then catches a
 		// top-level definition or CR in the new text and the tail lex's links catch
 		// a nested one, so the grown prefix is never re-scanned (O(n²) → O(n)).
+		if (this.#streamRewound !== undefined) this.#restoreRewoundPrefix(text);
 		const frozenText = this.#streamPrefixText;
+		const frozenTokens = this.#streamPrefixTokens;
 		const grewPastPrefix = frozenText !== undefined && text.length > frozenText.length && text.startsWith(frozenText);
 		// A tail line that could close a display-math block the prefix holds open
 		// makes the text from that block's opener on one `math` token, so the
-		// prefix falls back to its settled part, which ends in front of the
-		// opener, and the rest is lexed again. The check reads only the tail,
-		// which is lexed anyway.
-		if (grewPastPrefix && hasMathBlockCloserLine(text, frozenText.length, this.#streamPrefixOpeners)) {
-			this.#rewindStreamPrefix();
+		// prefix goes back to the boundary in front of the opener, and the rest
+		// is lexed again. The check reads only the tail, which is lexed anyway.
+		if (grewPastPrefix && frozenTokens !== undefined && this.#streamPrefixOpeners.length > 0) {
+			this.#rewindForCloser(text, frozenText, frozenTokens);
 		}
 		const prefix = this.#streamPrefixText;
 		const prefixTokens = this.#streamPrefixTokens;
@@ -2265,28 +2343,95 @@ export class Markdown implements Component {
 		return tokens;
 	}
 
-	/** Drop the frozen lex prefix and the transient row caches keyed on it. */
+	/**
+	 * Drop the frozen lex prefix and the transient row caches keyed on it. A
+	 * prefix set aside for #restoreRewoundPrefix checks itself against each
+	 * later text, so it stays until a non-append edit.
+	 */
 	#dropStreamPrefix(): void {
 		this.#streamPrefixText = undefined;
 		this.#streamPrefixTokens = undefined;
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
-		this.#streamSettledTokenCount = 0;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 	}
 
-	/** Cut the frozen prefix back to its settled part, dropping the row caches keyed on the rest. */
-	#rewindStreamPrefix(): void {
-		if (this.#streamSettledTokenCount === 0) {
-			this.#dropStreamPrefix();
+	/**
+	 * Rewind the frozen prefix `prefix` (its tokens `tokens`) for a line of the
+	 * tail after it that could close one of its openers: back to the boundary
+	 * in front of the first opener whose closer a tail line holds. When that
+	 * closer, and no other, is on the still-growing last line, the next chunk
+	 * can turn the line into text again, so the prefix is set aside for
+	 * #restoreRewoundPrefix.
+	 */
+	#rewindForCloser(text: string, prefix: string, tokens: Token[]): void {
+		let target: PrefixOpener | undefined;
+		let lastLineOnly = false;
+		for (const opener of this.#streamPrefixOpeners) {
+			const closer = mathBlockCloserIndex(text, prefix.length, opener.kind);
+			if (closer === undefined) continue;
+			lastLineOnly = target === undefined && !text.includes("\n", closer);
+			target ??= opener;
+		}
+		if (target === undefined) return;
+		this.#streamRewound = lastLineOnly
+			? {
+					text: prefix,
+					tokens,
+					openers: this.#streamPrefixOpeners,
+					lineCache: this.#streamPrefixLineCache,
+					tailRowCache: this.#tailRowCache,
+				}
+			: undefined;
+		this.#rewindStreamPrefix(target.rewindEnd, target.rewindCount);
+	}
+
+	/**
+	 * Cut the frozen prefix back to the boundary `end` characters and `count`
+	 * tokens in, keeping the openers in front of it and the rows of the prefix
+	 * that remains, and dropping the tail row cache keyed on the old prefix.
+	 */
+	#rewindStreamPrefix(end: number, count: number): void {
+		this.#streamPrefixLineCache = rewoundLineCache(this.#streamPrefixLineCache, count);
+		this.#tailRowCache = undefined;
+		if (count === 0) {
+			this.#streamPrefixText = undefined;
+			this.#streamPrefixTokens = undefined;
+			this.#streamPrefixOpeners = NO_OPENERS;
 			return;
 		}
-		this.#streamPrefixText = this.#streamSettledText;
-		this.#streamPrefixTokens = this.#streamPrefixTokens?.slice(0, this.#streamSettledTokenCount);
-		this.#streamPrefixOpeners = NO_OPENERS;
-		this.#streamPrefixLineCache = undefined;
-		this.#tailRowCache = undefined;
+		this.#streamPrefixText = this.#streamPrefixText?.slice(0, end);
+		this.#streamPrefixTokens = this.#streamPrefixTokens?.slice(0, count);
+		this.#streamPrefixOpeners = this.#streamPrefixOpeners.filter(opener => opener.at < end);
+	}
+
+	/**
+	 * Put back the prefix #rewindForCloser set aside once no line of `text`
+	 * after it could close one of its openers: the last line it rewound for
+	 * has grown into text, so the prefix lexes as the text stands again. A
+	 * closer line that has ended stays one under every append, so a prefix
+	 * with one after it can never come back.
+	 */
+	#restoreRewoundPrefix(text: string): void {
+		const rewound = this.#streamRewound;
+		if (rewound === undefined) return;
+		if (text.length <= rewound.text.length || !text.startsWith(rewound.text)) {
+			this.#streamRewound = undefined;
+			return;
+		}
+		for (const opener of rewound.openers) {
+			const closer = mathBlockCloserIndex(text, rewound.text.length, opener.kind);
+			if (closer === undefined) continue;
+			if (text.includes("\n", closer)) this.#streamRewound = undefined;
+			return;
+		}
+		this.#streamRewound = undefined;
+		this.#streamPrefixText = rewound.text;
+		this.#streamPrefixTokens = rewound.tokens;
+		this.#streamPrefixOpeners = rewound.openers;
+		this.#streamPrefixLineCache = rewound.lineCache;
+		this.#tailRowCache = rewound.tailRowCache;
 	}
 
 	// Freeze the largest run of leading blocks that end on a hard "\n\n" boundary
@@ -2318,21 +2463,30 @@ export class Markdown implements Component {
 			const settled = stableBlockBoundary(text, base, tokens, { startIndex: skipPrefix, settle: true });
 			if (settled.count > 0) {
 				this.#streamSettledText = text.slice(0, settled.end);
-				this.#streamSettledTokenCount = settled.count;
 			} else if (skipPrefix === 0) {
 				this.#streamSettledText = undefined;
-				this.#streamSettledTokenCount = 0;
 			}
 		}
-		// Record each kind of opener in the newly frozen tokens that an append
-		// could still close; one open opener of a kind is enough to watch for.
+		// Record the first opener of each kind in the newly frozen tokens that an
+		// append could still close, with the boundary a closer of its kind
+		// rewinds to: the last one in front of it, or the prefix end when the new
+		// tokens hold none. It is never in front of an earlier opener's, so the
+		// first opener whose closer a tail line holds has the earliest boundary.
 		let pos = base;
 		for (let i = skipPrefix; i < frozen.count && openers.length < 2; i++) {
 			const token = tokens[i];
 			if (token.type !== "math") {
-				const opener = mathBlockOpenerAt(text, pos);
-				if (opener !== undefined && !openers.includes(opener) && mathBlockMayCloseAt(text, pos)) {
-					openers = [...openers, opener];
+				const kind = mathBlockOpenerAt(text, pos);
+				if (kind !== undefined && !openers.some(opener => opener.kind === kind) && mathBlockMayCloseAt(text, pos)) {
+					const boundary = stableBlockBoundary(text, base, tokens, { startIndex: skipPrefix, endIndex: i });
+					let rewindEnd = boundary.count > 0 ? boundary.end : base;
+					let rewindCount = boundary.count > 0 ? boundary.count : skipPrefix;
+					const earlier = openers.at(-1);
+					if (earlier !== undefined && earlier.rewindEnd > rewindEnd) {
+						rewindEnd = earlier.rewindEnd;
+						rewindCount = earlier.rewindCount;
+					}
+					openers = [...openers, { kind, at: pos, rewindEnd, rewindCount }];
 				}
 			}
 			pos += token.raw.length;
@@ -2513,9 +2667,11 @@ export class Markdown implements Component {
 			// next #lexTokens re-derives on the repaired buffer. The text past
 			// the frozen prefix is no append of what was frozen against either
 			// (a fence line right after the prefix leaves the tail opening on
-			// blank lines a one-pass lex joins to the ones above), so drop it.
+			// blank lines a one-pass lex joins to the ones above), so drop it,
+			// and any prefix a rewind set aside.
 			this.#lastScanValid = false;
 			this.#dropStreamPrefix();
+			this.#streamRewound = undefined;
 		}
 
 		// L2: module-level LRU — survives component disposal/recreation across
@@ -2656,10 +2812,15 @@ export class Markdown implements Component {
 		// of prefix + tail, so no array handed to a caller is ever mutated.
 		const reusablePrefix = this.#matchingStreamPrefixLineCache(normalizedText, stableText, signature);
 		let prefixLines: string[] = [];
+		let marks: PrefixMark[] = [];
 		let renderedUntil = 0;
 		if (reusablePrefix && reusablePrefix.tokenCount <= stableTokenCount) {
 			prefixLines = reusablePrefix.lines;
+			marks = reusablePrefix.marks;
 			renderedUntil = reusablePrefix.tokenCount;
+			if (renderedUntil < stableTokenCount) {
+				marks.push({ textEnd: reusablePrefix.text.length, tokenCount: renderedUntil, lineEnd: prefixLines.length });
+			}
 		}
 
 		if (renderedUntil < stableTokenCount) {
@@ -2682,6 +2843,7 @@ export class Markdown implements Component {
 			text: stableText,
 			tokenCount: stableTokenCount,
 			lines: prefixLines,
+			marks,
 		};
 
 		if (renderedUntil >= tokens.length) return prefixLines.slice();
@@ -3502,6 +3664,9 @@ export class Markdown implements Component {
 			return segments.map((segment: string) => (segment === "" ? "" : applyText(segment))).join("\n");
 		};
 		const swatchGlyph = this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH;
+		// Set by a line break: the next line's own leading whitespace is dropped.
+		// Every token consumes it, so the space after a styled span that starts
+		// the line stays; a token that renders nothing passes it on.
 		let trimLeadingWhitespace = false;
 		const htmlState = createHtmlNormalizationState();
 		const markHtmlItemWhenContent = (text: string): void => {
@@ -3509,6 +3674,8 @@ export class Markdown implements Component {
 		};
 
 		for (const token of collapseInlineHtml(tokens)) {
+			const lineStart: boolean = trimLeadingWhitespace;
+			trimLeadingWhitespace = false;
 			if (isMathToken(token)) {
 				markHtmlItemWhenContent(token.text);
 				result += applyTextWithNewlines(renderMathToken(token.text));
@@ -3516,9 +3683,8 @@ export class Markdown implements Component {
 			}
 			switch (token.type) {
 				case "text": {
-					const rawText = trimLeadingWhitespace ? token.text.replace(/^\s+/, "") : token.text;
+					const rawText = lineStart ? token.text.replace(/^\s+/, "") : token.text;
 					const text = normalizeHtmlEntitiesForTerminal(rawText);
-					trimLeadingWhitespace = false;
 					markHtmlItemWhenContent(text);
 					if (token.tokens) markHtmlItemWhenContent(plainInlineTokens(token.tokens));
 					// Text tokens in list items can have nested tokens for inline formatting
@@ -3599,8 +3765,8 @@ export class Markdown implements Component {
 						result += applyTextWithNewlines(cleaned);
 						if (cleaned.endsWith("\n")) {
 							trimLeadingWhitespace = true;
-						} else if (cleaned.length > 0) {
-							trimLeadingWhitespace = false;
+						} else if (cleaned.length === 0) {
+							trimLeadingWhitespace = lineStart;
 						}
 					}
 					break;
@@ -3608,11 +3774,12 @@ export class Markdown implements Component {
 				default:
 					// Handle any other inline token types as plain text
 					if ("text" in token && typeof token.text === "string") {
-						const rawText = trimLeadingWhitespace ? token.text.replace(/^\s+/, "") : token.text;
+						const rawText = lineStart ? token.text.replace(/^\s+/, "") : token.text;
 						const text = normalizeHtmlEntitiesForTerminal(rawText);
-						trimLeadingWhitespace = false;
 						markHtmlItemWhenContent(text);
 						result += applyTextWithNewlines(text);
+					} else {
+						trimLeadingWhitespace = lineStart;
 					}
 			}
 		}

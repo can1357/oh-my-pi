@@ -2388,6 +2388,22 @@ describe("Inline and block HTML tag rendering", () => {
 	});
 });
 
+describe("Hard line breaks", () => {
+	const secondRow = (md: string): string =>
+		stripVTControlCharacters(new Markdown(md, 0, 0, defaultMarkdownTheme).render(60)[1]!).trimEnd();
+
+	it("keeps the space after inline code, emphasis or math that starts the next line", () => {
+		// Only the new line's own leading spaces are dropped. The space after a
+		// styled span at its start is text between two words.
+		expect(secondRow("p  \n`c` b")).toBe("c b");
+		expect(secondRow("p  \n**s** b")).toBe("s b");
+		expect(secondRow("p\\\n*e* b")).toBe("e b");
+		expect(secondRow("p  \n~~d~~ b")).toBe("d b");
+		expect(secondRow("p  \n$a$ b")).toBe("a b");
+		expect(secondRow("p  \n   b")).toBe("b");
+	});
+});
+
 describe("Math rendering", () => {
 	const plain = (c: Markdown): string =>
 		c

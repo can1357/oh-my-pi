@@ -90,10 +90,10 @@ export function mathSpanAt(source: string, at: number, from = 0): MathSpan | und
 	return { opener, display: opener === "$$" || opener === "\\[", end: closeAt + opener.length, body };
 }
 
-/** The own-line display block starting at `from`, or `undefined`. */
-export function mathBlockAt(source: string, from = 0): MathBlock | undefined {
-	MATH_BLOCK_DOLLAR.lastIndex = from;
-	MATH_BLOCK_BRACKET.lastIndex = from;
+/** The own-line display block starting at offset 0, or `undefined`. */
+export function mathBlockAt(source: string): MathBlock | undefined {
+	MATH_BLOCK_DOLLAR.lastIndex = 0;
+	MATH_BLOCK_BRACKET.lastIndex = 0;
 	return blockOf(MATH_BLOCK_DOLLAR.exec(source) ?? MATH_BLOCK_BRACKET.exec(source));
 }
 
@@ -180,22 +180,22 @@ export function mathBlockMayCloseAt(source: string, from = 0): boolean {
 const MATH_BLOCK_CLOSER_LINE_RE = /(?<=^|\n) {0,3}(\$\$|\\\])[ \t]*(?=\r?\n|$)/g;
 
 /**
- * Whether a line of `source` from the line start `from` on holds the closer of
- * one of `openers` alone (up to 3 leading spaces, trailing spaces or tabs),
- * the unterminated last line included: a line at which a block that one of
- * them opened before `from` could close.
+ * Offset of the first line of `source`, from the line start `from` on, that
+ * holds the closer of `opener` alone (up to 3 leading spaces, trailing spaces
+ * or tabs), the unterminated last line included, or `undefined`: the first
+ * line at which a block `opener` opened before `from` could close.
  */
-export function hasMathBlockCloserLine(source: string, from: number, openers: readonly MathBlockOpener[]): boolean {
-	if (openers.length === 0) return false;
+export function mathBlockCloserIndex(source: string, from: number, opener: MathBlockOpener): number | undefined {
+	const closer = opener === "$$" ? "$$" : "\\]";
 	MATH_BLOCK_CLOSER_LINE_RE.lastIndex = from;
 	for (
 		let line = MATH_BLOCK_CLOSER_LINE_RE.exec(source);
 		line !== null;
 		line = MATH_BLOCK_CLOSER_LINE_RE.exec(source)
 	) {
-		if (openers.includes(line[1] === "$$" ? "$$" : "\\[")) return true;
+		if (line[1] === closer) return line.index;
 	}
-	return false;
+	return undefined;
 }
 
 /**
