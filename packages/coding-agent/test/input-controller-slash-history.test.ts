@@ -25,6 +25,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	const onInputCallback = vi.fn();
 	const shutdown = vi.fn(async () => {});
 	let text = "";
+	let guidedGoalInterview = false;
 	const editor = {
 		onSubmit: undefined as undefined | ((t: string) => Promise<void>),
 		getText: () => text,
@@ -89,6 +90,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 			return { ...input, cancelled: false, started: false };
 		},
 		ui: { requestRender: vi.fn() },
+		isGuidedGoalInterviewActive: () => guidedGoalInterview,
 		compactionQueuedMessages: [],
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -489,6 +491,29 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 
 		expect(addToHistory.mock.calls.filter(call => call[0] === "/skill:probe do the thing")).toHaveLength(1);
 	});
+	// `c` is the continue shortcut outside a /guided-goal interview, but a plausible
+	// answer to its questions inside one. Upstream's guard flips which branch wins, and
+	// history filing has to follow: a genuine user answer belongs in `Up` history, while
+	// the continue shortcut is a host action that must not masquerade as a message.
+	it("files `c` in Up history while a guided interview is active", async () => {
+		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		ctx.isGuidedGoalInterviewActive = () => true;
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("c");
+
+		expect(addToHistory).toHaveBeenCalledWith("c");
+	});
+
+	it("keeps `c` out of Up history outside a guided interview, where it continues", async () => {
+		const { ctx, editor, addToHistory } = makeCtx(false, []);
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("c");
+
+		expect(addToHistory).not.toHaveBeenCalled();
+	});
+
 
 	it("files a context-switching command once, under the context it was typed in", async () => {
 		// `/move` changes the cwd, so a second write after the handler ran would re-file the row
