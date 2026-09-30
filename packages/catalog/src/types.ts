@@ -1426,6 +1426,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	promptCache?: ModelPromptCache;
 	/**
+	 * Verbatim configured lifetimes (models.yml, `modelOverrides`, runtime
+	 * registrations). `buildModel` applies them over catalog `prompt-cache`
+	 * rules on every rebuild; `{}` keeps warming disabled.
+	 */
+	promptCacheConfig?: ModelPromptCache;
+	/**
 	 * Interpretation of an all-zero token-rate card. Omitted zero-rate cards
 	 * are unknown; any non-zero rate is always treated as fixed pricing.
 	 */

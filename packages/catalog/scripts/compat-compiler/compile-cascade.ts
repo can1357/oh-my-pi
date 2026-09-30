@@ -23,6 +23,7 @@ const CHILD_API = 1 << 5;
 const CHILD_UPSTREAM = 1 << 6;
 const CLASS_CHILDREN = CHILD_ON | CHILD_API | CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS | CHILD_UPSTREAM;
 const CLASS_FILTER_CHILDREN = CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS | CHILD_UPSTREAM;
+const ON_CHILDREN = CHILD_API | CLASS_FILTER_CHILDREN;
 const PROVIDER_CHILDREN = CHILD_CLASS | CHILD_MODELS | CHILD_API | CHILD_UPSTREAM;
 const FAMILY_CHILDREN = CHILD_REVISION | CHILD_MODELS | CHILD_UPSTREAM;
 const REVISION_CHILDREN = CHILD_MODELS | CHILD_UPSTREAM;
@@ -93,7 +94,7 @@ function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules:
 		switch (child.name) {
 			case "on":
 				kind = CHILD_ON;
-				nextAllowed = CLASS_FILTER_CHILDREN;
+				nextAllowed = ON_CHILDREN;
 				break;
 			case "on-api":
 				kind = CHILD_API;

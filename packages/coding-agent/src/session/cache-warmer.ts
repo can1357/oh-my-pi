@@ -77,6 +77,28 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
 }
 
 /**
+ * Whether the provider emits a real one-hour cache marker. Unsupported long
+ * retention is emitted as the provider's default five-minute entry, so the
+ * warmer must use that actual tier rather than a nonexistent long lifetime.
+ */
+function supportsLongCacheRetention(model: Model<Api>): boolean {
+	const compat = model.compat;
+	if (model.api === "anthropic-messages") {
+		return (
+			compat !== undefined && "supportsLongCacheRetention" in compat && compat.supportsLongCacheRetention === true
+		);
+	}
+	if (model.api === "bedrock-converse-stream") {
+		return (
+			compat !== undefined &&
+			"supportsLongPromptCacheRetention" in compat &&
+			compat.supportsLongPromptCacheRetention === true
+		);
+	}
+	return true;
+}
+
+/**
  * Retention tier a request writes under, or undefined when caching is off.
  *
  * Mirrors the Anthropic provider's retention default (`getCacheControl`):
@@ -89,15 +111,10 @@ export function resolvePromptCacheTier(
 	options: SimpleStreamOptions | undefined,
 	isOAuthToken = false,
 ): PromptCacheTier | undefined {
-	const compat = model.compat;
-	const longByDefault =
-		isOAuthToken &&
-		model.api === "anthropic-messages" &&
-		compat !== undefined &&
-		"supportsLongCacheRetention" in compat &&
-		compat.supportsLongCacheRetention === true;
+	const longByDefault = isOAuthToken && model.api === "anthropic-messages" && supportsLongCacheRetention(model);
 	const retention = resolveCacheRetention(options?.cacheRetention, longByDefault ? "long" : "short");
-	return retention === "none" ? undefined : retention;
+	if (retention === "none") return undefined;
+	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
 }
 
 /**
@@ -127,25 +144,30 @@ export function observedPromptCacheTier(usage: Usage): PromptCacheTier | undefin
 }
 
 /**
- * Whether replaying the request leaves its cache entry untouched. Anthropic's
- * budget-based thinking modes derive `budget_tokens` from `max_tokens`; the
- * replay would get a different budget, which Anthropic keys the message cache
- * on. Adaptive (effort-driven) thinking keys on the effort selector, which the
- * replay preserves — verified live: a capped replay of an adaptive-thinking
- * turn reads the full prefix and writes nothing.
+ * Whether replaying the request leaves its cache entry untouched. Anthropic
+ * Messages and Converse budget-based reasoning derive a wire budget from
+ * `max_tokens`; lowering the cap can change that budget and the cache key.
  */
 export function isReplayable(model: Model<Api>, options: SimpleStreamOptions | undefined): boolean {
-	if (model.api !== "anthropic-messages") return true;
-	const reasoningRequested = model.reasoning && options?.reasoning !== undefined && !options.forceReasoningOff;
-	if (!reasoningRequested) return true;
-	return model.thinking?.mode === "anthropic-adaptive";
+	if (model.api === "anthropic-messages") {
+		const reasoningRequested = model.reasoning && options?.reasoning !== undefined && !options.forceReasoningOff;
+		return !reasoningRequested || model.thinking?.mode === "anthropic-adaptive";
+	}
+	if (model.api === "bedrock-converse-stream") {
+		const reasoningRequested =
+			model.reasoning &&
+			((options?.reasoning !== undefined && !options.disableReasoning && !options.forceReasoningOff) ||
+				(model.thinking?.requiresEffort === true && !model.thinking.suppressWhenOff));
+		if (!reasoningRequested) return true;
+		return model.thinking?.mode === "anthropic-adaptive";
+	}
+	return true;
 }
 
 /**
- * True once the replay starts producing output. The cache outcome is already
- * on the response envelope by then, so the warmer aborts here: with thinking
- * active the provider lifts `max_tokens` to the thinking budget (4K+ tokens),
- * and a one-token cap alone would not bound what the replay generates.
+ * True once the replay starts generating output. Providers with early cache
+ * usage are cut off here; Converse must continue to terminal metadata under
+ * its one-token wire cap.
  */
 function isGenerationEvent(event: AssistantMessageEvent): boolean {
 	switch (event.type) {
@@ -518,22 +540,33 @@ export class CacheWarmer {
 	}
 
 	/**
-	 * Sends the replay and returns the response with its cache usage, cut off
-	 * at the first generated block. Undefined when the request never produced
-	 * a response.
+	 * Requests one output token. Anthropic Messages cuts off at its first
+	 * generated block after reporting early cache usage. Converse suppresses
+	 * adaptive allowance and runs to terminal metadata under a true one-token
+	 * total-generation cap.
 	 */
 	async #replay(run: ActiveRun): Promise<AssistantMessage | undefined> {
 		const cutoff = new AbortController();
 		let stream: CacheWarmStream;
+		const replayOptions: SimpleStreamOptions = {
+			...run.options,
+			maxTokens: 1,
+			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
+		};
+		if (run.model.api === "bedrock-converse-stream" && run.model.thinking?.mode === "anthropic-adaptive") {
+			// Adaptive Converse ignores thinkingBudgets on the wire. Zero each
+			// supported effort so the generic mapper cannot inflate maxTokens,
+			// including after mandatory-effort normalization selects its default.
+			const thinkingBudgets = { ...run.options.thinkingBudgets };
+			for (const effort of run.model.thinking.efforts) thinkingBudgets[effort] = 0;
+			replayOptions.thinkingBudgets = thinkingBudgets;
+		}
 		try {
-			stream = await this.#deps.stream(run.model, run.context, {
-				...run.options,
-				maxTokens: 1,
-				signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
-			});
+			stream = await this.#deps.stream(run.model, run.context, replayOptions);
 		} catch {
 			return undefined;
 		}
+		const needsTerminalUsage = run.model.api === "bedrock-converse-stream";
 		let partial: AssistantMessage | undefined;
 		try {
 			for await (const event of stream) {
@@ -543,7 +576,7 @@ export class CacheWarmer {
 					break;
 				}
 				partial = event.partial;
-				if (isGenerationEvent(event)) {
+				if (isGenerationEvent(event) && !needsTerminalUsage) {
 					cutoff.abort();
 					break;
 				}

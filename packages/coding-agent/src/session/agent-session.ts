@@ -4888,15 +4888,21 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Arms the prompt-cache warmer for a main-loop request. Called from the
-	 * session's streamFn after the request's options are finalized; a no-op
-	 * when the session has no warmer.
+	 * session streamFn with its raw request options; retention settings are
+	 * resolved here to match the settings-aware stream wrapper.
+	 * A no-op when the session has no warmer.
 	 */
 	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): void {
 		const warmer = this.#cacheWarmer;
 		if (!warmer) return;
 		const armMessages = this.messages;
+		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
+		const warmingOptions = {
+			...options,
+			cacheRetention: options.cacheRetention ?? (retentionSetting === "auto" ? undefined : retentionSetting),
+		};
 		const armShape = this.#cacheWarmingShape(model);
-		warmer.start({ model, context, options }, () => {
+		warmer.start({ model, context, options: warmingOptions }, () => {
 			// The armed request must still be a prefix of the live messages by
 			// entry identity: appends are fine (tool results mid-run), but a
 			// rewrite, shallow array copy with new objects, compaction, branch,

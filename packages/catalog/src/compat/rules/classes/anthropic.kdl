@@ -281,27 +281,11 @@ class "anthropic" {
 			}
 		}
 	}
-	// AWS Bedrock Converse prompt-cache checkpoints, from the AWS model cards
-	// (docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html); cache
-	// pricing is deliberately not used to infer these request shapes.
 	on "amazon-bedrock" {
+		// Model metadata applies to every Bedrock request adapter.
+		// Upstream metadata is stale for cache pricing and context.
 		family "opus" {
-			revision ">=4 <4.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
-			}
-			revision "=4.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
-			}
 			revision "=4.6" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				// Upstream metadata is stale for cache pricing and context.
 				cost-patch {
 					cache-read 0.5
 					cache-write 6.25
@@ -311,74 +295,196 @@ class "anthropic" {
 					max-tokens 128000
 				}
 			}
-			revision ">=4.7 <5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
+		}
+		// AWS Bedrock Converse prompt-cache checkpoints, from the AWS model cards
+		// (docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html); cache
+		// pricing is deliberately not used to infer these request shapes. Keep the
+		// provider and adapter conjunctive so this policy stays on Converse.
+		on-api "bedrock-converse-stream" {
+			family "opus" {
+				revision ">=4 <4.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 1024
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision "=4.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+						long 3600
+					}
+					supports-long-prompt-cache-retention #true
+				}
+				revision "=4.6" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision ">=4.7 <5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
+				revision ">=5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 512
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
 			}
-			revision ">=5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 512
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
+			family "sonnet" {
+				revision "=3.5" {
+					models "*3-5-sonnet-20241022-v2*" {
+						prompt-cache-mode "explicit"
+						prompt-cache-minimum-tokens 1024
+						prompt-cache-maximum-checkpoints 4
+						prompt-cache {
+							short 300
+						}
+					}
+				}
+				revision "=3.7" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 1024
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision ">=4 <4.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 1024
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision "=4.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
+				revision "=4.6" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 1024
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision ">=5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
+			}
+			family "haiku" {
+				revision "=3.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 2048
+					prompt-cache-maximum-checkpoints 4
+					prompt-cache {
+						short 300
+					}
+				}
+				revision ">=4.5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 4096
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
+			}
+			family "fable" {
+				revision ">=5" {
+					prompt-cache-mode "explicit"
+					prompt-cache-minimum-tokens 1024
+					prompt-cache-maximum-checkpoints 4
+					supports-long-prompt-cache-retention #true
+					prompt-cache {
+						short 300
+						long 3600
+					}
+				}
 			}
 		}
-		family "sonnet" {
-			revision "=3.5" {
-				models "*3-5-sonnet-20241022-v2*" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
+	}
+	// Messages routes on Bedrock Runtime and Mantle use the Anthropic five-minute
+	// cache lifetime. Require both the AWS provider and Messages API: model IDs
+	// alone do not distinguish Bedrock from gateways or other API lanes.
+	on "amazon-bedrock" "bedrock-mantle" {
+		on-api "anthropic-messages" {
+			family "opus" {
+				revision ">=4.7" {
+					prompt-cache {
+						short 300
+					}
+				}
 			}
+			family "sonnet" {
+				revision ">=4.6" {
+					prompt-cache {
+						short 300
+					}
+				}
 			}
-			revision "=3.7" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
+			family "haiku" {
+				revision ">=4.5" {
+					prompt-cache {
+						short 300
+					}
+				}
 			}
-			revision ">=4 <4.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
+			family "fable" {
+				revision ">=5" {
+					prompt-cache {
+						short 300
+					}
+				}
 			}
-			revision "=4.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
-			}
-			revision "=4.6" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
-			}
-			revision ">=5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
-			}
-		}
-		family "haiku" {
-			revision "=3.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 2048
-				prompt-cache-maximum-checkpoints 4
-			}
-			revision ">=4.5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 4096
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
-			}
-		}
-		family "fable" {
-			revision ">=5" {
-				prompt-cache-mode "explicit"
-				prompt-cache-minimum-tokens 1024
-				prompt-cache-maximum-checkpoints 4
-				supports-long-prompt-cache-retention #true
+			family "mythos" {
+				// The Mythos Preview id has no numeric revision to select.
+				models "*mythos-preview*" {
+					prompt-cache {
+						short 300
+					}
+				}
+
+				revision ">=5" {
+					prompt-cache {
+						short 300
+					}
+				}
 			}
 		}
 	}
