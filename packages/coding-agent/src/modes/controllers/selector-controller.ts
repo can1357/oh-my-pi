@@ -1205,13 +1205,17 @@ export class SelectorController {
 						hub?.refreshAfterExternalMutation();
 					}
 				},
-				providerEditor: {
-					get: id => getCustomProvider(id, undefined, this.ctx.session.modelRegistry.authStorage),
-					add: values => addCustomProvider(values, customProviderContext(this.ctx.session.modelRegistry)),
-					update: (id, update) =>
-						updateCustomProvider(id, update, customProviderContext(this.ctx.session.modelRegistry)),
-					remove: id => removeCustomProvider(id, customProviderContext(this.ctx.session.modelRegistry)),
-				},
+				// A --models scope pins the sidebar to its fixed list, where a new provider could never appear.
+				providerEditor:
+					this.ctx.session.scopedModels.length === 0
+						? {
+								get: id => getCustomProvider(id, undefined, this.ctx.session.modelRegistry.authStorage),
+								add: values => addCustomProvider(values, customProviderContext(this.ctx.session.modelRegistry)),
+								update: (id, update) =>
+									updateCustomProvider(id, update, customProviderContext(this.ctx.session.modelRegistry)),
+								remove: id => removeCustomProvider(id, customProviderContext(this.ctx.session.modelRegistry)),
+							}
+						: undefined,
 				onCancel: () => done(),
 			},
 			{
