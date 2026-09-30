@@ -60,11 +60,16 @@ export class CollabSocket {
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
-		// Zombie-connection self-healing: NAT/firewall drops can leave a socket
-		// whose readyState is still OPEN but that will never deliver another
-		// byte. When the page returns to the foreground, the network comes
-		// back, or the page is restored from the back/forward cache, force a
-		// reconnect if nothing has been received recently.
+	}
+
+	// Zombie-connection self-healing: NAT/firewall drops can leave a socket
+	// whose readyState is still OPEN but that will never deliver another byte.
+	// When the page returns to the foreground, the network comes back, or the
+	// page is restored from the back/forward cache, force a reconnect if
+	// nothing has been received recently. Listeners are re-armed on connect()
+	// so reopened sockets keep healing.
+	#installBrowserListeners(): void {
+		if (this.#browserListeners.length > 0) return;
 		const resurrect = (event: Event) => {
 			if (event.type === "visibilitychange" && document.visibilityState !== "visible") return;
 			this.#resurrectIfStale();
@@ -80,15 +85,21 @@ export class CollabSocket {
 		}
 	}
 
+	#removeBrowserListeners(): void {
+		for (const [target, type, handler] of this.#browserListeners) target.removeEventListener(type, handler);
+		this.#browserListeners.length = 0;
+	}
+
 	/**
 	 * Force-replaces a zombie connection: an OPEN socket that has not received
 	 * any byte for `staleMs`. Liveness means transport receipt — control frames
 	 * count too, because the failure mode being detected is a dead link, not an
 	 * idle session. Sockets that are still connecting or closing are left to
-	 * their normal lifecycle, so event bursts cannot stack connection attempts,
-	 * and ordinary backoff/room-recovery state is never reset from here. The
-	 * replacement goes through the regular reconnect path: onClose with
-	 * willReconnect=true, then a fresh join and snapshot.
+	 * their normal lifecycle, so event bursts cannot stack connection attempts.
+	 * The replacement goes through the regular reconnect path: onClose with
+	 * willReconnect=true, then a fresh join and snapshot. Backoff and
+	 * room-recovery state are preserved, and a close() issued from the onClose
+	 * listener aborts the replacement.
 	 */
 	#resurrectIfStale(staleMs = 60_000): void {
 		const ws = this.#ws;
@@ -96,14 +107,13 @@ export class CollabSocket {
 		if (Date.now() - this.#lastAlive < staleMs) return;
 		console.info("collab: stale connection detected, forcing reconnect");
 		this.#ws = null;
-		this.#clearRetry();
-		this.#attempt = 0;
 		try {
 			ws.close();
 		} catch {
 			/* already closing */
 		}
 		this.onClose?.("stale connection", true);
+		if (this.#closed) return; // close() from the onClose listener aborts
 		this.#openSocket();
 	}
 
@@ -116,6 +126,7 @@ export class CollabSocket {
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#attempt = 0;
+		this.#installBrowserListeners();
 		this.#openSocket();
 	}
 
@@ -140,8 +151,7 @@ export class CollabSocket {
 
 	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
 	close(): void {
-		for (const [target, type, handler] of this.#browserListeners) target.removeEventListener(type, handler);
-		this.#browserListeners.length = 0;
+		this.#removeBrowserListeners();
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
 		const wasClosed = this.#closed;

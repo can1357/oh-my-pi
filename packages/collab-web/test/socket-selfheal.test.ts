@@ -104,8 +104,6 @@ describe("zombie connection self-healing", () => {
 		vi.useFakeTimers();
 		installBrowserStubs();
 		const client = new GuestClient(LINK, "tester");
-		const seen: Array<[string, boolean]> = [];
-		client.subscribe(() => {});
 		client.connect();
 		instance(0).open();
 
@@ -184,15 +182,39 @@ describe("zombie connection self-healing", () => {
 		client.close();
 	});
 
-	it("removes its browser listeners on close", () => {
+	it("arms listeners on connect and re-arms them after close+connect", () => {
 		vi.useFakeTimers();
 		installBrowserStubs();
 		const before = fakeDocument.handlerCount() + fakeWindow.handlerCount();
 		const client = new GuestClient(LINK, "tester");
-		const afterOpen = fakeDocument.handlerCount() + fakeWindow.handlerCount();
-		expect(afterOpen).toBe(before + 3); // visibilitychange + online + pageshow
+		// Construction alone must not subscribe; connect() owns the lifecycle.
+		expect(fakeDocument.handlerCount() + fakeWindow.handlerCount()).toBe(before);
+
+		client.connect();
+		expect(fakeDocument.handlerCount() + fakeWindow.handlerCount()).toBe(before + 3); // visibilitychange + online + pageshow
 
 		client.close();
 		expect(fakeDocument.handlerCount() + fakeWindow.handlerCount()).toBe(before);
+
+		client.connect(); // reopened client keeps healing
+		expect(fakeDocument.handlerCount() + fakeWindow.handlerCount()).toBe(before + 3);
+		client.close();
+	});
+
+	it("aborts the replacement when close() runs from the onClose listener", () => {
+		vi.useFakeTimers();
+		installBrowserStubs();
+		const client = new GuestClient(LINK, "tester");
+		client.connect();
+		instance(0).open();
+		// A snapshot subscriber closing the client from the reconnecting
+		// transition must stop the socket from opening a replacement.
+		const unsubscribe = client.subscribe(() => client.close());
+
+		advanceClock(120_000);
+		goForeground();
+
+		expect(ScriptedWebSocket.instances).toHaveLength(1);
+		unsubscribe();
 	});
 });
