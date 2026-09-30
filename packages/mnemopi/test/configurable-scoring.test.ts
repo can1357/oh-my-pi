@@ -7,6 +7,10 @@ const ORIGINAL_ENV = {
 	MNEMOPI_VEC_WEIGHT: process.env.MNEMOPI_VEC_WEIGHT,
 	MNEMOPI_FTS_WEIGHT: process.env.MNEMOPI_FTS_WEIGHT,
 	MNEMOPI_IMPORTANCE_WEIGHT: process.env.MNEMOPI_IMPORTANCE_WEIGHT,
+	MNEMOPI_TOOL_WEIGHT: process.env.MNEMOPI_TOOL_WEIGHT,
+	MNEMOPI_UNKNOWN_WEIGHT: process.env.MNEMOPI_UNKNOWN_WEIGHT,
+	MNEMOPI_TIER1_WEIGHT: process.env.MNEMOPI_TIER1_WEIGHT,
+	MNEMOPI_TIER2_WEIGHT: process.env.MNEMOPI_TIER2_WEIGHT,
 };
 
 function restoreEnv(): void {
@@ -108,5 +112,41 @@ describe("configurable recall scoring", () => {
 		});
 
 		expect(results[0]?.content).toContain("match phrase");
+	});
+
+	it("ranks by the MNEMOPI_<LABEL>_WEIGHT veracity weights", async () => {
+		delete process.env.MNEMOPI_TOOL_WEIGHT;
+		delete process.env.MNEMOPI_UNKNOWN_WEIGHT;
+		const beam = makeBeam();
+		beam.remember("quorum ledger rotation alpha", { importance: 0.5, source: "test", veracity: "tool" });
+		beam.remember("quorum ledger rotation bravo", { importance: 0.5, source: "test", veracity: "unknown" });
+		const order = async () => (await beam.recall("quorum ledger rotation", 2)).map(row => row.veracity);
+
+		expect(await order()).toEqual(["unknown", "tool"]);
+		process.env.MNEMOPI_TOOL_WEIGHT = "1.0";
+		process.env.MNEMOPI_UNKNOWN_WEIGHT = "0.5";
+		expect(await order()).toEqual(["tool", "unknown"]);
+	});
+
+	it("ranks episodic rows by the MNEMOPI_TIER<N>_WEIGHT degradation weights", async () => {
+		delete process.env.MNEMOPI_TIER1_WEIGHT;
+		delete process.env.MNEMOPI_TIER2_WEIGHT;
+		const beam = makeBeam();
+		const now = new Date().toISOString();
+		for (const [id, tier] of [
+			["ep-tier1", 1],
+			["ep-tier2", 2],
+		] as const) {
+			beam.db.run(
+				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, veracity, tier) VALUES (?, ?, 'test', ?, ?, 0.5, 'stated', ?)",
+				[id, `harbor crane manifest ${id === "ep-tier1" ? "alpha" : "bravo"}`, now, beam.sessionId, tier],
+			);
+		}
+		const order = async () => (await beam.recall("harbor crane manifest", 2)).map(row => row.id);
+
+		expect(await order()).toEqual(["ep-tier1", "ep-tier2"]);
+		process.env.MNEMOPI_TIER1_WEIGHT = "0.5";
+		process.env.MNEMOPI_TIER2_WEIGHT = "1.0";
+		expect(await order()).toEqual(["ep-tier2", "ep-tier1"]);
 	});
 });
