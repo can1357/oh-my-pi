@@ -2518,6 +2518,7 @@ export class SessionMaintenance {
 			triggerContextTokens: contextTokens,
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
+			targetModel: target,
 		});
 		return this.contextFitsModel(target, excludedMessage);
 	}
@@ -3345,8 +3346,16 @@ export class SessionMaintenance {
 		return candidate;
 	}
 
-	#getCompactionModelCandidates(availableModels: Model[], filter?: (model: Model) => boolean): Model[] {
-		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
+	#getCompactionModelCandidates(
+		availableModels: Model[],
+		filter?: (model: Model) => boolean,
+		preferredModel?: Model | null,
+	): Model[] {
+		return this.resolveCompactionModelCandidates(
+			preferredModel !== undefined ? preferredModel : this.#model,
+			availableModels,
+			filter,
+		);
 	}
 
 	resolveCompactionModelCandidates(
@@ -3581,13 +3590,18 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+	#computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: EngineCompactionSettings,
+		modelOverride?: Model,
+	): number {
+		const model = modelOverride ?? this.#model;
+		const ctxWindow = model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.providerFrameBudget(model?.provider),
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -3623,7 +3637,7 @@ export class SessionMaintenance {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
+		const shape = snapcompact.resolveShape(model, cfgSnapcompactShape.get(this.#host.settings));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -4200,6 +4214,8 @@ export class SessionMaintenance {
 			 * request (#11482).
 			 */
 			excludeMediaMethods?: boolean;
+			/** Pre-fallback compaction: compact specifically on behalf of this target model. */
+			targetModel?: Model;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = cfgCompaction.get(this.#host.settings);
@@ -4229,19 +4245,23 @@ export class SessionMaintenance {
 		const startIndex = options.methodIndex ?? 0;
 		let methodIndex = -1;
 		let method: CompactionMethod | undefined;
+		const effectiveTargetModel = options.targetModel ?? this.#model;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
+			// Pre-fallback compaction cannot use provider-native remote compaction or deferred handoff
+			if (options.targetModel && (candidate === "remote" || candidate === "handoff")) {
+				continue;
+			}
 			if (
 				!isCompactionMethodUsable(
 					candidate,
 					reason,
-					this.#model,
+					effectiveTargetModel,
 					compactionSettings,
 					options.excludeMediaMethods === true,
 				)
 			)
 				continue;
-			// Re-sending a native request that just failed for good only delays the
 			// fallback. Skip it while a later method can still run.
 			const liveModel = this.#model;
 			if (
@@ -4684,28 +4704,29 @@ export class SessionMaintenance {
 					preparation.previousPreserveData,
 					preparation.previousSummary,
 				);
+				const modelForSnapcompact = options.targetModel ?? this.#model;
 				const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
-				const shape = snapcompact.resolveShapeForText(probeText, this.#model, shapeSetting);
+				const shape = snapcompact.resolveShapeForText(probeText, modelForSnapcompact, shapeSetting);
 				const renderScan = snapcompact.scanRenderability(probeText, { shape });
 				if (!renderScan.isSafe) {
 					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 					logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
-						model: this.#model?.id,
+						model: modelForSnapcompact?.id,
 						unrenderableRatio: renderScan.unrenderableRatio,
 					});
 					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings, modelForSnapcompact);
 					if (maxFrames < 1) {
 						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
-							model: this.#model?.id,
+							model: modelForSnapcompact?.id,
 						});
 						snapcompactBlocker =
 							"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
 					} else {
 						snapcompactResult = await snapcompact.compact(preparation, {
 							convertToLlm,
-							model: this.#model,
+							model: modelForSnapcompact,
 							...(shapeSetting === "auto" ? {} : { shape }),
 							maxFrames,
 							includeThinking: snapcompactIncludeThinking,
@@ -4713,7 +4734,7 @@ export class SessionMaintenance {
 						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
 							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
-								model: this.#model?.id,
+								model: modelForSnapcompact?.id,
 								framePayloadBytes,
 								budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
 							});
@@ -4722,7 +4743,7 @@ export class SessionMaintenance {
 							snapcompactResult = undefined;
 						}
 						if (snapcompactResult) {
-							const ctxWindow = this.#model?.contextWindow ?? 0;
+							const ctxWindow = modelForSnapcompact?.contextWindow ?? 0;
 							const budget =
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
@@ -4813,12 +4834,28 @@ export class SessionMaintenance {
 				details = snapcompactResult.details;
 				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
-				const liveModel = this.#model;
+				const liveModel = options.targetModel ?? this.#model;
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
-					method === "remote" && !effectiveSettings.remoteEndpoint && liveModel
-						? candidate => canUseLiveProviderNativeCompaction(candidate, liveModel, effectiveSettings)
-						: undefined,
+					candidate => {
+						// When compacting for fallback, exclude the failing current model
+						if (options.targetModel && this.#model && modelsAreEqual(candidate, this.#model)) {
+							return false;
+						}
+						// Exclude any model whose selector is suppressed (in cooldown)
+						const fullSelector = `${candidate.provider}/${candidate.id}`;
+						if (
+							this.#host.modelRegistry.isSelectorSuppressed(fullSelector) ||
+							this.#host.modelRegistry.isSelectorSuppressed(candidate.id)
+						) {
+							return false;
+						}
+						if (method === "remote" && !effectiveSettings.remoteEndpoint && liveModel) {
+							return canUseLiveProviderNativeCompaction(candidate, liveModel, effectiveSettings);
+						}
+						return true;
+					},
+					options.targetModel ? null : undefined,
 				);
 				const retrySettings = cfgRetry.get(this.#host.settings);
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());

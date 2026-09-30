@@ -303,6 +303,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#retrySagaCompactedForFallback = false;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -528,7 +529,7 @@ export class TurnRecovery {
 			retryErrors,
 		});
 		this.#clearPendingRetryErrors();
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempt();
 		this.resolveRetry();
 	}
 
@@ -536,7 +537,7 @@ export class TurnRecovery {
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
 		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempt();
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -1004,7 +1005,7 @@ export class TurnRecovery {
 				finalError,
 			});
 			this.#clearPendingRetryErrors();
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempt();
 			this.resolveRetry();
 			// A turn with no actionable output carries no transcript value, while its
 			// provider usage can anchor the next prompt at the full failed-request size
@@ -2106,7 +2107,6 @@ export class TurnRecovery {
 			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
-		let compactedForFallback = false;
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2157,7 +2157,10 @@ export class TurnRecovery {
 				// preserved unexecuted-tool turn remains in the request (#8065).
 				const excludedMessage = options?.preserveFailedTurn ? undefined : failedMessage;
 				let fits = this.#host.contextFitsModel(candidate, excludedMessage);
-				if (!fits && (compactedForFallback || !this.#canCompactBeforeFallback(candidate, this.#host.model()))) {
+				if (
+					!fits &&
+					(this.#retrySagaCompactedForFallback || !this.#canCompactBeforeFallback(candidate, this.#host.model()))
+				) {
 					continue;
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -2165,7 +2168,7 @@ export class TurnRecovery {
 				// Compact once, still on the current model. Later candidates are
 				// judged against that same result; the first one that fits is used.
 				if (!fits) {
-					compactedForFallback = true;
+					this.#retrySagaCompactedForFallback = true;
 					await this.#host.compactForTargetModel(candidate, excludedMessage);
 					if (this.#host.isDisposed()) return false;
 					fits = this.#host.contextFitsModel(candidate, excludedMessage);
@@ -2343,13 +2346,15 @@ export class TurnRecovery {
 		if (!apiKey) return false;
 		// Fit the smaller primary before leaving the fallback. If compaction
 		// cannot make the conversation fit, stay on the fallback instead of
-		// sending an oversized request.
-		if (
-			this.#canCompactBeforeFallback(primaryModel, currentModel) &&
-			!this.#host.contextFitsModel(primaryModel) &&
-			!(await this.#host.compactForTargetModel(primaryModel))
-		) {
-			return false;
+		// sending an oversized request. Avoid repeating compaction on every
+		// subsequent turn while remaining on the fallback.
+		if (this.#activeRetryFallback.revertCompactionAttempted) return false;
+		if (this.#canCompactBeforeFallback(primaryModel, currentModel)) {
+			if (!this.#host.contextFitsModel(primaryModel)) {
+				this.#activeRetryFallback.revertCompactionAttempted = true;
+				const fits = await this.#host.compactForTargetModel(primaryModel);
+				if (!fits) return false;
+			}
 		}
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
@@ -2404,6 +2409,9 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		if (this.#retryAttempt === 1) {
+			this.#retrySagaCompactedForFallback = false;
+		}
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2681,7 +2689,7 @@ export class TurnRecovery {
 					retryErrors,
 				});
 				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
+				this.#resetRetryAttempt();
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
@@ -2708,7 +2716,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempt();
 			this.resolveRetry();
 			return false;
 		}
@@ -2733,7 +2741,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempt();
 			this.resolveRetry();
 			return false;
 		}
@@ -2766,7 +2774,7 @@ export class TurnRecovery {
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempt();
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -2852,7 +2860,7 @@ export class TurnRecovery {
 	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempt();
 		this.#retryAbortController = undefined;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
@@ -2894,7 +2902,7 @@ export class TurnRecovery {
 	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempt();
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
 		await this.#host.emitSessionEvent({
@@ -3060,7 +3068,7 @@ export class TurnRecovery {
 		}
 
 		// Reset retry budget for a fresh attempt
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempt();
 
 		// Re-attempt the turn
 		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
@@ -3109,5 +3117,10 @@ export class TurnRecovery {
 			});
 		}
 		this.#host.agent.replaceMessages(messages.slice(0, replayStart));
+	}
+
+	#resetRetryAttempt(): void {
+		this.#retryAttempt = 0;
+		this.#retrySagaCompactedForFallback = false;
 	}
 }

@@ -5230,6 +5230,102 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(requestContexts.at(-1)).toContain("Retained context for smaller primary");
 	});
+	it("does not repeatedly compact on subsequent turns when pre-revert compaction fails to fit", async () => {
+		const modelsConfigPath = path.join(tempDir.path(), "revert-loop-models.json");
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					openai: {
+						modelOverrides: {
+							"gpt-4o-mini": { contextWindow: 4000 },
+							"gpt-4o": { contextWindow: 1_000_000 },
+						},
+					},
+				},
+			}),
+		);
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+		const primary = modelRegistry.find("openai", "gpt-4o-mini");
+		const fallback = modelRegistry.find("openai", "gpt-4o");
+		if (!primary || !fallback) throw new Error("Expected override models to resolve");
+		const sessionManager = SessionManager.inMemory();
+		const runtime = new ExtensionRuntime();
+		const sequence: string[] = [];
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_compact", () => {
+					sequence.push("committed");
+				});
+				pi.on("session_before_compact", event => {
+					sequence.push("compact");
+					return {
+						compaction: {
+							summary: "oversized summary ".repeat(2000),
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					};
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"oversized-revert-compact",
+		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryCalls = 0;
+		let fallbackCalls = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requestedModels.push(model.id);
+				if (model.id === primary.id && primaryCalls++ === 0) {
+					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				} else if (model.id === fallback.id && fallbackCalls++ === 0) {
+					mock.push({ content: ["lorem ipsum ".repeat(5000)] });
+				} else {
+					mock.push({ content: ["ok"] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"provider.appendOnlyContext": "off",
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"compaction.keepRecentTokens": 200,
+			"retry.compactBeforeFallback": true,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+		});
+		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		await session.prompt("Initial turn triggers rate limit and falls back");
+		await session.waitForIdle();
+		await session.prompt("Close the large fallback turn");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallback.id);
+		// Cooldown expires; next prompt triggers revert check. Compaction runs, but
+		// resulting context is still over 4000 tokens, so revert bails and stays on fallback.
+		now += 60_000;
+		await session.prompt("Third turn attempts revert");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallback.id);
+		expect(sequence.filter(s => s === "compact")).toHaveLength(1);
+		// Fourth prompt: revertCompactionAttempted must prevent repeating compaction again.
+		await session.prompt("Fourth turn should not repeat compaction");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallback.id);
+		expect(sequence.filter(s => s === "compact")).toHaveLength(1);
+	});
 
 	it("compacts before retrying an undersized forward fallback when enabled", async () => {
 		const modelsConfigPath = path.join(tempDir.path(), "compact-forward-models.json");
@@ -5335,26 +5431,78 @@ describe("AgentSession retry fallback", () => {
 		const primary = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const fallback = modelRegistry.find("openai", "gpt-4o-mini");
 		if (!primary || !fallback) throw new Error("Expected override models to resolve");
+		const sessionManager = SessionManager.inMemory();
+		const runtime = new ExtensionRuntime();
+		const sequence: string[] = [];
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_compact", () => {
+					sequence.push("committed");
+				});
+				pi.on("session_before_compact", event => {
+					sequence.push("compact");
+					return {
+						compaction: {
+							summary: "oversized summary ".repeat(2000),
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					};
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"oversized-compact",
+		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primary, requestedModels, { retryAfterMs: 200 });
+		const mock = createMockModel();
+		let primaryCalls = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === primary.id && primaryCalls++ === 0) {
+					mock.push({ content: ["lorem ipsum ".repeat(5000)] });
+				} else if (model.id === primary.id) {
+					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				} else {
+					mock.push({ content: ["recovered"] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
 		const settings = Settings.isolated({
+			"provider.appendOnlyContext": "off",
 			"compaction.enabled": true,
 			"compaction.methodOrder": ["soft"],
+			"compaction.keepRecentTokens": 200,
 			"retry.compactBeforeFallback": true,
 			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 2,
 			"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
 		});
 		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings,
 			modelRegistry,
+			extensionRunner,
 		});
-		await session.prompt("lorem ipsum ".repeat(5000));
+		await session.prompt("Build context with large turn");
 		await session.waitForIdle();
-		// The single oversized turn cannot be compacted into the smaller fallback,
-		// so the chain is skipped and the retry stays on the primary.
+		await session.prompt("Trigger fallback with rate limit");
+		// Compaction ran and committed, but the resulting context still exceeds
+		// the 4000-token fallback window, so the fallback candidate is skipped.
+		expect(sequence).toContain("compact");
+		expect(sequence).toContain("committed");
+		// Compaction must run only ONCE across the retry saga, not per retry attempt.
+		expect(sequence.filter(s => s === "compact")).toHaveLength(1);
 		expect(requestedModels.every(id => id === `${primary.provider}/${primary.id}`)).toBe(true);
 		expect(requestedModels.length).toBeGreaterThan(1);
 		expect(session.model?.id).toBe(primary.id);

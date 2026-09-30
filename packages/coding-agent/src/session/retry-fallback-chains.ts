@@ -59,6 +59,11 @@ export interface ActiveRetryFallbackState {
 	 * model, so no observer may report the run as having used it.
 	 */
 	served?: boolean;
+	/**
+	 * Set when pre-revert compaction was attempted for the primary but could not
+	 * fit. Prevents re-compacting on every subsequent turn while on fallback.
+	 */
+	revertCompactionAttempted?: boolean;
 }
 
 /** Model a session's produced work is attributed to. */
