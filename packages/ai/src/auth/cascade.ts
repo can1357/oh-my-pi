@@ -23,6 +23,7 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
+	#configFallbacks: Map<string, string> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
@@ -39,6 +40,11 @@ export class KeyOverrides {
 
 	configKey(provider: string): string | undefined {
 		return this.#configOverrides.get(provider);
+	}
+
+	/** Config value consulted only after stored OAuth/login credentials. */
+	fallbackKey(provider: string): string | undefined {
+		return this.#configFallbacks.get(provider);
 	}
 
 	/** Resolve a config value (env var name, "!command", literal) to the secret. */
@@ -70,16 +76,28 @@ export class KeyOverrides {
 	 *
 	 * Lower priority than {@link KeyOverrides.setRuntime} so a CLI `--api-key`
 	 * still wins for the duration of a single invocation.
+	 *
+	 * `fallback: true` instead ranks the value below stored OAuth and `/login`
+	 * credentials (at the env-var tier). Providers that own a `/login` flow use
+	 * this so their default key reference (e.g. an unset env-var name, which
+	 * resolves to its literal text) cannot shadow the key the user logged in with.
 	 */
-	setConfig(provider: string, apiKeyConfig: string): void {
-		this.#configOverrides.set(provider, apiKeyConfig);
+	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+		if (options?.fallback) {
+			this.#configOverrides.delete(provider);
+			this.#configFallbacks.set(provider, apiKeyConfig);
+		} else {
+			this.#configFallbacks.delete(provider);
+			this.#configOverrides.set(provider, apiKeyConfig);
+		}
 	}
 
 	/**
-	 * Remove a single config-sourced API key override.
+	 * Remove a single config-sourced API key (override or fallback).
 	 */
 	removeConfig(provider: string): void {
 		this.#configOverrides.delete(provider);
+		this.#configFallbacks.delete(provider);
 	}
 
 	/**
@@ -88,6 +106,7 @@ export class KeyOverrides {
 	 */
 	clearConfig(): void {
 		this.#configOverrides.clear();
+		this.#configFallbacks.clear();
 	}
 
 	/**
@@ -169,7 +188,7 @@ export class KeyCascade implements KeysApi {
 	/**
 	 * Classify where a provider's auth comes from, following the same precedence
 	 * as {@link KeyCascade.get}: runtime override → config override →
-	 * stored OAuth → login-stored api_key → env var → stored api_key.
+	 * stored OAuth → login-stored api_key → config fallback → env var → stored api_key.
 	 * Returns undefined when no auth is configured.
 	 *
 	 * Compact, structured counterpart to {@link KeyCascade.describe}; `env`
@@ -184,6 +203,7 @@ export class KeyCascade implements KeysApi {
 		if (bearing.some(credential => credential.type === "api_key" && credential.source === "login")) {
 			return { kind: "api_key", concrete: true };
 		}
+		if (this.#deps.overrides.fallbackKey(provider) !== undefined) return { kind: "config", concrete: true };
 		if (
 			(env === "dedicated" && this.#hasDedicatedEnvAuth(provider)) ||
 			(env === "aliases" && (this.#hasDedicatedEnvAuth(provider) || Boolean(getEnvApiKey(provider))))
@@ -255,6 +275,9 @@ export class KeyCascade implements KeysApi {
 		if (loginApiKeySelection) {
 			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
 		}
+
+		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -333,6 +356,9 @@ export class KeyCascade implements KeysApi {
 		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly
 		// suppresses account_uuid for this session.
 		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+
+		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -458,6 +484,7 @@ export class KeyCascade implements KeysApi {
 				!this.isKeylessFallback(provider, credential),
 		);
 		if (loginApiKeySource) return loginApiKeySource;
+		if (this.#deps.overrides.fallbackKey(provider) !== undefined) return "provider config (fallback)";
 		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;
 		const apiKeySource = describeStored(
 			"api_key",
@@ -475,8 +502,8 @@ export class KeyCascade implements KeysApi {
 		this.#deps.overrides.removeRuntime(provider);
 	}
 
-	setConfig(provider: string, apiKeyConfig: string): void {
-		this.#deps.overrides.setConfig(provider, apiKeyConfig);
+	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+		this.#deps.overrides.setConfig(provider, apiKeyConfig, options);
 	}
 
 	removeConfig(provider: string): void {

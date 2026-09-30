@@ -31,6 +31,10 @@ export interface InitializeExtensionsOptions {
 	markAgentInvokingMessage?: () => void;
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
 	trackAgentInvokingMessage?: (task: Promise<unknown>) => void;
+	/** Optional observer of every extension-originated send, turn-triggering or not. */
+	trackExtensionSend?: (task: Promise<unknown>) => void;
+	/** Optional filter applied to tool names an extension activates. */
+	filterActiveTools?: (toolNames: string[]) => string[];
 }
 
 /**
@@ -51,6 +55,8 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		uiContext,
 		markAgentInvokingMessage,
 		trackAgentInvokingMessage,
+		trackExtensionSend,
+		filterActiveTools,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -59,6 +65,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		{
 			sendMessage: (message, sendOptions) => {
 				const sendTask = session.sendCustomMessage(message, sendOptions);
+				trackExtensionSend?.(sendTask);
 				if (sendOptions?.triggerTurn || sendOptions?.deliverAs === "aside") {
 					// sendCustomMessage resolves `false` for outcomes that provably start no turn
 					// (streaming queue, idle plan-mode fold, deferred ACP turn) — only a `true`
@@ -88,6 +95,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			},
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
+				trackExtensionSend?.(sendTask);
 				if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(sendTask);
 				} else {
@@ -99,6 +107,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			},
 			sendUserInput: (text, inputOptions) => {
 				const inputTask = sendSessionUserInput(session, text, inputOptions);
+				trackExtensionSend?.(inputTask);
 				// Only a submitted prompt or skill starts a turn; the rest handle the text locally.
 				const invokingTask = inputTask.then(result => {
 					if (result.handled !== "prompt" && result.handled !== "skill") {
@@ -124,7 +133,8 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			},
 			getActiveTools: () => session.getEnabledToolNames(),
 			getAllTools: () => session.getAllToolInfos(),
-			setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),
+			setActiveTools: (toolNames: string[]) =>
+				session.setActiveToolsByName(filterActiveTools ? filterActiveTools(toolNames) : toolNames),
 			getCommands: () => getSessionSlashCommands(session),
 			setModel: model => runExtensionSetModel(session, model),
 			getThinkingLevel: () => session.thinkingLevel,

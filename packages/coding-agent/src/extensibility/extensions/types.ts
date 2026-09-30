@@ -1684,7 +1684,13 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
-	/** API key or environment variable name. Required when defining models unless oauth is provided. */
+	/**
+	 * API key or environment variable name. Required when defining models unless oauth is provided.
+	 *
+	 * Without `oauth`, this overrides stored OAuth and `/login` credentials for the provider. With
+	 * `oauth`, it is a fallback: a key saved by `/login` wins, and this value is used only when no
+	 * stored login credential exists.
+	 */
 	apiKey?: string;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;

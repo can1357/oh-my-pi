@@ -28,6 +28,7 @@ import { buildSkillPromptMessage } from "../../extensibility/skills";
 import { type RpcSkillCommandSession, resolveRpcSkillInvocation, runRpcSkillCommand } from "./rpc-skill-invocation";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession } from "../../session/session-listing";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -705,9 +706,9 @@ export function registerRpcPersistenceSurface(
 
 /** Startup options for {@link runRpcMode}. */
 export interface RpcModeOptions {
-	/** `--mode rpc-ui`: route tool UI (ask, tool cards) over the protocol as well. */
+	/** `--mode rpc-ui`: route tool UI (e.g. ask) over the protocol, independently of headless extensions. */
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-	/** `--no-ui`: extensions run with `hasUI=false`; no dialog or presentation `extension_ui_request` frames are emitted. */
+	/** `--no-ui`: extensions run with `hasUI=false` and no UI frames; tool UI and host-issued login are unaffected. */
 	headless?: boolean;
 	subagentEventBus?: EventBus;
 	input?: ReadableStream<Uint8Array>;
@@ -1349,7 +1350,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				) {
 					return error(id, "set_event_filter", "events must be null or an array of non-empty event type strings");
 				}
-				return success(id, "set_event_filter", { events: sessionEvents.setFilter(events) });
+				const messageUpdates = command.messageUpdates === undefined ? "full" : command.messageUpdates;
+				if (messageUpdates !== "full" && messageUpdates !== "delta") {
+					return error(id, "set_event_filter", 'messageUpdates must be "full" or "delta"');
+				}
+				return success(id, "set_event_filter", {
+					events: sessionEvents.setFilter(events, messageUpdates),
+					messageUpdates,
+				});
 			}
 
 			case "get_subagents": {
@@ -1472,6 +1480,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			// =================================================================
+			// Cache warming
+			// =================================================================
+
+			case "set_cache_warming": {
+				if (!CACHE_WARMING_MODES.includes(command.mode)) {
+					return error(id, "set_cache_warming", `Invalid cache warming mode: ${String(command.mode)}`);
+				}
+				const mode = session.setCacheWarmingMode(command.mode);
+				return success(id, "set_cache_warming", { mode });
 			}
 
 			// =================================================================
