@@ -32,7 +32,10 @@ import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-c
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import {
+	type BuiltinSlashCommandExecutionResult,
+	executeBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
@@ -1111,7 +1114,7 @@ describe("CollabController", () => {
 			const transition = Promise.withResolvers<void>();
 			const flush = spyOn(CollabSocket.prototype, "flush").mockImplementation(() => drain.promise);
 			state.transition = transition.promise;
-			let stopping: Promise<string | boolean> | undefined;
+			let stopping: Promise<BuiltinSlashCommandExecutionResult> | undefined;
 			try {
 				switchSession(state, "cancelled-session");
 				// The old room has left the command's public slot, but its goodbye is

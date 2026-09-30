@@ -1,4 +1,4 @@
-import { afterEach, expect, it, spyOn } from "bun:test";
+import { afterEach, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
@@ -147,14 +147,17 @@ it("queues an image-bearing skill when another turn starts during vision preproc
 			},
 		],
 	});
-	const skillDispatch = session.promptCustomMessage(skill, { streamingBehavior: "followUp" });
+	const accepted = vi.fn();
+	const skillDispatch = session.promptCustomMessage(skill, { streamingBehavior: "followUp", onAccepted: accepted });
 	await visionStarted.promise;
 	const otherTurn = session.prompt("other turn");
 	await otherStarted.promise;
+	expect(accepted).not.toHaveBeenCalled();
 	releaseVision.resolve();
 	// Queued into the running turn, the skill settles while that turn is still blocked;
 	// dispatching it as its own turn would wait for the other turn and never settle here.
 	await skillDispatch;
+	expect(accepted).toHaveBeenCalledTimes(1);
 	expect(session.agent.state.isStreaming).toBe(true);
 	releaseOther.resolve();
 	await otherTurn;

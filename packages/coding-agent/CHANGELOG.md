@@ -109,6 +109,9 @@
 ### Removed
 
 - Removed the web search provider picker from `omp setup`; set the `web` model role (or keep the free default chain) instead.
+### Added
+
+- Stash a prompt draft with Ctrl+S and restore or swap it without losing attachments; the composer briefly confirms when a draft is stashed ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.4.2] - 2026-09-28
 

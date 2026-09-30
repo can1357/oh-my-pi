@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import {
 	formatDoubleTap,
@@ -6,7 +9,10 @@ import {
 	KeybindingsManager,
 	setKeyHintPlatform,
 } from "@oh-my-pi/pi-tui/app-keybindings";
+import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { initTheme, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 describe("KeybindingsManager.getDisplayString", () => {
 	beforeEach(() => setKeyHintPlatform("linux"));
@@ -26,6 +32,36 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.clipboard.copyPrompt")).toBe("");
 	});
 
+	it("keeps the default Hub chord off Ctrl+S", () => {
+		const keybindings = KeybindingsManager.inMemory();
+		expect(keybindings.getKeys("app.agents.hub")).toEqual(["alt+a"]);
+		expect(keybindings.getKeys("app.editor.stash")).toEqual(["ctrl+s"]);
+		expect(keybindings.getResolvedBindings()).not.toHaveProperty("app.session.observe");
+	});
+
+	it("preserves an explicit Hub Ctrl+S remap instead of silently binding stash over it", () => {
+		const keybindings = KeybindingsManager.inMemory({ "app.agents.hub": "ctrl+s" });
+		expect(keybindings.getKeys("app.agents.hub")).toEqual(["ctrl+s"]);
+		expect(keybindings.getKeys("app.editor.stash")).toEqual([]);
+		expect(keybindings.getEffectiveConfig()["app.editor.stash"]).toEqual([]);
+	});
+
+	it("keeps the editor stash despite a configured session-selector sort shortcut", () => {
+		const keybindings = KeybindingsManager.inMemory({ "app.session.toggleSort": "ctrl+s" });
+		expect(keybindings.getKeys("app.editor.stash")).toEqual(["ctrl+s"]);
+		expect(keybindings.getKeys("app.session.toggleSort")).toEqual(["ctrl+s"]);
+		expect(keybindings.getEffectiveConfig()["app.editor.stash"]).toEqual("ctrl+s");
+	});
+
+	it("still gives an explicit Hub remap precedence when selector sort shares the chord", () => {
+		const keybindings = KeybindingsManager.inMemory({
+			"app.session.toggleSort": "ctrl+s",
+			"app.agents.hub": "ctrl+s",
+		});
+		expect(keybindings.getKeys("app.editor.stash")).toEqual([]);
+		expect(keybindings.getKeys("app.agents.hub")).toEqual(["ctrl+s"]);
+	});
+
 	it("keeps Alt and Super labels off macOS", () => {
 		setKeyHintPlatform("linux");
 		const keybindings = KeybindingsManager.inMemory({
@@ -35,6 +71,56 @@ describe("KeybindingsManager.getDisplayString", () => {
 
 		expect(keybindings.getDisplayString("app.display.reset")).toBe("Alt+L");
 		expect(keybindings.getDisplayString("app.clipboard.pasteImage")).toBe("Ctrl+V/Super+V");
+	});
+});
+
+describe("persisted hub shortcut migration", () => {
+	beforeEach(() => setKeybindings(KeybindingsManager.inMemory()));
+	afterEach(() => setKeybindings(KeybindingsManager.inMemory()));
+
+	it("merges both old names with explicit Hub chords regardless of YAML entry order", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hub-keybindings-"));
+		const configPath = path.join(agentDir, "keybindings.yml");
+		try {
+			await Bun.write(
+				configPath,
+				YAML.stringify({
+					observeSessions: ["ctrl+o", "alt+o"],
+					"app.session.observe": ["ctrl+s", "ctrl+o"],
+					"app.agents.hub": ["ctrl+s", "alt+h"],
+				}),
+			);
+
+			const manager = KeybindingsManager.create(agentDir);
+			expect(manager.getKeys("app.agents.hub")).toEqual(["ctrl+s", "alt+h", "ctrl+o", "alt+o"]);
+			expect(manager.getKeys("app.editor.stash")).toEqual([]);
+			expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+				"app.agents.hub": ["ctrl+s", "alt+h", "ctrl+o", "alt+o"],
+			});
+			expect(manager.getResolvedBindings()).not.toHaveProperty("app.session.observe");
+			expect(manager.getResolvedBindings()).not.toHaveProperty("observeSessions");
+		} finally {
+			await removeWithRetries(agentDir);
+		}
+	});
+
+	it("migrates old JSON remaps without a new Hub entry", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hub-keybindings-"));
+		try {
+			await Bun.write(
+				path.join(agentDir, "keybindings.json"),
+				JSON.stringify({ observeSessions: "ctrl+o", "app.session.observe": "ctrl+s" }),
+			);
+
+			const manager = KeybindingsManager.create(agentDir);
+			expect(manager.getKeys("app.agents.hub")).toEqual(["alt+a", "ctrl+s", "ctrl+o"]);
+			expect(manager.getKeys("app.editor.stash")).toEqual([]);
+			expect(YAML.parse(await Bun.file(path.join(agentDir, "keybindings.yml")).text())).toEqual({
+				"app.agents.hub": ["alt+a", "ctrl+s", "ctrl+o"],
+			});
+		} finally {
+			await removeWithRetries(agentDir);
+		}
 	});
 });
 
