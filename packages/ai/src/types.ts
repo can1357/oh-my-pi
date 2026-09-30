@@ -1045,6 +1045,19 @@ export interface ProviderInputTransformation {
 	[key: string]: unknown;
 }
 
+/**
+ * Why a request changed the cached prompt prefix, as named by the provider that
+ * shaped the request. `charDelta` is the signed change in total system-prompt
+ * length. `tool` names the tool whose definition changed when the provider
+ * could attribute the change to one, and is absent when only the tool array as
+ * a whole is known to differ.
+ */
+export type CacheBreakReason =
+	| { kind: "system_prompt"; charDelta: number }
+	| { kind: "tools"; tool?: string }
+	| { kind: "history_rewrite" }
+	| { kind: "retention"; from: "5m" | "1h"; to: "5m" | "1h" };
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -1183,6 +1196,11 @@ export interface AssistantMessage {
 	 * requests over the same transcript replay a byte-identical prefix.
 	 */
 	requestControls?: AnthropicRequestControls;
+	/**
+	 * Anthropic's observed prompt-prefix change for this request. Independent of
+	 * usage: the consumer decides whether a cold turn warrants displaying it.
+	 */
+	cacheBreakReason?: CacheBreakReason;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */

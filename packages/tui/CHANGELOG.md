@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cache-miss markers now show what changed in the request: the system prompt, tools, history, or retention ([#11813](https://github.com/can1357/oh-my-pi/pull/11813) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

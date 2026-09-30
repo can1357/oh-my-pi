@@ -10,6 +10,7 @@
 
 ### Changed
 
+- The cache miss marker now names what broke the prefix on Anthropic turns, for example `cache miss · 52K tokens · system prompt changed (+40 chars)`. Enable it with `display.cacheMissMarker` ([#11813](https://github.com/can1357/oh-my-pi/pull/11813) by [@camjac251](https://github.com/camjac251)).
 - `--no-ui` now also works with `--mode rpc-ui`: extensions run headless while tool UI such as the `ask` tool still reaches the host ([#13718](https://github.com/can1357/oh-my-pi/pull/13718) by [@alphastorm](https://github.com/alphastorm))
 
 ### Fixed

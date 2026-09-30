@@ -422,7 +422,11 @@ export class ChatTranscriptBuilder {
 		let lastAssistantComponent = assistantComponent;
 
 		if (displayPreferences.cacheMissMarker) {
-			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
+			const invalidation = detectCacheInvalidation(
+				this.#lastAssistantUsage,
+				message.usage,
+				message.cacheBreakReason,
+			);
 			if (invalidation) assistantComponent.setCacheInvalidation(invalidation);
 		}
 		if (message.usage.cacheRead + message.usage.cacheWrite + message.usage.input > 0) {

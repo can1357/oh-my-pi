@@ -29,6 +29,7 @@ import type {
 	AnthropicToolChange,
 	Api,
 	AssistantMessage,
+	CacheBreakReason,
 	CacheRetention,
 	Context,
 	DeveloperMessage,
@@ -461,6 +462,330 @@ type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_co
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
 
+/** Accepted request fingerprints, bounded per endpoint/model. Never changes request shaping. */
+type AnthropicCachePrefixSnapshot = {
+	messageCount: number;
+
+	historyChain: bigint;
+
+	thinkingChain: bigint;
+
+	controlChain: bigint;
+
+	controlCount: number;
+
+	controlPlanned: boolean;
+	systemFingerprint: string;
+	systemTextLength: number;
+	toolsFingerprint: string;
+	/** Per-tool hashes name schema rewrites without retaining definitions. */
+	toolDefinitions: { name: string; key: bigint }[];
+	toolsPresent: boolean;
+
+	toolsPlanned: boolean;
+
+	toolsStrictDropped: boolean;
+
+	cacheTtl?: "5m" | "1h";
+};
+
+const MAX_ANTHROPIC_CONTROL_STATES = 16;
+
+const ANTHROPIC_CONTINUE_PAD_TEXT = "Continue.";
+
+function isAnthropicContinuePadContent(content: MessageParam["content"]): boolean {
+	if (typeof content === "string") return content === ANTHROPIC_CONTINUE_PAD_TEXT;
+	if (content.length !== 1) return false;
+	const block = content[0];
+	return block.type === "text" && block.text === ANTHROPIC_CONTINUE_PAD_TEXT;
+}
+
+/** Ignore only a provenance-free continuation pad, including one before trailing controls. */
+function anthropicStableMessageCount(messages: readonly MessageParam[]): number {
+	let trailingIndex = messages.length - 1;
+	while (trailingIndex >= 0 && anthropicHistoryMessageProjection(messages[trailingIndex]) === undefined)
+		trailingIndex--;
+	const trailingMessage = messages[trailingIndex];
+	let previousIndex = trailingIndex - 1;
+	while (previousIndex >= 0 && anthropicHistoryMessageProjection(messages[previousIndex]) === undefined)
+		previousIndex--;
+	const hasTrailingAssistantPad =
+		trailingMessage?.role === "user" &&
+		isAnthropicContinuePadContent(trailingMessage.content) &&
+		!isConversationalUser(trailingMessage) &&
+		messages[previousIndex]?.role === "assistant";
+	return hasTrailingAssistantPad ? trailingIndex : messages.length;
+}
+
+function anthropicControlMessageProjection(message: MessageParam): MessageParam {
+	const { content } = message;
+	if (typeof content === "string") return { ...message, content: [{ type: "text", text: content }] };
+	const dropThinking = message.role === "assistant";
+	const projected: ContentBlockParam[] = [];
+	let changed = false;
+	for (const block of content) {
+		if (dropThinking && (block.type === "thinking" || block.type === "redacted_thinking")) {
+			changed = true;
+			continue;
+		}
+		if ("cache_control" in block) {
+			projected.push({ ...block, cache_control: undefined });
+			changed = true;
+			continue;
+		}
+		projected.push(block);
+	}
+	return changed ? { ...message, content: projected } : message;
+}
+
+function anthropicHistoryMessageProjection(message: MessageParam): MessageParam | undefined {
+	if (message.role !== "system") return anthropicControlMessageProjection(message);
+	const { content } = message;
+	const blocks: readonly ContentBlockParam[] =
+		typeof content === "string" ? [{ type: "text", text: content }] : content;
+	const kept = blocks.filter(block => block.type !== "tool_addition" && block.type !== "tool_removal");
+	if (kept.length === 0) return undefined;
+
+	const projected: MessageParam = { role: "system", content: kept };
+	if (message.clear_at !== undefined) projected.clear_at = message.clear_at;
+	return anthropicControlMessageProjection(projected);
+}
+
+type AnthropicControlDeclaration = {
+	blocks: ContentBlockParam[];
+
+	output_config?: AnthropicOutputConfig;
+};
+
+function anthropicControlDeclaration(message: MessageParam): AnthropicControlDeclaration | undefined {
+	if (message.role !== "system") return undefined;
+	const { content } = message;
+	const blocks =
+		typeof content === "string"
+			? []
+			: content.filter(block => block.type === "tool_addition" || block.type === "tool_removal");
+	if (blocks.length === 0 && message.output_config === undefined) return undefined;
+	return {
+		blocks,
+		...(message.output_config === undefined ? {} : { output_config: message.output_config }),
+	};
+}
+
+function anthropicControlDeclarationImage(message: MessageParam, anchor: number): string | undefined {
+	const declaration = anthropicControlDeclaration(message);
+	return declaration === undefined ? undefined : JSON.stringify({ anchor, ...declaration });
+}
+
+function anthropicControlDeclarationsFingerprint(messages: readonly MessageParam[]): string {
+	const declarations: Array<{ index: number } & AnthropicControlDeclaration> = [];
+	const stableCount = anthropicStableMessageCount(messages);
+	for (let index = 0; index < stableCount; index++) {
+		const declaration = anthropicControlDeclaration(messages[index]);
+		if (declaration !== undefined) declarations.push({ index, ...declaration });
+	}
+	return String(Bun.hash(JSON.stringify(toWellFormedDeep(declarations))));
+}
+
+function anthropicThinkingBlocksImage(message: MessageParam, position: number): string | undefined {
+	if (message.role !== "assistant") return undefined;
+	const { content } = message;
+	if (typeof content === "string") return undefined;
+	const blocks: Array<{ at: number; block: ContentBlockParam }> = [];
+	for (let at = 0; at < content.length; at++) {
+		const block = content[at];
+		if (block.type === "thinking" || block.type === "redacted_thinking") blocks.push({ at, block });
+	}
+	return blocks.length === 0 ? undefined : JSON.stringify({ position, blocks });
+}
+
+type AnthropicHistoryChain = {
+	messageCount: number;
+
+	chain: bigint;
+
+	mark: bigint | undefined;
+
+	thinkingChain: bigint;
+
+	thinkingMark: bigint | undefined;
+
+	controlChain: bigint;
+
+	controlCount: number;
+
+	controlMark: bigint;
+};
+
+/**
+ * Fold content, thinking and declarations separately. Compare only the prefix
+ * the accepted request sent, never its newly appended suffix. Declarations need
+ * both a message and declaration-count bound because control-only messages do
+ * not advance the content chain. Retain hashes, not per-message histories.
+ */
+function anthropicHistoryChain(
+	messages: readonly MessageParam[],
+	markAt: number,
+	controlMarkAt: number,
+): AnthropicHistoryChain {
+	const stableCount = anthropicStableMessageCount(messages);
+	let chain = 0n;
+	let thinkingChain = 0n;
+	let controlChain = 0n;
+	let controlCount = 0;
+	let controlMark = 0n;
+	let messageCount = 0;
+	let mark = markAt === 0 ? chain : undefined;
+	let thinkingMark = markAt === 0 ? thinkingChain : undefined;
+	for (let index = 0; index < stableCount; index++) {
+		const message = messages[index];
+		const projected = anthropicHistoryMessageProjection(message);
+		if (projected !== undefined) {
+			chain = Bun.hash.wyhash(JSON.stringify(projected), chain);
+			messageCount++;
+			const thinking = anthropicThinkingBlocksImage(message, messageCount);
+			if (thinking !== undefined) thinkingChain = Bun.hash.wyhash(thinking, thinkingChain);
+			if (messageCount === markAt) {
+				mark = chain;
+				thinkingMark = thinkingChain;
+			}
+		}
+
+		const declaration = anthropicControlDeclarationImage(message, messageCount);
+		if (declaration === undefined) continue;
+		controlChain = Bun.hash.wyhash(declaration, controlChain);
+		controlCount++;
+		if (controlCount <= controlMarkAt && messageCount <= markAt) controlMark = controlChain;
+	}
+	return { messageCount, chain, mark, thinkingChain, thinkingMark, controlChain, controlCount, controlMark };
+}
+
+function anthropicToolPrefixKey(tool: AnthropicWireTool): string {
+	const stable = { ...tool };
+	delete stable.cache_control;
+	return JSON.stringify(stable);
+}
+
+function anthropicToolsPrefixFingerprint(tools: readonly AnthropicWireTool[] | undefined): string {
+	return String(Bun.hash(JSON.stringify(tools?.map(anthropicToolPrefixKey) ?? [])));
+}
+
+function getAnthropicPayloadCacheControl(params: MessageCreateParamsStreaming): AnthropicCacheControl | undefined {
+	for (const tool of params.tools ?? []) {
+		if (tool.cache_control) return tool.cache_control;
+	}
+	if (Array.isArray(params.system)) {
+		for (const block of params.system) {
+			if (block.cache_control) return block.cache_control;
+		}
+	}
+	for (let index = params.messages.length - 1; index >= 0; index--) {
+		const content = params.messages[index].content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if ("cache_control" in block && isRecord(block.cache_control) && block.cache_control.type === "ephemeral") {
+				return block.cache_control as AnthropicCacheControl;
+			}
+		}
+	}
+	return undefined;
+}
+
+type AnthropicCacheBreakDetection = {
+	reason: CacheBreakReason | undefined;
+	commit?: () => void;
+};
+
+const NO_CACHE_BREAK_DETECTION: AnthropicCacheBreakDetection = { reason: undefined };
+
+function detectAnthropicCacheBreak(
+	state: AnthropicProviderSessionState | undefined,
+	conversationKey: string,
+	params: MessageCreateParamsStreaming,
+	plannedToolsFingerprint: string | undefined,
+	plannedControlFingerprint: string,
+	strictToolsDropped: boolean,
+): AnthropicCacheBreakDetection {
+	if (!state) return NO_CACHE_BREAK_DETECTION;
+	const { system, tools } = params;
+	const texts = typeof system === "string" ? [system] : (system?.map(block => block.text) ?? []);
+	const systemFingerprint = String(Bun.hash(JSON.stringify(texts)));
+	let systemTextLength = 0;
+	for (const text of texts) systemTextLength += text.length;
+	const toolsFingerprint = anthropicToolsPrefixFingerprint(tools);
+
+	const toolsPlanned = plannedToolsFingerprint === toolsFingerprint;
+	const controlFingerprint = anthropicControlDeclarationsFingerprint(params.messages);
+
+	const controlPlanned = plannedControlFingerprint === controlFingerprint;
+
+	const cacheControl = getAnthropicPayloadCacheControl(params);
+	const cacheTtl = cacheControl ? (cacheControl.ttl === "1h" ? "1h" : "5m") : undefined;
+	const previous = state.cachePrefixDiagnostics.get(conversationKey);
+	const history = anthropicHistoryChain(params.messages, previous?.messageCount ?? 0, previous?.controlCount ?? 0);
+	const snapshot: AnthropicCachePrefixSnapshot = {
+		messageCount: history.messageCount,
+		historyChain: history.chain,
+		thinkingChain: history.thinkingChain,
+		controlChain: history.controlChain,
+		controlCount: history.controlCount,
+		controlPlanned,
+		systemFingerprint,
+		systemTextLength,
+		toolsFingerprint,
+		toolDefinitions:
+			tools?.map(tool => ({ name: tool.name, key: Bun.hash.wyhash(anthropicToolPrefixKey(tool)) })) ?? [],
+		toolsPresent: tools !== undefined,
+		toolsPlanned,
+		toolsStrictDropped: strictToolsDropped,
+		...(cacheTtl ? { cacheTtl } : {}),
+	};
+	const commit = (): void => {
+		state.cachePrefixDiagnostics.delete(conversationKey);
+		state.cachePrefixDiagnostics.set(conversationKey, snapshot);
+		if (state.cachePrefixDiagnostics.size > MAX_ANTHROPIC_CONTROL_STATES) {
+			const oldest = state.cachePrefixDiagnostics.keys().next().value;
+			if (oldest !== undefined) state.cachePrefixDiagnostics.delete(oldest);
+		}
+	};
+	if (!previous) return { reason: undefined, commit };
+
+	if (history.mark !== previous.historyChain) return { reason: { kind: "history_rewrite" }, commit };
+
+	if (!(controlPlanned && previous.controlPlanned) && history.controlMark !== previous.controlChain) {
+		return { reason: { kind: "history_rewrite" }, commit };
+	}
+
+	if (history.thinkingMark !== previous.thinkingChain) return { reason: { kind: "history_rewrite" }, commit };
+	if (previous.systemFingerprint !== systemFingerprint) {
+		return {
+			reason: { kind: "system_prompt", charDelta: systemTextLength - previous.systemTextLength },
+			commit,
+		};
+	}
+
+	// The persisted planner permits deferred appends, not rewrites of previously
+	// declared definitions. Compare accepted bytes directly, so retries need no
+	// mutable control-reason latch and hooks restoring the old array stay silent.
+	const toolsExempt = toolsPlanned && previous.toolsPlanned && previous.toolsStrictDropped === strictToolsDropped;
+	if (toolsExempt) {
+		for (let index = 0; index < previous.toolDefinitions.length; index++) {
+			const old = previous.toolDefinitions[index];
+			const current = snapshot.toolDefinitions[index];
+			if (!current || current.name !== old.name) return { reason: { kind: "tools" }, commit };
+			if (current.key !== old.key) return { reason: { kind: "tools", tool: current.name }, commit };
+		}
+	}
+	if (
+		previous.toolsPresent !== snapshot.toolsPresent ||
+		(!toolsExempt && previous.toolsFingerprint !== toolsFingerprint)
+	) {
+		return { reason: { kind: "tools" }, commit };
+	}
+	if (cacheTtl && previous.cacheTtl && previous.cacheTtl !== cacheTtl) {
+		return { reason: { kind: "retention", from: previous.cacheTtl, to: cacheTtl }, commit };
+	}
+	return { reason: undefined, commit };
+}
 type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
@@ -483,6 +808,7 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	thinkingReplayDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
+	cachePrefixDiagnostics: Map<string, AnthropicCachePrefixSnapshot>;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -492,12 +818,15 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		replayUnsignedThinkingDisabled: false,
 		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
+		cachePrefixDiagnostics: new Map(),
+
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
+			state.cachePrefixDiagnostics.clear();
 		},
 	};
 	return state;
@@ -513,6 +842,8 @@ function getAnthropicProviderSessionState(
 	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
 	if (existing) {
 		existing.prefixDroppedThinkingBlocks ??= new Set();
+		existing.cachePrefixDiagnostics ??= new Map();
+
 		return existing;
 	}
 	const created = createAnthropicProviderSessionState();
@@ -2237,7 +2568,11 @@ const streamAnthropicOnce = (
 				requestExtraBetas = extraBetas;
 			}
 			const preparedContext = await prepareAnthropicManyImageContext(context, model.input.includes("image"));
+			let commitCacheBreakSnapshot: (() => void) | undefined;
+			const cacheIdentity =
+				options?.sessionId ?? extractClaudeMetadataSessionId(options?.metadata?.user_id) ?? options?.promptCacheKey;
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
+				output.cacheBreakReason = undefined;
 				const built = buildParams(model, preparedContext, isOAuthToken, options, {
 					compactionSupported,
 					disableStrictTools,
@@ -2260,6 +2595,20 @@ const streamAnthropicOnce = (
 				if (dropFastMode) {
 					dropAnthropicFastMode(nextParams);
 				}
+				const root = nextParams.messages[0];
+				const conversationKey = String(
+					Bun.hash(
+						JSON.stringify(
+							cacheIdentity === undefined
+								? [null, root ? anthropicControlMessageProjection(root) : null]
+								: [cacheIdentity],
+						),
+					),
+				);
+				const plannedToolsFingerprint = model.compat.supportsMidConversationToolChanges
+					? anthropicToolsPrefixFingerprint(toWellFormedDeep(nextParams.tools) as typeof nextParams.tools)
+					: undefined;
+				const plannedControlFingerprint = anthropicControlDeclarationsFingerprint(nextParams.messages);
 				const replacementPayload = await options?.onPayload?.(nextParams, model);
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
@@ -2268,6 +2617,23 @@ const streamAnthropicOnce = (
 				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
 				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
+				const cacheBreak = detectAnthropicCacheBreak(
+					providerSessionState,
+					conversationKey,
+					nextParams,
+					plannedToolsFingerprint,
+					plannedControlFingerprint,
+					disableStrictTools,
+				);
+				commitCacheBreakSnapshot = cacheBreak.commit;
+				output.cacheBreakReason = cacheBreak.reason;
+				if (output.cacheBreakReason?.kind === "tools" && output.cacheBreakReason.tool) {
+					output.cacheBreakReason.tool = decodeAnthropicToolName(
+						output.cacheBreakReason.tool,
+						isOAuthToken,
+						model.compat.escapeBuiltinToolNames,
+					);
+				}
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -2654,6 +3020,8 @@ const streamAnthropicOnce = (
 								continue;
 							}
 							sawMessageStart = true;
+							// Acceptance, not successful completion, establishes the cached prefix.
+							commitCacheBreakSnapshot?.();
 							const startMessage = event.message;
 							if (startMessage?.id) output.responseId = startMessage.id;
 							applyReportedInputTransformations(
@@ -3906,14 +4274,7 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// assistant because Anthropic rejects assistant-prefill endings. It is absent
 	// from the next normal turn, so anchor the rolling window on the preceding
 	// real assistant instead.
-	const trailingIndex = params.messages.length - 1;
-	const trailingMessage = params.messages[trailingIndex];
-	const hasTrailingAssistantPad =
-		trailingMessage?.role === "user" &&
-		trailingMessage.content === "Continue." &&
-		!isConversationalUser(trailingMessage) &&
-		params.messages[trailingIndex - 1]?.role === "assistant";
-	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
+	const messageEnd = anthropicStableMessageCount(params.messages) - 1;
 
 	// A breakpoint caches every preceding byte, not only the decorated message.
 	// A per-call or turn-scoped message is rebuilt next request, so a prefix
