@@ -48,7 +48,10 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 		.map(n => {
 			const severity = n.severity ? ` severity="${n.severity}"` : "";
 			const who = n.advisor ? ` advisor="${escapeXmlAttribute(n.advisor)}"` : "";
-			return `<advisory${who}${severity} guidance="${ADVISOR_GUIDANCE}">\n${escapeXmlText(n.note)}\n</advisory>`;
+			// Marks a note that absorbed equivalent notes from other advisors, so
+			// consumers can tell a single observation from a corroborated one.
+			const curated = n.curated ? ` curated="true"` : "";
+			return `<advisory${who}${severity}${curated} guidance="${ADVISOR_GUIDANCE}">\n${escapeXmlText(n.note)}\n</advisory>`;
 		})
 		.join("\n");
 }

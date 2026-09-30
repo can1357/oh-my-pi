@@ -12461,6 +12461,11 @@ export class AgentSession implements SettingsScope {
 		return this.#advisors.getAdvisorAgent();
 	}
 
+	/** Every live advisor agent keyed by advisor name. */
+	getAdvisorAgentsByName(): ReadonlyMap<string, Agent> {
+		return this.#advisors.getAdvisorAgentsByName();
+	}
+
 	/** WATCHDOG.yml problems from startup discovery; shown by the UI once it is ready. */
 	getAdvisorConfigWarnings(): readonly string[] {
 		return this.#advisors.configWarnings;

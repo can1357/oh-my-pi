@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an advisor curator: live advisor nits are held for 250 ms and judged together, so the same issue raised by several advisors reaches the agent once and a note the agent already fixed is dropped; concerns and blockers are never held, a lone nit is delivered without a judge call, and any judge error or timeout delivers the notes unchanged. Controlled by `advisor.curator` ([#13932](https://github.com/can1357/oh-my-pi/pull/13932) by [@DarkPhilosophy](https://github.com/DarkPhilosophy))
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

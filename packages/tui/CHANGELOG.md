@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `curated` flag to advisor notes so a note that absorbed equivalent reports from other advisors can be marked as such ([#13932](https://github.com/can1357/oh-my-pi/pull/13932) by [@DarkPhilosophy](https://github.com/DarkPhilosophy))
+
 ## [18.4.5] - 2026-09-30
 
 ### Added

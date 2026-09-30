@@ -11,6 +11,7 @@ import { loadAdvisorTranscriptCosts } from "@oh-my-pi/pi-coding-agent/advisor/tr
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -597,6 +598,188 @@ describe("AgentSession advisor toggle", () => {
 		const advisorPrompt = advisor.state.systemPrompt.join("\n");
 		expect(advisorPrompt).toContain("Keep advice concrete.");
 		expect(advisorPrompt).toContain("Review module boundaries.");
+	});
+	describe("live aside curation", () => {
+		afterEach(() => {
+			// Full-suite safety: never leave the judge resolver patched for later files.
+			vi.restoreAllMocks();
+		});
+
+		async function waitForQueuedAdvisorNotes(count: number): Promise<string[]> {
+			// The coalescing window is a real timer inside the session, so there is no event to await;
+			// poll the queue with a bounded budget (documented exception to the no-timers rule).
+			const seen: string[] = [];
+			for (let attempt = 0; attempt < 80 && seen.length < count; attempt++) {
+				await Bun.sleep(25);
+				for (const build of session.yieldQueue.drainLazy()) {
+					const card = build();
+					if (card?.role === "custom" && card.customType === "advisor") seen.push(JSON.stringify(card));
+				}
+			}
+			return seen;
+		}
+
+		function adviseToolOf(name: string): advisorModule.AdviseTool {
+			const tool = session
+				.getAdvisorAgentsByName()
+				.get(name)
+				?.state.tools.find(candidate => candidate.name === "advise");
+			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error(`Missing advise tool for ${name}`);
+			return tool;
+		}
+
+		it("delivers a lone streaming note after the coalescing window with the curator at its default", async () => {
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("lone", { note: "Guard the retry budget.", severity: "nit" });
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+			const delivered = await waitForQueuedAdvisorNotes(1);
+			expect(delivered.filter(card => card.includes("Guard the retry budget"))).toHaveLength(1);
+		});
+
+		it("does not persist the internal turn counter in the delivered advisor card", async () => {
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("t1", { note: "Guard the retry budget.", severity: "nit" });
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+			const [card] = await waitForQueuedAdvisorNotes(1);
+
+			expect(card).toContain("Guard the retry budget");
+			expect(card).not.toContain('"turn"');
+		});
+
+		it("drops a note held in the coalescing window when the advisor is turned off and back on", async () => {
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("held", {
+					note: "Stale finding held in the window.",
+					severity: "nit",
+				});
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+
+			// Off then on inside the 250ms window: the note belonged to a run the user switched off.
+			session.setAdvisorEnabled(false);
+			session.setAdvisorEnabled(true);
+
+			const delivered = await waitForQueuedAdvisorNotes(1);
+			expect(delivered.join("\n")).not.toContain("Stale finding held in the window");
+		});
+
+		it("does not deliver the result of a judgment that was in flight when the advisor was turned off", async () => {
+			const judging = Promise.withResolvers<{ answers: Record<string, unknown> }>();
+			const entered = Promise.withResolvers<void>();
+			let judgeSignal: AbortSignal | undefined;
+			vi.spyOn(judgment, "resolveJudge").mockReturnValue({
+				judge: async (_request: unknown, options?: { signal?: AbortSignal }) => {
+					judgeSignal = options?.signal;
+					entered.resolve();
+					return judging.promise;
+				},
+			} as unknown as judgment.ChainJudge);
+
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("j1", { note: "In-flight finding one.", severity: "nit" });
+				await adviseToolOf("Testing").execute("j2", { note: "In-flight finding two.", severity: "nit" });
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+			await entered.promise;
+
+			expect(judgeSignal?.aborted).toBe(false);
+			session.setAdvisorEnabled(false);
+			// The request itself is cancelled, not only its result ignored: it is billed until it answers.
+			expect(judgeSignal?.aborted).toBe(true);
+			judging.resolve({ answers: {} });
+			session.setAdvisorEnabled(true);
+
+			const delivered = await waitForQueuedAdvisorNotes(1);
+			expect(delivered.join("\n")).not.toContain("In-flight finding");
+		});
+
+		it("holds nits for the coalescing window so parallel advisors can be curated together", async () => {
+			let judgeCalls = 0;
+			vi.spyOn(judgment, "resolveJudge").mockReturnValue({
+				judge: async () => {
+					judgeCalls++;
+					return { answers: {} };
+				},
+			} as unknown as judgment.ChainJudge);
+
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("w1", { note: "Window finding one.", severity: "nit" });
+				await adviseToolOf("Testing").execute("w2", { note: "Window finding two.", severity: "nit" });
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+
+			// Well inside the window: nothing is judged and nothing has reached the queue yet, which is
+			// what lets two advisors raising the same issue be collapsed into one note. Without the
+			// window each note is enqueued the moment it is raised, and curation never sees a pair.
+			await Bun.sleep(40);
+			expect(judgeCalls).toBe(0);
+			expect(session.yieldQueue.drainLazy()).toHaveLength(0);
+
+			// After the window the pair is judged together and both notes are delivered.
+			const delivered = (await waitForQueuedAdvisorNotes(2)).join("\n");
+			expect(judgeCalls).toBe(1);
+			expect(delivered).toContain("Window finding one");
+			expect(delivered).toContain("Window finding two");
+		});
+
+		it("delivers both groups when a second batch starts while the first is still being judged", async () => {
+			const first = Promise.withResolvers<{ answers: Record<string, unknown> }>();
+			let judgeCalls = 0;
+			vi.spyOn(judgment, "resolveJudge").mockReturnValue({
+				judge: async () => {
+					judgeCalls++;
+					// The first group's judgment stays open until the test releases it, after the second
+					// group has already started; later groups resolve immediately.
+					return judgeCalls === 1 ? first.promise : { answers: {} };
+				},
+			} as unknown as judgment.ChainJudge);
+
+			enableAdvisor();
+			expect(session.applyAdvisorConfigs([{ name: "Security" }, { name: "Testing" }], undefined)).toBe(2);
+			session.agent.state.isStreaming = true;
+			try {
+				await adviseToolOf("Security").execute("g1a", { note: "Alpha finding one.", severity: "nit" });
+				await adviseToolOf("Testing").execute("g1b", { note: "Alpha finding two.", severity: "nit" });
+				// Let the first group's window elapse so its judgment is in flight.
+				for (let attempt = 0; attempt < 200 && judgeCalls < 1; attempt++) await Bun.sleep(25);
+				expect(judgeCalls).toBe(1);
+				await adviseToolOf("Security").execute("g2a", { note: "Beta finding one.", severity: "nit" });
+				await adviseToolOf("Testing").execute("g2b", { note: "Beta finding two.", severity: "nit" });
+				for (let attempt = 0; attempt < 200 && judgeCalls < 2; attempt++) await Bun.sleep(25);
+				expect(judgeCalls).toBe(2);
+			} finally {
+				session.agent.state.isStreaming = false;
+			}
+			first.resolve({ answers: {} });
+
+			const delivered = (await waitForQueuedAdvisorNotes(4)).join("\n");
+			expect(delivered).toContain("Alpha finding one");
+			expect(delivered).toContain("Alpha finding two");
+			expect(delivered).toContain("Beta finding one");
+			expect(delivered).toContain("Beta finding two");
+		});
 	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();

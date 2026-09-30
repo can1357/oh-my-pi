@@ -96,3 +96,67 @@ export const cfgAdvisorEvictStaleResults = register({
 		condition: "advisorEnabled",
 	},
 });
+
+export const cfgAdvisorCurator = register({
+	id: "advisor.curator",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["auto", "off"] as const,
+	default: "auto",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Curator",
+		description:
+			"Curate advisor notes before they reach the agent: collapse the same issue raised by several advisors into one note, and drop what the agent already fixed. The backend is the judge model role (TypeSafe when a credential exists, otherwise the tiny/smol chat chain), and a TypeSafe failure falls back to that chain automatically. With no backend at all, notes are delivered uncurated.",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Curate through the judge role; deliver notes unchanged if it is unavailable. Default.",
+			},
+			{ value: "off", label: "Off", description: "Never curate: every admitted note is delivered as-is." },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorCuratorTimeoutMs = register({
+	id: "advisor.curatorTimeoutMs",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 1500,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Curator Timeout",
+		description:
+			"Budget for one curation judgment. On timeout the notes are delivered uncurated. A native judge typically answers in 0.3-0.8 s; shorter budgets make curation a no-op.",
+		options: [
+			{ value: "750", label: "750 ms" },
+			{ value: "1500", label: "1.5 s", description: "Default." },
+			{ value: "3000", label: "3 s" },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorCuratorContextChars = register({
+	id: "advisor.curatorContextChars",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 12000,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Curator Context",
+		description:
+			"How much of the agent's recent work the curator reads when judging whether a note is already addressed.",
+		options: [
+			{ value: "6000", label: "6k chars" },
+			{ value: "12000", label: "12k chars", description: "Default." },
+			{ value: "24000", label: "24k chars" },
+		],
+		condition: "advisorEnabled",
+	},
+});
